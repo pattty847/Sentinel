@@ -806,14 +806,15 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 handleSnapshotMessage(msg);
                 return;
             case protocol::MessageType::HeatmapAvailability: {
-                const auto availability = protocol::chunkwire::parseAvailability(msg);
-                if (availability.chunkWireVersion != heatmap::kChunkWireVersion) {
-                    sLog_Error("Heatmap chunk wire version mismatch: server=" << availability.chunkWireVersion
+                // Version first: another version's fields need not parse here.
+                const int version = protocol::chunkwire::availabilityWireVersion(msg);
+                if (version != heatmap::kChunkWireVersion) {
+                    sLog_Error("Heatmap chunk wire version mismatch: server=" << version
                                << " client=" << heatmap::kChunkWireVersion << " (chunks refused)");
                     emit errorOccurred(QStringLiteral("heatmap chunk wire version mismatch"));
                     return;
                 }
-                emit heatmapAvailabilityReceived(availability);
+                emit heatmapAvailabilityReceived(protocol::chunkwire::parseAvailability(msg));
                 return;
             }
             case protocol::MessageType::CandleHistoryChunk:

@@ -132,8 +132,6 @@ LabSource loadRealSource(const std::string &layer, int hours, int loadHours, int
     recording::Hmc2Reader reader(root); // read-only; never takes the writer lock
     recording::ReadControl control;
     const auto minutes = reader.availability("BTC-USD", layer, heatmap::kMinuteMs, control);
-    const auto hoursAvail = layer == "deep" ? reader.availability("BTC-USD", layer, heatmap::kHourMs, control)
-                                            : recording::SeriesAvailability{};
     if (control.status != recording::ReadStatus::Complete || !minutes.latestMs)
         throw std::runtime_error("no " + layer + " minute recording available");
     LabSource out;
@@ -142,15 +140,12 @@ LabSource loadRealSource(const std::string &layer, int hours, int loadHours, int
     const int64_t fullStart = recording::floorDiv(out.endMs - int64_t(hours) * heatmap::kHourMs, tfMs) * tfMs;
     out.startMs = std::max(fullStart,
         recording::floorDiv(out.endMs - int64_t(std::min(hours, loadHours)) * heatmap::kHourMs, tfMs) * tfMs);
-    int64_t oldest = minutes.oldestMs.value_or(out.startMs);
-    if (hoursAvail.oldestMs) oldest = std::min(oldest, *hoursAvail.oldestMs);
-    out.availableStartMs = std::max(oldest, fullStart);
+    out.availableStartMs = std::max(minutes.oldestMs.value_or(out.startMs), fullStart);
     const auto loaded = Clock::now();
+    // Every timeframe composes minutes: the served 1h/1d levels are minute-built
+    // rollups of exactly this picture (the recorder's hour files are not used).
     std::vector<heatmap::SparseColumns> levels;
-    if (layer == "deep" && tfMs % heatmap::kHourMs == 0)
-        levels = heatmap::loadRecordingLevels(reader, "BTC-USD", layer, out.startMs, out.endMs, tfMs);
-    else // near has no hour rollups; odd and sub-hour timeframes compose minutes
-        levels.push_back(heatmap::loadRecording(reader, "BTC-USD", layer, heatmap::kMinuteMs, out.startMs, out.endMs));
+    levels.push_back(heatmap::loadRecording(reader, "BTC-USD", layer, heatmap::kMinuteMs, out.startMs, out.endMs));
     out.loadMs = msSince(loaded);
     const auto composedAt = Clock::now();
     auto composed = heatmap::compose(levels, tfMs);

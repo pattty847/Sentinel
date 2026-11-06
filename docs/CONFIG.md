@@ -81,6 +81,7 @@ recording:                # recording v2: near and deep order-book layers
   deep_low_frac: 0.25
   deep_high_mult: 4
   live_publish_ms: 500      # open-minute live publication interval (2 Hz); clamped to [250, 5000]
+  # rollup_dir: /Volumes/T7/sentinel-data/hmc2-rollups # derived 1h/1d levels; default <roller_shadow.dir>-rollups
   # advanced: price_scale (100), size_floor (1e-6), codes_per_octave (819), lateness_ms (2000)
 
 roller_shadow:
@@ -92,6 +93,8 @@ roller_shadow:
 mdc:
   ssl_ca_bundle: resources/certs/ca-bundle.crt  # REST candle-history TLS
 ```
+
+`recording.rollup_dir` (default empty: `<roller_shadow.dir>-rollups`, a sibling of the HMC2 tree) is where the server keeps the stored 1h and 1d heatmap levels it builds from recorded minutes (docs/MARKETDATA.md, "Rollup levels"). A path that is the HMC2 tree or inside it is refused (logged; minutes are then served at every timeframe). The directory is derived data: deleting it is safe and the server rebuilds it in the background.
 
 `recording.live_publish_ms` (default 500, clamped to [250, 5000]) is how often the recorder publishes each layer's open minute to live subscribers (owner decision 2026-10-01: 500 ms, 2 Hz). The live worker paces subscriptions at half of it, so each publication is sent at the next worker turn; refused sends back off from there up to 5 s. It does not change what is recorded on disk. Recorder-thread cost: about 0.4 ms per publication for a BTC-USD book (~23,500 near+deep entries), 0.08% of a core at 2 Hz (`recording_live_bench --publish`).
 

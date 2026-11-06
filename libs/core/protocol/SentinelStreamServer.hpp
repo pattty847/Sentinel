@@ -28,6 +28,7 @@
 #include "../trading/LiveTradingSession.hpp"
 
 class Authenticator;
+namespace sentinel::metrics { class MetricsRegistry; }
 class CoinbaseRestClient;
 class Session;
 
@@ -51,6 +52,8 @@ public:
     // Invalid addresses throw; other listener failures return false so recording continues.
     bool start();
     void stop();
+    // Rollup builder metrics (ops/monitoring/README.md); no-op without recording.
+    void registerMetrics(sentinel::metrics::MetricsRegistry& registry);
 
 signals:
     void orderUpdateBroadcast(const trading::OrderUpdate& update);
@@ -98,6 +101,8 @@ private:
     // Heatmap chunk serving; null when recording is unavailable. Shared with
     // history-worker jobs, which the server joins in stop().
     std::shared_ptr<recording::ChunkService> m_chunks;
+    // Stored 1h/1d levels; its builder thread runs between start() and stop().
+    std::shared_ptr<recording::RollupStore> m_rollups;
     std::unique_ptr<CoinbaseRestClient> m_restClient;
     ServerConfig m_serverConfig;
     int m_port;

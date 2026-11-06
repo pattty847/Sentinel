@@ -93,6 +93,7 @@ bool SentinelServerApp::initialize() {
             return false;
         }
         m_serverModel->registerMetrics(m_metrics);
+        m_server->registerMetrics(m_metrics);
         m_metrics.gaugeFn("sentinel_stream_sessions", "Open client stream sessions.", {},
                           [this]() -> std::optional<double> { return double(m_server->sessionCount()); });
 

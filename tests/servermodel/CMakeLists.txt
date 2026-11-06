@@ -207,3 +207,17 @@ add_dependencies(servermodel_tests test_candle_wire)
 add_executable(candle_fixture_server candle_fixture_server.cpp)
 target_include_directories(candle_fixture_server PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(candle_fixture_server PRIVATE sentinel_core Qt6::Core Qt6::Network)
+
+add_executable(test_rollup_store test_rollup_store.cpp)
+target_include_directories(test_rollup_store PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_rollup_store PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME RollupStoreTests COMMAND test_rollup_store)
+add_dependencies(servermodel_tests test_rollup_store)
+
+# Offline real-data check of stored rollup levels (build, oracle, serving cost);
+# not a ctest: it reads a recorded HMC2 tree given on the command line.
+if(NOT WIN32) # getrusage
+    add_executable(rollup_levels_check rollup_levels_check.cpp)
+    target_include_directories(rollup_levels_check PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+    target_link_libraries(rollup_levels_check PRIVATE sentinel_core nlohmann_json::nlohmann_json)
+endif()

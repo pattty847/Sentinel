@@ -8,23 +8,35 @@
 
 namespace heatmap {
 // v2: the chunk key names a neutral source id instead of an HMC2 layer code.
-inline constexpr uint16_t kChunkWireVersion = 2;
+// v3: every source serves stored 1h and 1d levels built from its minutes; their
+// columns are composed and carry exact numerators (docs/MARKETDATA.md).
+inline constexpr uint16_t kChunkWireVersion = 3;
 // Chunk sources. The wire carries only the id. The hmc2.* ids are MIGRATION-ONLY:
 // they name the HMC2 near/deep recording layers while HMC2 is the source. Nothing
 // may branch product or renderer behaviour on them; raw-derived levels add new ids.
 struct ChunkSource {
     std::string_view id, hmc2Layer;
-    bool hourLevel = false; // serves the 1h native level (day-sized chunks)
 };
 inline constexpr std::array<ChunkSource, 2> kChunkSources{{
-    {"hmc2.near", "near", false},
-    {"hmc2.deep", "deep", true},
+    {"hmc2.near", "near"},
+    {"hmc2.deep", "deep"},
 }};
 const ChunkSource* findChunkSource(std::string_view id);
 const ChunkSource* chunkSourceForHmc2Layer(std::string_view layer);
-// Fixed chunk span for a (source, native level): 1m -> 1 UTC hour, 1h -> 1 UTC day.
-// Zero when the source does not serve that level.
+// Stored levels, finest first. 1m is recorded; 1h and 1d are rollups of it.
+inline constexpr std::array<int64_t, 3> kChunkLevels{kMinuteMs, kHourMs, kDayMs};
+// A 1d chunk holds this many UTC days (a fixed span keeps key arithmetic a
+// modulo; see docs/MARKETDATA.md for the size bound).
+inline constexpr int64_t kDayChunkDays = 16;
+// Fixed chunk span for a (source, stored level): 1m -> 1 UTC hour, 1h -> 1 UTC
+// day, 1d -> kDayChunkDays UTC days. Zero for an unknown source or level.
 int64_t chunkSpanMs(std::string_view source, int64_t levelMs);
+int64_t chunkSpanMs(int64_t levelMs);
+// Chunk starts are whole spans after 2000-01-01 UTC, the first supported day
+// (for 1m and 1h this is the same as Unix-epoch alignment). chunkStartOf is the
+// start of the level's chunk holding timeMs (timeMs itself for an unknown level).
+int64_t chunkStartOf(int64_t levelMs, int64_t timeMs);
+bool isChunkStart(int64_t levelMs, int64_t startMs);
 
 struct ChunkKey {
     std::string symbol, source;

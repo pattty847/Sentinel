@@ -11,14 +11,18 @@ std::string hmc2Layer(const ChunkKey& key) {
 }
 int64_t chunkEndMs(const ChunkKey& key) {
     const int64_t span = heatmap::chunkSpanMs(key.source, key.levelMs);
-    if (!span || key.symbol.empty() || key.startMs < kHmc2MinMs || key.startMs % span || key.startMs > kHmc2EndMs - span)
+    if (!span || key.symbol.empty() || key.startMs < kHmc2MinMs || !heatmap::isChunkStart(key.levelMs, key.startMs) || key.startMs > kHmc2EndMs - span)
         throw std::invalid_argument("invalid recording chunk key");
     return key.startMs + span;
 }
 namespace {
 int64_t throughFor(const ChunkKey& key, const BookRecorder::Watermarks& watermarks) {
     (void)chunkEndMs(key);
-    return key.levelMs == heatmap::kMinuteMs ? watermarks.minuteThroughMs : watermarks.hourThroughMs;
+    // Rollup levels (1h, 1d) are derived from minutes by RollupStore; the
+    // recorder's own hour files are not a chunk source.
+    if (key.levelMs != heatmap::kMinuteMs)
+        throw std::invalid_argument("recording chunks are minute chunks; rollup levels come from RollupStore");
+    return watermarks.minuteThroughMs;
 }
 heatmap::SparseColumns buildUntil(Hmc2Reader& reader, const ChunkKey& key, int64_t committedThroughMs, ReadControl& control) {
     if (!control.poll()) throw std::runtime_error("recording chunk scan cancelled");
@@ -54,7 +58,7 @@ ChunkState chunkState(const ChunkKey& key, const BookRecorder::Watermarks& water
 }
 heatmap::SparseColumns buildChunk(Hmc2Reader& reader, const ChunkKey& key) {
     ReadControl control;
-    return buildUntil(reader, key, chunkEndMs(key), control);
+    return buildUntil(reader, key, throughFor(key, {chunkEndMs(key), 0}), control);
 }
 heatmap::SparseColumns buildChunk(Hmc2Reader& reader, const ChunkKey& key,
                                   const BookRecorder::Watermarks& watermarks) {

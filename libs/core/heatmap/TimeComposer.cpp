@@ -114,8 +114,6 @@ SparseColumns compose(std::span<const SparseColumns* const> levels, int64_t tfMs
         if (!options.trustedInputs) validate(level);
         if (level.symbol != out.symbol || level.layer != out.layer)
             throw std::invalid_argument("mixed symbols or layers in heatmap composition");
-        if (level.tfMs == kHourMs && level.layer != "deep")
-            throw std::invalid_argument("hour rollups exist only for deep");
         if (tfMs % level.tfMs == 0) selected.push_back(&level);
     }
     if (selected.empty()) throw std::invalid_argument("timeframe requires a finer source level");

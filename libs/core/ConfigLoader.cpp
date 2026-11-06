@@ -163,6 +163,7 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(rec, "enabled", cfg.recording.enabled);
             readScalar(rec, "dir", cfg.recording.dir);
             readScalar(rec, "fallback_dir", cfg.recording.fallbackDir);
+            readScalar(rec, "rollup_dir", cfg.recording.rollupDir);
             readScalar(rec, "price_scale", cfg.recording.priceScale);
             readScalar(rec, "size_floor", cfg.recording.sizeFloor);
             readScalar(rec, "codes_per_octave", cfg.recording.codesPerOctave);

@@ -23,7 +23,7 @@ constexpr int64_t epoch = ((recording::kHmc2MinMs / (320 * kMinuteMs)) + 3) * (3
 constexpr int64_t availableStart = epoch - 12 * kHourMs, availableEnd = epoch + 36 * kHourMs;
 constexpr int64_t tileMs = tiles::kTileColumns * kMinuteMs;
 // Deliberately not "near"/"deep" by position: the controller must not care.
-bool coarse(const std::string &source) { return findChunkSource(source)->hourLevel; }
+bool coarse(const std::string &source) { return source == kChunkSources.back().id; }
 
 // Hour level (oldest, committed-through) for sources that have one; 0 = none.
 ChunkAvailability availability(int64_t end = availableEnd, int64_t hourFrom = 0, int64_t hourThrough = 0) {
@@ -36,7 +36,7 @@ ChunkAvailability availability(int64_t end = availableEnd, int64_t hourFrom = 0,
         s.latestGrid = protocol::chunkwire::GridInfo{};
         s.latestGrid->priceScale = 100;
         s.levels.push_back({kMinuteMs, kHourMs, end, availableStart, end - kMinuteMs});
-        if (source.hourLevel && hourThrough)
+        if (coarse(std::string(source.id)) && hourThrough)
             s.levels.push_back({kHourMs, kDayMs, hourThrough, hourFrom, hourThrough - kHourMs});
         a.sources.push_back(std::move(s));
     }
@@ -1167,10 +1167,10 @@ TEST_F(SourceController, DemotedFallbackIsEvictableInTheSameReconcile) {
     EXPECT_GE(a.stats().evictions, 1u);
 }
 
-// Hour chunks only where the hour level has data.
+// Hour chunks only inside the advertised hour interval (a backfill in progress).
 TEST_F(SourceController, HourChunksStartWhereHourRollupsStart) {
     const int64_t day = (availableStart / kDayMs + 1) * kDayMs; // first day start after the oldest minute
-    hourOldest = day + 5 * kHourMs;
+    hourOldest = day + kDayMs;
     transport.push(availability(day + 3 * kDayMs, hourOldest, day + 2 * kDayMs));
     drain();
     auto &a = chart();
@@ -1183,8 +1183,8 @@ TEST_F(SourceController, HourChunksStartWhereHourRollupsStart) {
             EXPECT_GE(key.startMs, day + kDayMs);
         }
     EXPECT_GT(hours, 0u);
-    // The first partial day composes from minutes: its hours before the first
-    // rollup are data, not recorder gaps.
+    // The day before the interval composes from minutes: its hours are data,
+    // not recorder gaps.
     bool checked = false;
     for (const auto &column : a.latestSnapshot()->resolution.columns)
         if (column.startMs == day + 2 * kHourMs)

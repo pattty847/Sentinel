@@ -10,12 +10,15 @@
 namespace recording {
 using ChunkKey = heatmap::ChunkKey;
 using ChunkState = heatmap::ChunkState;
-// Only native levels are chunks. Minute chunks span a UTC hour; hour chunks
-// (hmc2.deep only) span a UTC day. The start must be aligned to that span.
+// Chunk keys name a stored level (heatmap::chunkSpanMs): minute chunks span a
+// UTC hour, 1h chunks a UTC day, 1d chunks kDayChunkDays days. The start must be
+// aligned to that span. Throws invalid_argument for an invalid key.
 int64_t chunkEndMs(const ChunkKey& key);
 // Migration-only mapping from an hmc2.* source id to its HMC2 layer name.
 std::string hmc2Layer(const ChunkKey& key);
-// Sealed states report committedThroughMs == chunk end and revision 0.
+// Minute chunks only (buildChunk and chunkState throw invalid_argument for a
+// rollup level; RollupStore serves those). Sealed states report
+// committedThroughMs == chunk end and revision 0.
 ChunkState chunkState(const ChunkKey& key, const BookRecorder::Watermarks& watermarks,
                       uint64_t revision);
 // Omit watermarks only when the caller knows the entire chunk is committed.

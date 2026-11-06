@@ -119,6 +119,10 @@ struct HeatmapChunkWireTest {
     static void clientBinary(SentinelStreamClient& client, std::vector<uint8_t> bytes) {
         client.handleBinaryMessage(std::make_shared<std::vector<uint8_t>>(std::move(bytes)));
     }
+    // An inbound text frame, handled on the client's strand like a real one.
+    static void clientText(SentinelStreamClient& client, std::string payload) {
+        net::post(client.m_strand, [&client, payload = std::move(payload)] { client.handleMessage(payload); });
+    }
     static void sendText(SentinelStreamClient& client, std::string payload) {
         net::post(client.m_strand, [&client, payload = std::move(payload)]() mutable {
             client.m_writeQueue.push_back(std::move(payload));
@@ -417,11 +421,18 @@ TEST_F(ChunkWire, BinaryChunksDecodeExactlyAndHashMatchesGiveNotModified) {
     EXPECT_EQ(heatmap::bucketState(chunks[0]->key == minute0 ? chunks[0]->columns : chunks[1]->columns,
                                    kEpoch + 9 * kMin), heatmap::BucketState::Gap);
 
-    // Hour level: one UTC day, deep source only.
-    const auto hourReq = client->requestHeatmapChunks("BTC-USD", "hmc2.deep", kHour, {kEpoch});
-    ASSERT_TRUE(inbox.waitReplies(hourReq, 1));
-    ASSERT_EQ(inbox.chunksFor(hourReq).size(), 1u);
-    EXPECT_EQ(reencode(*inbox.chunksFor(hourReq)[0]), expectedWire({"BTC-USD", "hmc2.deep", kHour, kEpoch}, sealed));
+    // 1h level: one UTC day composed from minutes (RollupStore), every source.
+    for (const char* source : {"hmc2.deep", "hmc2.near"}) {
+        const auto hourReq = client->requestHeatmapChunks("BTC-USD", source, kHour, {kEpoch});
+        ASSERT_TRUE(inbox.waitReplies(hourReq, 1));
+        ASSERT_EQ(inbox.chunksFor(hourReq).size(), 1u) << source;
+        recording::Hmc2Reader reader(root());
+        recording::ReadControl control;
+        const std::string layer = std::string(source) == "hmc2.deep" ? "deep" : "near";
+        EXPECT_EQ(reencode(*inbox.chunksFor(hourReq)[0]),
+                  recording::encodeHourFrame("BTC-USD", recording::composeDay(reader, "BTC-USD", layer, kEpoch, control),
+                                             kEpoch));
+    }
 
     // have_hash: match -> not_modified (no payload), mismatch -> full chunk.
     const auto hash0 = std::find_if(chunks.begin(), chunks.end(), [&](const auto& c) { return c->key == minute0; })
@@ -442,18 +453,19 @@ TEST_F(ChunkWire, BinaryChunksDecodeExactlyAndHashMatchesGiveNotModified) {
             EXPECT_EQ(reencode(*c), expectedWire(minute1, sealed));
         }
     }
-    EXPECT_GE(HeatmapChunkWireTest::cache(*server).size(), 3u); // sealed chunks are cached as exact bytes
+    // Sealed minute chunks are cached as exact bytes (rollup chunks by the rollup store).
+    EXPECT_GE(HeatmapChunkWireTest::cache(*server).size(), 2u);
 
     // Per-key errors echo the key; no source may be named by its HMC2 layer.
     const auto badReq = client->requestHeatmapChunks("BTC-USD", "deep", kMin, {kEpoch});
-    const auto misaligned = client->requestHeatmapChunks("BTC-USD", "hmc2.near", kHour, {kEpoch});
+    const auto misaligned = client->requestHeatmapChunks("BTC-USD", "hmc2.near", kHour, {kEpoch + kHour});
     ASSERT_TRUE(inbox.waitReplies(badReq, 1));
     ASSERT_TRUE(inbox.waitReplies(misaligned, 1));
     for (const auto req2 : {badReq, misaligned}) {
         const auto errors = inbox.errorsFor(req2);
         ASSERT_EQ(errors.size(), 1u);
         EXPECT_EQ(errors[0].code, "invalid_request");
-        EXPECT_EQ(errors[0].key.startMs, kEpoch);
+        EXPECT_EQ(errors[0].key.startMs, req2 == misaligned ? kEpoch + kHour : kEpoch);
     }
 }
 
@@ -532,6 +544,46 @@ TEST_F(ChunkWire, OpenChunksCarryCommittedThroughAndOrderedRevisions) {
     EXPECT_EQ(inbox.errorsFor(9004)[0].code, "superseded");
 }
 
+// A new GUI and an old (v2) server: the client reads chunk_wire_version before
+// any other field (a future version's fields need not parse) and signals the
+// mismatch; the fetcher then clears its cache and stops fetching.
+TEST_F(ChunkWire, OldServerAvailabilityIsRefusedBeforeItsFieldsAreParsed) {
+    useControlledWatermarks(); // fixed availability: no v3 push after the v2 one
+    ASSERT_TRUE(server->start());
+    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(HeatmapChunkWireTest::port(*server)));
+    inbox.attach(*client);
+    protocol::SentinelStreamClientTransport transport(*client);
+    heatmap::ChunkStore store;
+    heatmap::ChunkFetcher fetcher(store, transport);
+    const auto stopClient = qScopeGuard([&] { client->disconnectFromServer(); });
+    QObject::connect(client.get(), &SentinelStreamClient::connected, client.get(),
+                     [&] { client->subscribe("BTC-USD"); }, Qt::DirectConnection);
+    client->connectToServer();
+    std::atomic<bool> mismatch{false};
+    QObject::connect(&transport, &heatmap::ChunkTransport::wireVersionMismatch, &transport,
+                     [&] { mismatch = true; }, Qt::DirectConnection);
+    const auto waitGui = [&](auto pred) {
+        return poll([&] { QCoreApplication::processEvents(); return pred(); }, 3s);
+    };
+    const ChunkKey key{"BTC-USD", "hmc2.deep", kMin, kEpoch};
+    fetcher.want(1, {key});
+    ASSERT_TRUE(waitGui([&] { return store.contains(key); }));
+    // Verbatim shape of a v2 server's message.
+    const std::string v2 = R"({"type":"heatmap_availability","symbol":"BTC-USD","chunk_wire_version":2,)"
+        R"("sources":{"hmc2.deep":{"migration_only":true,"oldest_ms":946684800000,"latest_ms":946691940000,)"
+        R"("grids":[],"levels":[{"level_ms":60000,"chunk_span_ms":3600000,"oldest_ms":946684800000,)"
+        R"("latest_ms":946691940000,"committed_through_ms":946692000000},{"level_ms":3600000,)"
+        R"("chunk_span_ms":86400000,"oldest_ms":946684800000,"latest_ms":946684800000,)"
+        R"("committed_through_ms":946688400000}]}}})";
+    HeatmapChunkWireTest::clientText(*client, v2);
+    ASSERT_TRUE(waitGui([&] { return mismatch.load() && !store.contains(key); }));
+    const auto requests = fetcher.stats().requests;
+    fetcher.want(2, {key, ChunkKey{"BTC-USD", "hmc2.deep", kMin, kEpoch + kHour}});
+    for (int i = 0; i < 20; ++i) { QCoreApplication::processEvents(); std::this_thread::sleep_for(10ms); }
+    EXPECT_EQ(fetcher.stats().requests, requests) << "fetching stays disabled";
+    EXPECT_FALSE(store.contains(key));
+}
+
 TEST_F(ChunkWire, AvailabilityOnSubscribeAndOnChange) {
     useControlledWatermarks();
     marks.minute = kEpoch + 90 * kMin;
@@ -548,19 +600,13 @@ TEST_F(ChunkWire, AvailabilityOnSubscribeAndOnChange) {
         EXPECT_TRUE(s.migrationOnly);
         ASSERT_TRUE(s.latestGrid);
         EXPECT_EQ(s.latestGrid->rowTickUnits, s.id == "hmc2.near" ? 100 : 200);
-        ASSERT_EQ(s.levels.size(), s.id == "hmc2.deep" ? 2u : 1u);
+        ASSERT_EQ(s.levels.size(), 1u) << "no rollup store on this service; never the recorder's hour files";
         const auto& m = s.levels[0];
         EXPECT_EQ(m.levelMs, kMin);
         EXPECT_EQ(m.chunkSpanMs, kHour);
         EXPECT_EQ(m.oldestMs, kEpoch);
         EXPECT_EQ(m.latestMs, kEpoch + 119 * kMin);
         EXPECT_EQ(m.committedThroughMs, kEpoch + 90 * kMin);
-        if (s.id == "hmc2.deep") {
-            EXPECT_EQ(s.levels[1].levelMs, kHour);
-            EXPECT_EQ(s.levels[1].chunkSpanMs, kDay);
-            EXPECT_EQ(s.levels[1].oldestMs, kEpoch);
-            EXPECT_EQ(s.levels[1].committedThroughMs, kEpoch + kHour);
-        }
     }
     // A watermark move is pushed without a new subscribe (1 s availability tick).
     marks.minute = kEpoch + 100 * kMin;
@@ -820,16 +866,15 @@ TEST(ChunkServiceWatermarks, RecorderCutoffsWinAndColdSeriesKeepAMargin) {
     recording::ChunkService service(dir.path().toStdString(),
         [&](const std::string&, const std::string&) { return recording::BookRecorder::Watermarks{minute.load(), 7}; },
         [&] { return now; });
-    // No recorder watermark: 13:02:30 - 5 min = 12:57:30 -> minutes before 12:57,
-    // hours before 11:00 (the rollup of 11:00-12:00 may still be written).
+    // No recorder watermark: 13:02:30 - 5 min = 12:57:30 -> minutes before 12:57.
     const auto cold = service.effectiveWatermarks("BTC-USD", "deep");
     EXPECT_EQ(cold.minuteThroughMs, kEpoch + 10 * kDay + 12 * kHour + 57 * kMin);
-    EXPECT_EQ(cold.hourThroughMs, kEpoch + 10 * kDay + 11 * kHour);
+    EXPECT_EQ(cold.hourThroughMs, 0) << "rollup levels come from minutes";
     minute = kEpoch + 42;
     const auto live = service.effectiveWatermarks("BTC-USD", "deep");
     EXPECT_EQ(live.minuteThroughMs, kEpoch + 42);
     EXPECT_EQ(live.hourThroughMs, 7);
-    EXPECT_EQ(service.availabilityFingerprint("BTC-USD"), (std::vector<int64_t>{kEpoch + 42, 7, kEpoch + 42, 7}));
+    EXPECT_EQ(service.availabilityFingerprint("BTC-USD"), (std::vector<int64_t>{kEpoch + 42, kEpoch + 42, 0}));
 }
 
 // A non-default recording.live_publish_ms proves the server paces live frames

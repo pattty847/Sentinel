@@ -1601,7 +1601,46 @@ SentinelStreamServer::SentinelStreamServer(ServerDataModel& model,
                 return std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count();
             });
+        const auto rollupRoot = recording::rollupRootFor(config.recording.rollupDir, *model.recordingDir());
+        if (rollupRoot.empty()) {
+            sLog_Error("Rollup levels not served: recording.rollup_dir must not be inside the HMC2 tree dir="
+                       << config.recording.rollupDir);
+        } else {
+            recording::RollupStore::Options options;
+            options.hmc2Root = *model.recordingDir();
+            options.root = rollupRoot;
+            options.symbols = rollerProducts(config);
+            options.minuteThrough = [weak = std::weak_ptr<recording::ChunkService>(m_chunks)](
+                                        const std::string& symbol, const std::string& layer) -> int64_t {
+                const auto service = weak.lock();
+                return service ? service->effectiveWatermarks(symbol, layer).minuteThroughMs : 0;
+            };
+            m_rollups = std::make_shared<recording::RollupStore>(std::move(options));
+            m_chunks->attachRollups(m_rollups);
+            sLog_App("Rollup levels served from dir=" << rollupRoot.string());
+        }
     }
+}
+
+void SentinelStreamServer::registerMetrics(sentinel::metrics::MetricsRegistry& registry) {
+    if (!m_rollups) return;
+    // Samplers read relaxed atomics on the scraping (main) thread.
+    const auto rollups = m_rollups;
+    auto counter = [&](const char* name, const char* help, auto read) {
+        registry.counterFn(name, help, {}, [rollups, read]() -> std::optional<double> { return read(*rollups); });
+    };
+    counter("sentinel_rollup_days_built_total", "Rollup days (one series, one UTC day, 1h and 1d) built.",
+            [](const recording::RollupStore& r) { return double(r.counters().daysBuilt.load(std::memory_order_relaxed)); });
+    counter("sentinel_rollup_build_failures_total", "Rollup day or series builds that failed and will be retried.",
+            [](const recording::RollupStore& r) { return double(r.counters().buildFailures.load(std::memory_order_relaxed)); });
+    counter("sentinel_rollup_build_seconds_total", "Wall seconds spent building rollup days.",
+            [](const recording::RollupStore& r) { return double(r.counters().buildMicros.load(std::memory_order_relaxed)) / 1e6; });
+    counter("sentinel_rollup_fallback_serves_total", "Rollup days served by composing minutes (file missing or corrupt).",
+            [](const recording::RollupStore& r) { return double(r.counters().fallbackServes.load(std::memory_order_relaxed)); });
+    registry.gaugeFn("sentinel_rollup_pending_days", "Closed series-days without a current rollup after the last pass.", {},
+                     [rollups]() -> std::optional<double> {
+                         return double(rollups->counters().pendingDays.load(std::memory_order_relaxed));
+                     });
 }
 
 SentinelStreamServer::~SentinelStreamServer() {
@@ -1661,6 +1700,7 @@ net::ip::address SentinelStreamServer::validateBindAddress(const ServerConfig& c
 
 bool SentinelStreamServer::start() {
     if (m_running) return true;
+    if (m_rollups) m_rollups->start(); // its own low-priority thread, never a network or recorder thread
     // Invalid configuration is fatal; transport availability must not stop recording.
     const auto address = validateBindAddress(m_serverConfig);
 
@@ -1767,6 +1807,7 @@ bool SentinelStreamServer::start() {
 }
 
 void SentinelStreamServer::stop() {
+    if (m_rollups) m_rollups->stop();
     // Live delivery can hold a Session and post to its executor. Join it while
     // that executor is alive, even when session drain will time out or start failed.
     if (auto* live = m_model.recordingLive()) live->shutdown();

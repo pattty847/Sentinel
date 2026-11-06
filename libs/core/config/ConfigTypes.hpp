@@ -80,6 +80,9 @@ struct ServerRecordingConfig {
     std::vector<int64_t> timeframesMs;
     std::string dir = "data/recording";
     std::string fallbackDir;          // used when dir's volume is not mounted; empty = do not record
+    // Derived 1h/1d rollup store (recording.rollup_dir). Empty: "<roller_shadow.dir>-rollups",
+    // a sibling of the HMC2 tree. Never inside it. Safe to delete: the server rebuilds it.
+    std::string rollupDir;
     double priceScale = 100.0;        // price units per 1.0 quote (0.01 increment)
     double sizeFloor = 1e-6;
     double codesPerOctave = 819.0;

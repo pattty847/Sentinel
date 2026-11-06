@@ -1303,18 +1303,14 @@ std::vector<SourceAvailability> HeatmapSourceController::sources() {
             priceScaleKnown_ = true;
             break;
         }
-    // Keep each level's interval: hour chunks only where hour rollups exist.
+    // Keep each level's interval: rollup chunks only where the server built them.
     for (const auto &source : available->sources) {
         SourceAvailability a{source.id, {}};
         int64_t oldest = INT64_MAX;
         for (const auto &level : source.levels) {
             oldest = std::min(oldest, level.oldestMs);
             a.time.endMs = std::max(a.time.endMs, level.committedThroughMs);
-            if (level.levelMs == kMinuteMs) a.time.minuteOldestMs = level.oldestMs;
-            if (level.levelMs == kHourMs) {
-                a.time.hourOldestMs = level.oldestMs;
-                a.time.hourThroughMs = level.committedThroughMs;
-            }
+            tiles::addLevel(a.time, level.levelMs, level.oldestMs, level.committedThroughMs);
         }
         for (const auto &edge : fetcher_.live(symbol_))
             if (edge->source == source.id) a.time.endMs = std::max(a.time.endMs, edge->committedThroughMs);
@@ -1468,14 +1464,16 @@ void HeatmapSourceController::reconcile() {
         return;
     }
     const auto available = sources();
-    // The time this tf can plan spans for: minute history, and hour rollups for
-    // hour-multiple timeframes (tiles::chunksFor), not an earlier level the tf
-    // never reads (the node would wait for spans that are never planned).
+    // The time this tf can plan spans for: minute history, and the rollup levels
+    // that divide the tf (tiles::chunksFor), not an earlier level the tf never
+    // reads (the node would wait for spans that are never planned).
     int64_t availableStart = 0, availableEnd = 0;
     for (const auto &source : available) {
         int64_t lo = source.time.minuteOldestMs;
         if (tfMs_ % kHourMs == 0 && source.time.hourThroughMs > source.time.hourOldestMs && source.time.hourOldestMs > 0)
             lo = std::min(lo, source.time.hourOldestMs);
+        if (tfMs_ % kDayMs == 0 && source.time.dayThroughMs > source.time.dayOldestMs && source.time.dayOldestMs > 0)
+            lo = std::min(lo, source.time.dayOldestMs);
         if (lo == INT64_MAX || lo >= source.time.endMs) continue;
         lo = std::max(lo, source.time.oldestMs);
         availableStart = availableEnd ? std::min(availableStart, lo) : lo;

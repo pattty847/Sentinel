@@ -6,7 +6,7 @@
 #include <functional>
 #include <stop_token>
 
-namespace recording { class Hmc2Reader; }
+namespace recording { class Hmc2Reader; class RollupStore; }
 
 namespace heatmap {
 // Read-only HMC2 lab source. All availability scans, builds and hashing run on
@@ -22,6 +22,9 @@ public:
         // Lab benchmarks: availability (and so every chunk's watermark) ends
         // here, exclusive UTC ms, as if the recorder had stopped; 0 = live.
         int64_t pinnedEndMs = 0;
+        // Serve the 1h and 1d levels from this rollup store directory (read
+        // only: days it lacks are not built and not advertised). Empty: minutes only.
+        std::filesystem::path rollupRoot;
     };
     LocalChunkTransport(std::filesystem::path root, TestHooks hooks, QObject *parent = nullptr);
     explicit LocalChunkTransport(std::filesystem::path root, QObject *parent = nullptr);

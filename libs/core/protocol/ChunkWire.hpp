@@ -163,6 +163,12 @@ inline nlohmann::json buildAvailability(const std::string& symbol,
             {"chunk_wire_version", heatmap::kChunkWireVersion}, {"sources", out}};
 }
 
+// The advertised wire version, read before anything version-specific (0 when
+// absent or not an integer). Check it before parseAvailability.
+inline int availabilityWireVersion(const nlohmann::json& j) {
+    const auto it = j.find("chunk_wire_version");
+    return it != j.end() && it->is_number_integer() ? it->get<int>() : 0;
+}
 // Throws nlohmann::json::exception on malformed messages.
 inline Availability parseAvailability(const nlohmann::json& j) {
     Availability out;
