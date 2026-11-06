@@ -7,14 +7,19 @@ Detail belongs in the linked plan or file, not in the item.
 
 ## Queue (ordered)
 
-1. **Journal-built candles + liquidity events** (owner's strongest direction, 2026-10-06; needs a Fable plan; crosses roller, HMC2, wire, renderer):
+1. **HMC2 rollups and screen-bounded heatmap memory** (owner 2026-11-05; Architecture C stopped, RAWL2 stays the exact record). Probe run 2026-11-05 22:46 (`sentinel-gui-20261105-224604-37282.log`, BTC, 37 days): 1h fetched 915 chunks, about one minute chunk per hour of history (finished building at +21 s); 1d fetched 2,384 chunks for 892 distinct (refetched about 2.7x under the 1 GiB CPU ceiling); every tf from 15m refused 1.5-2.3 GB of visible spans. Cause: only the deep layer has a 1h level, its chunks are one day (24 columns, `ChunkCodec.cpp:218`), and no level is coarser than 1h, so the near layer reads minute chunks at every tf.
+   - 1h and 1d levels for every layer of every product; sub-minute stays in RAM;
+   - chunks sized by column count, not by wall time (about 1 day per 1m chunk, 1 month per 1h chunk, 1 year per 1d chunk); the newest chunk of each level grows while live (rewrite or compose the live column);
+   - each tf reads the coarsest level that divides it (`tiles::chunksFor`);
+   - then fetch only the visible price range plus a margin, more on zoom-out;
+   - target: decoded and GPU memory scale with the screen, not with history; prove it first in an isolated lab slice on recorded HMC2 (owner to approve its T7 location).
+2. **Journal-built candles + liquidity events** (owner's strongest direction, 2026-10-06; needs a Fable plan; crosses roller, HMC2, wire, renderer):
    - candles for the recorded period from our own journal trades: 1m kept forever (~25 MB/product/year), 1s rolling 5 days (~20 MB/product) and rebuilt from the journal beyond that; REST only for pre-recording history and odd timeframes;
    - history requests may ask 1,000+ bars; the server answers from cache or fans out 350-bar Coinbase pages within the rate limit;
    - change-driven live publishing with a per-client max update rate;
    - EATEN vs PULLED liquidity, ABSORPTION, REPLENISHMENT at sub-minute resolution from the raw journal (a 1-minute TWAP column cannot show event order).
-2. **Order book widget pass** (owner reports 2026-10-06): following cannot keep the mid centred in a fast dump (`OrderBookDock.cpp` follow/recenter; DECISIONS 2026-10-03, 67 ms over a 2001-tick window); BTC rows under the best bid looked empty at 0.1 tick (thin book or display bug, unverified).
-3. **GUI polish** (owner, 2026-10-06):
-   - heatmap chunk loading after a timeframe change (1m->15m) or fast zoom-out is too slow for a local server (S6 A/B: 1h settle 509-1297 ms); profile the chunk request path before guessing;
+3. **Order book widget pass** (owner reports 2026-10-06): following cannot keep the mid centred in a fast dump (`OrderBookDock.cpp` follow/recenter; DECISIONS 2026-10-03, 67 ms over a 2001-tick window); BTC rows under the best bid looked empty at 0.1 tick (thin book or display bug, unverified).
+4. **GUI polish** (owner, 2026-10-06):
    - put explanatory hover tooltips behind a "learning mode" setting (an order book tooltip covers the chart);
    - TPO history depth: diagnosed 2026-10-23, not a refusal: the GUI asks for `tpoSessions` (default 5, clamp 1..8 at `TpoOverlayRenderer.cpp:95`) h24 sessions, so it showed back to 10-03 on 10-08. Owner decides: deeper history (raise the clamp and `kMaxHistoryPages`), and whether REST-candle columns before the 24 h trade tape are labelled approximate (INV-039 target) or INV-030/039 are amended. The 250k-trade page failure is fixed on main (`46edf77c`, not deployed); open with it: candle-derived TPO letters carry no approximate marker (INV-039).
    - inline volume bars on the market chart (only the Stock Chart dock's `CandlestickBatched` has them);
@@ -23,10 +28,10 @@ Detail belongs in the linked plan or file, not in the item.
    - zoom-to-footprint: candles widen into bid/ask footprint cells, then numbers appear (extends Footprint and text LOD below);
    - **Trade bubbles rethink** (owner 2026-10-25, discussion pending; screenshots in the 2026-10-25 conductor chat): at 1m zoomed out the bubbles bury the chart and say little; zoomed in they sit at trade time inside the candle, which the owner expected at the candle's centre. Topics: x placement (trade time like Bookmap vs candle centre), size/magnitude scaling, separating price-moving or large trades from passive flow (minimum-size/volume filter, aggregation per time slot and price, sweep detection). Bookmap's bubbles are the floor, not the target. Owner 2026-10-27: after a GUI restart bubbles appear only from the start of the session (no history).
    - **Heatmap stops after sub-minute switches** (owner 2026-10-25, to debug): panning/zooming at 1 s, then 1m -> 1s -> 100ms, left the heatmap empty from the switch time on; back on 1m, time after the switch shows the hatched not-built background. Log `~/Library/Logs/Sentinel/sentinel-gui-20261024-235229-50461.log` 18:10-18:14 EDT: `Heatmap CPU ceiling refused visible spans ... tf=3600000 spans=7 bytes=1189108208` at 18:10:35 (the same ceiling refused spans twice overnight), live subscribe `sub=5206` at 18:12:56 on 1m, no live subscribe at 1 s/100 ms. Known context: live heatmap columns are requested only for tf >= 1 minute (`HeatmapSourceController.cpp:882`, order book plan CE-3). Check whether the 1m live resubscribe resumes and whether the CPU ceiling (about 1 GB committed after a long session) is what leaves spans unbuilt.
-4. **Heatmap/candle zoom drift**: heatmap and candles drift apart slightly on wheel zoom-out (moved from the landed render performance pass, `3a54b829`; see item 3).
-5. **Repeatable performance benchmark** on the owner's machines; cite its numbers in the README (the old 110 FPS figure was removed 2026-10-07).
-6. **README + ARCHITECTURE pass** for the finished one-world architecture; also fix `docs/MARKETDATA.md` (TLS described as optional, single-quad heatmap, 110 FPS).
-7. **CI** for macOS, Windows, Linux (no `.github/workflows` today). Hosted runners have no GPU, so GPU tests skip and report Passed; GPU coverage needs self-hosted runners on the Mac and the Windows machine.
+5. **Heatmap/candle zoom drift**: heatmap and candles drift apart slightly on wheel zoom-out (moved from the landed render performance pass, `3a54b829`; see item 4).
+6. **Repeatable performance benchmark** on the owner's machines; cite its numbers in the README (the old 110 FPS figure was removed 2026-10-07).
+7. **README + ARCHITECTURE pass** for the finished one-world architecture; also fix `docs/MARKETDATA.md` (TLS described as optional, single-quad heatmap, 110 FPS).
+8. **CI** for macOS, Windows, Linux (no `.github/workflows` today). Hosted runners have no GPU, so GPU tests skip and report Passed; GPU coverage needs self-hosted runners on the Mac and the Windows machine.
 
 ## Security (owner decides when)
 
@@ -57,7 +62,7 @@ Detail belongs in the linked plan or file, not in the item.
 - Candle restart-partial bars: the 1m bar and the 5m..1d rollup bars open at a server restart lose their pre-restart part (only 100 ms and 1 s are restored); a GUI keeps the partial closed bar. Owner to confirm it matches the 4h/1d report.
 - Startup candle flicker: the auto tick commits 100 -> 500 -> 100 within ~60 ms around the first snapshot, so the settled tick differs run to run; do not commit an auto tick until the first snapshot and price window settle (owner-visible). Until fixed, do not chase price-row diffs in screenshots.
 - Overlay teardown crash: `CandlestickOverlayItem`/`TradeBubbleOverlayItem` keep a dangling mapping provider/renderer after `UnifiedGridRenderer` is deleted (tests null them first); use a QPointer or disconnect on UGR destruction.
-- `HeatmapGpuBinner` precision self-test intermittently reads back all zeros (1 of 6 starts) and silently drops the fast kernel; suspect readback before dispatch completion in `driveSelfTest`.
+- `HeatmapGpuBinner` precision self-test intermittently reads back all zeros (1 of 6 starts) and silently drops the fast kernel; suspect readback before dispatch completion in `driveSelfTest`. Seen again 2026-11-05 22:46 (384/384 zeros, Metal M4).
 - Roller reconnect catch-up may retry forever if the already-applied cursor block is corrupt (LiveSource requires the first reopened record to equal the saved cursor; a recovering JournalReader can return a successor with gapBefore). Unverified.
 - An anchor-resumed JournalFeed can re-emit a pre-anchor trade_id on a reconnect snapshot (the v1 anchor sidecar omits the trade-ID window); the fix changes on-disk state and needs owner approval.
 - doc-health: bare `file.cpp:123` pointers (no directory) report as dead although the file exists (`MainWindowGpu.cpp:973`, `TopToolbar.cpp:90`); resolve by basename via `git ls-files`. Warning only.
