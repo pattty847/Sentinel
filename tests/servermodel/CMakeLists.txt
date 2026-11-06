@@ -216,6 +216,8 @@ add_dependencies(servermodel_tests test_rollup_store)
 
 # Offline real-data check of stored rollup levels (build, oracle, serving cost);
 # not a ctest: it reads a recorded HMC2 tree given on the command line.
-add_executable(rollup_levels_check rollup_levels_check.cpp)
-target_include_directories(rollup_levels_check PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
-target_link_libraries(rollup_levels_check PRIVATE sentinel_core nlohmann_json::nlohmann_json)
+if(NOT WIN32) # getrusage
+    add_executable(rollup_levels_check rollup_levels_check.cpp)
+    target_include_directories(rollup_levels_check PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+    target_link_libraries(rollup_levels_check PRIVATE sentinel_core nlohmann_json::nlohmann_json)
+endif()

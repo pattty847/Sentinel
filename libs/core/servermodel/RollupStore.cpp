@@ -10,6 +10,12 @@
 #include <sys/qos.h>
 #include <unistd.h>
 #elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <io.h>
 #include <process.h>
 #include <windows.h>
