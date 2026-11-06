@@ -55,7 +55,7 @@ TEST(HeatmapSpanPlanner, AvailabilityClipsSourcesAndHourTailIsSourceAware) {
     for (const auto &source : plan[0].sources) {
         const auto *descriptor = findChunkSource(source.source);
         ASSERT_TRUE(descriptor);
-        EXPECT_EQ(source.chunks.front().levelMs, descriptor->hourLevel ? kHourMs : kMinuteMs);
+        EXPECT_EQ(source.chunks.front().levelMs, kHourMs) << "every source has the 1h level";
         EXPECT_EQ(source.chunks.back().levelMs, kMinuteMs);
     }
     // A source that starts later is left out of the spans before it.
@@ -71,39 +71,46 @@ TEST(HeatmapSpanPlanner, AvailabilityClipsSourcesAndHourTailIsSourceAware) {
         }
     }
 }
-TEST(HeatmapSpanPlanner, HourChunksOnlyInsideTheAdvertisedHourInterval) {
+TEST(HeatmapSpanPlanner, RollupChunksOnlyInsideTheAdvertisedIntervals) {
     constexpr int64_t day0 = 20000 * kDayMs;
-    auto keys = [](const tiles::Availability &a, const char *source = "hmc2.deep") {
-        std::vector<std::pair<int64_t, int64_t>> out; // (level, start - day0)
-        for (const auto &k : tiles::chunksFor("BTC-USD", source, kHourMs, day0, day0 + 4 * kDayMs, a))
+    using Keys = std::vector<std::pair<int64_t, int64_t>>; // (level, start - day0)
+    auto keys = [](const tiles::Availability &a, int64_t tfMs, const char *source = "hmc2.deep",
+                   int64_t from = day0, int64_t to = day0 + 4 * kDayMs) {
+        Keys out;
+        for (const auto &k : tiles::chunksFor("BTC-USD", source, tfMs, from, to, a))
             out.emplace_back(k.levelMs, k.startMs - day0);
         return out;
     };
-    auto expect = [](int64_t minutesFrom, int64_t minutesTo, std::vector<int64_t> days, int64_t tailFrom, int64_t tailTo) {
-        std::vector<std::pair<int64_t, int64_t>> out;
-        for (int64_t t = minutesFrom; t < minutesTo; t += kHourMs) out.emplace_back(kMinuteMs, t);
-        for (const auto d : days) out.emplace_back(kHourMs, d * kDayMs);
-        for (int64_t t = tailFrom; t < tailTo; t += kHourMs) out.emplace_back(kMinuteMs, t);
-        return out;
+    auto minutes = [](Keys &out, int64_t from, int64_t to) {
+        for (int64_t t = from; t < to; t += kHourMs) out.emplace_back(kMinuteMs, t);
     };
-    // Minutes from day0+2h, hour rollups only from day0+5h: the partial first day
-    // composes from minutes (its hour chunk would read 0h-5h as recorder gaps).
-    tiles::Availability a{day0 + 2 * kHourMs, day0 + 3 * kDayMs + 7 * kHourMs, day0 + 3 * kDayMs,
-                          day0 + 2 * kHourMs, day0 + 5 * kHourMs};
-    EXPECT_EQ(keys(a), expect(2 * kHourMs, kDayMs, {1, 2}, 3 * kDayMs, 3 * kDayMs + 7 * kHourMs));
-    // A range that ends before the hour interval uses no hour chunk at all.
-    std::vector<std::pair<int64_t, int64_t>> early;
-    for (const auto &k : tiles::chunksFor("BTC-USD", "hmc2.deep", kHourMs, day0, day0 + 20 * kHourMs, a))
-        early.emplace_back(k.levelMs, k.startMs - day0);
-    EXPECT_EQ(early, expect(2 * kHourMs, 20 * kHourMs, {}, 0, 0));
-    // Minutes start after the first hour: that day comes from its hour chunk.
-    a.minuteOldestMs = day0 + 8 * kHourMs;
-    EXPECT_EQ(keys(a), expect(0, 0, {0, 1, 2}, 3 * kDayMs, 3 * kDayMs + 7 * kHourMs));
-    // A source without an hour level composes minutes only, from its oldest minute.
-    EXPECT_EQ(keys(a, "hmc2.near"), expect(8 * kHourMs, 3 * kDayMs + 7 * kHourMs, {}, 0, 0));
-    // Legacy single interval (hour bound unknown): hours from the range start.
-    a.minuteOldestMs = a.hourOldestMs = 0;
-    EXPECT_EQ(keys(a), expect(0, 0, {0, 1, 2}, 3 * kDayMs, 3 * kDayMs + 7 * kHourMs));
+    // Complete store: hours from the first recorded hour through the last closed day.
+    tiles::Availability a{day0 + 2 * kHourMs, day0 + 3 * kDayMs + 7 * kHourMs, day0 + 2 * kHourMs,
+                          day0 + 2 * kHourMs, day0 + 3 * kDayMs};
+    Keys expected{{kHourMs, 0}, {kHourMs, kDayMs}, {kHourMs, 2 * kDayMs}};
+    minutes(expected, 3 * kDayMs, 3 * kDayMs + 7 * kHourMs);
+    EXPECT_EQ(keys(a, kHourMs), expected);
+    EXPECT_EQ(keys(a, kHourMs, "hmc2.near"), expected) << "every source has the stored levels";
+    EXPECT_EQ(keys(a, 4 * kHourMs), expected) << "4h composes 1h";
+    // Backfill in progress: hours only for built days; earlier days use minutes.
+    a.hourOldestMs = day0 + kDayMs;
+    expected.clear();
+    minutes(expected, 2 * kHourMs, kDayMs);
+    expected.insert(expected.end(), {{kHourMs, kDayMs}, {kHourMs, 2 * kDayMs}});
+    minutes(expected, 3 * kDayMs, 3 * kDayMs + 7 * kHourMs);
+    EXPECT_EQ(keys(a, kHourMs), expected);
+    // A range that ends before the interval uses no hour chunk.
+    expected.clear();
+    minutes(expected, 2 * kHourMs, 20 * kHourMs);
+    EXPECT_EQ(keys(a, kHourMs, "hmc2.deep", day0, day0 + 20 * kHourMs), expected);
+    // Sub-hour and non-dividing timeframes compose minutes only.
+    expected.clear();
+    minutes(expected, 2 * kHourMs, 3 * kDayMs + 7 * kHourMs);
+    EXPECT_EQ(keys(a, 15 * kMinuteMs), expected);
+    EXPECT_EQ(keys(a, 90 * kMinuteMs), expected);
+    // No rollups advertised (through 0): minutes.
+    a.hourThroughMs = 0;
+    EXPECT_EQ(keys(a, kHourMs), expected);
 }
 TEST(HeatmapSpanPlanner, RetainedSpansKeepTheirTierAfterPrefetch) {
     const auto sources = availability();

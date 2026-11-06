@@ -207,24 +207,77 @@ TEST(HeatmapTiles, TilesAreEpochAlignedSixtyFourColumnSpans) {
 }
 
 TEST(HeatmapTiles, ChunkPlanUsesHoursBeforeTheWatermarkAndMinutesAfter) {
-    Availability a{epoch + 30 * minute, epoch + 2 * day + 90 * minute, epoch + 2 * day};
-    // Deep 1h: day chunks of hour rollups through the watermark, then minute chunks.
-    auto keys = chunksFor("BTC-USD", "hmc2.deep", hour, epoch, epoch + 3 * day, a);
-    ASSERT_EQ(keys.size(), 4u);
-    EXPECT_EQ(keys[0].levelMs, hour);
-    EXPECT_EQ(keys[0].startMs, epoch);
-    EXPECT_EQ(keys[1].startMs, epoch + day);
-    EXPECT_EQ(keys[2].levelMs, minute);
-    EXPECT_EQ(keys[2].startMs, epoch + 2 * day);
-    EXPECT_EQ(keys[3].startMs, epoch + 2 * day + hour);
-    // Near (no rollups) and sub-hour timeframes compose minutes only; the range
-    // is clipped to the available data.
-    keys = chunksFor("BTC-USD", "hmc2.near", hour, epoch - day, epoch + 3 * hour, a);
+    Availability a{epoch + 30 * minute, epoch + 2 * day + 90 * minute, epoch + 30 * minute, epoch, epoch + 2 * day};
+    // 1h: day chunks of the 1h level through its committed end, then minute chunks.
+    for (const char *source : {"hmc2.deep", "hmc2.near"}) {
+        auto keys = chunksFor("BTC-USD", source, hour, epoch, epoch + 3 * day, a);
+        ASSERT_EQ(keys.size(), 4u);
+        EXPECT_EQ(keys[0].levelMs, hour);
+        EXPECT_EQ(keys[0].startMs, epoch);
+        EXPECT_EQ(keys[1].startMs, epoch + day);
+        EXPECT_EQ(keys[2].levelMs, minute);
+        EXPECT_EQ(keys[2].startMs, epoch + 2 * day);
+        EXPECT_EQ(keys[3].startMs, epoch + 2 * day + hour);
+    }
+    // Sub-hour timeframes compose minutes only; the range is clipped to the
+    // available data.
+    auto keys = chunksFor("BTC-USD", "hmc2.near", 5 * minute, epoch - day, epoch + 3 * hour, a);
     ASSERT_EQ(keys.size(), 3u);
     EXPECT_EQ(keys[0].startMs, epoch);
     EXPECT_EQ(keys[0].levelMs, minute);
     keys = chunksFor("BTC-USD", "hmc2.deep", 5 * minute, epoch + 2 * day + 2 * hour, epoch + 3 * day, a);
     EXPECT_TRUE(keys.empty()) << "nothing recorded after availability.endMs";
+    EXPECT_TRUE(chunksFor("BTC-USD", "hmc2.unknown", hour, epoch, epoch + day, a).empty());
+}
+
+// The widest views of the stored levels over a closed range: 1h and 4h read
+// day chunks of the 1h level, 1d reads kDayChunkDays-day chunks of the 1d level;
+// the open edge uses the next finer level; a missing level falls back.
+TEST(HeatmapTiles, ChunkPlanUsesTheCoarsestStoredLevelThatDividesTheTimeframe) {
+    const int64_t span = chunkSpanMs(day);
+    ASSERT_EQ(span, kDayChunkDays * day);
+    const int64_t first = chunkStartOf(day, epoch) + span; // a 1d chunk boundary
+    const int64_t closed = first + 40 * day;         // 40 closed days
+    Availability a{first, closed + 5 * hour + 30 * minute, first, first, closed, first, closed};
+    auto count = [](const std::vector<ChunkKey> &keys, int64_t level) {
+        return std::count_if(keys.begin(), keys.end(), [&](const ChunkKey &k) { return k.levelMs == level; });
+    };
+    for (const int64_t tf : {hour, 4 * hour}) {
+        const auto keys = chunksFor("BTC-USD", "hmc2.deep", tf, first, closed + day, a);
+        EXPECT_EQ(count(keys, hour), 40) << tf;
+        EXPECT_EQ(count(keys, day), 0) << tf;
+        EXPECT_EQ(count(keys, minute), 6) << "the open day's recorded hours, tf " << tf;
+    }
+    auto keys = chunksFor("BTC-USD", "hmc2.near", day, first, closed + day, a);
+    EXPECT_EQ(count(keys, day), 3) << "40 days in 16-day chunks";
+    EXPECT_EQ(count(keys, hour), 0);
+    EXPECT_EQ(count(keys, minute), 6);
+    EXPECT_EQ(keys.front().startMs, first);
+    EXPECT_EQ(keys[2].startMs, first + 2 * span);
+    // The 1d level lags the 1h level by a day: that day comes from its 1h chunk.
+    a.dayThroughMs = closed - day;
+    keys = chunksFor("BTC-USD", "hmc2.near", day, first, closed + day, a);
+    EXPECT_EQ(count(keys, day), 3);
+    ASSERT_EQ(count(keys, hour), 1);
+    EXPECT_EQ(std::find_if(keys.begin(), keys.end(), [](const ChunkKey &k) { return k.levelMs == hour; })->startMs,
+              closed - day);
+    // No 1d level: 1d composes the 1h level. No rollups at all: minutes.
+    a.dayThroughMs = 0;
+    keys = chunksFor("BTC-USD", "hmc2.near", day, first, closed + day, a);
+    EXPECT_EQ(count(keys, day), 0);
+    EXPECT_EQ(count(keys, hour), 40);
+    a.hourThroughMs = 0;
+    keys = chunksFor("BTC-USD", "hmc2.near", day, first, closed + day, a);
+    EXPECT_EQ(count(keys, minute), 40 * 24 + 6);
+    // Backfill in progress: 1h from day 30, 1d from the chunk boundary at day 32.
+    a = {first, closed + 5 * hour + 30 * minute, first, first + 30 * day, closed, first + 2 * span, closed};
+    keys = chunksFor("BTC-USD", "hmc2.deep", day, first, closed + day, a);
+    EXPECT_EQ(count(keys, day), 1);
+    EXPECT_EQ(count(keys, hour), 2);                // days 30 and 31
+    EXPECT_EQ(count(keys, minute), 30 * 24 + 6);    // days 0-29 and the open tail
+    // Sorted by start, then level.
+    for (size_t i = 1; i < keys.size(); ++i)
+        EXPECT_LE(std::tie(keys[i - 1].startMs, keys[i - 1].levelMs), std::tie(keys[i].startMs, keys[i].levelMs));
 }
 
 TEST(HeatmapTiles, ClippedCompositionEqualsTheSameBucketsOfTheWholeComposition) {

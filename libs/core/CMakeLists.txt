@@ -65,6 +65,8 @@ add_library(sentinel_core
     servermodel/RecordingChunks.cpp
     servermodel/RecordingChunks.hpp
     servermodel/ChunkService.cpp
+    servermodel/RollupStore.cpp
+    servermodel/RollupStore.hpp
     servermodel/ChunkService.hpp
     heatmap/SparseColumns.cpp
     heatmap/SparseColumns.hpp

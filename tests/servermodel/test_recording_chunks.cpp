@@ -1,5 +1,6 @@
 #include "heatmap/BinCell.hpp"
 #include "heatmap/ChunkCodec.hpp"
+#include "heatmap/RecordingLoader.hpp"
 #include "heatmap/TimeComposer.hpp"
 #include "servermodel/RecordingChunks.hpp"
 #include "servermodel/RecordingLive.hpp"
@@ -214,34 +215,44 @@ TEST_F(ChunkTest, RoundTripGapsGridChangesCoverageAndOpenSealedState) {
     encoded.back() ^= 1;
     EXPECT_THROW(decodeChunk(encoded), std::invalid_argument);
 }
-TEST_F(ChunkTest, HourCoverageSidecarsRoundTripAndComposedV1IsRejected) {
+TEST_F(ChunkTest, RecorderHoursAreNotChunksAndComposedRollupsRoundTripExactly) {
     seed(); Hmc2Reader reader(root());
-    ChunkKey hourKey{"BTC-USD", "hmc2.deep", kHourMs, epoch};
-    auto hours = buildChunk(reader, hourKey);
-    const BookRecorder::Watermarks minuteOnly{epoch+kDayMs, epoch};
-    EXPECT_FALSE(chunkState(hourKey, minuteOnly, 5).sealed);
-    EXPECT_TRUE(buildChunk(reader, hourKey, minuteOnly).scannedRanges.empty());
+    // The recorder's own hour files are not a chunk source (rollups come from minutes).
+    const ChunkKey hourKey{"BTC-USD", "hmc2.deep", kHourMs, epoch};
+    EXPECT_THROW(buildChunk(reader, hourKey), std::invalid_argument);
+    EXPECT_THROW(chunkState(hourKey, {epoch + kDayMs, epoch + kDayMs}, 0), std::invalid_argument);
+    // Per-entry duration sidecars (hour records) still round-trip on a rollup key.
+    SparseColumns hours{"BTC-USD", "deep", kHourMs, epoch, epoch + kDayMs};
+    ReadControl control;
+    const auto scan = reader.visit("BTC-USD", "deep", kHourMs, epoch, epoch + kDayMs,
+        [&](const Hmc2Record& r) { hours.columns.push_back(fromRecording(r)); }, control);
+    hours.scannedRanges.push_back({scan.scannedStartMs, scan.scannedEndMs});
     ASSERT_EQ(hours.columns.size(), 1);
     EXPECT_EQ(hours.columns[0].native[0].entryCoveredMs.size(), 2);
-    EXPECT_EQ(hours.columns[0].native[0].coverage[0].size(), 2);
-    ChunkFrame f{ChunkKind::Chunk, hourKey, chunkState(hourKey, {epoch+kDayMs, epoch+kDayMs}, 0), hours};
-    std::vector<uint8_t> hourWire;
-    ASSERT_NO_THROW(hourWire = encodeChunk(f));
-    ASSERT_NO_THROW(same(hours, decodeChunk(hourWire).columns));
+    ASSERT_NO_THROW(same(hours, decodeChunk(encodeChunk({ChunkKind::Chunk, hourKey, {true, epoch + kDayMs, 0}, hours})).columns));
+    // Composed columns travel with exact numerators on rollup levels only.
     auto minutes = buildChunk(reader, {"BTC-USD", "hmc2.deep", kMinuteMs, epoch});
-    auto composed = compose(minutes, 5 * kMinuteMs);
-    ASSERT_FALSE(composed.columns.empty());
-    EXPECT_TRUE(composed.columns.front().native.front().composed);
-    // v1 has no portable encoding for in-memory long-double numerators.
     auto composedHour = compose(minutes, kHourMs);
     ASSERT_EQ(composedHour.columns.size(), 1);
-    EXPECT_EQ(composedHour.startMs, epoch);
-    EXPECT_EQ(composedHour.endMs, epoch + kHourMs);
-    EXPECT_NO_THROW(validate(composedHour));
-    composedHour.endMs = epoch + kDayMs; // partial scan inside a day-sized hour chunk
-    ChunkFrame cf{ChunkKind::Chunk, {"BTC-USD", "hmc2.deep", kHourMs, epoch},
-                  {false, epoch+kHourMs, 0}, composedHour};
-    EXPECT_THROW(encodeChunk(cf), std::invalid_argument);
+    EXPECT_TRUE(composedHour.columns.front().native.front().composed);
+    composedHour.endMs = epoch + kDayMs; // the first hour of a day chunk, still open
+    ChunkFrame cf{ChunkKind::Chunk, hourKey, {false, epoch + kHourMs, 2}, composedHour};
+    const auto decoded = decodeChunk(encodeChunk(cf)).columns;
+    auto expected = composedHour;
+    for (auto& column : expected.columns)
+        for (auto& native : column.native)
+            if (native.composed) native.entryCoveredMs.clear(); // coverage runs carry durations
+    same(expected, decoded);
+    // Composing the decoded columns again gives the original numerators.
+    EXPECT_EQ(compose(decoded, kHourMs).columns.front().native.front().numerators,
+              composedHour.columns.front().native.front().numerators);
+    // A composed column is never a minute chunk or a live column.
+    ChunkFrame bad{ChunkKind::Chunk, {"BTC-USD", "hmc2.deep", kMinuteMs, epoch}, {false, epoch + kHourMs, 1}, {}};
+    bad.columns = minutes;
+    bad.columns.columns.front().native.front().composed = true;
+    bad.columns.columns.front().native.front().numerators.assign(
+        bad.columns.columns.front().native.front().entries.size(), 1.0L);
+    EXPECT_THROW(encodeChunk(bad), std::invalid_argument);
 }
 TEST_F(ChunkTest, MalformedHeadersAndPayloadsAreBounded) {
     seed(); Hmc2Reader reader(root());
@@ -268,8 +279,10 @@ TEST_F(ChunkTest, MalformedHeadersAndPayloadsAreBounded) {
     EXPECT_THROW(decodeChunk(hugeColumns), std::invalid_argument);
     auto badCoverage = rewritePayload(wire, [](auto& raw) { raw.at(98) = raw.at(99) = 0xff; });
     EXPECT_THROW(decodeChunk(badCoverage), std::invalid_argument);
-    auto composedV1 = rewritePayload(wire, [](auto& raw) { raw.at(96) = 1; });
-    EXPECT_THROW(decodeChunk(composedV1), std::invalid_argument);
+    auto composedMinute = rewritePayload(wire, [](auto& raw) { raw.at(96) = 1; }); // composed flag on a minute chunk
+    EXPECT_THROW(decodeChunk(composedMinute), std::invalid_argument);
+    auto unknownFlag = rewritePayload(wire, [](auto& raw) { raw.at(96) = 4; });
+    EXPECT_THROW(decodeChunk(unknownFlag), std::invalid_argument);
     auto badRanges = rewritePayload(wire, [](auto& raw) {
         for (size_t i = 10; i < 18; ++i) raw.at(i) = 0;
     });
@@ -284,8 +297,10 @@ TEST_F(ChunkTest, MalformedHeadersAndPayloadsAreBounded) {
 TEST(ChunkCodecControl, SourceIdsNotModifiedAndErrorFramesAreExactAndBounded) {
     // Only neutral source ids travel; HMC2 layer names are not valid ids.
     EXPECT_EQ(chunkSpanMs("hmc2.near", kMinuteMs), kHourMs);
-    EXPECT_EQ(chunkSpanMs("hmc2.near", kHourMs), 0);
+    EXPECT_EQ(chunkSpanMs("hmc2.near", kHourMs), kDayMs);
     EXPECT_EQ(chunkSpanMs("hmc2.deep", kHourMs), kDayMs);
+    EXPECT_EQ(chunkSpanMs("hmc2.near", kDayMs), kDayChunkDays * kDayMs);
+    EXPECT_EQ(chunkSpanMs("hmc2.near", 4 * kHourMs), 0);
     EXPECT_EQ(chunkSpanMs("deep", kMinuteMs), 0);
     EXPECT_THROW(chunkEndMs({"BTC-USD", "deep", kMinuteMs, epoch}), std::invalid_argument);
     ChunkFrame nm;
@@ -464,8 +479,10 @@ TEST_F(ChunkTest, RecorderLevelWatermarksKeepUnwrittenHourNotLoaded) {
     EXPECT_EQ(before.minuteThroughMs, epoch + 59*kMinuteMs);
     EXPECT_EQ(before.hourThroughMs, epoch);
     Hmc2Reader reader(root());
-    const auto open = buildChunk(reader, hourKey, before);
-    EXPECT_EQ(bucketState(open, epoch), BucketState::NotLoaded);
+    const ChunkKey minuteKey{"BTC-USD", "hmc2.deep", kMinuteMs, epoch};
+    const auto open = buildChunk(reader, minuteKey, before);
+    EXPECT_EQ(bucketState(open, epoch + 59*kMinuteMs), BucketState::NotLoaded);
+    EXPECT_THROW(buildChunk(reader, hourKey, before), std::invalid_argument) << "rollups come from RollupStore";
     EXPECT_EQ(live.snapshot("BTC-USD", "deep").committedThroughMs,
               epoch + 59*kMinuteMs);
     local = epoch + kHourMs + 2000;
@@ -475,8 +492,7 @@ TEST_F(ChunkTest, RecorderLevelWatermarksKeepUnwrittenHourNotLoaded) {
     EXPECT_EQ(after.minuteThroughMs, epoch + kHourMs);
     EXPECT_EQ(after.hourThroughMs, epoch + kHourMs);
     EXPECT_EQ(live.snapshot("BTC-USD", "deep").committedThroughMs, epoch + kHourMs);
-    const auto persisted = buildChunk(reader, hourKey, after);
-    EXPECT_EQ(bucketState(persisted, epoch), BucketState::Present);
+    const auto persisted = buildChunk(reader, minuteKey, after);
     ASSERT_EQ(persisted.scannedRanges.size(), 1);
     EXPECT_EQ(persisted.scannedRanges[0].endMs, epoch + kHourMs);
 }

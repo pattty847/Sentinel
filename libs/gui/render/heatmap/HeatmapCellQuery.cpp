@@ -269,8 +269,7 @@ std::shared_ptr<const SpanSet> wallsPicture(const WallScanRequest& r, const Span
             for (const auto& level : source.levels) {
                 time.oldestMs = std::min(time.oldestMs, level.oldestMs);
                 time.endMs = std::max(time.endMs, level.committedThroughMs);
-                if (level.levelMs == kMinuteMs) time.minuteOldestMs = level.oldestMs;
-                if (level.levelMs == kHourMs) { time.hourOldestMs = level.oldestMs; time.hourThroughMs = level.committedThroughMs; }
+                tiles::addLevel(time, level.levelMs, level.oldestMs, level.committedThroughMs);
             }
             auto build = std::make_shared<SpanSourceBuild>();
             build->key = {span.id, source.id, std::clamp(time.oldestMs, span.id.startMs(), span.id.endMs()),

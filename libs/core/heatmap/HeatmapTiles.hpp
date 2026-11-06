@@ -50,22 +50,25 @@ TileRange tilesCovering(double timeLoMs, double timeHiMs, int64_t tfMs, int64_t 
 
 // ------------------------------------------------------------------ chunks
 struct Availability {
-    int64_t oldestMs = 0;    // oldest recorded time of the source (any level)
-    int64_t endMs = 0;       // exclusive end of the newest recorded minute
-    int64_t hourThroughMs = 0; // hour rollups exist before this (exclusive; 0 = none)
-    // Per-level lower bounds (0 = unknown: oldestMs, and hour chunks from the
-    // start of the range, the lab's single-interval behaviour).
-    int64_t minuteOldestMs = 0, hourOldestMs = 0;
+    int64_t oldestMs = 0;       // oldest recorded time of the source (any level)
+    int64_t endMs = 0;          // exclusive end of the newest recorded minute
+    int64_t minuteOldestMs = 0; // minute history starts here (0 = oldestMs)
+    // Stored rollup levels: their chunks are used only inside [oldest, through)
+    // (through 0 = level not advertised).
+    int64_t hourOldestMs = 0, hourThroughMs = 0;
+    int64_t dayOldestMs = 0, dayThroughMs = 0;
 };
-// Native chunk keys needed to compose [startMs, endMs) at tfMs, restricted to the
-// available range. `source` is a chunk source id (ChunkCodec kChunkSources). For a
-// source with an hour level, hour-multiple timeframes use hour chunks (one UTC day)
-// only inside the advertised hour interval [hourOldestMs, hourThroughMs) and minute
-// chunks (one UTC hour) before and after it (the open tail). An hour chunk scans
-// its whole day, so its hours before hourOldestMs read as recorder gaps, and gaps
-// of a coarser level supersede minutes: the day holding hourOldestMs therefore
-// uses minutes when minute history starts at or before hourOldestMs. Every other timeframe composes
-// minutes. Ascending.
+// Records one advertised level (wire level_ms, oldest_ms, committed_through_ms).
+// Unknown levels are ignored. Does not touch oldestMs/endMs.
+void addLevel(Availability &availability, int64_t levelMs, int64_t oldestMs, int64_t throughMs);
+// Chunk keys needed to compose [startMs, endMs) at tfMs, restricted to the
+// available range. `source` is a chunk source id (ChunkCodec kChunkSources).
+// The coarsest stored level that divides tfMs serves the part of the range
+// inside its advertised interval (1d when tfMs % 1d == 0, else 1h when
+// tfMs % 1h == 0); the next finer dividing level serves the edges before and
+// after it, down to minutes (one UTC hour per chunk) for the open tail. A
+// rollup chunk scans its whole span inside the interval, so the edges never
+// overlap it. Sorted by start, then level.
 std::vector<ChunkKey> chunksFor(const std::string &symbol, const std::string &source, int64_t tfMs,
                                 int64_t startMs, int64_t endMs, const Availability &availability);
 // Composes [startMs, endMs) (multiples of tfMs) from stored chunks in any order.

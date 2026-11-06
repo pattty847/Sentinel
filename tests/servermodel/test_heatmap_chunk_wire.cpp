@@ -417,11 +417,18 @@ TEST_F(ChunkWire, BinaryChunksDecodeExactlyAndHashMatchesGiveNotModified) {
     EXPECT_EQ(heatmap::bucketState(chunks[0]->key == minute0 ? chunks[0]->columns : chunks[1]->columns,
                                    kEpoch + 9 * kMin), heatmap::BucketState::Gap);
 
-    // Hour level: one UTC day, deep source only.
-    const auto hourReq = client->requestHeatmapChunks("BTC-USD", "hmc2.deep", kHour, {kEpoch});
-    ASSERT_TRUE(inbox.waitReplies(hourReq, 1));
-    ASSERT_EQ(inbox.chunksFor(hourReq).size(), 1u);
-    EXPECT_EQ(reencode(*inbox.chunksFor(hourReq)[0]), expectedWire({"BTC-USD", "hmc2.deep", kHour, kEpoch}, sealed));
+    // 1h level: one UTC day composed from minutes (RollupStore), every source.
+    for (const char* source : {"hmc2.deep", "hmc2.near"}) {
+        const auto hourReq = client->requestHeatmapChunks("BTC-USD", source, kHour, {kEpoch});
+        ASSERT_TRUE(inbox.waitReplies(hourReq, 1));
+        ASSERT_EQ(inbox.chunksFor(hourReq).size(), 1u) << source;
+        recording::Hmc2Reader reader(root());
+        recording::ReadControl control;
+        const std::string layer = std::string(source) == "hmc2.deep" ? "deep" : "near";
+        EXPECT_EQ(reencode(*inbox.chunksFor(hourReq)[0]),
+                  recording::encodeHourFrame("BTC-USD", recording::composeDay(reader, "BTC-USD", layer, kEpoch, control),
+                                             kEpoch));
+    }
 
     // have_hash: match -> not_modified (no payload), mismatch -> full chunk.
     const auto hash0 = std::find_if(chunks.begin(), chunks.end(), [&](const auto& c) { return c->key == minute0; })
@@ -442,18 +449,19 @@ TEST_F(ChunkWire, BinaryChunksDecodeExactlyAndHashMatchesGiveNotModified) {
             EXPECT_EQ(reencode(*c), expectedWire(minute1, sealed));
         }
     }
-    EXPECT_GE(HeatmapChunkWireTest::cache(*server).size(), 3u); // sealed chunks are cached as exact bytes
+    // Sealed minute chunks are cached as exact bytes (rollup chunks by the rollup store).
+    EXPECT_GE(HeatmapChunkWireTest::cache(*server).size(), 2u);
 
     // Per-key errors echo the key; no source may be named by its HMC2 layer.
     const auto badReq = client->requestHeatmapChunks("BTC-USD", "deep", kMin, {kEpoch});
-    const auto misaligned = client->requestHeatmapChunks("BTC-USD", "hmc2.near", kHour, {kEpoch});
+    const auto misaligned = client->requestHeatmapChunks("BTC-USD", "hmc2.near", kHour, {kEpoch + kHour});
     ASSERT_TRUE(inbox.waitReplies(badReq, 1));
     ASSERT_TRUE(inbox.waitReplies(misaligned, 1));
     for (const auto req2 : {badReq, misaligned}) {
         const auto errors = inbox.errorsFor(req2);
         ASSERT_EQ(errors.size(), 1u);
         EXPECT_EQ(errors[0].code, "invalid_request");
-        EXPECT_EQ(errors[0].key.startMs, kEpoch);
+        EXPECT_EQ(errors[0].key.startMs, req2 == misaligned ? kEpoch + kHour : kEpoch);
     }
 }
 
@@ -548,19 +556,13 @@ TEST_F(ChunkWire, AvailabilityOnSubscribeAndOnChange) {
         EXPECT_TRUE(s.migrationOnly);
         ASSERT_TRUE(s.latestGrid);
         EXPECT_EQ(s.latestGrid->rowTickUnits, s.id == "hmc2.near" ? 100 : 200);
-        ASSERT_EQ(s.levels.size(), s.id == "hmc2.deep" ? 2u : 1u);
+        ASSERT_EQ(s.levels.size(), 1u) << "no rollup store on this service; never the recorder's hour files";
         const auto& m = s.levels[0];
         EXPECT_EQ(m.levelMs, kMin);
         EXPECT_EQ(m.chunkSpanMs, kHour);
         EXPECT_EQ(m.oldestMs, kEpoch);
         EXPECT_EQ(m.latestMs, kEpoch + 119 * kMin);
         EXPECT_EQ(m.committedThroughMs, kEpoch + 90 * kMin);
-        if (s.id == "hmc2.deep") {
-            EXPECT_EQ(s.levels[1].levelMs, kHour);
-            EXPECT_EQ(s.levels[1].chunkSpanMs, kDay);
-            EXPECT_EQ(s.levels[1].oldestMs, kEpoch);
-            EXPECT_EQ(s.levels[1].committedThroughMs, kEpoch + kHour);
-        }
     }
     // A watermark move is pushed without a new subscribe (1 s availability tick).
     marks.minute = kEpoch + 100 * kMin;
@@ -820,16 +822,15 @@ TEST(ChunkServiceWatermarks, RecorderCutoffsWinAndColdSeriesKeepAMargin) {
     recording::ChunkService service(dir.path().toStdString(),
         [&](const std::string&, const std::string&) { return recording::BookRecorder::Watermarks{minute.load(), 7}; },
         [&] { return now; });
-    // No recorder watermark: 13:02:30 - 5 min = 12:57:30 -> minutes before 12:57,
-    // hours before 11:00 (the rollup of 11:00-12:00 may still be written).
+    // No recorder watermark: 13:02:30 - 5 min = 12:57:30 -> minutes before 12:57.
     const auto cold = service.effectiveWatermarks("BTC-USD", "deep");
     EXPECT_EQ(cold.minuteThroughMs, kEpoch + 10 * kDay + 12 * kHour + 57 * kMin);
-    EXPECT_EQ(cold.hourThroughMs, kEpoch + 10 * kDay + 11 * kHour);
+    EXPECT_EQ(cold.hourThroughMs, 0) << "rollup levels come from minutes";
     minute = kEpoch + 42;
     const auto live = service.effectiveWatermarks("BTC-USD", "deep");
     EXPECT_EQ(live.minuteThroughMs, kEpoch + 42);
     EXPECT_EQ(live.hourThroughMs, 7);
-    EXPECT_EQ(service.availabilityFingerprint("BTC-USD"), (std::vector<int64_t>{kEpoch + 42, 7, kEpoch + 42, 7}));
+    EXPECT_EQ(service.availabilityFingerprint("BTC-USD"), (std::vector<int64_t>{kEpoch + 42, kEpoch + 42, 0}));
 }
 
 // A non-default recording.live_publish_ms proves the server paces live frames

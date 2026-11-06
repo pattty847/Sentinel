@@ -3,6 +3,7 @@
 #include "../servermodel/Hmc2Store.hpp"
 #include <zstd.h>
 #include <bit>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string_view>
@@ -67,7 +68,7 @@ uint64_t chunkHash(std::span<const uint8_t> prefix, std::span<const uint8_t> raw
 bool validKey(const ChunkKey& key) {
     const int64_t span = chunkSpanMs(key.source, key.levelMs);
     return span && !key.symbol.empty() &&
-           key.startMs >= recording::kHmc2MinMs && key.startMs % span == 0 &&
+           key.startMs >= recording::kHmc2MinMs && isChunkStart(key.levelMs, key.startMs) &&
            key.startMs <= recording::kHmc2EndMs - span;
 }
 bool validExtent(const ChunkKey& key, int64_t end) {
@@ -86,6 +87,21 @@ std::string_view hmc2Layer(const std::string& source) {
     return s->hmc2Layer;
 }
 bool knownError(uint16_t code) { return code >= 1 && code <= 4; }
+// Native record flags (v3). Composed: entries carry f64 numerators; NumeratorLow:
+// each numerator also carries the f64 remainder of a wider long double, so the
+// value round-trips exactly on every platform (always clear where long double is
+// a double, e.g. Apple arm64 and MSVC).
+constexpr uint8_t kComposed = 1, kNumeratorLow = 2;
+struct NumeratorParts { double hi = 0, lo = 0; };
+NumeratorParts splitNumerator(long double value) {
+    const double hi = static_cast<double>(value);
+    return {hi, static_cast<double>(value - static_cast<long double>(hi))};
+}
+uint8_t nativeFlags(const NativeColumn& n) {
+    if (!n.composed) return 0;
+    for (const auto value : n.numerators) if (splitNumerator(value).lo != 0) return kComposed | kNumeratorLow;
+    return kComposed;
+}
 struct HeaderGrid {
     GridIdentity grid;
     recording::SizeScale scale;
@@ -211,11 +227,24 @@ const ChunkSource* chunkSourceForHmc2Layer(std::string_view layer) {
     for (const auto& s : kChunkSources) if (s.hmc2Layer == layer) return &s;
     return nullptr;
 }
+int64_t chunkSpanMs(int64_t levelMs) {
+    switch (levelMs) {
+    case kMinuteMs: return kHourMs;
+    case kHourMs: return kDayMs;
+    case kDayMs: return kDayChunkDays * kDayMs;
+    default: return 0;
+    }
+}
+int64_t chunkStartOf(int64_t levelMs, int64_t timeMs) {
+    const int64_t span = chunkSpanMs(levelMs);
+    if (!span) return timeMs;
+    return recording::kHmc2MinMs + recording::floorDiv(timeMs - recording::kHmc2MinMs, span) * span;
+}
+bool isChunkStart(int64_t levelMs, int64_t startMs) {
+    return chunkSpanMs(levelMs) && chunkStartOf(levelMs, startMs) == startMs;
+}
 int64_t chunkSpanMs(std::string_view source, int64_t levelMs) {
-    const auto* s = findChunkSource(source);
-    if (!s) return 0;
-    if (levelMs == kMinuteMs) return kHourMs;
-    return levelMs == kHourMs && s->hourLevel ? kDayMs : 0;
+    return findChunkSource(source) ? chunkSpanMs(levelMs) : 0;
 }
 const char* chunkErrorName(ChunkError code) {
     switch (code) {
@@ -253,10 +282,12 @@ std::vector<uint8_t> encodeChunk(const ChunkFrame& frame, ChunkEncodeScratch& sc
         raw.i(col.bucketStartMs); raw.u(col.observedMs); raw.u(col.flags);
         raw.u(uint16_t(col.native.size()));
         for (const auto& n : col.native) {
-            if (n.composed) fail(); // v1 transports native levels only.
+            // Composed constituents exist only in rollup levels. They carry exact
+            // numerators instead of per-entry durations (coverage runs give those).
+            if (n.composed && (live || frame.key.levelMs == kMinuteMs)) fail();
             putGrid(raw, n.grid, n.sizeScale);
             raw.i(n.baseRow); raw.u(n.observedMs);
-            raw.u(uint8_t(0)); raw.u(uint8_t(!n.entryCoveredMs.empty()));
+            raw.u(nativeFlags(n)); raw.u(uint8_t(!n.composed && !n.entryCoveredMs.empty()));
             for (const auto& side : n.coverage) {
                 if (side.size() > 65535) fail();
                 raw.u(uint16_t(side.size()));
@@ -269,12 +300,19 @@ std::vector<uint8_t> encodeChunk(const ChunkFrame& frame, ChunkEncodeScratch& sc
     }
     for (const auto& col : frame.columns.columns) for (const auto& n : col.native) {
         uint32_t previousRow = 0;
+        const bool sidecar = !n.composed && !n.entryCoveredMs.empty();
+        const bool low = nativeFlags(n) & kNumeratorLow;
         for (size_t j = 0; j < n.entries.size(); ++j) {
             const auto& e = n.entries[j];
             const uint64_t packed = (uint64_t(e.row() - previousRow) << 1) | e.isAsk();
             recording::putVarint(raw.data, packed);
             raw.u(e.code);
-            if (!n.entryCoveredMs.empty()) recording::putVarint(raw.data, n.entryCoveredMs[j]);
+            if (sidecar) recording::putVarint(raw.data, n.entryCoveredMs[j]);
+            if (n.composed) {
+                const auto parts = splitNumerator(n.numerators[j]);
+                raw.d(parts.hi);
+                if (low) raw.d(parts.lo);
+            }
             previousRow = e.row();
         }
     }
@@ -341,20 +379,24 @@ ChunkFrame decodeChunk(std::span<const uint8_t> wire) {
     r.requireCount(nColumns, kColumnRecordMinBytes);
     out.columns.columns.reserve(nColumns);
     uint64_t totalEntries = 0;
-    std::vector<std::vector<uint32_t>> entryCounts;
+    struct NativeLayout { uint32_t count = 0; bool sidecar = false, low = false; };
+    std::vector<std::vector<NativeLayout>> entryCounts;
     for (uint32_t i = 0; i < nColumns; ++i) {
         SparseColumn col;
         col.bucketStartMs = r.i(); col.observedMs = r.u<uint64_t>(); col.flags = r.u<uint32_t>();
         const auto nativeCount = r.u<uint16_t>(); if (nativeCount > 1024) fail();
         r.requireCount(nativeCount, kNativeRecordMinBytes);
         col.native.reserve(nativeCount);
-        std::vector<uint32_t> perNative;
+        std::vector<NativeLayout> perNative;
         for (unsigned j = 0; j < nativeCount; ++j) {
             NativeColumn n;
             const auto g = getGrid(r); n.grid = g.grid; n.sizeScale = g.scale;
             n.baseRow = r.i(); n.observedMs = r.u<uint64_t>();
-            const auto composed = r.u<uint8_t>(), sidecar = r.u<uint8_t>();
-            if (composed || sidecar > 1) fail();
+            const auto flags = r.u<uint8_t>(), sidecar = r.u<uint8_t>();
+            if ((flags & ~(kComposed | kNumeratorLow)) || sidecar > 1 ||
+                (!(flags & kComposed) && (flags & kNumeratorLow)) ||
+                ((flags & kComposed) && (sidecar || live || out.key.levelMs == kMinuteMs))) fail();
+            n.composed = flags & kComposed;
             for (auto& side : n.coverage) {
                 const auto count = r.u<uint16_t>();
                 r.requireCount(count, 24);
@@ -366,7 +408,8 @@ ChunkFrame decodeChunk(std::span<const uint8_t> wire) {
             r.requireCount(totalEntries, 3); // running total: entries are read after all headers
             n.entries.reserve(count);
             if (sidecar) n.entryCoveredMs.reserve(count);
-            perNative.push_back((count << 1) | sidecar);
+            if (n.composed) n.numerators.reserve(count);
+            perNative.push_back({count, sidecar != 0, (flags & kNumeratorLow) != 0});
             col.native.push_back(std::move(n));
         }
         entryCounts.push_back(std::move(perNative));
@@ -376,15 +419,19 @@ ChunkFrame decodeChunk(std::span<const uint8_t> wire) {
     for (size_t i = 0; i < out.columns.columns.size(); ++i)
         for (size_t j = 0; j < out.columns.columns[i].native.size(); ++j) {
             auto& n = out.columns.columns[i].native[j];
-            const auto count = entryCounts[i][j] >> 1;
-            const bool sidecar = entryCounts[i][j] & 1;
+            const auto layout = entryCounts[i][j];
             uint32_t row = 0;
-            for (uint32_t k = 0; k < count; ++k) {
+            for (uint32_t k = 0; k < layout.count; ++k) {
                 const auto packed = r.var();
                 if ((packed >> 1) > 0x7fffffffu - row) fail();
                 row += uint32_t(packed >> 1);
                 n.entries.push_back({row | (uint32_t(packed & 1) << 31), r.u<uint16_t>()});
-                if (sidecar) n.entryCoveredMs.push_back(r.var());
+                if (layout.sidecar) n.entryCoveredMs.push_back(r.var());
+                if (n.composed) {
+                    const double hi = r.d(), lo = layout.low ? r.d() : 0.0;
+                    if (!std::isfinite(hi) || !std::isfinite(lo)) fail();
+                    n.numerators.push_back(static_cast<long double>(hi) + static_cast<long double>(lo));
+                }
             }
         }
     if (r.pos != raw.size()) fail();

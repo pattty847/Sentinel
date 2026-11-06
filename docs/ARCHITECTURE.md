@@ -92,7 +92,7 @@ WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor �
 
 ## Rendering pipeline
 
-**Server:** capture journal → roller (`BookRecorder` history plus live lead) → ChunkService / LiveService raw tail → SentinelStreamServer (binary chunk replies to `heatmap_chunk_request`, the `heatmap_live_subscribe` raw tail and `heatmap_availability`).
+**Server:** capture journal → roller (`BookRecorder` history plus live lead) → ChunkService / LiveService raw tail → SentinelStreamServer (binary chunk replies to `heatmap_chunk_request`, the `heatmap_live_subscribe` raw tail and `heatmap_availability`). ChunkService serves 1m chunks from HMC2 and the 1h/1d levels from `RollupStore`, a derived store beside the HMC2 tree that its own background thread builds from closed days of minutes (docs/MARKETDATA.md, "Rollup levels").
 **Client:** HeatmapDataService → HeatmapGpuLayer → UnifiedGridRenderer → HeatmapTileNode, MsdfGlyphNode, CandlestickOverlayItem, and other overlays → GPU.
 
 No per-cell QML rendering is used. Labels use the MSDF atlas; candlesticks are a GPU-batched overlay on the same coordinate plane.

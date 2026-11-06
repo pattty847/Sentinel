@@ -41,8 +41,7 @@ BookRecorder::Watermarks ChunkService::effectiveWatermarks(const std::string& sy
     // write that minute and the previous hour's rollup.
     constexpr int64_t kColdMarginMs = 5 * heatmap::kMinuteMs;
     const int64_t now = now_() - kColdMarginMs;
-    return {floorDiv(now, heatmap::kMinuteMs) * heatmap::kMinuteMs,
-            floorDiv(now, heatmap::kHourMs) * heatmap::kHourMs - heatmap::kHourMs};
+    return {floorDiv(now, heatmap::kMinuteMs) * heatmap::kMinuteMs, 0, 0};
 }
 
 std::shared_ptr<const std::vector<uint8_t>> ChunkService::serve(const ChunkKey& key, uint64_t haveHash) {
@@ -58,6 +57,7 @@ std::shared_ptr<const std::vector<uint8_t>> ChunkService::serve(const ChunkKey& 
             frame.key = key; frame.state = state; frame.contentHash = hash;
             return std::make_shared<const std::vector<uint8_t>>(heatmap::encodeChunk(frame));
         };
+        if (key.levelMs != heatmap::kMinuteMs) return serveRollup(key, haveHash);
         if (auto cached = cache_.get(key)) {
             if (haveHash && heatmap::chunkContentHash(*cached) == haveHash)
                 return notModified({true, chunkEndMs(key), 0}, haveHash);
@@ -95,33 +95,51 @@ std::vector<ChunkService::SourceAvailability> ChunkService::availability(const s
     auto& reader = threadReader(root_);
     for (const auto& source : heatmap::kChunkSources) {
         const std::string layer(source.hmc2Layer);
-        const auto watermarks = effectiveWatermarks(symbol, layer);
         SourceAvailability item{std::string(source.id), {}, {}};
-        for (const int64_t level : {heatmap::kMinuteMs, heatmap::kHourMs}) {
-            const auto span = heatmap::chunkSpanMs(source.id, level);
-            if (!span) continue;
-            ReadControl control;
-            const auto series = reader.availability(symbol, layer, level, control);
-            if (control.status != ReadStatus::Complete)
-                throw std::runtime_error("recording availability scan incomplete");
-            LevelAvailability l{level, span,
-                                level == heatmap::kMinuteMs ? watermarks.minuteThroughMs : watermarks.hourThroughMs,
-                                series.oldestMs, series.latestMs};
-            if (level == heatmap::kMinuteMs) item.latestGrid = series.latestHeader;
-            if (l.oldestMs) item.levels.push_back(l);
-        }
-        if (!item.levels.empty()) out.push_back(std::move(item));
+        ReadControl control;
+        const auto series = reader.availability(symbol, layer, heatmap::kMinuteMs, control);
+        if (control.status != ReadStatus::Complete)
+            throw std::runtime_error("recording availability scan incomplete");
+        if (!series.oldestMs) continue;
+        item.latestGrid = series.latestHeader;
+        item.levels.push_back({heatmap::kMinuteMs, heatmap::chunkSpanMs(heatmap::kMinuteMs),
+                               effectiveWatermarks(symbol, layer).minuteThroughMs, series.oldestMs, series.latestMs});
+        if (rollups_)
+            for (const auto& level : rollups_->levels(symbol, layer))
+                item.levels.push_back({level.levelMs, heatmap::chunkSpanMs(level.levelMs), level.throughMs,
+                                       level.oldestMs, level.throughMs - level.levelMs});
+        out.push_back(std::move(item));
     }
     return out;
 }
 
+std::shared_ptr<const std::vector<uint8_t>> ChunkService::serveRollup(const ChunkKey& key, uint64_t haveHash) {
+    try { (void)chunkEndMs(key); }
+    catch (const std::invalid_argument&) {
+        return chunkErrorFrame(key, heatmap::ChunkError::InvalidRequest, "invalid chunk key");
+    }
+    if (!rollups_) return chunkErrorFrame(key, heatmap::ChunkError::Unavailable, "rollup levels unavailable");
+    auto reply = rollups_->serve(key, threadReader(root_));
+    if (!reply.wire) return chunkErrorFrame(key, reply.error, reply.message);
+    const auto hash = heatmap::chunkContentHash(*reply.wire);
+    sLog_Probe("chunks.serve", "symbol=" << key.symbol << " source=" << key.source << " level=" << key.levelMs
+               << " start=" << key.startMs << " bytes=" << reply.wire->size() << " fallback=" << reply.fallback
+               << " notModified=" << (haveHash == hash));
+    if (!haveHash || haveHash != hash) return reply.wire;
+    const auto frame = heatmap::decodeChunk(*reply.wire);
+    heatmap::ChunkFrame notModified;
+    notModified.kind = heatmap::ChunkKind::NotModified;
+    notModified.key = key;
+    notModified.state = frame.state;
+    notModified.contentHash = hash;
+    return std::make_shared<const std::vector<uint8_t>>(heatmap::encodeChunk(notModified));
+}
+
 std::vector<int64_t> ChunkService::availabilityFingerprint(const std::string& symbol) const {
     std::vector<int64_t> out;
-    for (const auto& source : heatmap::kChunkSources) {
-        const auto w = effectiveWatermarks(symbol, std::string(source.hmc2Layer));
-        out.push_back(w.minuteThroughMs);
-        out.push_back(w.hourThroughMs);
-    }
+    for (const auto& source : heatmap::kChunkSources)
+        out.push_back(effectiveWatermarks(symbol, std::string(source.hmc2Layer)).minuteThroughMs);
+    out.push_back(rollups_ ? int64_t(rollups_->generation()) : 0);
     return out;
 }
 } // namespace recording

@@ -1,5 +1,6 @@
 #include "LocalChunkTransport.hpp"
 #include "../servermodel/RecordingChunks.hpp"
+#include "../servermodel/RollupStore.hpp"
 #include "../SentinelLogging.hpp"
 #include <algorithm>
 #include <stdexcept>
@@ -14,12 +15,31 @@ struct LocalChunkTransport::Worker : QObject {
     sentinel::log_throttle::Site warnings, requestWarnings;
     std::filesystem::path root;
     std::unique_ptr<recording::Hmc2Reader> session;
+    std::unique_ptr<recording::RollupStore> rollups;
+    std::map<std::pair<std::string, std::string>, int64_t> minuteThrough; // (symbol, layer)
+    recording::RollupStore *rollupStore(const std::string &symbol) {
+        if (hooks.rollupRoot.empty()) return nullptr;
+        if (!rollups) {
+            recording::RollupStore::Options options;
+            options.hmc2Root = root;
+            options.root = hooks.rollupRoot;
+            options.buildMissing = false;
+            options.minuteThrough = [this](const std::string &s, const std::string &layer) {
+                const auto it = minuteThrough.find({s, layer});
+                return it == minuteThrough.end() ? int64_t(0) : it->second;
+            };
+            rollups = std::make_unique<recording::RollupStore>(std::move(options));
+        }
+        rollups->setSymbols({symbol});
+        return rollups.get();
+    }
     recording::Hmc2Reader &reader() {
         // Lazy construction and QObject::deleteLater destruction both occur on
         // this worker's thread. Reuse the reader's bounded metadata cache.
         if (!session) session = std::make_unique<recording::Hmc2Reader>(root);
         return *session;
     }
+    ChunkAvailability readAvailability(const std::string &symbol, std::stop_token stop);
 };
 namespace {
 // Text of the exception being handled; call only inside a catch block.
@@ -45,40 +65,48 @@ std::string currentExceptionMessage() {
         return "unknown exception";
     }
 }
-ChunkAvailability readAvailability(recording::Hmc2Reader &reader, const std::string &symbol, std::stop_token stop,
-                                   int64_t pinnedEndMs) {
+} // namespace
+ChunkAvailability LocalChunkTransport::Worker::readAvailability(const std::string &symbol, std::stop_token stop) {
+    auto &worker = *this;
     ChunkAvailability out;
     out.symbol = symbol;
     out.chunkWireVersion = kChunkWireVersion;
+    auto &reader = worker.reader();
+    const int64_t pinnedEndMs = worker.hooks.pinnedEndMs;
     for (const auto &source : kChunkSources) {
         protocol::chunkwire::SourceInfo info;
         info.id = source.id;
         info.migrationOnly = true;
-        for (const auto level : {kMinuteMs, kHourMs}) {
-            const auto span = chunkSpanMs(source.id, level);
-            if (!span) continue;
-            recording::ReadControl control;
-            control.stop = stop;
-            const auto a = reader.availability(symbol, std::string(source.hmc2Layer), level, control);
-            if (control.status != recording::ReadStatus::Complete)
-                throw std::runtime_error("local chunk availability scan incomplete");
-            if (!a.oldestMs || !a.latestMs) continue;
-            int64_t latest = *a.latestMs;
-            if (pinnedEndMs > 0) { // the recorder "stopped" at the pin: whole buckets before it
-                latest = std::min(latest, recording::floorDiv(pinnedEndMs, level) * level - level);
-                if (latest < *a.oldestMs) continue;
-            }
-            info.levels.push_back({level, span, latest + level, *a.oldestMs, latest});
-            if (level == kMinuteMs && a.latestHeader) {
-                const auto &h = *a.latestHeader;
-                info.latestGrid = protocol::chunkwire::GridInfo{h.configHash, h.rowTickUnits, h.priceScale,
-                                                               h.sizeScale.floor, h.sizeScale.codesPerOctave};
-            }
+        const std::string layer(source.hmc2Layer);
+        recording::ReadControl control;
+        control.stop = stop;
+        const auto a = reader.availability(symbol, layer, kMinuteMs, control);
+        if (control.status != recording::ReadStatus::Complete)
+            throw std::runtime_error("local chunk availability scan incomplete");
+        if (!a.oldestMs || !a.latestMs) continue;
+        int64_t latest = *a.latestMs;
+        if (pinnedEndMs > 0) { // the recorder "stopped" at the pin: whole minutes before it
+            latest = std::min(latest, recording::floorDiv(pinnedEndMs, kMinuteMs) * kMinuteMs - kMinuteMs);
+            if (latest < *a.oldestMs) continue;
         }
-        if (!info.levels.empty()) out.sources.push_back(std::move(info));
+        info.levels.push_back({kMinuteMs, chunkSpanMs(kMinuteMs), latest + kMinuteMs, *a.oldestMs, latest});
+        if (a.latestHeader) {
+            const auto &h = *a.latestHeader;
+            info.latestGrid = protocol::chunkwire::GridInfo{h.configHash, h.rowTickUnits, h.priceScale,
+                                                           h.sizeScale.floor, h.sizeScale.codesPerOctave};
+        }
+        worker.minuteThrough[{symbol, layer}] = latest + kMinuteMs;
+        if (auto *rollups = worker.rollupStore(symbol)) {
+            (void)rollups->runPass(stop); // index only: this store never builds
+            for (const auto &level : rollups->levels(symbol, layer))
+                info.levels.push_back({level.levelMs, chunkSpanMs(level.levelMs), level.throughMs, level.oldestMs,
+                                       level.throughMs - level.levelMs});
+        }
+        out.sources.push_back(std::move(info));
     }
     return out;
 }
+namespace {
 bool sameAvailability(const ChunkAvailability &a, const ChunkAvailability &b) {
     if (a.symbol != b.symbol || a.chunkWireVersion != b.chunkWireVersion || a.sources.size() != b.sources.size()) return false;
     for (size_t i = 0; i < a.sources.size(); ++i) {
@@ -104,7 +132,6 @@ recording::BookRecorder::Watermarks watermarks(const ChunkAvailability &a, const
         if (s.id != source) continue;
         for (const auto &l : s.levels) {
             if (l.levelMs == kMinuteMs) out.minuteThroughMs = l.committedThroughMs;
-            if (l.levelMs == kHourMs) out.hourThroughMs = l.committedThroughMs;
         }
     }
     return out;
@@ -146,7 +173,8 @@ void LocalChunkTransport::refreshAvailability(const std::string &symbol, bool fo
         try {
             auto &reader = worker_->reader();
             if (worker_->hooks.beforeAvailability) worker_->hooks.beforeAvailability(reader, stop);
-            auto next = readAvailability(reader, symbol, stop, worker_->hooks.pinnedEndMs);
+            (void)reader;
+            auto next = worker_->readAvailability(symbol, stop);
             if (stop.stop_requested()) return;
             const auto previous = worker_->availability.find(symbol);
             const bool changed = previous == worker_->availability.end() || !sameAvailability(previous->second, next);
@@ -190,7 +218,28 @@ quint64 LocalChunkTransport::request(const std::string &symbol, const std::strin
                 const ChunkKey key{symbol, source, levelMs, starts[i]};
                 try {
                     const auto end = recording::chunkEndMs(key); // validate before arithmetic
-                    const auto through = levelMs == kMinuteMs ? marks.minuteThroughMs : marks.hourThroughMs;
+                    if (levelMs != kMinuteMs) {
+                        auto *rollups = worker_->rollupStore(symbol);
+                        if (!rollups) {
+                            emit failed(id, key, QStringLiteral("unavailable"), QStringLiteral("no local rollup store"));
+                            continue;
+                        }
+                        const auto reply = rollups->serve(key, reader);
+                        if (stop.stop_requested()) return;
+                        if (!reply.wire) {
+                            emit failed(id, key, QString::fromUtf8(chunkErrorName(reply.error)),
+                                        QString::fromStdString(reply.message));
+                            continue;
+                        }
+                        auto frame = std::make_shared<ChunkFrame>(decodeChunk(*reply.wire));
+                        if (!hashes.empty() && hashes[i] == frame->contentHash) {
+                            frame->kind = ChunkKind::NotModified;
+                            frame->columns = {};
+                        }
+                        emit received(id, std::move(frame));
+                        continue;
+                    }
+                    const auto through = marks.minuteThroughMs;
                     if (!through) {
                         emit failed(id, key, QStringLiteral("unavailable"), QStringLiteral("no local recording level"));
                         continue;

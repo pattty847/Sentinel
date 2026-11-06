@@ -24,8 +24,8 @@ ChunkFramePtr body(const ChunkKey &key, int minutes = 30, uint64_t salt = 0) {
     frame->key = key;
     const auto end = recording::chunkEndMs(key);
     const auto through = std::min(end, key.startMs + minutes * kMinuteMs);
-    recording::BookRecorder::Watermarks marks{through, through};
-    frame->state = recording::chunkState(key, marks, minutes + 1);
+    const bool sealed = through >= end;
+    frame->state = {sealed, sealed ? end : through, sealed ? 0 : uint64_t(minutes + 1)};
     frame->columns = {key.symbol, recording::hmc2Layer(key), key.levelMs, key.startMs, end};
     if (through > key.startMs) frame->columns.scannedRanges = {{key.startMs, through}};
     if (minutes) {
@@ -58,7 +58,7 @@ ChunkAvailability available(int64_t through = epoch + 30 * kMinuteMs) {
         protocol::chunkwire::SourceInfo s;
         s.id = source.id;
         s.levels.push_back({kMinuteMs, kHourMs, through, epoch, through - kMinuteMs});
-        if (source.hourLevel) s.levels.push_back({kHourMs, kDayMs, epoch, epoch, epoch});
+        if (&source == &kChunkSources.back()) s.levels.push_back({kHourMs, kDayMs, epoch, epoch, epoch});
         a.sources.push_back(std::move(s));
     }
     return a;

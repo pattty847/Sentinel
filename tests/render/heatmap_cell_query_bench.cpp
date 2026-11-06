@@ -45,8 +45,7 @@ int main(int argc, char** argv) {
             for (const auto& l : s.levels) {
                 a.time.oldestMs = std::min(a.time.oldestMs, l.oldestMs);
                 a.time.endMs = std::max(a.time.endMs, l.committedThroughMs);
-                if (l.levelMs == kMinuteMs) a.time.minuteOldestMs = l.oldestMs;
-                if (l.levelMs == kHourMs) { a.time.hourOldestMs = l.oldestMs; a.time.hourThroughMs = l.committedThroughMs; }
+                tiles::addLevel(a.time, l.levelMs, l.oldestMs, l.committedThroughMs);
             }
             if (!a.time.minuteOldestMs) a.time.minuteOldestMs = INT64_MAX;
             pin = std::min(pin, a.time.endMs);

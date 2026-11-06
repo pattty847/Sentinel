@@ -5,6 +5,7 @@
 #include <cmath>
 #include <numeric>
 #include <stdexcept>
+#include <tuple>
 
 namespace heatmap::tiles {
 namespace {
@@ -25,38 +26,45 @@ TileRange tilesCovering(double timeLoMs, double timeHiMs, int64_t tfMs, int64_t 
     return {tileOfBucket(first) - marginTiles, tileOfBucket(end - 1) + 1 + marginTiles};
 }
 
+void addLevel(Availability &a, int64_t levelMs, int64_t oldestMs, int64_t throughMs) {
+    if (levelMs == kMinuteMs) a.minuteOldestMs = oldestMs;
+    else if (levelMs == kHourMs) { a.hourOldestMs = oldestMs; a.hourThroughMs = throughMs; }
+    else if (levelMs == kDayMs) { a.dayOldestMs = oldestMs; a.dayThroughMs = throughMs; }
+}
+
 std::vector<ChunkKey> chunksFor(const std::string &symbol, const std::string &source, int64_t tfMs,
                                 int64_t startMs, int64_t endMs, const Availability &availability) {
     std::vector<ChunkKey> out;
     const int64_t lo = std::max(startMs, availability.oldestMs), hi = std::min(endMs, availability.endMs);
-    if (hi <= lo || tfMs <= 0) return out;
+    if (hi <= lo || tfMs <= 0 || !findChunkSource(source)) return out;
     const int64_t minuteOldest = std::max(availability.oldestMs, availability.minuteOldestMs);
-    auto minutes = [&](int64_t from, int64_t to) {
-        from = std::max(from, minuteOldest);
+    struct Level { int64_t levelMs, oldestMs, throughMs; };
+    // Coarsest first; a level serves only timeframes it divides.
+    std::vector<Level> levels;
+    if (tfMs % kDayMs == 0 && availability.dayThroughMs > availability.dayOldestMs)
+        levels.push_back({kDayMs, availability.dayOldestMs, availability.dayThroughMs});
+    if (tfMs % kHourMs == 0 && availability.hourThroughMs > availability.hourOldestMs)
+        levels.push_back({kHourMs, availability.hourOldestMs, availability.hourThroughMs});
+    auto fill = [&](auto &self, int64_t from, int64_t to, size_t index) -> void {
         if (to <= from) return;
-        for (int64_t s = floorDiv(from, kHourMs) * kHourMs; s < to; s += kHourMs)
-            out.push_back({symbol, source, kMinuteMs, s});
+        if (index == levels.size()) {
+            from = std::max(from, minuteOldest);
+            for (int64_t s = floorDiv(from, kHourMs) * kHourMs; s < to; s += kHourMs)
+                out.push_back({symbol, source, kMinuteMs, s});
+            return;
+        }
+        const auto &level = levels[index];
+        const int64_t a = std::clamp(level.oldestMs, from, to), b = std::clamp(level.throughMs, a, to);
+        if (b <= a) return self(self, from, to, index + 1);
+        self(self, from, a, index + 1);
+        const int64_t span = chunkSpanMs(level.levelMs);
+        for (int64_t s = chunkStartOf(level.levelMs, a); s < b; s += span) out.push_back({symbol, source, level.levelMs, s});
+        self(self, b, to, index + 1);
     };
-    const auto *src = findChunkSource(source);
-    const bool hours = src && src->hourLevel && tfMs % kHourMs == 0 && availability.hourThroughMs > 0;
-    if (!hours) {
-        minutes(lo, hi);
-        return out;
-    }
-    int64_t hourFrom = lo; // legacy: hours from the start of the range
-    if (availability.hourOldestMs > 0) {
-        const int64_t day = floorDiv(availability.hourOldestMs, kDayMs) * kDayMs;
-        // Minutes reach the first hour: they compose that partial day. Otherwise
-        // the hour chunk does (minutes cannot supply its hours).
-        hourFrom = minuteOldest <= availability.hourOldestMs && day != availability.hourOldestMs ? day + kDayMs : day;
-    }
-    const int64_t hourLo = std::clamp(hourFrom, lo, hi);
-    const int64_t hourHi = std::clamp(availability.hourThroughMs, hourLo, hi);
-    minutes(lo, hourLo);
-    if (hourHi > hourLo)
-        for (int64_t s = floorDiv(hourLo, kDayMs) * kDayMs; s < hourHi; s += kDayMs)
-            out.push_back({symbol, source, kHourMs, s});
-    minutes(std::max(hourHi, hourLo), hi);
+    fill(fill, lo, hi, 0);
+    std::sort(out.begin(), out.end(), [](const ChunkKey &x, const ChunkKey &y) {
+        return std::tie(x.startMs, x.levelMs) < std::tie(y.startMs, y.levelMs);
+    });
     return out;
 }
 
