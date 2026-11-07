@@ -221,6 +221,7 @@ class Session : public std::enable_shared_from_this<Session> {
     QMetaObject::Connection bookSnapshotConn_;
     QMetaObject::Connection barUpdatedConn_;
     QMetaObject::Connection barClosedConn_;
+    QMetaObject::Connection liveRollupsConn_;
 
     struct CandleStreamState {
         int64_t seq = 0;
@@ -278,11 +279,13 @@ class Session : public std::enable_shared_from_this<Session> {
         QObject::disconnect(bookSnapshotConn_);
         QObject::disconnect(barUpdatedConn_);
         QObject::disconnect(barClosedConn_);
+        QObject::disconnect(liveRollupsConn_);
         tradeConn_ = {};
         bookConn_ = {};
         bookSnapshotConn_ = {};
         barUpdatedConn_ = {};
         barClosedConn_ = {};
+        liveRollupsConn_ = {};
     }
 
     void requestClose(const char* reason) {
@@ -808,6 +811,15 @@ public:
                 }
             });
 
+        liveRollupsConn_ = QObject::connect(&model_, &ServerDataModel::liveRollupsUpdated,
+            [weak](const QString& symbol, const std::vector<TimeframeBar>& bars) {
+                if (auto self = weak.lock()) {
+                    self->postModelEvent([symbol, bars](Session& session) {
+                        for (const auto& live : bars) session.on_bar_updated(symbol, live.timeframeMs, live.bar);
+                    });
+                }
+            });
+
         barClosedConn_ = QObject::connect(&model_, &ServerDataModel::barClosed,
             [weak](const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar) {
                 if (auto self = weak.lock()) {
@@ -1303,6 +1315,10 @@ public:
 
         const OHLCVBar& last = state.lastBar;
         if (timeframeMs < 1000 && (bar.timestamp_ms != last.timestamp_ms || (last.volume <= 0 && bar.volume > 0))) {
+            return true;
+        }
+        // A bar of a minute or longer is sent at its first trade.
+        if (timeframeMs >= 60'000 && bar.timestamp_ms != last.timestamp_ms && bar.count > 0) {
             return true;
         }
         const bool highChanged = bar.high > last.high;

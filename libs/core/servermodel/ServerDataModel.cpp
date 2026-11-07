@@ -117,6 +117,8 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     // time (onFeedWatermark and its trades), never this process's wall clock.
     connect(m_aggregator.get(), &TimeframeAggregator::barClosed, this, &ServerDataModel::barClosed);
     connect(m_aggregator.get(), &TimeframeAggregator::barUpdated, this, &ServerDataModel::barUpdated);
+    connect(m_aggregator.get(), &TimeframeAggregator::liveRollupsUpdated, this,
+            &ServerDataModel::liveRollupsUpdated);
 
     startRollerServing();
 }

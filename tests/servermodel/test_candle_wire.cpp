@@ -20,7 +20,7 @@ class CandleWire : public testing::Test {
     char name[20] = "candle-wire";
     char *argv[2] = {name, nullptr};
     QCoreApplication app{argc, argv};
-    CandleFixture fixture;
+    CandleFixture fixture{true, 0, {300000}};
     std::unique_ptr<SentinelStreamClient> client;
     std::vector<Event> events;
     QVector<SentinelStreamClient::CandleBar> page;
@@ -115,6 +115,26 @@ TEST_F(CandleWire, OneSecondSequenceMatchesBaseRun) {
     // Recorded by executing the c852038d Session with the same journal trades/watermark.
     EXPECT_EQ(seconds,
               (std::vector<std::tuple<bool, int64_t, double>>{{false, 1000, 1}, {true, 1000, 1}, {true, 2000, 1}}));
+}
+
+// The first trade of a minute or longer bar is sent at once, though it moves
+// no price and adds no volume over the bar just closed (inside the silence
+// window), and before any minute of a new 5 m period closes.
+TEST_F(CandleWire, MinuteAndFiveMinuteBarsAreSentAtTheirFirstTrade) {
+    tradeAt(*fixture.model, 60000);
+    tradeAt(*fixture.model, 300000);
+    ASSERT_TRUE(spinUntil([&] {
+        return std::any_of(events.begin(), events.end(),
+                           [](const auto &e) { return e.tf == 300000 && e.closed && e.start == 0; });
+    }));
+    ASSERT_TRUE(fixture.fence());
+    for (const int64_t tf : {60000, 300000}) {
+        EXPECT_TRUE(spinUntil([&] {
+            return std::any_of(events.begin(), events.end(), [tf](const auto &e) {
+                return e.tf == tf && !e.closed && e.start == 300000 && e.volume == 1 && e.open == 100;
+            });
+        }, 500ms)) << tf;
+    }
 }
 
 TEST_F(CandleWire, PagesBothMemoryIntervalsAndRejectsUnsupportedOrFailedRest) {

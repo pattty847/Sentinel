@@ -113,13 +113,15 @@ struct CandleFixture {
     std::unique_ptr<ServerDataModel> model;
     std::unique_ptr<Authenticator> auth;
     std::unique_ptr<SentinelStreamServer> server;
-    explicit CandleFixture(bool hundred = true, unsigned short port = 0) {
+    // rollups: timeframes above 1 m to configure as well.
+    explicit CandleFixture(bool hundred = true, unsigned short port = 0, const std::vector<int64_t> &rollups = {}) {
         if (!dir.isValid()) throw std::runtime_error("scratch directory failed");
         config.recording.enabled = false;
         config.rollerShadow.enabled = false;
         config.rollerShadow.products = {"BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "ADA-USD", "AVAX-USD"};
         config.chart.timeframesMs =
             hundred ? std::vector<int64_t>{100, 1000, 60000} : std::vector<int64_t>{1000, 60000};
+        config.chart.timeframesMs.insert(config.chart.timeframesMs.end(), rollups.begin(), rollups.end());
         config.chart.historyBars = {{100, 18000}};
         config.tls.certFile = (dir.path() + "/fixture.crt").toStdString();
         config.tls.keyFile = (dir.path() + "/fixture.key").toStdString();

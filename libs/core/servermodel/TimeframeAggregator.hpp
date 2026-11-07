@@ -21,6 +21,11 @@ struct OHLCVBar {
     bool is_closed = false;
 };
 
+struct TimeframeBar {
+    int64_t timeframeMs = 0;
+    OHLCVBar bar;
+};
+
 class TimeframeAggregator : public QObject {
     Q_OBJECT
 public:
@@ -78,6 +83,9 @@ public:
 signals:
     void barClosed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
     void barUpdated(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
+    // After each accepted trade: every timeframe above 1 m as its open bar
+    // including the open minute (that bar's barUpdated carries closed minutes).
+    void liveRollupsUpdated(const QString& symbol, const std::vector<TimeframeBar>& bars);
 
 private:
     struct SymbolState {
@@ -94,6 +102,7 @@ private:
     std::vector<int64_t> m_timeframesMs;
     std::map<int64_t, size_t> m_historyBars;
     std::array<bool, 3> m_tradeTimeframeOn{}; // kTradeTimeframes[i] is configured
+    std::vector<TimeframeBar> m_liveScratch; // reused by publishLiveRollups under m_mutex
 
     static int64_t bucketStart(int64_t timestampMs, int64_t timeframeMs);
     // Index into kTradeTimeframes, or -1.
@@ -101,6 +110,9 @@ private:
     void closeBar(SymbolState& state, const std::string& symbol, int64_t timeframeMs,
                   OHLCVBar& bar);
     void addMinuteToRollups(SymbolState& state, const std::string& symbol,
+                            const OHLCVBar& minute);
+    // Emits liveRollupsUpdated for the open minute.
+    void publishLiveRollups(const SymbolState& state, const std::string& symbol,
                             const OHLCVBar& minute);
     void closeElapsed(SymbolState& state, const std::string& symbol, int64_t nowMs);
     // Under m_mutex: the timeframe has no history, no open bar and no floor.

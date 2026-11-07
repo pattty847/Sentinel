@@ -122,6 +122,33 @@ void TimeframeAggregator::updateTradeBar(SymbolState& state, const std::string& 
         ++bar.count;
     }
     emit barUpdated(QString::fromStdString(symbol), timeframeMs, bar);
+    if (timeframeMs == kMinuteMs) publishLiveRollups(state, symbol, bar);
+}
+
+// The coarser bars hold closed minutes only; their live view adds the open
+// minute, combined exactly as addMinuteToRollups will when it closes. All
+// timeframes go out in one signal, so each trade adds one event per client.
+void TimeframeAggregator::publishLiveRollups(const SymbolState& state, const std::string& symbol,
+                                             const OHLCVBar& minute) {
+    m_liveScratch.clear();
+    for (const int64_t tf : m_timeframesMs) {
+        if (tf <= kMinuteMs) continue;
+        OHLCVBar live = minute;
+        live.timestamp_ms = bucketStart(minute.timestamp_ms, tf);
+        live.is_closed = false;
+        if (const auto found = state.activeBars.find(tf);
+            found != state.activeBars.end() && found->second.timestamp_ms == live.timestamp_ms) {
+            const OHLCVBar& closedPart = found->second;
+            live.open = closedPart.open;
+            live.high = std::max(closedPart.high, minute.high);
+            live.low = std::min(closedPart.low, minute.low);
+            live.volume = closedPart.volume + minute.volume;
+            live.count = closedPart.count + minute.count;
+        }
+        m_liveScratch.push_back({tf, live});
+    }
+    if (!m_liveScratch.empty())
+        emit liveRollupsUpdated(QString::fromStdString(symbol), m_liveScratch);
 }
 
 void TimeframeAggregator::onTrade(const Trade& trade) {
