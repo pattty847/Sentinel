@@ -243,6 +243,8 @@ private:
     int64_t tickUnits_ = 0, autoUnits_ = 0, postedTickUnits_ = -1;
     bool postedManual_ = false;
     std::optional<int64_t> autoPriceTick_; // fit policy input, not a retained click/window
+    QTimer *startupTickTimer_ = nullptr;
+    bool startupTickReady_ = false;
     struct TickKey {
         uint64_t version = 0;
         const ResolutionSummary *set = nullptr;

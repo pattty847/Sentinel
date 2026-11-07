@@ -3779,6 +3779,39 @@ TEST_F(UgrZoomCpu, ControllerDestroyJudgesAutoTickFreshOnNextFrame) {
     EXPECT_EQ(layer.predictTickUnits(view), fresh);
 }
 
+TEST(UgrTickCpu, StartupSnapshotCommitsOnlySettledAutoTick) {
+    heatmap::gpu::HeatmapGpuLayer layer;
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 3 * kHourMs),
+                                        100120, 100180};
+    std::vector<int64_t> committed;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::tickChanged, &layer,
+                     [&] { committed.push_back(layer.tickUnits()); });
+    bool scripted = false;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, &layer, [&] {
+        if (scripted || !layer.hasCurrentResolution()) return;
+        scripted = true;
+        for (const int64_t units : {100, 500, 100}) {
+            layer.setAutoPriceTick(units);
+            layer.chooseTickForView(view);
+            QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+        }
+    });
+    layer.setSymbol("BTC-USD");
+    layer.setTimeframeMs(minute);
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while ((!scripted || committed.empty()) && elapsed.elapsed() < 10'000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    ASSERT_TRUE(scripted);
+    ASSERT_EQ(committed.size(), 1u);
+    EXPECT_EQ(committed.front(), 100);
+    layer.setService(nullptr);
+}
+
 // Exercise the chart QWheelEvent and the same C++ axis entries called by QML,
 // without QRhi. Fixed Manual ticks make the one-rung assertion independent of Auto.
 class UgrWheelCpu : public UgrZoomCpu {
