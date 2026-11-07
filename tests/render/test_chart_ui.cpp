@@ -420,6 +420,7 @@ TEST(ChartToolbar, NarrowTickMenuRetainsUnavailableValueAndResolutionWarning) {
         auto *unavailable = menuAction(tickMenu, "controlsTickPreset", 1);
         ASSERT_TRUE(unavailable);
         EXPECT_EQ(unavailable->text(), "$0.15 (unavailable)");
+        EXPECT_TRUE(toolbar.tickPresetCombo()->toolTip().contains("$0.15 (unavailable)"));
         EXPECT_TRUE(unavailable->isChecked());
         EXPECT_FALSE(unavailable->isEnabled());
         EXPECT_EQ(unavailable->toolTip(), toolbar.tickPresetCombo()->itemData(1, Qt::ToolTipRole).toString());
