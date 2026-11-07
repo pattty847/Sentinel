@@ -47,6 +47,9 @@ struct RecordingServerStopTest {
             session.on_bar_updated("BTC-USD", 100, bar);
         });
     }
+    static void bar(Session &s, int64_t tf, const OHLCVBar &bar) {
+        s.postModelEvent([tf, bar](Session &session) { session.on_bar_updated("BTC-USD", tf, bar); });
+    }
     static bool subscribed(Session &s) { return s.subscriptions_.contains("BTC-USD"); }
 };
 

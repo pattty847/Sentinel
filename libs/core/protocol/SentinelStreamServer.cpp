@@ -1317,8 +1317,10 @@ public:
         if (timeframeMs < 1000 && (bar.timestamp_ms != last.timestamp_ms || (last.volume <= 0 && bar.volume > 0))) {
             return true;
         }
-        // A bar of a minute or longer is sent at its first trade.
-        if (timeframeMs >= 60'000 && bar.timestamp_ms != last.timestamp_ms && bar.count > 0) {
+        // A bar of a minute or longer is sent at its first trade: a new bucket,
+        // or a sent empty (carried) bar of the same bucket gaining a trade.
+        if (timeframeMs >= 60'000 && bar.count > 0 &&
+            (bar.timestamp_ms != last.timestamp_ms || last.count == 0)) {
             return true;
         }
         const bool highChanged = bar.high > last.high;

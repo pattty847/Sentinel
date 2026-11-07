@@ -137,6 +137,33 @@ TEST_F(CandleWire, MinuteAndFiveMinuteBarsAreSentAtTheirFirstTrade) {
     }
 }
 
+// A sent empty (carried) bar is replaced by its first trade at once, though
+// that trade is in the same bucket, moves no price and is inside the silence window.
+TEST_F(CandleWire, CarriedBarIsReplacedByItsFirstTrade) {
+    OHLCVBar carried{};
+    carried.timestamp_ms = 300000;
+    carried.open = carried.high = carried.low = carried.close = 100;
+    OHLCVBar traded = carried;
+    traded.volume = 1;
+    traded.count = 1;
+    RecordingServerStopTest::bar(*session, 300000, carried);
+    RecordingServerStopTest::bar(*session, 300000, traded);
+    ASSERT_TRUE(fixture.fence());
+    EXPECT_TRUE(spinUntil([&] {
+        return std::any_of(events.begin(), events.end(),
+                           [](const auto &e) { return e.tf == 300000 && !e.closed && e.volume == 1; });
+    }, 500ms));
+    // Later updates of the bar stay gated.
+    OHLCVBar more = traded;
+    more.volume = 2;
+    more.count = 2;
+    RecordingServerStopTest::bar(*session, 300000, more);
+    ASSERT_TRUE(fixture.fence());
+    EXPECT_FALSE(spinUntil([&] {
+        return std::any_of(events.begin(), events.end(), [](const auto &e) { return e.tf == 300000 && e.volume == 2; });
+    }, 300ms));
+}
+
 TEST_F(CandleWire, PagesBothMemoryIntervalsAndRejectsUnsupportedOrFailedRest) {
     // Keep fan-out below the unrelated executor limit while seeding 80 seconds.
     for (int i = 0; i < 800; ++i) {
