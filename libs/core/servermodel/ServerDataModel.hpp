@@ -133,6 +133,7 @@ signals:
     // Aggregation signals (forwarded from aggregator)
     void barClosed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
     void barUpdated(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);
+    void liveRollupsUpdated(const QString& symbol, const std::vector<TimeframeBar>& bars);
 
 
 private:

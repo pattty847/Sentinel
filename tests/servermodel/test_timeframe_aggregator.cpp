@@ -43,6 +43,10 @@ struct Recorder {
                          [keep](const QString&, int64_t tf, const OHLCVBar& bar) { keep(true, tf, bar); });
         QObject::connect(&aggregator, &TimeframeAggregator::barUpdated,
                          [keep](const QString&, int64_t tf, const OHLCVBar& bar) { keep(false, tf, bar); });
+        QObject::connect(&aggregator, &TimeframeAggregator::liveRollupsUpdated,
+                         [keep](const QString&, const std::vector<TimeframeBar>& bars) {
+                             for (const auto& live : bars) keep(false, live.timeframeMs, live.bar);
+                         });
     }
 };
 
@@ -512,4 +516,107 @@ TEST(TimeframeAggregatorRestore, FloorIsNeitherSeededNorReadOnceABarExists) {
     installed.onTrade(tradeAt(at(1, 31, 500), 310, 1));
     EXPECT_EQ(installed.exportSeries("BTC-USD", 1'000).active.count, 2u);
     EXPECT_EQ(lateDropsOf(installed, "BTC-USD", 1'000), 0u);
+}
+
+namespace {
+constexpr int64_t kFive = 300'000;
+constexpr int64_t kDay = 86'400'000;
+const std::vector<int64_t> kAllTimeframes{100, 1'000, 60'000, 300'000, 900'000,
+                                          3'600'000, 14'400'000, 86'400'000};
+
+std::optional<OHLCVBar> lastLive(const Recorder& recorder, int64_t tf, int64_t start) {
+    for (auto it = recorder.events.rbegin(); it != recorder.events.rend(); ++it)
+        if (!it->closed && it->tf == tf && it->bar.timestamp_ms == start) return it->bar;
+    return std::nullopt;
+}
+
+bool closedMinuteIn(const Recorder& recorder, int64_t start, int64_t tf) {
+    return std::any_of(recorder.events.begin(), recorder.events.end(), [&](const Emitted& e) {
+        return e.closed && e.tf == 60'000 && e.bar.timestamp_ms >= start && e.bar.timestamp_ms < start + tf;
+    });
+}
+} // namespace
+
+// The first trade of a period publishes every coarser bar at once, before any
+// minute of that period closes; the last live view equals the closed bar.
+TEST(TimeframeAggregatorLiveRollup, NewPeriodPublishesBeforeFirstMinuteCloses) {
+    TimeframeAggregator aggregator(kAllTimeframes);
+    Recorder recorder(aggregator, kAllTimeframes);
+    constexpr int64_t b = 1'700'000'400'000; // a 5m boundary inside a 15m period
+    static_assert(b % kFive == 0 && b % 900'000 != 0);
+    aggregator.onTrade(tradeAt(b - 2'000, 10, 1));
+    aggregator.onTrade(tradeAt(b + 1'000, 11, 2));
+    ASSERT_FALSE(closedMinuteIn(recorder, b, kFive));
+    const auto opened = lastLive(recorder, kFive, b);
+    ASSERT_TRUE(opened.has_value());
+    EXPECT_TRUE(sameBar(*opened, OHLCVBar{b, 11, 11, 11, 11, 2, 1, false}));
+
+    aggregator.onTrade(tradeAt(b + 30'000, 13, 1));
+    aggregator.onTrade(tradeAt(b + 50'000, 9, 1));
+    EXPECT_TRUE(sameBar(*lastLive(recorder, kFive, b), OHLCVBar{b, 11, 13, 9, 9, 4, 3, false}));
+    // Later minutes: the live view is the closed minutes plus the open one.
+    aggregator.onTrade(tradeAt(b + 70'000, 12, 0.5));
+    EXPECT_TRUE(sameBar(*lastLive(recorder, kFive, b), OHLCVBar{b, 11, 13, 9, 12, 4.5, 4, false}));
+    aggregator.onTrade(tradeAt(b + 250'000, 14, 0.25));
+    const auto beforeClose = *lastLive(recorder, kFive, b);
+    EXPECT_TRUE(sameBar(beforeClose, OHLCVBar{b, 11, 14, 9, 14, 4.75, 5, false}));
+    // The 15m bar spans the previous 5m: it keeps its earlier open.
+    const int64_t fifteen = b - b % 900'000;
+    EXPECT_DOUBLE_EQ(lastLive(recorder, 900'000, fifteen)->open, 10);
+
+    aggregator.advance("BTC-USD", b + kFive);
+    const auto five = aggregator.getHistory("BTC-USD", kFive);
+    ASSERT_FALSE(five.empty());
+    const OHLCVBar& closed = five.back();
+    ASSERT_EQ(closed.timestamp_ms, b);
+    OHLCVBar asLive = closed;
+    asLive.is_closed = false;
+    EXPECT_TRUE(sameBar(asLive, beforeClose));
+    const auto rolled = TimeframeAggregator::rollupMinutes(aggregator.getHistory("BTC-USD", 60'000), kFive);
+    ASSERT_FALSE(rolled.empty());
+    EXPECT_TRUE(sameBar(rolled.back(), closed));
+}
+
+// A UTC day boundary opens the 1d bar (and every coarser bar) on its first trade.
+TEST(TimeframeAggregatorLiveRollup, DayBoundaryOpensDailyBarOnFirstTrade) {
+    TimeframeAggregator aggregator(kAllTimeframes);
+    Recorder recorder(aggregator, kAllTimeframes);
+    constexpr int64_t day = 19'675 * kDay;
+    aggregator.onTrade(tradeAt(day - 500, 50, 1));
+    aggregator.onTrade(tradeAt(day + 100, 51, 3));
+    ASSERT_FALSE(closedMinuteIn(recorder, day, kDay));
+    for (const int64_t tf : {kFive, int64_t{900'000}, int64_t{3'600'000}, int64_t{14'400'000}, kDay}) {
+        const auto live = lastLive(recorder, tf, day);
+        ASSERT_TRUE(live.has_value()) << tf;
+        EXPECT_TRUE(sameBar(*live, OHLCVBar{day, 51, 51, 51, 51, 3, 1, false})) << tf;
+    }
+    // The previous day closed with its own trade only.
+    const auto days = aggregator.getHistory("BTC-USD", kDay);
+    ASSERT_EQ(days.size(), 1u);
+    EXPECT_TRUE(sameBar(days[0], OHLCVBar{day - kDay, 50, 50, 50, 50, 1, 1, true}));
+}
+
+// A quiet period publishes no traded coarser bar; its bars and their closes
+// stay those the closed (carried) minutes build.
+TEST(TimeframeAggregatorLiveRollup, GapPublishesNoTradedBarForQuietPeriod) {
+    TimeframeAggregator aggregator(kAllTimeframes);
+    Recorder recorder(aggregator, {kFive});
+    constexpr int64_t b = 1'700'000'400'000;
+    aggregator.onTrade(tradeAt(b - 2'000, 10, 1));
+    aggregator.onTrade(tradeAt(b + 2 * kFive + 1'000, 12, 1)); // b .. b+5m has no trade
+    for (const auto& e : recorder.events)
+        if (e.bar.timestamp_ms == b || e.bar.timestamp_ms == b + kFive) {
+            EXPECT_EQ(e.bar.count, 0u) << e.bar.timestamp_ms;
+            EXPECT_DOUBLE_EQ(e.bar.volume, 0) << e.bar.timestamp_ms;
+        }
+    aggregator.advance("BTC-USD", b + 3 * kFive);
+    const auto rolled = TimeframeAggregator::rollupMinutes(aggregator.getHistory("BTC-USD", 60'000), kFive);
+    expectSameHistory(aggregator.getHistory("BTC-USD", kFive), rolled, kFive);
+    // One live bar per traded period opens at its first trade; none for b or b+5m.
+    std::vector<int64_t> liveStarts;
+    for (const auto& e : recorder.events)
+        if (!e.closed && e.bar.count > 0 &&
+            (liveStarts.empty() || liveStarts.back() != e.bar.timestamp_ms))
+            liveStarts.push_back(e.bar.timestamp_ms);
+    EXPECT_EQ(liveStarts, (std::vector<int64_t>{b - kFive, b + 2 * kFive}));
 }
