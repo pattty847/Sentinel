@@ -89,7 +89,7 @@ public:
     };
     struct Counters {
         std::atomic<uint64_t> daysBuilt{0}, buildFailures{0}, buildMicros{0}, fallbackServes{0};
-        std::atomic<int64_t> pendingDays{0}; // closed days not yet built, as of the last pass
+        std::atomic<int64_t> pendingDays{0}; // days still to build in the current pass
     };
     struct PassResult {
         uint64_t built = 0, failed = 0, pending = 0;
@@ -159,6 +159,8 @@ private:
     std::thread thread_;
 
     void builderLoop(std::stop_token stop);
+    int64_t countPendingDays(Hmc2Reader& reader, const std::string& symbol, const std::string& layer,
+                             std::stop_token stop) const;
     void passSeries(Hmc2Reader& reader, const std::string& symbol, const std::string& layer, std::stop_token stop,
                     PassResult& result);
     void writeAtomically(const std::filesystem::path& path, const std::vector<uint8_t>& bytes) const;

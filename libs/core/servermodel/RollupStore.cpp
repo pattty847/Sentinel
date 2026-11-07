@@ -409,6 +409,17 @@ RollupStore::PassResult RollupStore::runPass(std::stop_token stop) {
     std::lock_guard pass(passMutex_);
     PassResult result;
     Hmc2Reader reader(options_.hmc2Root);
+    int64_t pending = 0;
+    for (const auto& symbol : options_.symbols)
+        for (const auto* layer : {"near", "deep"}) {
+            if (stop.stop_requested()) break;
+            try {
+                pending += countPendingDays(reader, symbol, layer, stop);
+            } catch (const std::exception& e) {
+                sLog_Warning("Rollup pending scan failed symbol=" << symbol << " layer=" << layer << " error=" << e.what());
+            }
+        }
+    counters_.pendingDays.store(pending, std::memory_order_relaxed);
     for (const auto& symbol : options_.symbols)
         for (const auto* layer : {"near", "deep"}) {
             if (stop.stop_requested()) { result.stopped = true; break; }
@@ -420,8 +431,37 @@ RollupStore::PassResult RollupStore::runPass(std::stop_token stop) {
                 sLog_Warning("Rollup series failed symbol=" << symbol << " layer=" << layer << " error=" << e.what());
             }
         }
-    counters_.pendingDays.store(int64_t(result.pending), std::memory_order_relaxed);
+    counters_.pendingDays.store(0, std::memory_order_relaxed);
     return result;
+}
+
+int64_t RollupStore::countPendingDays(Hmc2Reader& reader, const std::string& symbol,
+                                       const std::string& layer, std::stop_token stop) const {
+    ReadControl control;
+    control.stop = stop;
+    const auto available = reader.availability(symbol, layer, kMinuteMs, control);
+    if (control.status != ReadStatus::Complete || !available.oldestMs) return 0;
+    const auto fingerprints = minuteFingerprints(options_.hmc2Root, symbol, layer);
+    const int64_t firstDay = dayFloor(*available.oldestMs);
+    const int64_t closedEnd = dayFloor(options_.minuteThrough(symbol, layer));
+    int64_t pending = 0;
+    for (int64_t day = closedEnd - kDayMs; day >= firstDay; day -= kDayMs) {
+        if (stop.stop_requested()) break;
+        const auto it = fingerprints.find(day);
+        if (it == fingerprints.end() || !it->second.fingerprint) continue;
+        bool suspect = false;
+        {
+            std::lock_guard lock(indexMutex_);
+            suspect = suspect_.contains({symbol, layer, day});
+        }
+        bool current = !suspect;
+        for (const int64_t level : {kHourMs, kDayMs}) {
+            const auto header = readRollupHeader(filePath(symbol, layer, level, day));
+            if (!header || header->sourceFingerprint != it->second.fingerprint) current = false;
+        }
+        if (!current) ++pending;
+    }
+    return pending;
 }
 
 void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, const std::string& layer,
@@ -475,6 +515,7 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
         // A day without minute files is a recorder gap: it needs no files (a
         // request composes it, all gaps, from the absent minutes at no cost).
         bool built = !fp || (!suspects.contains(day) && current(day, fp));
+        const bool neededBuild = !built;
         if (!built && options_.buildMissing) {
             const auto started = std::chrono::steady_clock::now();
             try {
@@ -506,6 +547,11 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
                 counters_.buildFailures.fetch_add(1, std::memory_order_relaxed);
                 if (!failures++) firstError = dayString(day) + ": " + e.what();
             }
+        }
+        if (neededBuild) {
+            int64_t remaining = counters_.pendingDays.load(std::memory_order_relaxed);
+            while (remaining > 0 && !counters_.pendingDays.compare_exchange_weak(
+                       remaining, remaining - 1, std::memory_order_relaxed)) {}
         }
         if (built) {
             const bool joins = !s.runEnd || (contiguous && day + kDayMs == s.runStart);

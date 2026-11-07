@@ -377,6 +377,24 @@ TEST_F(RollupTest, RestartMidBackfillResumesAndAdvertisesOnlyBuiltDays) {
     EXPECT_EQ(store.levels("BTC-USD", "near")[1].oldestMs, day0);
 }
 
+TEST_F(RollupTest, PendingDaysCountsDownDuringStartupBackfill) {
+    auto o = options();
+    std::vector<int64_t> observed;
+    RollupStore* active = nullptr;
+    o.beforeRename = [&](const fs::path&, const fs::path&) {
+        observed.push_back(active->counters().pendingDays.load(std::memory_order_relaxed));
+    };
+    RollupStore store(o);
+    active = &store;
+    const auto pass = store.runPass();
+    ASSERT_EQ(pass.built, 8u);
+    ASSERT_FALSE(observed.empty());
+    EXPECT_EQ(observed.front(), 8);
+    EXPECT_EQ(observed.back(), 1);
+    EXPECT_TRUE(std::is_sorted(observed.rbegin(), observed.rend()));
+    EXPECT_EQ(store.counters().pendingDays.load(std::memory_order_relaxed), 0);
+}
+
 // Scenario: the UTC day rolls over while serving: the new day is built,
 // availability advances (generation), the open 1d chunk gains it.
 TEST_F(RollupTest, DayRolloverAdvancesLevelsAndTheOpenDayChunk) {

@@ -1655,7 +1655,7 @@ void SentinelStreamServer::registerMetrics(sentinel::metrics::MetricsRegistry& r
             [](const recording::RollupStore& r) { return double(r.counters().buildMicros.load(std::memory_order_relaxed)) / 1e6; });
     counter("sentinel_rollup_fallback_serves_total", "Rollup days served by composing minutes (file missing or corrupt).",
             [](const recording::RollupStore& r) { return double(r.counters().fallbackServes.load(std::memory_order_relaxed)); });
-    registry.gaugeFn("sentinel_rollup_pending_days", "Closed series-days without a current rollup after the last pass.", {},
+    registry.gaugeFn("sentinel_rollup_pending_days", "Closed series-days still to build in the current pass.", {},
                      [rollups]() -> std::optional<double> {
                          return double(rollups->counters().pendingDays.load(std::memory_order_relaxed));
                      });
