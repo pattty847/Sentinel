@@ -12,6 +12,8 @@ HeatmapLayer::HeatmapLayer() = default;
 HeatmapLayer::~HeatmapLayer() = default;
 void HeatmapLayer::initialize() {
     gpu = std::make_unique<heatmap::gpu::HeatmapGpuLayer>();
+    QObject::connect(gpu.get(), &heatmap::gpu::HeatmapGpuLayer::frameRequested, gpu.get(),
+                     [this] { if (queueUpdate) queueUpdate(); });
     tileStats_ = gpu->tileStatsPtr();
 }
 void HeatmapLayer::onRootRebuilt() { gate_ = nullptr; tile_ = nullptr; }

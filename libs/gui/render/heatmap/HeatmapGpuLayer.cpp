@@ -54,10 +54,11 @@ HeatmapGpuLayer::HeatmapGpuLayer(QObject *parent) : QObject(parent) {
     startupTickTimer_ = new QTimer(this);
     startupTickTimer_->setSingleShot(true);
     connect(startupTickTimer_, &QTimer::timeout, this, [this] {
+        if (manualMode_) return;
         startupTickReady_ = true;
         const int64_t before = tickUnits_;
         commitProposedTick();
-        if (tickUnits_ == before) emit snapshotChanged(); // an invalidated fit needs one final proposal
+        if (tickUnits_ == before) emit frameRequested();
     });
 }
 
@@ -201,6 +202,8 @@ void HeatmapGpuLayer::setSettings(const HeatmapChartSettings &settings, bool exp
     const bool wasManual = manualMode_;
     const int64_t wasUnits = manualUnits_;
     manualMode_ = settings.tickMode == TickMode::Manual;
+    if (manualMode_) startupTickTimer_->stop();
+    else armStartupTick();
     if (manualMode_) {
         if (explicitManualTick && isPresetUnits(settings.manualTick)) {
             manualUnits_ = settings.manualTick;
@@ -316,7 +319,7 @@ void HeatmapGpuLayer::onSnapshot() {
     snapshot_ = controller_->latestSnapshot();
     resolution_ = controller_->latestResolution();
     if (!snapshot_) return;
-    if (!startupTickReady_ && hasCurrentResolution()) startupTickTimer_->start(90);
+    armStartupTick();
     refreshPresets();
     noteLimits(); // the price scale may have changed
     emit snapshotChanged();
@@ -326,6 +329,7 @@ void HeatmapGpuLayer::onLive() {
     if (!controller_) return;
     resolution_ = controller_->latestResolution();
     live_ = controller_->latestLive();
+    armStartupTick();
     if (live_ && live_->version != lastLiveVersion_) {
         lastLiveVersion_ = live_->version;
         liveReceivedAtMs_ = QDateTime::currentMSecsSinceEpoch();
@@ -464,6 +468,11 @@ bool HeatmapGpuLayer::hasCurrentResolution() const {
     if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_) return false;
     const auto &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;
     return summary.tfMs == tfMs_ && !summary.columns.empty();
+}
+
+void HeatmapGpuLayer::armStartupTick() {
+    if (!manualMode_ && !startupTickReady_ && !startupTickTimer_->isActive() && hasCurrentResolution())
+        startupTickTimer_->start(90);
 }
 
 bool HeatmapGpuLayer::buildsTick(int64_t units, const ViewWindow &candidate) const {
