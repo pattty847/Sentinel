@@ -202,9 +202,10 @@ void CandlestickOverlayItem::setCandleBuffer(QObject* buffer) {
 }
 
 void CandlestickOverlayItem::setMappingProvider(QObject* provider) {
-    if (m_mappingProviderObject == provider) {
+    if (m_mappingProviderObject == provider && (provider || !m_mappingProvider)) {
         return;
     }
+    disconnect(m_mappingDestroyConn);
     if (m_mappingViewportConn) {
         disconnect(m_mappingViewportConn);
     }
@@ -218,6 +219,8 @@ void CandlestickOverlayItem::setMappingProvider(QObject* provider) {
     m_mappingProvider = qobject_cast<ITimeAxisMappingProvider*>(provider);
     m_lastBoundarySequence = std::numeric_limits<qint64>::min();
     if (m_mappingProviderObject) {
+        m_mappingDestroyConn = connect(provider, &QObject::destroyed, this,
+                                       [this] { setMappingProvider(nullptr); });
         auto* mapping = qobject_cast<ITimeAxisMappingProvider*>(provider);
         auto* view = mapping ? mapping->viewNotifications() : nullptr;
         m_mappingViewportConn = QObject::connect(view,
