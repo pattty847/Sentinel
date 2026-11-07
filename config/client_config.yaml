@@ -30,7 +30,8 @@ gui:
   msdf_font: resources/fonts/RobotoMono/RobotoMono-Regular.ttf
   axis_label_px: 0  # <= 0 uses automatic monitor-scaled sizing
 
-server:
-  host: 127.0.0.1
-  port: 8080
-  ca_file: certs/sentinel-server.crt
+client:
+  server:
+    host: 127.0.0.1
+    port: 8080
+    ca_file: certs/sentinel-server.crt

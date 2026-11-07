@@ -228,6 +228,23 @@ TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     ini.setValue("heatmap/budgets/cpuCeiling", 1);
     EXPECT_TRUE(store.loadBudgets(config.heatmap).valid());
 }
+
+TEST_F(HeatmapPlumbing, TopLevelServerIsIgnoredWithPathWarning) {
+    QTemporaryDir dir;
+    QFile yaml(dir.filePath("client.yaml"));
+    ASSERT_TRUE(yaml.open(QIODevice::WriteOnly));
+    yaml.write("server:\n  host: wrong-host\n  port: 9999\n");
+    yaml.close();
+    ClientConfig config;
+    const ClientConfig defaults;
+    testing::internal::CaptureStderr();
+    const bool loaded = ConfigLoader::loadClientConfig(yaml.fileName().toStdString(), &config);
+    const std::string log = testing::internal::GetCapturedStderr();
+    ASSERT_TRUE(loaded);
+    EXPECT_NE(log.find("key=server; use client.server"), std::string::npos);
+    EXPECT_EQ(config.server.host, defaults.server.host);
+    EXPECT_EQ(config.server.port, defaults.server.port);
+}
 TEST_F(HeatmapPlumbing, LastSessionNeverOverwritesLiveSettingsOrSnapshotsOverrides) {
     QTemporaryDir dir;
     QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);

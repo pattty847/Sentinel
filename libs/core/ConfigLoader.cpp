@@ -210,6 +210,9 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
 void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
     YAML::Node root = YAML::LoadFile(filePath);
     YAML::Node clientNode = root["client"];
+    if (root["server"])
+        sLog_Warning("Ignored top-level server in client config: path=" << filePath
+                     << " key=server; use client.server");
     YAML::Node heatmapNode;
     if (clientNode && clientNode["heatmap"]) {
         heatmapNode = clientNode["heatmap"];
