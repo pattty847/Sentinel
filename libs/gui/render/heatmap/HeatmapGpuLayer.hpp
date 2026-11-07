@@ -205,6 +205,7 @@ public:
 signals:
     void snapshotChanged();
     void liveChanged();
+    void frameRequested(); // startup tick needs a fresh render-thread proposal
     void tickChanged();     // the drawn tick or the mode changed
     void presetsChanged();
     void limitsChanged();   // max/min time or price span changed
@@ -243,6 +244,8 @@ private:
     int64_t tickUnits_ = 0, autoUnits_ = 0, postedTickUnits_ = -1;
     bool postedManual_ = false;
     std::optional<int64_t> autoPriceTick_; // fit policy input, not a retained click/window
+    QTimer *startupTickTimer_ = nullptr;
+    bool startupTickReady_ = false;
     struct TickKey {
         uint64_t version = 0;
         const ResolutionSummary *set = nullptr;
@@ -279,6 +282,7 @@ private:
     // The tick policy generation (GUI thread: symbol, timeframe, settings, Manual memory)
     // and the one the pending proposal was chosen under; a mismatch drops the proposal.
     std::atomic<uint64_t> tickPolicy_{0}, proposedPolicy_{0};
+    void armStartupTick();
     void invalidateTickProposal();
     void commitProposedTick();
     std::atomic<double> rowPxContinuous_{0.0};

@@ -89,7 +89,7 @@ public:
     };
     struct Counters {
         std::atomic<uint64_t> daysBuilt{0}, buildFailures{0}, buildMicros{0}, fallbackServes{0};
-        std::atomic<int64_t> pendingDays{0}; // closed days not yet built, as of the last pass
+        std::atomic<int64_t> pendingDays{0}; // closed days without a current rollup, including failures
     };
     struct PassResult {
         uint64_t built = 0, failed = 0, pending = 0;

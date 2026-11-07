@@ -209,6 +209,21 @@ public:
     using CandlestickOverlayItem::updatePaintNode;
 };
 
+TEST(CandleStyleTest, DeletedMappingProviderClearsOverlayBeforeNextPaint) {
+    CandleGeometryItem item;
+    item.setTimeframeMs(60'000);
+    auto* provider = new CandleFrameProvider;
+    item.setMappingProvider(provider);
+    QSignalSpy changed(&item, &CandlestickOverlayItem::mappingProviderChanged);
+    delete provider;
+    EXPECT_EQ(item.mappingProvider(), nullptr);
+    EXPECT_EQ(changed.count(), 1);
+    QSGNode* node = item.updatePaintNode(nullptr, nullptr);
+    ASSERT_NE(node, nullptr);
+    node = item.updatePaintNode(node, nullptr);
+    delete node;
+}
+
 TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
     CandleFrameProvider provider;
     CandleGeometryItem item;

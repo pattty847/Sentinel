@@ -168,11 +168,19 @@ def check():
     normalized = {token: token.removesuffix("()") for token in raw_tokens}
     tokens = set(normalized.values())
     resolved = set()
+    bare_files = {token: token.rsplit(":", 1)[0] for token in tokens
+                  if re.fullmatch(r"[\w.-]+\.[\w]+:\d+", token)}
     for token in tokens:
+        if token in bare_files:
+            continue
         path = (root / re.sub(r":\d+(?::\d+)?$", "", token)).resolve()
         if path.is_relative_to(root) and path.exists():
             resolved.add(token)
-    pending = tokens - resolved
+    if bare_files:
+        tracked = git(root, "ls-files", "-z").stdout.split("\0")
+        basename_counts = Counter(Path(path).name for path in tracked if path)
+        resolved.update(token for token, name in bare_files.items() if basename_counts[name] == 1)
+    pending = tokens - resolved - bare_files.keys()
     dirs = [str(root / name) for name in ("libs", "apps", "tests", "scripts", "config", "tools")
             if (root / name).is_dir()]
     if pending and dirs:

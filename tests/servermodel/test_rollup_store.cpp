@@ -362,6 +362,8 @@ TEST_F(RollupTest, RestartMidBackfillResumesAndAdvertisesOnlyBuiltDays) {
         const auto pass = store.runPass(stop.get_token());
         EXPECT_TRUE(pass.stopped);
         EXPECT_EQ(pass.built, 2u);
+        EXPECT_EQ(pass.pending, 2u);
+        EXPECT_EQ(store.counters().pendingDays.load(std::memory_order_relaxed), 2);
         const auto levels = store.levels("BTC-USD", "near");
         ASSERT_EQ(levels.size(), 2u);
         EXPECT_EQ(levels[0].oldestMs, day0 + 2 * day);
@@ -375,6 +377,51 @@ TEST_F(RollupTest, RestartMidBackfillResumesAndAdvertisesOnlyBuiltDays) {
     EXPECT_EQ(pass.built, 6u); // near days 1, 0 and all deep days
     EXPECT_EQ(store.levels("BTC-USD", "near")[0].oldestMs, day0 + 13 * hour);
     EXPECT_EQ(store.levels("BTC-USD", "near")[1].oldestMs, day0);
+}
+
+TEST_F(RollupTest, PendingDaysCountsDownDuringStartupBackfill) {
+    auto o = options();
+    std::vector<int64_t> observed;
+    RollupStore* active = nullptr;
+    o.beforeRename = [&](const fs::path&, const fs::path&) {
+        observed.push_back(active->counters().pendingDays.load(std::memory_order_relaxed));
+    };
+    RollupStore store(o);
+    active = &store;
+    const auto pass = store.runPass();
+    ASSERT_EQ(pass.built, 8u);
+    ASSERT_EQ(observed.size(), 16u);
+    EXPECT_EQ(observed.front(), 4);
+    EXPECT_EQ(observed[8], 4) << "the second series is counted when its pass begins";
+    EXPECT_EQ(observed.back(), 1);
+    EXPECT_TRUE(std::is_sorted(observed.rbegin(), observed.rbegin() + 8));
+    EXPECT_TRUE(std::is_sorted(observed.rbegin() + 8, observed.rend()));
+    EXPECT_EQ(store.counters().pendingDays.load(std::memory_order_relaxed), 0);
+}
+
+TEST_F(RollupTest, FailedAndSkippedDaysStayPendingAfterPass) {
+    auto o = options();
+    bool failOnce = true;
+    o.beforeRename = [&](const fs::path&, const fs::path&) {
+        if (failOnce) {
+            failOnce = false;
+            throw std::runtime_error("scripted rename failure");
+        }
+    };
+    RollupStore store(o);
+    const auto failed = store.runPass();
+    EXPECT_EQ(failed.built, 7u);
+    EXPECT_EQ(failed.pending, 1u);
+    EXPECT_EQ(store.counters().pendingDays.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(store.runPass().pending, 0u);
+    EXPECT_EQ(store.counters().pendingDays.load(std::memory_order_relaxed), 0);
+
+    o = options();
+    o.buildMissing = false;
+    o.root = fs::path(temp.path().toStdString()) / "read-only-rollups";
+    RollupStore readOnly(o);
+    EXPECT_EQ(readOnly.runPass().pending, 8u);
+    EXPECT_EQ(readOnly.counters().pendingDays.load(std::memory_order_relaxed), 8);
 }
 
 // Scenario: the UTC day rolls over while serving: the new day is built,

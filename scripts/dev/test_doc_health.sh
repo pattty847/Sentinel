@@ -229,6 +229,23 @@ setup_case live-pointers
 printf -- '- FM-001 | See libs/known.cpp:123\n- FM-002 | See `KnownSymbol`\n- FM-003 | See `TEST(KnownSuite, KnownCase)`\n- FM-004 | See KnownSuite.KnownCase\n- FM-005 | See `Overlap`\n- FM-006 | See `Overlapping`\n- FM-007 | See `lapping`\n' >> "$private/_agent/FAILURE_MODES.md"
 run_expect 0 'warning: dead pointers: 0'
 
+setup_case bare-file-pointer
+printf -- '- FM-001 | See known.cpp:123\n' >> "$private/_agent/FAILURE_MODES.md"
+run_expect 0 'warning: dead pointers: 0'
+
+setup_case ambiguous-bare-file-pointer
+mkdir -p "$repo/apps"
+printf 'second\n' > "$repo/apps/known.cpp"
+git -C "$repo" add apps/known.cpp
+printf -- '- FM-001 | See known.cpp:123\n' >> "$private/_agent/FAILURE_MODES.md"
+run_expect 0 'warning: dead pointers: 1 (up to 20): .*FM-001 known.cpp:123'
+
+setup_case ambiguous-root-bare-file-pointer
+printf 'root copy\n' > "$repo/known.cpp"
+git -C "$repo" add known.cpp
+printf -- '- FM-001 | See known.cpp:123\n' >> "$private/_agent/FAILURE_MODES.md"
+run_expect 0 'warning: dead pointers: 1 (up to 20): .*FM-001 known.cpp:123'
+
 setup_case qualified-method
 printf -- '- FM-001 | See KnownClass::method\n' >> "$private/_agent/FAILURE_MODES.md"
 run_expect 0 'resolved pointers: 1'

@@ -3726,9 +3726,13 @@ TEST_F(UgrZoomCpu, LiveChangedFitsOnceAndRefitsWithoutFollowShift) {
         live->columns.columns.push_back({t, minute, t >= centre ? recording::kProvisional : 0u, {std::move(column)}});
     }
     live->columns.scannedRanges = {{live->columns.startMs, live->columns.endMs}};
-    service.onData([&] { transport->replyLive(transport->liveRequests.back().id, live); });
     auto *layer = chart.gpuHeatmapLayer();
-    ASSERT_TRUE(waitFor([&] { return layer->liveOpenEndMs() == centre + minute && layer->hasCurrentResolution(); }));
+    EXPECT_FALSE(layer->hasCurrentResolution()) << "the fixture must need live columns for its tick";
+    EXPECT_EQ(layer->tickUnits(), 0);
+    service.onData([&] { transport->replyLive(transport->liveRequests.back().id, live); });
+    ASSERT_TRUE(waitFor([&] {
+        return layer->liveOpenEndMs() == centre + minute && layer->hasCurrentResolution() && layer->tickUnits() > 0;
+    }));
     v->setViewport(centre - 4 * minute, centre, 100120, 100180);
     // Prime the live revision while auto fit is off, then measure the actual connections.
     layer->liveChanged();
@@ -3777,6 +3781,185 @@ TEST_F(UgrZoomCpu, ControllerDestroyJudgesAutoTickFreshOnNextFrame) {
         return layer.hasCurrentResolution() && layer.predictTickUnits(view) > 0;
     }));
     EXPECT_EQ(layer.predictTickUnits(view), fresh);
+}
+
+TEST(UgrTickCpu, StartupSnapshotCommitsOnlySettledAutoTick) {
+    heatmap::gpu::HeatmapGpuLayer layer;
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 3 * kHourMs),
+                                        100120, 100180};
+    std::vector<int64_t> committed;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::tickChanged, &layer,
+                     [&] { committed.push_back(layer.tickUnits()); });
+    bool scripted = false;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, &layer, [&] {
+        if (scripted || !layer.hasCurrentResolution()) return;
+        scripted = true;
+        for (const int64_t units : {100, 500, 100}) {
+            layer.setAutoPriceTick(units);
+            layer.chooseTickForView(view);
+            QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+        }
+    });
+    layer.setSymbol("BTC-USD");
+    layer.setTimeframeMs(minute);
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while ((!scripted || committed.empty()) && elapsed.elapsed() < 10'000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    ASSERT_TRUE(scripted);
+    ASSERT_EQ(committed.size(), 1u);
+    EXPECT_EQ(committed.front(), 100);
+    layer.setService(nullptr);
+}
+
+TEST(UgrTickCpu, RepeatedSnapshotsDoNotExtendTheFirstTickHold) {
+    heatmap::gpu::HeatmapGpuLayer layer;
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 3 * kHourMs),
+                                        100120, 100180};
+    QElapsedTimer elapsed;
+    qint64 firstCommitMs = -1;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::tickChanged, &layer,
+                     [&] { if (firstCommitMs < 0) firstCommitMs = elapsed.elapsed(); });
+    QTimer snapshots;
+    int sent = 0;
+    QObject::connect(&snapshots, &QTimer::timeout, &layer, [&] {
+        if (++sent > 10) { snapshots.stop(); return; }
+        QMetaObject::invokeMethod(layer.controller(), "snapshotChanged", Qt::QueuedConnection);
+    });
+    bool scripted = false;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, &layer, [&] {
+        if (scripted || !layer.hasCurrentResolution()) return;
+        scripted = true;
+        elapsed.start();
+        layer.setAutoPriceTick(100);
+        layer.chooseTickForView(view);
+        QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+        snapshots.start(30);
+    });
+    layer.setSymbol("BTC-USD");
+    layer.setTimeframeMs(minute);
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    QElapsedTimer timeout;
+    timeout.start();
+    while ((!scripted || snapshots.isActive()) && timeout.elapsed() < 10'000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    ASSERT_TRUE(scripted);
+    ASSERT_EQ(sent, 11);
+    ASSERT_GE(firstCommitMs, 0);
+    EXPECT_LE(firstCommitMs, 160) << "ten 30 ms snapshots must not postpone the initial tick";
+    layer.setService(nullptr);
+}
+
+TEST(UgrTickCpu, SymbolAndTimeframeChangesCancelTheStartupHold) {
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 3 * kHourMs),
+                                        100120, 100180};
+    for (const bool changeSymbol : {true, false}) {
+        heatmap::gpu::HeatmapGpuLayer layer;
+        int frameRequests = 0;
+        QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::frameRequested, &layer,
+                         [&] { ++frameRequests; });
+        bool changed = false;
+        qint64 changedAt = -1;
+        QElapsedTimer elapsed;
+        elapsed.start();
+        QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, &layer, [&] {
+            if (changed || !layer.hasCurrentResolution()) return;
+            changed = true;
+            changedAt = elapsed.elapsed();
+            layer.setAutoPriceTick(100);
+            layer.chooseTickForView(view);
+            QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+            if (changeSymbol) layer.setSymbol("TINY-USD");
+            else layer.setTimeframeMs(5 * minute);
+            // Isolate the old timer from a legitimate new snapshot for the new view.
+            QObject::disconnect(layer.controller(), nullptr, &layer, nullptr);
+        });
+        layer.setSymbol("BTC-USD");
+        layer.setTimeframeMs(minute);
+        layer.setSurface(640, 320, 1);
+        layer.setView(view, true);
+        layer.setService(&lab::LabData::instance().service());
+        layer.setActive(true);
+        while ((!changed || elapsed.elapsed() - changedAt < 150) && elapsed.elapsed() < 10'000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        EXPECT_TRUE(changed);
+        EXPECT_EQ(frameRequests, 0) << (changeSymbol ? "symbol" : "timeframe");
+        layer.setService(nullptr);
+    }
+}
+
+TEST(UgrTickCpu, ExpiredInvalidProposalRequestsOnlyAFrame) {
+    heatmap::gpu::HeatmapGpuLayer layer;
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 3 * kHourMs),
+                                        100120, 100180};
+    int snapshotSignals = 0, frameRequests = 0;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::frameRequested, &layer,
+                     [&] { ++frameRequests; });
+    bool scripted = false;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, &layer, [&] {
+        ++snapshotSignals;
+        if (scripted || !layer.hasCurrentResolution()) return;
+        scripted = true;
+        layer.setAutoPriceTick(100);
+        layer.chooseTickForView(view);
+        QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+        layer.setAutoPriceTick(500); // invalidates the queued 100; no new frame has chosen 500 yet
+    });
+    layer.setSymbol("BTC-USD");
+    layer.setTimeframeMs(minute);
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while ((!scripted || !frameRequests) && elapsed.elapsed() < 10'000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    ASSERT_TRUE(scripted);
+    EXPECT_EQ(frameRequests, 1);
+    EXPECT_EQ(snapshotSignals, 1) << "the timer must not report a synthetic data snapshot";
+    layer.setService(nullptr);
+}
+
+TEST(UgrTickCpu, ManualTickBypassesStartupHold) {
+    heatmap::gpu::HeatmapGpuLayer layer;
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 3 * kHourMs),
+                                        100120, 100180};
+    layer.setSymbol("BTC-USD");
+    layer.setTimeframeMs(minute);
+    auto settings = layer.settings();
+    settings.tickMode = heatmap::TickMode::Manual;
+    settings.manualTick = 500;
+    layer.setSettings(settings, true);
+    std::vector<int64_t> committed;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::tickChanged, &layer,
+                     [&] { committed.push_back(layer.tickUnits()); });
+    bool scripted = false;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, &layer, [&] {
+        if (scripted || !layer.hasCurrentResolution()) return;
+        scripted = true;
+        layer.chooseTickForView(view);
+        QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+    });
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while ((!scripted || committed.empty()) && elapsed.elapsed() < 10'000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    ASSERT_TRUE(scripted);
+    ASSERT_EQ(committed.size(), 1u);
+    EXPECT_EQ(committed.front(), 500);
+    layer.setService(nullptr);
 }
 
 // Exercise the chart QWheelEvent and the same C++ axis entries called by QML,

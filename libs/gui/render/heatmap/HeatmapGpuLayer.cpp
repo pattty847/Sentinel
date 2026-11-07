@@ -51,6 +51,15 @@ HeatmapGpuLayer::HeatmapGpuLayer(QObject *parent) : QObject(parent) {
     labelRetry_ = new QTimer(this);
     labelRetry_->setSingleShot(true);
     connect(labelRetry_, &QTimer::timeout, this, &HeatmapGpuLayer::onLabelRetry);
+    startupTickTimer_ = new QTimer(this);
+    startupTickTimer_->setSingleShot(true);
+    connect(startupTickTimer_, &QTimer::timeout, this, [this] {
+        if (manualMode_) return;
+        startupTickReady_ = true;
+        const int64_t before = tickUnits_;
+        commitProposedTick();
+        if (tickUnits_ == before) emit frameRequested();
+    });
 }
 
 HeatmapGpuLayer::~HeatmapGpuLayer() { setService(nullptr); }
@@ -69,6 +78,8 @@ void HeatmapGpuLayer::setService(HeatmapDataService *service) {
 // widgets): drop the controller pointer without touching it; the service
 // deletes it on its data thread. The node keeps its shared snapshot/capacity.
 void HeatmapGpuLayer::forgetService() {
+    startupTickTimer_->stop();
+    startupTickReady_ = false;
     if (controller_) QObject::disconnect(controller_, nullptr, this, nullptr);
     controller_ = nullptr;
     autoPriceTick_.reset();
@@ -120,6 +131,8 @@ void HeatmapGpuLayer::createController() {
 
 void HeatmapGpuLayer::destroyController() {
     autoPriceTick_.reset();
+    startupTickTimer_->stop();
+    startupTickReady_ = false;
     if (!controller_) return;
     QObject::disconnect(controller_, nullptr, this, nullptr);
     if (service_) service_->destroyController(controller_);
@@ -139,6 +152,7 @@ void HeatmapGpuLayer::destroyController() {
 
 void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     if (symbol_ == symbol) return;
+    if (!startupTickReady_) startupTickTimer_->stop();
     symbol_ = symbol;
     autoPriceTick_.reset();
     invalidateTickProposal();
@@ -152,6 +166,7 @@ void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
 
 void HeatmapGpuLayer::setTimeframeMs(int64_t tfMs) {
     if (tfMs <= 0 || tfMs_ == tfMs) return;
+    if (!startupTickReady_) startupTickTimer_->stop();
     tfMs_ = tfMs;
     autoPriceTick_.reset();
     invalidateTickProposal();
@@ -187,6 +202,8 @@ void HeatmapGpuLayer::setSettings(const HeatmapChartSettings &settings, bool exp
     const bool wasManual = manualMode_;
     const int64_t wasUnits = manualUnits_;
     manualMode_ = settings.tickMode == TickMode::Manual;
+    if (manualMode_) startupTickTimer_->stop();
+    else armStartupTick();
     if (manualMode_) {
         if (explicitManualTick && isPresetUnits(settings.manualTick)) {
             manualUnits_ = settings.manualTick;
@@ -302,6 +319,7 @@ void HeatmapGpuLayer::onSnapshot() {
     snapshot_ = controller_->latestSnapshot();
     resolution_ = controller_->latestResolution();
     if (!snapshot_) return;
+    armStartupTick();
     refreshPresets();
     noteLimits(); // the price scale may have changed
     emit snapshotChanged();
@@ -311,6 +329,7 @@ void HeatmapGpuLayer::onLive() {
     if (!controller_) return;
     resolution_ = controller_->latestResolution();
     live_ = controller_->latestLive();
+    armStartupTick();
     if (live_ && live_->version != lastLiveVersion_) {
         lastLiveVersion_ = live_->version;
         liveReceivedAtMs_ = QDateTime::currentMSecsSinceEpoch();
@@ -421,6 +440,7 @@ void HeatmapGpuLayer::invalidateTickProposal() {
 
 void HeatmapGpuLayer::commitProposedTick() {
     // GUI thread (the render thread only reads tickUnits_ while the GUI thread is blocked).
+    if (!manualMode_ && !startupTickReady_) return;
     const int64_t tick = proposedTickUnits_.load(std::memory_order_relaxed);
     if (tick == tickUnits_) return; // superseded (the proposal went back to the drawn tick)
     if (proposedPolicy_.load(std::memory_order_relaxed) != tickPolicy_.load(std::memory_order_relaxed)) {
@@ -450,6 +470,11 @@ bool HeatmapGpuLayer::hasCurrentResolution() const {
     return summary.tfMs == tfMs_ && !summary.columns.empty();
 }
 
+void HeatmapGpuLayer::armStartupTick() {
+    if (!manualMode_ && !startupTickReady_ && !startupTickTimer_->isActive() && hasCurrentResolution())
+        startupTickTimer_->start(90);
+}
+
 bool HeatmapGpuLayer::buildsTick(int64_t units, const ViewWindow &candidate) const {
     if (!hasCurrentResolution()) return false;
     const auto &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;
@@ -459,6 +484,7 @@ bool HeatmapGpuLayer::buildsTick(int64_t units, const ViewWindow &candidate) con
 bool HeatmapGpuLayer::setAutoPriceTick(std::optional<int64_t> units) {
     if (autoPriceTick_ == units) return false;
     autoPriceTick_ = units;
+    if (startupTickTimer_->isActive()) startupTickTimer_->start(90);
     tickKey_ = {};
     invalidateTickProposal(); // an older frame's proposal belongs to another raw fit
     return true;

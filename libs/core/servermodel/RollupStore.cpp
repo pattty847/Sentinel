@@ -409,6 +409,7 @@ RollupStore::PassResult RollupStore::runPass(std::stop_token stop) {
     std::lock_guard pass(passMutex_);
     PassResult result;
     Hmc2Reader reader(options_.hmc2Root);
+    counters_.pendingDays.store(0, std::memory_order_relaxed);
     for (const auto& symbol : options_.symbols)
         for (const auto* layer : {"near", "deep"}) {
             if (stop.stop_requested()) { result.stopped = true; break; }
@@ -456,6 +457,13 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
         }
         return true;
     };
+    std::set<int64_t> pendingDays;
+    for (int64_t day = closedEnd - kDayMs; day >= firstDay; day -= kDayMs) {
+        const auto fp = minuteDay(fingerprints, day).fingerprint;
+        if (fp && (suspects.contains(day) || !current(day, fp))) pendingDays.insert(day);
+    }
+    result.pending += pendingDays.size();
+    counters_.pendingDays.fetch_add(int64_t(pendingDays.size()), std::memory_order_relaxed);
     // Mid-pass, publish only growth of the advertised run (a backfill becomes
     // visible day by day); the pass's final run, which may be shorter, is
     // published when the pass completes. Re-checking current days never
@@ -507,13 +515,16 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
                 if (!failures++) firstError = dayString(day) + ": " + e.what();
             }
         }
+        if (built && pendingDays.erase(day)) {
+            --result.pending;
+            counters_.pendingDays.fetch_sub(1, std::memory_order_relaxed);
+        }
         if (built) {
             const bool joins = !s.runEnd || (contiguous && day + kDayMs == s.runStart);
             if (!s.runEnd) s = {s.firstMinuteMs, day, day + kDayMs};
             else if (joins) s.runStart = day;
             publishGrowth();
         } else {
-            ++result.pending;
             if (s.runEnd) contiguous = false;
         }
     }

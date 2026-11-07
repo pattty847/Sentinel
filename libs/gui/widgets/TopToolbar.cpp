@@ -22,6 +22,25 @@
 #include <QKeyEvent>
 #include <QWindow>
 #include <QScopedValueRollback>
+#include <QStylePainter>
+
+namespace {
+class ElidedTickCombo final : public QComboBox {
+public:
+    using QComboBox::QComboBox;
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QStylePainter painter(this);
+        QStyleOptionComboBox option;
+        initStyleOption(&option);
+        const QRect edit = style()->subControlRect(QStyle::CC_ComboBox, &option,
+                                                   QStyle::SC_ComboBoxEditField, this);
+        option.currentText = fontMetrics().elidedText(option.currentText, Qt::ElideRight, edit.width());
+        painter.drawComplexControl(QStyle::CC_ComboBox, option);
+        painter.drawControl(QStyle::CE_ComboBoxLabel, option);
+    }
+};
+}
 
 TopToolbar::TopToolbar(QWidget* parent)
     : QToolBar(parent)
@@ -185,7 +204,7 @@ TopToolbar::TopToolbar(QWidget* parent)
         sLog_App("ui: toolbar tick mode=" << (index == 1 ? "manual" : "auto"));
         emit tickModeRequested(index == 1);
     });
-    m_tickPresetCombo = new QComboBox(this);
+    m_tickPresetCombo = new ElidedTickCombo(this);
     m_tickPresetCombo->setObjectName("tickPresetCombo");
     m_tickPresetCombo->setAccessibleName("Heatmap tick size");
     m_tickPresetCombo->setFixedWidth(84);
@@ -1117,7 +1136,7 @@ void TopToolbar::setTickSelectorState(const TickSelectorState& state) {
                                : QStringLiteral("Drawn tick %1 (Auto). Pick a preset to lock it (Manual).")
                                      .arg(tickText(state.drawnUnits, state.priceScale));
     if (!state.indicator.isEmpty()) tip += QStringLiteral("\n") + state.indicator;
-    m_tickPresetCombo->setToolTip(tip);
+    m_tickPresetCombo->setToolTip(m_tickPresetCombo->currentText() + QStringLiteral("\n") + tip);
     m_tickVeilLabel->setToolTip(state.indicator);
 }
 
