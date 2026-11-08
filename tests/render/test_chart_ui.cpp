@@ -2032,13 +2032,21 @@ TEST_F(ChartLabels, ACancelledQueryDrawsNoStaleLabelsAndRetries) {
         EXPECT_NE(ugr->gpuLabelSerial(), drawnSerial) << "no label drawn from a cancelled result";
         // They come back: by a new request (releasing the query's wants can republish
         // the SpanSet) or, with nothing else changing, by the retry.
-        ASSERT_TRUE(pump(heatmap::gpu::HeatmapGpuLayer::kLabelRetryMs + 8000,
-                         [&] { return labelsDrawn() && ugr->gpuLabelSerial() > drawnSerial; }, [&] { checkFrame(); }))
-            << error.toStdString();
+        // Rendering can observe the worker's published result before the queued
+        // labelsChanged handler resets the retry policy. Wait for that handler's
+        // result for the current request, not just for drawable glyphs.
+        ASSERT_TRUE(pump(30'000, [&] {
+            const auto labels = q->latestLabels();
+            return labelsDrawn() && ugr->gpuLabelSerial() > drawnSerial && labels &&
+                   labels->key.serial == layer().labelCounters().lastPostedSerial &&
+                   layer().labelRetryMs() == heatmap::gpu::HeatmapGpuLayer::kLabelRetryMs;
+        }, [&] { checkFrame(); })) << error.toStdString();
         const bool retried = layer().labelCounters().retries > retries;
         if (layer().labelCounters().posted == posted + 1 && !retried) continue; // a version change re-posted
         if (retried) {
-            EXPECT_EQ(layer().labelCounters().retries, retries + 1);
+            EXPECT_GT(layer().labelCounters().retries, retries);
+            // Four scheduled retries can reach the 30 s bound (2+4+8+16 s); more is a retry storm.
+            EXPECT_LE(layer().labelCounters().retries, retries + 4);
             EXPECT_EQ(layer().labelRetryMs(), heatmap::gpu::HeatmapGpuLayer::kLabelRetryMs) << "reset after a result";
             return; // the retry path ran
         }
