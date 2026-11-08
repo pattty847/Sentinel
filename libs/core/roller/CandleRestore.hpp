@@ -48,7 +48,7 @@ struct CandleRestoreInput {
     std::map<int64_t, int> historyBars;
     std::function<void(const JournalRecord&)> afterRecordForTest;
     int64_t windowMsForTest = 0;           // 0: kRestoreWindowMs
-    bool forceLeadInRereadForTest = false; // first read counts as not established
+    bool forceLeadInRereadForTest = false; // first probe counts as not established
     std::string* failure = nullptr;        // reason when nullopt is returned
 };
 
@@ -69,7 +69,11 @@ struct CandleRestore {
     // newest seen, and those older by more than kRestoreLeadInMs.
     uint64_t records = 0, trades = 0, lateDrops = 0, clockRegressions = 0, deepRegressions = 0;
     size_t files = 0, startFile = 0;
-    size_t reads = 0;  // journal passes, re-reads one file earlier included
+    size_t reads = 0;  // full replays (always 1 on success)
+    // Lead-in probes and the records they read (each file at most once,
+    // except the first candidate's own lead-in).
+    size_t probes = 0;
+    uint64_t probeRecords = 0;
     double readMs = 0; // wall time of every read, re-reads included
 };
 
