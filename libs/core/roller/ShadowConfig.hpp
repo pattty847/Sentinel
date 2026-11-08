@@ -65,7 +65,7 @@ struct ShadowConfig {
   // loop.
   unsigned failureThreshold = 3;
   // Across error reasons and reopens; reset only by new committed progress.
-  // Exhaustion stops this product until restart. Installed, not YAML config.
+  // Exhaustion alerts and latches slow probes until progress. Not YAML config.
   unsigned maxFailuresWithoutProgress = 32;
   std::chrono::milliseconds failureMinDuration{120000};
   std::chrono::milliseconds failureCooldown{600000};

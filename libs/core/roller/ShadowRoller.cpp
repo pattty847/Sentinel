@@ -21,7 +21,6 @@ using json = nlohmann::json;
 namespace {
 constexpr int64_t Hour = 3600000, Day = 86400000;
 struct ShadowStopped {};
-struct ShadowRetryExhausted {};
 int64_t nowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
@@ -1143,7 +1142,7 @@ nlohmann::json rollShadowOracleHour(const fs::path &journalRoot,
 struct ShadowRoller::Impl {
   struct Product {
     std::string name;
-    metrics::Gauge *running, *lastComparison, *cooldown;
+    metrics::Gauge *running, *lastComparison, *cooldown, *retryExhausted;
     metrics::Counter *records, *failures, *compareFailures, *cooldowns,
         *leadForks, *invalidations, *writeErrors;
     metrics::Counter *minuteColumns = nullptr;
@@ -1233,6 +1232,9 @@ struct ShadowRoller::Impl {
       p->cooldown = &registry.gauge(
           "sentinel_roller_shadow_fault_cooldown",
           "Product is probing a persistent fault at slow cadence.", labels);
+      p->retryExhausted = &registry.gauge(
+          "sentinel_roller_shadow_retry_exhausted",
+          "Retry budget exhausted without new committed progress; slow probes continue.", labels);
       p->cooldowns =
           &registry.counter("sentinel_roller_shadow_fault_cooldowns_total",
                             "Entries into persistent-fault cooldown.", labels);
@@ -1441,7 +1443,7 @@ struct ShadowRoller::Impl {
     std::string lastFailure;
     unsigned consecutive = 0, failuresWithoutProgress = 0;
     std::optional<std::chrono::steady_clock::time_point> failureSince;
-    bool coolingDown = false;
+    bool coolingDown = false, retryExhausted = false;
     int64_t furthestCommitted = 0;
     // Outlives each day's source and feed: a day rotation re-seeds the model
     // without invalidating it.
@@ -1458,11 +1460,12 @@ struct ShadowRoller::Impl {
         return;
       p.running->set(0);
       p.failures->inc();
-      if (++failuresWithoutProgress >= cfg.maxFailuresWithoutProgress) {
+      if (!retryExhausted && ++failuresWithoutProgress >= cfg.maxFailuresWithoutProgress) {
+        retryExhausted = true;
+        p.retryExhausted->set(1);
         sLog_Error("Shadow roller retry limit reached product=" << p.name
                    << " failures=" << failuresWithoutProgress << " error=" << reason
-                   << " action=stop_product restart_required=true");
-        throw ShadowRetryExhausted{};
+                   << " action=continue_cooldown_probes retryMs=" << cfg.failureCooldown.count());
       }
       const auto now = cfg.nowForTest ? cfg.nowForTest()
                                       : std::chrono::steady_clock::now();
@@ -1480,7 +1483,7 @@ struct ShadowRoller::Impl {
         p.cooldown->set(1);
         p.cooldowns->inc();
       }
-      const auto delay = coolingDown ? cfg.failureCooldown : backoff;
+      const auto delay = (retryExhausted || coolingDown) ? cfg.failureCooldown : backoff;
       sLog_Warning("Shadow roller retry product="
                    << p.name << " error=" << reason << " consecutive="
                    << consecutive << " retryMs=" << delay.count());
@@ -1607,6 +1610,11 @@ struct ShadowRoller::Impl {
             backoff = cfg.retryMin;
             consecutive = 0;
             failuresWithoutProgress = 0;
+            if (std::exchange(retryExhausted, false)) {
+              p.retryExhausted->set(0);
+              sLog_App("Shadow roller retry budget recovered product=" << p.name
+                       << " committedThroughMs=" << through);
+            }
             lastFailure.clear();
             failureSince.reset();
             coolingDown = false;
@@ -1618,21 +1626,10 @@ struct ShadowRoller::Impl {
                  << " day=" << day << " root=" << cfg.outputRoot);
         roll(o);
         // Midnight rotates through the same anchor/replay path as batch.
-      } catch (const ShadowRetryExhausted &) {
-        // Exhaustion from LiveSource must not become another outer retry.
-        return;
       } catch (const std::exception &e) {
-        try {
-          retry(e.what());
-        } catch (const ShadowRetryExhausted &) {
-          return;
-        }
+        retry(e.what());
       } catch (...) {
-        try {
-          retry("unknown shadow failure");
-        } catch (const ShadowRetryExhausted &) {
-          return;
-        }
+        retry("unknown shadow failure");
       }
       p.running->set(0);
     }

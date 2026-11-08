@@ -3986,9 +3986,19 @@ TEST_F(ShadowTest, CorruptCursorDuringDetachedReplayRetainsTheFirstSuccessor) {
   EXPECT_TRUE(has("sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 0"));
 }
 
-TEST_F(ShadowTest, ReconnectRetryLimitStopsWithoutReplayingTheAppliedPrefix) {
+// Call after joining the worker: every journal position must appear once, in order.
+void expectAppliedJournal(ShadowTest& t) {
+  JournalReader reader(t.cfg.journalRoot, Product);
+  JournalRecord r;
+  std::vector<JournalPos> expected;
+  while (reader.next(r)) expected.push_back(r.pos);
+  EXPECT_EQ(t.applied, expected);
+}
+
+TEST_F(ShadowTest, ReconnectRetryLimitKeepsProbingAndRecoversWithoutReplay) {
   LogCapture logs;
   cfg.maxFailuresWithoutProgress = 4;
+  cfg.failureCooldown = 120ms;
   initial();
   start();
   const auto stopWorker = qScopeGuard([&] { shadow.reset(); });
@@ -3997,47 +4007,119 @@ TEST_F(ShadowTest, ReconnectRetryLimitStopsWithoutReplayingTheAppliedPrefix) {
   ASSERT_TRUE(eventually([&] { return count() == 65; }));
   fanout.reset();
   ASSERT_TRUE(eventually([&] {
-    return LogCapture::count("Shadow roller retry limit reached product=BTC-USD") == 1;
+    return LogCapture::count("Shadow roller retry product=BTC-USD") >= 6;
   }));
+  EXPECT_EQ(LogCapture::count("Shadow roller retry limit reached product=BTC-USD"), 1u);
+  EXPECT_TRUE(has("sentinel_roller_shadow_retry_exhausted{product=\"BTC-USD\"} 1"));
   EXPECT_FALSE(shadow->running(Product));
+  // A successful handshake without newer committed history cannot clear exhaustion.
   startFanout();
   writer->append(record(65000)); writer->flush();
-  std::this_thread::sleep_for(200ms);
+  ASSERT_TRUE(eventually([&] { return count() == 66; }));
+  EXPECT_TRUE(has("sentinel_roller_shadow_retry_exhausted{product=\"BTC-USD\"} 1"));
+  EXPECT_EQ(LogCapture::count("Shadow roller retry budget recovered product=BTC-USD"), 0u);
+  for (int t = 66; t <= 125; ++t) writer->append(record(t*1000));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return count() == 126; }));
+  ASSERT_TRUE(eventually([&] {
+    return has("sentinel_roller_shadow_retry_exhausted{product=\"BTC-USD\"} 0");
+  }));
   shadow.reset();
-  EXPECT_EQ(count(), 65u);
-  EXPECT_TRUE(has("sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 4"));
+  expectAppliedJournal(*this);
+  EXPECT_EQ(LogCapture::count("Shadow roller retry budget recovered product=BTC-USD"), 1u);
+  EXPECT_EQ(LogCapture::count("Shadow roller retry limit reached product=BTC-USD"), 1u);
 }
 
-TEST_F(ShadowTest, RetryLimitCountsChangingFailuresAndStopsWithError) {
+TEST_F(ShadowTest, RetryLimitCountsChangingFailuresAndKeepsSlowProbes) {
   LogCapture logs;
   initial();
   cfg.maxFailuresWithoutProgress = 4;
   cfg.retryMin = cfg.retryMax = 10ms;
+  cfg.failureCooldown = 120ms;
   const auto checkpoint = root / "shadow" / Product / "roller.json";
   fs::create_directories(checkpoint.parent_path());
   std::ofstream(checkpoint) << "{";
   unsigned attempts = 0;
   cfg.nowForTest = [&] {
-    // Alternate parse and type errors: the total budget must not restart.
+    // Alternate parse and type errors: neither budget nor probe cadence resets.
     std::ofstream(checkpoint) << (++attempts % 2 ? "{\"committedThroughMs\":\"bad\"}" : "{");
     return std::chrono::steady_clock::now();
   };
   start();
   const auto stopWorker = qScopeGuard([&] { shadow.reset(); });
   ASSERT_TRUE(eventually([&] {
-    return LogCapture::count("Shadow roller retry limit reached product=BTC-USD") == 1;
+    return LogCapture::count("Shadow roller retry product=BTC-USD") >= 6;
   }));
+  shadow.reset();
   const auto error = LogCapture::line("Shadow roller retry limit reached");
   EXPECT_NE(error.find("failures=4"), std::string::npos);
-  EXPECT_NE(error.find("action=stop_product restart_required=true"), std::string::npos);
+  EXPECT_NE(error.find("action=continue_cooldown_probes retryMs=120"), std::string::npos);
   EXPECT_EQ(LogCapture::count("consecutive=1 retryMs=10"), 3u);
-  EXPECT_FALSE(shadow->running(Product));
-  EXPECT_EQ(count(), 0u);
-  fs::remove(checkpoint);
-  std::this_thread::sleep_for(100ms); // removing the failure cannot restart a stopped worker
-  shadow.reset();
-  EXPECT_TRUE(has("sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 4"));
+  EXPECT_GE(LogCapture::count("consecutive=1 retryMs=120"), 3u);
   EXPECT_EQ(LogCapture::count("Shadow roller retry limit reached"), 1u);
+  EXPECT_TRUE(has("sentinel_roller_shadow_retry_exhausted{product=\"BTC-USD\"} 1"));
+  EXPECT_EQ(count(), 0u);
+}
+
+TEST_F(ShadowTest, PreHandshakeCaptureOutageBeyondRetryBudgetSelfHeals) {
+  LogCapture logs;
+  initial();
+  fanout.reset();
+  cfg.maxFailuresWithoutProgress = 4;
+  cfg.failureCooldown = 120ms;
+  start();
+  const auto stopWorker = qScopeGuard([&] { shadow.reset(); });
+  ASSERT_TRUE(eventually([&] {
+    return LogCapture::count("Shadow roller retry product=BTC-USD") >= 6;
+  }));
+  EXPECT_EQ(count(), 0u); // no handshake or applied cursor before exhaustion
+  EXPECT_TRUE(has("sentinel_roller_shadow_retry_exhausted{product=\"BTC-USD\"} 1"));
+  EXPECT_EQ(LogCapture::count("Shadow roller retry limit reached product=BTC-USD"), 1u);
+  startFanout();
+  // Cross the next minute fence so recovery includes a durable checkpoint.
+  for (int t = 64; t <= 125; ++t) writer->append(record(t*1000));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return count() == 126; }));
+  ASSERT_TRUE(eventually([&] {
+    return has("sentinel_roller_shadow_retry_exhausted{product=\"BTC-USD\"} 0");
+  }));
+  shadow.reset();
+  expectAppliedJournal(*this);
+  EXPECT_EQ(LogCapture::count("Shadow roller retry budget recovered product=BTC-USD"), 1u);
+  EXPECT_EQ(LogCapture::count("Shadow roller retry limit reached product=BTC-USD"), 1u);
+}
+
+TEST_F(ShadowTest, MissingJournalBeyondRetryBudgetSelfHealsWithoutReplay) {
+  LogCapture logs;
+  initial();
+  cfg.maxFailuresWithoutProgress = 4;
+  cfg.failureCooldown = 120ms;
+  start();
+  const auto stopWorker = qScopeGuard([&] { shadow.reset(); });
+  ASSERT_TRUE(eventually([&] { return count() == 64; }));
+  publish = false;
+  for (int t = 64; t <= 125; ++t) writer->append(record(t*1000));
+  writer->flush();
+  fs::rename(root / "raw", root / "unmounted");
+  fanout->publish(0, {capture::JournalEventKind::Durable, durable.runId,
+                      durable.block, durable.record, true, {}});
+  fanout->publish(0, {capture::JournalEventKind::Retract, durable.runId,
+                      durable.block, durable.record, true, {}});
+  ASSERT_TRUE(eventually([&] {
+    return LogCapture::count("Shadow roller retry product=BTC-USD") >= 6;
+  }));
+  EXPECT_EQ(count(), 64u);
+  EXPECT_TRUE(has("sentinel_roller_shadow_retry_exhausted{product=\"BTC-USD\"} 1"));
+  fs::rename(root / "unmounted", root / "raw");
+  publish = true;
+  ASSERT_TRUE(eventually([&] { return count() == 126; }));
+  ASSERT_TRUE(eventually([&] {
+    return has("sentinel_roller_shadow_retry_exhausted{product=\"BTC-USD\"} 0");
+  }));
+  shadow.reset();
+  expectAppliedJournal(*this);
+  EXPECT_EQ(LogCapture::count("Shadow roller retry limit reached product=BTC-USD"), 1u);
+  EXPECT_EQ(LogCapture::count("Shadow roller retry budget recovered product=BTC-USD"), 1u);
 }
 
 TEST_F(ShadowTest, RetryLimitLeavesOtherProductConsuming) {
@@ -4057,6 +4139,7 @@ TEST_F(ShadowTest, RetryLimitLeavesOtherProductConsuming) {
   for (int t = 1; t <= 63; ++t) eth.append(record(t*1000));
   eth.flush();
   cfg.maxFailuresWithoutProgress = 4;
+  cfg.failureCooldown = 120ms;
   const auto checkpoint = root / "shadow" / Product / "roller.json";
   fs::create_directories(checkpoint.parent_path());
   std::ofstream(checkpoint) << "{";
@@ -4067,12 +4150,15 @@ TEST_F(ShadowTest, RetryLimitLeavesOtherProductConsuming) {
   shadow = std::make_unique<ShadowRoller>(cfg, std::vector<std::string>{Product, "ETH-USD"}, *metrics);
   const auto stopWorker = qScopeGuard([&] { shadow.reset(); });
   ASSERT_TRUE(eventually([&] {
-    return LogCapture::count("Shadow roller retry limit reached product=BTC-USD") == 1;
+    return LogCapture::count("Shadow roller retry product=BTC-USD") >= 6;
   }));
   ASSERT_TRUE(eventually([&] { return ethApplied.load() == 64; }));
   for (int t = 64; t <= 125; ++t) eth.append(record(t*1000));
   eth.flush();
   ASSERT_TRUE(eventually([&] { return ethApplied.load() == 126; }));
+  EXPECT_EQ(LogCapture::count("Shadow roller retry limit reached product=BTC-USD"), 1u);
+  EXPECT_TRUE(has("sentinel_roller_shadow_retry_exhausted{product=\"BTC-USD\"} 1"));
+  EXPECT_TRUE(has("sentinel_roller_shadow_retry_exhausted{product=\"ETH-USD\"} 0"));
   EXPECT_FALSE(shadow->running(Product));
   EXPECT_TRUE(shadow->running("ETH-USD"));
   EXPECT_TRUE(has("sentinel_roller_shadow_setup_failures_total{product=\"ETH-USD\"} 0"));

@@ -344,6 +344,7 @@ minimum elapsed time for an identical-failure streak before slow probes begin.
 | `sentinel_roller_shadow_records_applied_total` | counter | product | Applied durable records, including deterministic restart/day warmup replay. |
 | `sentinel_roller_shadow_setup_failures_total` | counter | product | Setup, socket framing, continuity or write failures that trigger backoff. Malformed journal payloads invalidate and continue like batch. |
 | `sentinel_roller_shadow_fault_cooldown` | gauge | product | 1 after at least three identical consecutive faults spanning `fault_min_duration_ms` without new committed progress; 0 after new durable checkpoint progress or a different fault. |
+| `sentinel_roller_shadow_retry_exhausted` | gauge | product | 1 after 32 failures without new committed progress, across error reasons; cooldown probes continue. New committed progress clears it to 0. |
 | `sentinel_roller_shadow_fault_cooldowns_total` | counter | product | Entries into the persistent-fault slow probe loop. |
 | `sentinel_roller_shadow_start_failures_total` | counter | - | Supervisor construction failure, such as inability to create worker threads. |
 | `sentinel_roller_shadow_mismatch_total` | counter | product, layer | Persisted count of strict same-journal mismatching buckets, including one-sided missing and partial buckets. Series absent until checkpoint restore completes; restart does not re-count old hours. |
@@ -380,9 +381,13 @@ default without a newer committed watermark**, that product probes once every
 `sentinel-roller-shadow-fault-cooldown` pages after the gauge remains set for
 another **two minutes**. Replaying the old checkpoint does not reset
 the streak. After 32 failures without new committed progress (even with changing
-errors), `Shadow roller retry limit reached` logs an error and stops only that
-product until restart; its running gauge stays zero. Socket/retract/EOF recovery
-keeps the applied durable book in memory
+errors), `Shadow roller retry limit reached` logs one error per exhaustion episode,
+sets `sentinel_roller_shadow_retry_exhausted` to 1, and keeps probing every
+`failureCooldown` (ten minutes by default), even if the error changes.
+`sentinel-roller-shadow-retry-exhausted` pages immediately while that gauge is 1:
+check capture, the journal volume and the log. New committed progress clears
+the gauge and logs `Shadow roller retry budget recovered`; no restart is needed.
+Socket/retract/EOF recovery keeps the applied durable book in memory
 and resumes the journal at its exclusive applied cursor. Recorder failures and
 process restarts reconstruct from the first incomplete day's anchor with the
 persisted commit floor; resuming a stateless book at a position alone is invalid.
