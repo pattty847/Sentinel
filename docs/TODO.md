@@ -33,6 +33,9 @@ Detail belongs in the linked plan or file, not in the item.
 - On a screener request the deployed server runs `screener/screener_fetch.py` from the repo checkout (`SentinelStreamServer.cpp:1142-1154`): agent-writable code with the owner's privileges.
 - GUI Agent API (17100) has no authentication; client auth does not exist.
 - The ntfy topic is in plain text in the grafana plist.
+- Writer sandbox: Codex writers commit into a quarantine object directory that land imports by fetch; drop their write access to the shared object store (2026-11-08 audit follow-up; details in Sentinel-Private `private/security-audit-verified.md`).
+- REST candle client: check the server certificate hostname like the WebSocket transport does (`CoinbaseRestClient.cpp:123-171`).
+- Land follow-ups (2026-11-08 review minors): rebase onto the checked `main_tip`, not `main`; reuse the main checkout's rerere cache in the private land repo; manual `agent-worktree.sh remove` refuses a dirty worktree unless forced.
 
 ## Direction (owner, needs its own plan)
 
