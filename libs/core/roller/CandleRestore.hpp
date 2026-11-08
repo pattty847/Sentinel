@@ -21,9 +21,13 @@ constexpr int64_t kRestoreLeadInMs = 60'000;
 // Most files the 100 ms / 1 s window may need (normal spans are 1-2).
 constexpr size_t kRestoreMaxFiles = 4;
 // Most files one rebuild may read for the open bars (hourly files: a day plus
-// the lead-in and one extension). Beyond it the read starts at the cap and
-// the open bars are partial.
+// the lead-in and the safety margin). Beyond it the read starts at the cap and
+// the open bars may be partial.
 constexpr size_t kRestoreOpenBarMaxFiles = 32;
+// Journal time read before the lead-in, so a continuous read has converged on
+// the uninterrupted path (late trades, carried bars) before the first bar that
+// matters. The read starts in the file holding that position.
+constexpr int64_t kRestoreSafetyMarginMs = 7'200'000;
 // Longest timeframe whose open bar is rebuilt.
 constexpr int64_t kRestoreMaxTimeframeMs = 86'400'000;
 
@@ -48,7 +52,6 @@ struct CandleRestoreInput {
     std::map<int64_t, int> historyBars;
     std::function<void(const JournalRecord&)> afterRecordForTest;
     int64_t windowMsForTest = 0;           // 0: kRestoreWindowMs
-    bool forceLeadInRereadForTest = false; // first probe counts as not established
     std::string* failure = nullptr;        // reason when nullopt is returned
 };
 
@@ -69,18 +72,15 @@ struct CandleRestore {
     // newest seen, and those older by more than kRestoreLeadInMs.
     uint64_t records = 0, trades = 0, lateDrops = 0, clockRegressions = 0, deepRegressions = 0;
     size_t files = 0, startFile = 0;
-    size_t reads = 0;  // full replays (always 1 on success)
-    // Lead-in probes and the records they read (each file at most once,
-    // except the first candidate's own lead-in).
-    size_t probes = 0;
-    uint64_t probeRecords = 0;
+    size_t reads = 0;  // journal replays (always 1 on success)
     double readMs = 0; // wall time of every read, re-reads included
 };
 
 // Never throws. nullopt on failure or when `stopping` is set; the caller reads
-// `stopping` to tell them apart. Outcome partial: no 100 ms / 1 s bar older
-// than the window, or no 1 m bar older than the oldest open bucket, could be
-// established inside the file caps; those bars begin at the first accepted
+// `stopping` to tell them apart. One replay from the file holding (the oldest
+// needed bucket - lead-in - safety margin), clamped to the file cap. Outcome
+// partial: that replay holds no 100 ms / 1 s bar older than the window, or no
+// 1 m bar older than the oldest open bucket; those bars begin at the first accepted
 // trade the read holds and the floor guards the rest. Nothing is synthesized
 // for the part of a bucket the journal does not hold.
 std::optional<CandleRestore> rebuildCandles(const CandleRestoreInput& input);

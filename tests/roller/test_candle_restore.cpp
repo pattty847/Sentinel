@@ -254,8 +254,9 @@ TEST(CandleRestore, SelectsTheNewestFileOpenedBeforeTheCutoff) {
     in.failure = &failure;
     const auto restore = rebuildCandles(in);
     ASSERT_TRUE(restore.has_value()) << failure;
-    EXPECT_EQ(restore->startFile, 29u);
-    EXPECT_EQ(restore->files, 1u);
+    EXPECT_EQ(restore->startFile, 27u); // the cutoff less the safety margin falls in 27:00
+    EXPECT_EQ(restore->files, 3u);
+    EXPECT_EQ(restore->reads, 1u);
     EXPECT_EQ(restore->outcome, RestoreOutcome::complete);
     Reference ref(temp.root());
     ref.until(through);
@@ -430,10 +431,9 @@ TEST(CandleRestore, InitialStateExtendsOneFileBackOrIsPartial) {
         const auto restore = rebuildCandles(in);
         ASSERT_TRUE(restore.has_value()) << failure;
         EXPECT_EQ(restore->outcome, RestoreOutcome::complete);
-        EXPECT_EQ(restore->startFile, 0u); // extended one file back from the 11:00 file
+        EXPECT_EQ(restore->startFile, 0u); // the safety margin reaches the 10:00 file
         EXPECT_EQ(restore->files, 2u);
         EXPECT_EQ(restore->reads, 1u);
-        EXPECT_EQ(restore->probes, 2u);
         EXPECT_EQ(restore->lateDrops, 1u);
         const auto& second = restore->series.at(1'000).closed;
         ASSERT_FALSE(second.empty());
@@ -531,9 +531,8 @@ TEST(CandleRestore, OpenBarsFromMinuteToDayEqualTheContinuousPath) {
         ASSERT_TRUE(restore.has_value()) << failure;
         EXPECT_EQ(restore->outcome, RestoreOutcome::complete);
         EXPECT_EQ(restore->openBarsFromMs, Epoch + Day);
-        EXPECT_EQ(restore->startFile, 1u); // 23:00, one minute before the day bucket
+        EXPECT_EQ(restore->startFile, 0u); // the journal's first file, inside the margin
         EXPECT_EQ(restore->reads, 1u);
-        EXPECT_EQ(restore->probes, 1u); // selected directly, no search
         EXPECT_EQ(restore->series.size(), OpenTfs.size());
         Reference ref(temp.root(), OpenTfs);
         ref.until(through);
@@ -698,17 +697,15 @@ TEST(CandleRestore, TimeframeSelection) {
     }
 }
 
-// Eight trade-free hours before a busy day: the lead-in search probes each
-// quiet file once and the day is replayed once (not once per extension). No
-// file establishes a minute before midnight, so the read starts at the first
-// candidate and the outcome is partial; the open bars still equal the
-// continuous path's, since the skipped files hold no trade.
-TEST(CandleRestore, QuietLeadInIsProbedOncePerFileAndReplayedOnce) {
+// A thin product: no trade in the whole safety margin before midnight. One
+// replay from the margin's file; no minute predates the day bucket, so the
+// outcome is partial and nothing is synthesized: the open bars begin at the
+// first trade, equal to the continuous path's (the skipped files hold none).
+TEST(CandleRestore, ThinProductWithoutATradeInTheMarginIsPartial) {
     Temp temp;
-    uint64_t quiet = 0;
     {
         Journal j(temp.root());
-        for (int64_t t = Day - 9 * Hour; t < Day; t += 10 * Second, ++quiet) j.heartbeat(t);
+        for (int64_t t = Day - 9 * Hour; t < Day; t += 10 * Second) j.heartbeat(t);
         irregularRun(j, Day + Minute, Day + 3 * Hour, 1);
     }
     const auto through = positionAt(temp.root(), Day + 2 * Hour + 50 * Minute);
@@ -721,13 +718,77 @@ TEST(CandleRestore, QuietLeadInIsProbedOncePerFileAndReplayedOnce) {
     ASSERT_EQ(inventory.files().size(), 12u); // 15:00 .. 23:00, then 00:00 .. 02:00
     EXPECT_EQ(restore->outcome, RestoreOutcome::partial);
     EXPECT_EQ(restore->reads, 1u);
-    EXPECT_EQ(restore->probes, 9u);   // the 23:00 candidate, then 22:00 .. 15:00 alone
-    EXPECT_LE(restore->probeRecords, quiet + 2); // each quiet record once, plus the deciding one
-    EXPECT_EQ(restore->startFile, 8u);
+    EXPECT_EQ(restore->startFile, 6u); // 21:00: 23:59 less the 2 h margin
     Reference ref(temp.root(), OpenTfs);
     ref.until(through);
     expectOpenBarsEqual(*restore, ref.aggregator);
-    EXPECT_EQ(restore->series.at(86'400'000).active.timestamp_ms, Epoch + Day);
+    const auto& day = restore->series.at(86'400'000).active;
+    EXPECT_EQ(day.timestamp_ms, Epoch + Day);
+    EXPECT_GT(day.count, 0u);
+}
+
+// Review regression: restart at 00:10 with open bars. The window (from 23:40)
+// is carried from a 22:10 trade; the first trade of the 23:00 file (23:50)
+// alone would already give a minute before midnight. The 100 ms / 1 s bars
+// 23:40 .. 23:50 must still equal the continuous path's.
+TEST(CandleRestore, WindowBarsBeforeTheFirstTradeOfTheLeadInFileAreCarried) {
+    Temp temp;
+    {
+        Journal j(temp.root());
+        for (int64_t t = Day - 2 * Hour; t < Day - 10 * Second; t += 10 * Second) {
+            j.heartbeat(t);
+            if (t == Day - 110 * Minute) j.trade(t + 10, "early", 321);
+            if (t == Day - 10 * Minute) j.trade(t + 10, "evening", 333);
+        }
+        irregularRun(j, Day, Day + 15 * Minute, 1);
+    }
+    const auto through = positionAt(temp.root(), Day + 10 * Minute);
+    std::string failure;
+    auto in = openBarInput(temp.root(), through);
+    in.failure = &failure;
+    const auto restore = rebuildCandles(in);
+    ASSERT_TRUE(restore.has_value()) << failure;
+    EXPECT_EQ(restore->outcome, RestoreOutcome::complete);
+    EXPECT_EQ(restore->startFile, 0u);
+    Reference ref(temp.root(), OpenTfs);
+    ref.until(through);
+    TimeframeAggregator window(Tfs, Caps);
+    for (const int64_t tf : Tfs) ASSERT_TRUE(window.restoreSeries("BTC-USD", tf, restore->series.at(tf)));
+    expectWindowEqual(window, ref.aggregator, restore->windowStartMs);
+    const auto& seconds = restore->series.at(1'000).closed;
+    ASSERT_FALSE(seconds.empty());
+    EXPECT_LT(seconds.front().timestamp_ms, Epoch + Day - 10 * Minute); // carried 23:40 .. 23:50
+    EXPECT_DOUBLE_EQ(seconds.front().close, 321);
+    expectOpenBarsEqual(*restore, ref.aggregator);
+}
+
+// Review regression: the 22:00 file ends at 22:58:55 with heartbeats; the
+// 23:00 file's first record delivers a trade stamped 22:58:30. Read from the
+// 23:00 file, the minute floor (22:59) drops it; the continuous path keeps
+// it, and its carried price opens the day bar at midnight.
+TEST(CandleRestore, DelayedTradeAcrossAFileBoundaryOpensTheDay) {
+    Temp temp;
+    {
+        Journal j(temp.root());
+        for (int64_t t = Day - 2 * Hour; t <= Day - Hour - 65 * Second; t += 5 * Second) j.heartbeat(t);
+        j.trade(Day - Hour + 200, "delayed", 555, Day - Hour - 90 * Second);
+        for (int64_t t = Day - Hour + 5 * Second; t < Day; t += 5 * Second) j.heartbeat(t);
+        irregularRun(j, Day + 5 * Minute, Day + Hour + 5 * Minute, 1);
+    }
+    JournalReader inventory(temp.root(), "BTC-USD");
+    ASSERT_EQ(inventory.files().size(), 4u); // 22:00, 23:00, 00:00, 01:00
+    const auto through = positionAt(temp.root(), Day + Hour);
+    std::string failure;
+    auto in = openBarInput(temp.root(), through);
+    in.failure = &failure;
+    const auto restore = rebuildCandles(in);
+    ASSERT_TRUE(restore.has_value()) << failure;
+    EXPECT_EQ(restore->outcome, RestoreOutcome::complete);
+    EXPECT_EQ(restore->startFile, 0u);
+    Reference ref(temp.root(), OpenTfs);
+    ref.until(through);
+    expectOpenBarsEqual(*restore, ref.aggregator);
+    EXPECT_DOUBLE_EQ(restore->series.at(86'400'000).active.open, 555);
 }
 
 // A restart exactly at UTC midnight (the open day bar is still the previous

@@ -5,7 +5,7 @@
 //       adds <count> header-only older files per product (one heartbeat each,
 //       earlier run starts) so selection scans a realistic inventory.
 //   candle_restore_bench run <root> [--threads N] [--file-back K] [--minute M]
-//       [--window-ms W] [--force-reread] [--open-bars] [--cmp] <product>...
+//       [--window-ms W] [--open-bars] [--cmp] <product>...
 //       `through` is the last record at or before minute M of the hour of the
 //       file K places before the newest one. --open-bars also rebuilds the
 //       open bars of the checked-in chart timeframes (1 m .. 1 d); --cmp then
@@ -102,7 +102,7 @@ struct Options {
     fs::path root;
     int threads = 1, fileBack = 0, minute = 50;
     int64_t windowMs = 0;
-    bool forceReread = false, cmp = false;
+    bool cmp = false;
     bool dropResentIdForTest = false; // cmp must then report one missing id
 };
 
@@ -262,7 +262,6 @@ bool runProduct(const Options& o, const std::string& product) {
     in.timeframesMs = RestoreTfs;
     in.historyBars = Caps;
     in.windowMsForTest = o.windowMs;
-    in.forceLeadInRereadForTest = o.forceReread;
     std::string failure;
     in.failure = &failure;
     const auto wall = std::chrono::steady_clock::now();
@@ -339,7 +338,6 @@ int main(int argc, char** argv) try {
         else if (args[i] == "--file-back") o.fileBack = std::stoi(value());
         else if (args[i] == "--minute") o.minute = std::stoi(value());
         else if (args[i] == "--window-ms") o.windowMs = std::stoll(value());
-        else if (args[i] == "--force-reread") o.forceReread = true;
         else if (args[i] == "--cmp") o.cmp = true;
         else if (args[i] == "--open-bars")
             RestoreTfs = restoreTimeframes({100, 1'000, 60'000, 300'000, 900'000, 3'600'000, 14'400'000, 86'400'000});
