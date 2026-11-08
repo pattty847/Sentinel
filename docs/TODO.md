@@ -1,9 +1,13 @@
 # Sentinel TODO
 
-Open work only, one line per item. Done work is in `git log --first-parent`; decisions are in
-`_agent/DECISIONS.md`. The conductor pulls the top Queue item into `docs/STATUS.md` Next when a slot
-opens. Delete an item when it lands or is dropped; do not keep Done lists or session logs here.
-Detail belongs in the linked plan or file, not in the item.
+Open work only, one line per item; delete it when it lands or is dropped. History is git log.
+The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes in the linked plan or file.
+
+## Waves (top-down; one recorder/server item at a time; deploys wait for the owner)
+
+- **Wave 2 (now):** duplicate trade id after anchor resume; read-only "are anchors still needed?" check; Codex: PEPE price units, two flaky tests.
+- **Wave 3:** aesthetics pass, heatmap seam, trade bubbles rethink.
+- **Wave 4:** Security, land follow-ups, Feature ideas check. Then the Queue.
 
 ## Queue (ordered)
 
@@ -20,12 +24,11 @@ Detail belongs in the linked plan or file, not in the item.
    - heatmap and candles drift apart slightly on wheel zoom-out; both mappings have the same slopes, cause unknown; the owner's note on direction decides the next look (FM-001, INV-004);
    - local-time axis labels: `TimeAxisModel` has a `timezone` property no control sets; `HeatmapGpuLayer.cpp` hard-codes UTC; add a setting and route every time label through one timezone;
    - zoom-to-footprint: candles widen into bid/ask footprint cells, then numbers appear (extends Footprint and text LOD below);
-   - **Trade bubbles rethink** (owner 2026-10-25, discussion pending; screenshots in the 2026-10-25 conductor chat): at 1m zoomed out the bubbles bury the chart and say little; zoomed in they sit at trade time inside the candle, which the owner expected at the candle's centre. Topics: x placement (trade time like Bookmap vs candle centre), size/magnitude scaling, separating price-moving or large trades from passive flow (minimum-size/volume filter, aggregation per time slot and price, sweep detection). Bookmap's bubbles are the floor, not the target. Owner 2026-10-27: after a GUI restart bubbles appear only from the start of the session (no history).
+   - **Trade bubbles rethink** (owner 2026-10-25, discussion pending): at 1m zoomed out the bubbles bury the chart and say little; zoomed in they sit at trade time inside the candle, which the owner expected at the candle's centre. Topics: x placement (trade time like Bookmap vs candle centre), size/magnitude scaling, separating price-moving or large trades from passive flow (minimum-size/volume filter, aggregation per time slot and price, sweep detection). Bookmap's bubbles are the floor, not the target. Owner 2026-10-27: after a GUI restart bubbles appear only from the start of the session (no history).
    - **Heatmap stops after sub-minute switches** (owner 2026-10-25, to debug): panning/zooming at 1 s, then 1m -> 1s -> 100ms, left the heatmap empty from the switch time on; back on 1m, time after the switch shows the hatched not-built background. Log `~/Library/Logs/Sentinel/sentinel-gui-20261024-235229-50461.log` 18:10-18:14 EDT: `Heatmap CPU ceiling refused visible spans ... tf=3600000 spans=7 bytes=1189108208` at 18:10:35 (the same ceiling refused spans twice overnight), live subscribe `sub=5206` at 18:12:56 on 1m, no live subscribe at 1 s/100 ms. Known context: live heatmap columns are requested only for tf >= 1 minute (`HeatmapSourceController.cpp:882`, order book plan CE-3). Check whether the 1m live resubscribe resumes and whether the CPU ceiling (about 1 GB committed after a long session) is what leaves spans unbuilt.
-4. **Heatmap/candle zoom drift**: heatmap and candles drift apart slightly on wheel zoom-out (moved from the landed render performance pass, `3a54b829`; see item 4).
-5. **Repeatable performance benchmark** on the owner's machines; cite its numbers in the README (the old 110 FPS figure was removed 2026-10-07).
-6. **README + ARCHITECTURE pass** for the finished one-world architecture; also fix `docs/MARKETDATA.md` (TLS described as optional, single-quad heatmap, 110 FPS).
-7. **CI** for macOS, Windows, Linux (no `.github/workflows` today). Hosted runners have no GPU, so GPU tests skip and report Passed; GPU coverage needs self-hosted runners on the Mac and the Windows machine.
+4. **Repeatable performance benchmark** on the owner's machines; cite its numbers in the README (the old 110 FPS figure was removed 2026-10-07).
+5. **README + ARCHITECTURE pass** for the finished one-world architecture; also fix `docs/MARKETDATA.md` (TLS described as optional, single-quad heatmap, 110 FPS).
+6. **CI** for macOS, Windows, Linux (no `.github/workflows` today). Hosted runners have no GPU (GPU tests skip and report Passed); GPU coverage needs self-hosted runners on the Mac and Windows.
 
 ## Security (owner decides when)
 
