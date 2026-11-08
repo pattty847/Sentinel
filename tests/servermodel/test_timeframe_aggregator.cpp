@@ -304,7 +304,7 @@ TEST(TimeframeAggregatorRestore, InstallsClosedAndActiveWithoutEmitting) {
     ASSERT_TRUE(aggregator.restoreSeries("BTC-USD", 1'000, series));
     EXPECT_TRUE(recorder.events.empty());
     EXPECT_FALSE(aggregator.restoreSeries("BTC-USD", 1'000, series)); // history present
-    EXPECT_FALSE(aggregator.restoreSeries("BTC-USD", 300'000, series)); // not a trade timeframe
+    EXPECT_FALSE(aggregator.restoreSeries("BTC-USD", 300'000, series)); // not configured
     TimeframeAggregator closedOnly({100, 1'000, 60'000});
     TimeframeAggregator::Series closedSeries;
     closedSeries.closed = series.closed;
@@ -619,4 +619,52 @@ TEST(TimeframeAggregatorLiveRollup, GapPublishesNoTradedBarForQuietPeriod) {
             (liveStarts.empty() || liveStarts.back() != e.bar.timestamp_ms))
             liveStarts.push_back(e.bar.timestamp_ms);
     EXPECT_EQ(liveStarts, (std::vector<int64_t>{b - kFive, b + 2 * kFive}));
+}
+
+// A rolled timeframe takes its open bar (the bucket's closed minutes) and
+// continues exactly like one that folded those minutes itself.
+TEST(TimeframeAggregatorRestore, RolledTimeframeOpenBarContinuesLikeTheContinuousOne) {
+    const std::vector<int64_t> tfs{60'000, 300'000, 3'600'000};
+    TimeframeAggregator continuous(tfs);
+    const auto feed = [](TimeframeAggregator& a, int fromMinute, int toMinute) {
+        for (int m = fromMinute; m < toMinute; ++m)
+            for (int s = 5; s < 60; s += 20) a.onTrade(tradeAt(at(m, s), 100 + (m * 7 + s) % 13, 1 + s % 3));
+    };
+    feed(continuous, 0, 7); // 12:00 .. 12:06:45; 12:05 and 12:06 minutes in the open 5 m bucket
+    TimeframeAggregator restored(tfs);
+    Recorder recorder(restored, tfs);
+    for (const int64_t tf : tfs) {
+        auto series = continuous.exportSeries("BTC-USD", tf);
+        series.closed.clear();
+        ASSERT_TRUE(restored.restoreSeries("BTC-USD", tf, series)) << tf;
+        EXPECT_FALSE(restored.restoreSeries("BTC-USD", tf, series)) << tf; // open bar present
+    }
+    EXPECT_TRUE(recorder.events.empty());
+    TimeframeAggregator::Series floored;
+    floored.floorMs = at(0, 0);
+    TimeframeAggregator other(tfs);
+    EXPECT_FALSE(other.restoreSeries("BTC-USD", 300'000, floored)); // rolled timeframes have no floor
+    EXPECT_FALSE(other.restoreSeries("BTC-USD", 900'000, {}));      // not configured
+    feed(continuous, 7, 12);
+    feed(restored, 7, 12);
+    continuous.advance("BTC-USD", at(12, 1));
+    restored.advance("BTC-USD", at(12, 1));
+    for (const int64_t tf : {300'000, 3'600'000}) {
+        auto want = continuous.getHistory("BTC-USD", tf);
+        std::erase_if(want, [](const OHLCVBar& b) { return b.timestamp_ms < at(5, 0); });
+        expectSameHistory(restored.getHistory("BTC-USD", tf), want, tf);
+        EXPECT_TRUE(sameBar(restored.exportSeries("BTC-USD", tf).active,
+                            continuous.exportSeries("BTC-USD", tf).active)) << tf;
+    }
+    EXPECT_EQ(restored.getHistory("BTC-USD", 300'000).size(), 1u); // 12:05 closed with both halves
+
+    // An absent rolled bar installs none: the next closed minute starts it,
+    // and no zero bar is ever closed.
+    TimeframeAggregator empty(tfs);
+    ASSERT_TRUE(empty.restoreSeries("BTC-USD", 300'000, {}));
+    EXPECT_FALSE(hasBar(empty.exportSeries("BTC-USD", 300'000).active));
+    feed(empty, 0, 2);
+    empty.advance("BTC-USD", at(2, 1));
+    EXPECT_TRUE(empty.getHistory("BTC-USD", 300'000).empty());
+    EXPECT_EQ(empty.exportSeries("BTC-USD", 300'000).active.timestamp_ms, at(0, 0));
 }

@@ -194,12 +194,9 @@ bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
         }
         shadow.model = journalModelSink();
         const auto products = shadow.products.empty() ? symbols : rollerProducts(m_serverConfig);
-        // Restart rebuild of the RAM-served trade timeframes (100 ms, 1 s).
-        shadow.candleTimeframesMs.clear();
-        for (const int64_t tf : {int64_t{100}, int64_t{1000}})
-            if (std::find(m_serverConfig.chart.timeframesMs.begin(), m_serverConfig.chart.timeframesMs.end(), tf) !=
-                m_serverConfig.chart.timeframesMs.end())
-                shadow.candleTimeframesMs.push_back(tf);
+        // Restart rebuild: the RAM-served 100 ms / 1 s windows and the open
+        // bar of every served timeframe from 1 m to 1 d.
+        shadow.candleTimeframesMs = sentinel::roller::restoreTimeframes(m_serverModel->candleTimeframes());
         shadow.candleHistoryBars = m_serverConfig.chart.historyBars;
         // Same condition as the roller's rebuild: every product it rebuilds
         // (or refuses) posts exactly once, which ends its warming.

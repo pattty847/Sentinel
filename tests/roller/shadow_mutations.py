@@ -368,8 +368,8 @@ mutations.extend([
     ('b2r2 deep regression boundary', CR,
      'if (maxSeenMs - ms > kRestoreLeadInMs)', 'if (maxSeenMs - ms >= kRestoreLeadInMs)',
      'CandleRestore.CountsReceiveClockRegressionsWithoutChangingTheOutcome', RESTORE),
-    ('b2r2 lead-in extension', CR,
-     'const bool extend = !ok && start > 0', 'const bool extend = false && start > 0',
+    ('b2r2 lead-in safety margin', CR,
+     'selectStart(*inv, cutoffMs - kRestoreSafetyMarginMs)', 'selectStart(*inv, cutoffMs)',
      'CandleRestore.InitialStateExtendsOneFileBackOrIsPartial', RESTORE),
     ('b2r2 rebuild seeds the floor', CR,
      'aggregator.seedJournalFloor(in.product, out.seedMs, in.timeframesMs);', ';',
@@ -471,6 +471,43 @@ if (ROOT / CBS).read_text().find('kWarmingRetryMs') >= 0:
          'if (m_candleBackfill.warming(symbol, timeframeMs, startMs, endMs, QDateTime::currentMSecsSinceEpoch()))',
          'if (false)', 'CandleDataSourceTest.WarmingSelectionSwitchSendsTheOtherRequestAtOnce', SOURCE),
     ])
+# Restart open bars (1 m .. 1 d) rebuilt by the startup read.
+mutations.extend([
+    ('openbars read starts before the oldest open bucket', CR,
+     'if (openBars) cutoffMs = std::min(cutoffMs, out.openBarsFromMs - kRestoreLeadInMs);', ';',
+     'CandleRestore.OpenBarsFromMinuteToDayEqualTheContinuousPath', RESTORE),
+    ('openbars minute established before the oldest open bucket', CR,
+     '(!openBars || established(aggregator, in.product, kMinuteMs, out.openBarsFromMs))', 'true',
+     'CandleRestore.OpenBucketBeforeTheJournalIsPartial', RESTORE),
+    ('openbars safety margin carries the window', CR,
+     'selectStart(*inv, cutoffMs - kRestoreSafetyMarginMs)', 'selectStart(*inv, cutoffMs - kRestoreLeadInMs)',
+     'CandleRestore.WindowBarsBeforeTheFirstTradeOfTheLeadInFileAreCarried', RESTORE),
+    ('openbars safety margin keeps a delayed boundary trade', CR,
+     'selectStart(*inv, cutoffMs - kRestoreSafetyMarginMs)', 'selectStart(*inv, cutoffMs - kRestoreLeadInMs)',
+     'CandleRestore.DelayedTradeAcrossAFileBoundaryOpensTheDay', RESTORE),
+    ('openbars open bucket from the lagged watermark', CR,
+     "const int64_t watermarkMs = bucketStart(out.throughMs, 1'000) - kLagMs;",
+     'const int64_t watermarkMs = out.throughMs;',
+     'CandleRestore.MidnightRestartsRebuildAndRollTheDayBar', RESTORE),
+    ('openbars cap never hides a clock-ahead file', CR,
+     'if (aheadMs > cutoffMs && aheadMs > inv->files[start].openedMs)', 'if (false)',
+     'CandleRestore.ClockRegressionBeyondTheFileCapFails', RESTORE),
+    ('openbars file cap', CR,
+     'const size_t earliest = span(0) > fileCap ? inv->throughFile + 1 - fileCap : 0;',
+     'const size_t earliest = 0;', 'CandleRestore.OpenBarReadStopsAtTheFileCap', RESTORE),
+    ('openbars rolled bar installed', TA,
+     '} else if (series.active.count != 0 || series.active.timestamp_ms != 0) {', '} else if (false) {',
+     'TimeframeAggregatorRestore.RolledTimeframeOpenBarContinuesLikeTheContinuousOne', AGG),
+    ('openbars absent rolled bar installs none', TA,
+     '} else if (series.active.count != 0 || series.active.timestamp_ms != 0) {', '} else if (true) {',
+     'TimeframeAggregatorRestore.RolledTimeframeOpenBarContinuesLikeTheContinuousOne', AGG),
+    ('openbars server rebuilds 1 m .. 1 d', APP,
+     'shadow.candleTimeframesMs = sentinel::roller::restoreTimeframes(m_serverModel->candleTimeframes());',
+     'shadow.candleTimeframesMs = sentinel::roller::restoreTimeframes({100, 1000});',
+     'ShadowTest.CandleRestoreRebuildsTheOpenFiveMinuteBar'),
+])
+if "--openbars" in sys.argv:
+    mutations = [m for m in mutations if m[0].startswith('openbars')]
 if "--db2" in sys.argv:
     mutations = [m for m in mutations if m[0].startswith('db2-')]
 if "--round1" in sys.argv:

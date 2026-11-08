@@ -15,7 +15,17 @@ struct Failure : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+constexpr int64_t kMinuteMs = 60'000;
+
 int64_t receiveMs(const JournalRecord& r) { return r.record.time.systemNs / 1'000'000; }
+
+// TimeframeAggregator's bucket alignment (UTC epoch).
+int64_t bucketStart(int64_t ms, int64_t tf) {
+    const int64_t q = ms / tf;
+    return (ms < 0 && ms % tf != 0 ? q - 1 : q) * tf;
+}
+
+bool openBarTimeframe(int64_t tf) { return tf >= kMinuteMs; }
 
 struct FileInfo {
     std::string run;
@@ -144,15 +154,30 @@ std::function<bool(const JournalPos&)> defaultBeyond(const Inventory& inv, const
     };
 }
 
+bool supported(int64_t tf) {
+    return tf == 100 || tf == 1'000 ||
+           (tf >= kMinuteMs && tf % kMinuteMs == 0 && tf <= kRestoreMaxTimeframeMs);
+}
+
 void validateTimeframes(const std::vector<int64_t>& timeframes) {
     if (timeframes.empty()) throw Failure("no timeframes");
-    for (const int64_t tf : timeframes)
-        if (tf != 100 && tf != 1'000) throw Failure("unsupported timeframe " + std::to_string(tf));
+    bool minute = false, coarse = false;
+    for (const int64_t tf : timeframes) {
+        if (!supported(tf)) throw Failure("unsupported timeframe " + std::to_string(tf));
+        minute = minute || tf == kMinuteMs;
+        coarse = coarse || tf > kMinuteMs;
+    }
+    if (coarse && !minute) throw Failure("coarse timeframe without 60000");
 }
 
 void exportInto(CandleRestore& out, Read& read, const std::vector<int64_t>& timeframes) {
     for (const int64_t tf : timeframes) {
         auto series = read.aggregator->exportSeries(out.product, tf);
+        if (openBarTimeframe(tf)) { // closed bars come from REST
+            series.closed.clear();
+            out.series[tf] = std::move(series);
+            continue;
+        }
         const auto first = std::partition_point(series.closed.begin(), series.closed.end(),
             [&](const OHLCVBar& bar) { return bar.timestamp_ms < out.windowStartMs; });
         series.closed.erase(series.closed.begin(), first);
@@ -192,41 +217,60 @@ std::optional<CandleRestore> rebuild(const CandleRestoreInput& in, Clock::time_p
     }
     const int64_t windowMs = in.windowMsForTest > 0 ? in.windowMsForTest : kRestoreWindowMs;
     out.windowStartMs = out.throughMs - windowMs;
-    const int64_t cutoffMs = out.windowStartMs - kRestoreLeadInMs;
-    size_t start = selectStart(*inv, cutoffMs);
+    int64_t fineTf = 0;
+    bool openBars = false;
+    for (const int64_t tf : in.timeframesMs) {
+        if (openBarTimeframe(tf)) {
+            // The read's last watermark is at least the start of through's
+            // second minus the lag; each open bucket starts at or after it.
+            const int64_t watermarkMs = bucketStart(out.throughMs, 1'000) - kLagMs;
+            const int64_t from = bucketStart(watermarkMs, tf);
+            out.openBarsFromMs = openBars ? std::min(out.openBarsFromMs, from) : from;
+            openBars = true;
+        } else {
+            fineTf = std::max(fineTf, tf);
+        }
+    }
     const auto span = [&](size_t first) { return inv->throughFile - first + 1; };
-    if (span(start) > kRestoreMaxFiles)
-        throw Failure("file span " + std::to_string(span(start)));
+    const size_t fileCap = openBars ? kRestoreOpenBarMaxFiles : kRestoreMaxFiles;
+    const int64_t fineCutoffMs = out.windowStartMs - kRestoreLeadInMs;
+    if (fineTf && span(selectStart(*inv, fineCutoffMs)) > kRestoreMaxFiles)
+        throw Failure("file span " + std::to_string(span(selectStart(*inv, fineCutoffMs))));
+    int64_t cutoffMs = fineTf ? fineCutoffMs : INT64_MAX;
+    if (openBars) cutoffMs = std::min(cutoffMs, out.openBarsFromMs - kRestoreLeadInMs);
+    // One replay from a fixed position: the margin lets a continuous read
+    // converge on the uninterrupted path before the first bar that matters.
+    const size_t earliest = span(0) > fileCap ? inv->throughFile + 1 - fileCap : 0;
+    const size_t start = std::max(selectStart(*inv, cutoffMs - kRestoreSafetyMarginMs), earliest);
+    // A file the read leaves out (file cap) whose header shows the clock past
+    // the bars this rebuild installs, and past the start file's: the live
+    // aggregator saw that watermark, the read would not. The regression guard's
+    // start is out of reach, so no exact result exists: fail, never install.
+    int64_t aheadMs = INT64_MIN;
+    for (size_t i = 0; i < start; ++i) aheadMs = std::max(aheadMs, inv->files[i].openedMs);
+    if (aheadMs > cutoffMs && aheadMs > inv->files[start].openedMs)
+        throw Failure("clock regression beyond the file cap");
     Plan plan{in, *inv, in.historyBars, in.beyond ? in.beyond : defaultBeyond(*inv, in.through)};
     for (const int64_t tf : in.timeframesMs) {
-        const int need = static_cast<int>((windowMs + kRestoreLeadInMs) / tf + 2);
+        const int64_t covered = openBarTimeframe(tf) ? out.throughMs - cutoffMs : windowMs + kRestoreLeadInMs;
+        const int need = static_cast<int>(covered / tf + 2);
         auto [cap, inserted] = plan.caps.try_emplace(tf, need);
         cap->second = std::max(cap->second, need);
     }
-    const int64_t checkTf = *std::max_element(in.timeframesMs.begin(), in.timeframesMs.end());
     sLog_App("Candle restore start product=" << in.product.c_str() << " through="
              << in.through.run.c_str() << "/" << in.through.block << "/" << in.through.record
              << " throughMs=" << out.throughMs << " windowStartMs=" << out.windowStartMs
-             << " startFile=" << start << " throughFile=" << inv->throughFile
+             << " openBarsFromMs=" << out.openBarsFromMs << " startFile=" << start << " throughFile=" << inv->throughFile
              << " inventory=" << inv->files.size());
-    bool forceReread = in.forceLeadInRereadForTest;
-    for (;;) {
-        auto read = readFrom(plan, start);
-        if (!read) return std::nullopt;
-        const bool forced = std::exchange(forceReread, false);
-        const bool ok =
-            !forced && established(*read->aggregator, in.product, checkTf, out.windowStartMs);
-        const bool extend = !ok && start > 0 && span(start - 1) <= kRestoreMaxFiles;
-        if (extend) {
-            sLog_App("Candle restore lead-in not established product=" << in.product.c_str()
-                     << " startFile=" << start << " action=read_one_file_earlier");
-            --start;
-            continue;
-        }
-        out.outcome = ok ? RestoreOutcome::complete : RestoreOutcome::partial;
-        exportInto(out, *read, in.timeframesMs);
-        break;
-    }
+    auto read = readFrom(plan, start);
+    if (!read) return std::nullopt;
+    ++out.reads;
+    const auto& aggregator = *read->aggregator;
+    const bool ok =
+        (!fineTf || established(aggregator, in.product, fineTf, out.windowStartMs)) &&
+        (!openBars || established(aggregator, in.product, kMinuteMs, out.openBarsFromMs));
+    out.outcome = ok ? RestoreOutcome::complete : RestoreOutcome::partial;
+    exportInto(out, *read, in.timeframesMs);
     out.startFile = start;
     out.files = span(start);
     out.readMs = std::chrono::duration<double, std::milli>(Clock::now() - began).count();
@@ -234,6 +278,17 @@ std::optional<CandleRestore> rebuild(const CandleRestoreInput& in, Clock::time_p
     return out;
 }
 } // namespace
+
+std::vector<int64_t> restoreTimeframes(const std::vector<int64_t>& configuredMs) {
+    std::vector<int64_t> out;
+    for (const int64_t tf : configuredMs)
+        if (supported(tf)) out.push_back(tf);
+    if (std::any_of(out.begin(), out.end(), [](int64_t tf) { return tf > kMinuteMs; }))
+        out.push_back(kMinuteMs);
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
 
 std::optional<CandleRestore> rebuildCandles(const CandleRestoreInput& in) {
     const auto began = Clock::now();
@@ -252,7 +307,7 @@ std::optional<CandleRestore> rebuildCandles(const CandleRestoreInput& in) {
                          << " deepRegressions=" << out->deepRegressions);
         sLog_App("Candle restore built product=" << in.product.c_str()
                  << " outcome=" << outcomeName(out->outcome) << " startFile=" << out->startFile
-                 << " files=" << out->files << " records=" << out->records
+                 << " files=" << out->files << " reads=" << out->reads << " records=" << out->records
                  << " trades=" << out->trades << " lateDrops=" << out->lateDrops
                  << " clockRegressions=" << out->clockRegressions
                  << " deepRegressions=" << out->deepRegressions

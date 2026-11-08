@@ -98,12 +98,14 @@ public:
     static constexpr int64_t kJournalCandleLagMs = 1000;
     void onFeedWatermark(const std::string& symbol, int64_t journalMs);
     void setReseedHandler(std::function<void(const std::string&)> handler);
+    // The aggregator's candle timeframes (fixed at construction).
+    std::vector<int64_t> candleTimeframes() const;
     // Startup candle rebuild. Main thread, once, before any stream session:
     // these products page their 100 ms / 1 s history only after their
     // rebuild ends. A product never listed is ready (a bare model never warms).
     void setCandleHistoryWarming(const std::vector<std::string>& products);
-    // Main thread: installs the rebuilt window into an empty series (else
-    // refused, live bars kept) and marks the product ready, whatever the
+    // Main thread: installs the rebuilt window and open bars into empty series
+    // (else refused, live bars kept) and marks the product ready, whatever the
     // outcome (nullopt: failed or refused, the window stays empty).
     void onCandleHistoryRestored(const std::string& symbol,
                                  std::optional<sentinel::roller::CandleRestore> restore);
