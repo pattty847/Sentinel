@@ -6,7 +6,7 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
 ## Waves (top-down; one recorder/server item at a time; deploys wait for the owner)
 
 - **Wave 2 (now):** duplicate trade id after anchor resume; read-only "are anchors still needed?" check; Codex: PEPE price units, two flaky tests.
-- **Wave 3:** aesthetics pass, heatmap seam, trade bubbles rethink.
+- **Wave 3:** aesthetics, heatmap seam, trade bubbles rethink.
 - **Wave 4:** Security, land follow-ups, Feature ideas check. Then the Queue.
 
 ## Queue (ordered)
