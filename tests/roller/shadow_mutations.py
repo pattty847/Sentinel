@@ -64,7 +64,7 @@ mutations = [
      'o.onInvalid = [&](const std::string &reason) { if (reason.starts_with("malformed")) throw std::logic_error(reason);',
      'ShadowTest.MalformedRecordInvalidatesAndContinuesLikeBatch'),
     ('persistent fault cooldown', SR,
-     'coolingDown ? cfg.failureCooldown : backoff', 'backoff',
+     '(retryExhausted || coolingDown) ? cfg.failureCooldown : backoff', 'backoff',
      'ShadowTest.PersistentWriteFaultEntersCooldownAndRecovers'),
     ('cooldown minimum duration', SR,
      'now - *failureSince >= cfg.failureMinDuration', 'true',
@@ -506,6 +506,63 @@ mutations.extend([
      'shadow.candleTimeframesMs = sentinel::roller::restoreTimeframes({100, 1000});',
      'ShadowTest.CandleRestoreRebuildsTheOpenFiveMinuteBar'),
 ])
+mutations.extend([
+    ('cursor reconnect requires equality again', 'libs/core/roller/JournalReader.cpp',
+     'if (first.pos == applied) return;',
+     'if (first.pos == applied) return; throw std::runtime_error("lost cursor");',
+     'CorruptCursor.RepeatedReopenMustMakeProgress', 'test_roller_corrupt_blocks'),
+    ('cursor reconnect retains the successor', 'libs/core/roller/JournalReader.cpp',
+     'putBack(std::move(first));', ';',
+     'CorruptCursor.ReplayInvalidatesOnceAndNeverAnchorsAnUnreportedGap', 'test_roller_corrupt_blocks'),
+    ('cursor reconnect requires a reported gap', 'libs/core/roller/JournalReader.cpp',
+     '!first.gapBefore || !damaged_', '!damaged_',
+     'CorruptCursor.PlainMismatchAndBackwardGapAreRejected', 'test_roller_corrupt_blocks'),
+    ('cursor reconnect preserves invalidation', 'libs/core/roller/JournalReader.cpp',
+     'putBack(std::move(first));', 'first.gapBefore = false; putBack(std::move(first));',
+     'CorruptCursor.ReplayInvalidatesOnceAndNeverAnchorsAnUnreportedGap', 'test_roller_corrupt_blocks'),
+    ('cursor reconnect observable failure budget', SR,
+     'if (!retryExhausted && ++failuresWithoutProgress >= cfg.maxFailuresWithoutProgress)', 'if (false)',
+     'ShadowTest.RetryLimitCountsChangingFailuresAndKeepsSlowProbes'),
+    ('cursor reconnect distinguishes the initial reader boundary', 'libs/core/roller/JournalReader.cpp',
+     '!first.gapBefore || !damaged_ ||', '!first.gapBefore ||',
+     'CorruptCursor.PlainMismatchAndBackwardGapAreRejected', 'test_roller_corrupt_blocks'),
+    ('cursor reconnect budget spans error reasons', SR,
+     'if (!failureSince || reason != lastFailure) {',
+     'if (!failureSince || reason != lastFailure) { failuresWithoutProgress = 0;',
+     'ShadowTest.RetryLimitCountsChangingFailuresAndKeepsSlowProbes'),
+])
+mutations.extend([
+    ('retry exhaustion keeps probing', SR,
+     'wait(delay);', 'if (retryExhausted) { wait(std::chrono::hours(1)); } else { wait(delay); }',
+     'ShadowTest.RetryLimitCountsChangingFailuresAndKeepsSlowProbes'),
+    ('retry exhaustion logs once', SR,
+     '!retryExhausted && ++failuresWithoutProgress', '++failuresWithoutProgress',
+     'ShadowTest.RetryLimitCountsChangingFailuresAndKeepsSlowProbes'),
+    ('retry exhaustion latches slow probes across error reasons', SR,
+     '(retryExhausted || coolingDown) ? cfg.failureCooldown : backoff',
+     'coolingDown ? cfg.failureCooldown : backoff',
+     'ShadowTest.RetryLimitCountsChangingFailuresAndKeepsSlowProbes'),
+    ('retry exhaustion exposes the gauge', SR,
+     'p.retryExhausted->set(1);', ';',
+     'ShadowTest.RetryLimitCountsChangingFailuresAndKeepsSlowProbes'),
+    ('retry recovery must not clear on applied records alone', SR,
+     'p.records->inc();', 'p.records->inc(); p.retryExhausted->set(0);',
+     'ShadowTest.ReconnectRetryLimitKeepsProbingAndRecoversWithoutReplay'),
+    ('retry recovery requires new committed progress', SR,
+     'failuresWithoutProgress = 0; if (std::exchange(retryExhausted, false))',
+     'failuresWithoutProgress = 0; if (false)',
+     'ShadowTest.ReconnectRetryLimitKeepsProbingAndRecoversWithoutReplay'),
+])
+if "--retry-exhaustion" in sys.argv:
+    mutations = [m for m in mutations if m[0].startswith('retry exhaustion')]
+if "--retry-recovery-native" in sys.argv:
+    mutations = [m for m in mutations if m[0].startswith('retry recovery')]
+if "--cursor-reconnect" in sys.argv:
+    mutations = [m for m in mutations if m[0].startswith('cursor reconnect')]
+if "--reconnect-native" in sys.argv:
+    mutations = [m for m in mutations if m[0] in (
+        'durable admission', 'disk ceiling', 'duplicate overlap',
+        'transport retains applied book state')]
 if "--openbars" in sys.argv:
     mutations = [m for m in mutations if m[0].startswith('openbars')]
 if "--db2" in sys.argv:

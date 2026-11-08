@@ -43,9 +43,17 @@ of unowned files.
   are `(product, run_id, block ordinal, record index)`, inclusive when reopening.
   If a saved position lies in a corrupt payload block, the reader returns its
   first readable successor with a gap instead. Callers that require the exact
-  cursor must handle that recovery case explicitly.
+  cursor must handle that recovery case explicitly. Live reconnect retains the proven
+  successor with its gap: the existing `journal boundary` invalidation and
+  `sentinel_roller_invalidations_total` counter apply before any book update,
+  checkpoint or post-gap anchor.
   To poll an open file, reopen and skip the already applied position. Inventory
   refresh is explicit; this batch CLI does not wait forever for new records.
+  After 32 failures without new committed progress (across error reasons), a live
+  worker logs one error, sets `sentinel_roller_shadow_retry_exhausted{product}`
+  and keeps probing at the cooldown cadence. The matching Grafana alert points
+  to capture, the journal volume and the log; new committed progress clears the
+  gauge with an info log. Recovery needs no restart and other products continue.
 - Reader framing is shared with capture. The verifier's strict default remains
   unchanged. Roller replay and anchor searches skip complete payload CRC/zstd
   failures and damaged block headers/magic. A sealed file's CRC-checked closing

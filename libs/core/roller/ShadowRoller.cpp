@@ -938,9 +938,7 @@ public:
           if (!diskDone) {
             catchup = std::make_unique<JournalReader>(cfg.journalRoot, product,
                                                       applied);
-            JournalRecord cursor;
-            if (!catchup->next(cursor) || cursor.pos != *applied)
-              throw std::runtime_error("resume cursor unavailable in journal");
+            catchup->skipApplied(*applied);
           }
           initialDetached = false;
           recovering = false;
@@ -978,9 +976,7 @@ private:
       if (*ceiling != *applied) {
         catchup =
             std::make_unique<JournalReader>(cfg.journalRoot, product, applied);
-        JournalRecord cursor;
-        if (!catchup->next(cursor) || cursor.pos != *applied)
-          throw std::runtime_error("resume cursor unavailable in journal");
+        catchup->skipApplied(*applied);
         diskDone = false;
       }
     }
@@ -1146,7 +1142,7 @@ nlohmann::json rollShadowOracleHour(const fs::path &journalRoot,
 struct ShadowRoller::Impl {
   struct Product {
     std::string name;
-    metrics::Gauge *running, *lastComparison, *cooldown;
+    metrics::Gauge *running, *lastComparison, *cooldown, *retryExhausted;
     metrics::Counter *records, *failures, *compareFailures, *cooldowns,
         *leadForks, *invalidations, *writeErrors;
     metrics::Counter *minuteColumns = nullptr;
@@ -1236,6 +1232,9 @@ struct ShadowRoller::Impl {
       p->cooldown = &registry.gauge(
           "sentinel_roller_shadow_fault_cooldown",
           "Product is probing a persistent fault at slow cadence.", labels);
+      p->retryExhausted = &registry.gauge(
+          "sentinel_roller_shadow_retry_exhausted",
+          "Retry budget exhausted without new committed progress; slow probes continue.", labels);
       p->cooldowns =
           &registry.counter("sentinel_roller_shadow_fault_cooldowns_total",
                             "Entries into persistent-fault cooldown.", labels);
@@ -1428,6 +1427,7 @@ struct ShadowRoller::Impl {
             "shadow output aliases a configured recorder root");
     if (cfg.retryMin.count() <= 0 || cfg.retryMax < cfg.retryMin ||
         cfg.compareInterval.count() <= 0 || cfg.failureThreshold == 0 ||
+        cfg.maxFailuresWithoutProgress == 0 ||
         cfg.failureMinDuration.count() <= 0 ||
         cfg.failureCooldown < cfg.retryMax ||
         cfg.resnapshotRetryMin.count() <= 0 ||
@@ -1441,9 +1441,9 @@ struct ShadowRoller::Impl {
   void run(Product &p) noexcept {
     auto backoff = cfg.retryMin;
     std::string lastFailure;
-    unsigned consecutive = 0;
+    unsigned consecutive = 0, failuresWithoutProgress = 0;
     std::optional<std::chrono::steady_clock::time_point> failureSince;
-    bool coolingDown = false;
+    bool coolingDown = false, retryExhausted = false;
     int64_t furthestCommitted = 0;
     // Outlives each day's source and feed: a day rotation re-seeds the model
     // without invalidating it.
@@ -1460,6 +1460,13 @@ struct ShadowRoller::Impl {
         return;
       p.running->set(0);
       p.failures->inc();
+      if (!retryExhausted && ++failuresWithoutProgress >= cfg.maxFailuresWithoutProgress) {
+        retryExhausted = true;
+        p.retryExhausted->set(1);
+        sLog_Error("Shadow roller retry limit reached product=" << p.name
+                   << " failures=" << failuresWithoutProgress << " error=" << reason
+                   << " action=continue_cooldown_probes retryMs=" << cfg.failureCooldown.count());
+      }
       const auto now = cfg.nowForTest ? cfg.nowForTest()
                                       : std::chrono::steady_clock::now();
       if (!failureSince || reason != lastFailure) {
@@ -1476,7 +1483,7 @@ struct ShadowRoller::Impl {
         p.cooldown->set(1);
         p.cooldowns->inc();
       }
-      const auto delay = coolingDown ? cfg.failureCooldown : backoff;
+      const auto delay = (retryExhausted || coolingDown) ? cfg.failureCooldown : backoff;
       sLog_Warning("Shadow roller retry product="
                    << p.name << " error=" << reason << " consecutive="
                    << consecutive << " retryMs=" << delay.count());
@@ -1602,6 +1609,12 @@ struct ShadowRoller::Impl {
             furthestCommitted = through;
             backoff = cfg.retryMin;
             consecutive = 0;
+            failuresWithoutProgress = 0;
+            if (std::exchange(retryExhausted, false)) {
+              p.retryExhausted->set(0);
+              sLog_App("Shadow roller retry budget recovered product=" << p.name
+                       << " committedThroughMs=" << through);
+            }
             lastFailure.clear();
             failureSince.reset();
             coolingDown = false;

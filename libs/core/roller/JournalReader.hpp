@@ -43,6 +43,9 @@ public:
     JournalReader(std::filesystem::path root, std::string product,
                   std::optional<JournalPos> start = {});
     bool next(JournalRecord& out);
+    // Consume the inclusive applied cursor, or retain a proven gap successor
+    // for normal feed invalidation. Any unreported mismatch remains fatal.
+    void skipApplied(const JournalPos& applied);
     // Return validated records in reverse order to replay without decoding twice.
     void putBack(JournalRecord record);
     const std::vector<JournalFile>& files() const { return files_; }

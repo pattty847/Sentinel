@@ -64,6 +64,9 @@ struct ShadowConfig {
   // Three identical faults without new durable progress enter a slow probe
   // loop.
   unsigned failureThreshold = 3;
+  // Across error reasons and reopens; reset only by new committed progress.
+  // Exhaustion alerts and latches slow probes until progress. Not YAML config.
+  unsigned maxFailuresWithoutProgress = 32;
   std::chrono::milliseconds failureMinDuration{120000};
   std::chrono::milliseconds failureCooldown{600000};
   // Deterministic monotonic clock for retry tests.

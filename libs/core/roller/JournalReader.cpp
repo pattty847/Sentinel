@@ -94,6 +94,28 @@ JournalReader::JournalReader(std::filesystem::path root, std::string product, st
         if (!found) throw std::runtime_error("journal position unavailable");
     }
 }
+void JournalReader::skipApplied(const JournalPos& applied) {
+    JournalRecord first;
+    if (!next(first)) throw std::runtime_error("resume cursor unavailable in journal");
+    if (first.pos == applied) return;
+    const auto runIndex = [&](const std::string& run) {
+        return std::find_if(files_.begin(), files_.end(), [&](const auto& f) {
+            return f.header.at("run_id") == run;
+        }) - files_.begin();
+    };
+    const auto a = runIndex(applied.run), b = runIndex(first.pos.run);
+    const bool successor = first.pos.run == applied.run
+        ? std::pair(first.pos.block, first.pos.record) > std::pair(applied.block, applied.record)
+        : a < b && b < static_cast<decltype(b)>(files_.size());
+    // gapBefore also marks the start of a reader. Require observed damage,
+    // not just that initial marker, before admitting a different position.
+    if (!first.gapBefore || !damaged_ || first.pos.product != applied.product || !successor)
+        throw std::runtime_error("resume cursor unavailable in journal");
+    sLog_Warning("Roller resume cursor gap product=" << product_
+                 << " cursor=" << json(applied).dump()
+                 << " successor=" << json(first.pos).dump());
+    putBack(std::move(first));
+}
 void JournalReader::putBack(JournalRecord record) {
     buffered_.push_front(std::move(record));
 }

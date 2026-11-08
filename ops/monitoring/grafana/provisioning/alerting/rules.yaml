@@ -432,6 +432,43 @@ groups:
                   query: { params: [C] }
                   reducer: { type: last, params: [] }
 
+      - uid: sentinel-roller-shadow-retry-exhausted
+        title: Roller retry budget exhausted
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: page
+        annotations:
+          summary: "roller retry budget exhausted, product {{ $labels.product }} not progressing; check capture, journal volume and the log"
+          description: >-
+            The product exhausted its retry budget without new committed progress. Cooldown probes continue and recovery is automatic when the capture, journal volume or logged fault recovers. A new committed checkpoint clears this alert; restarting the server is not required.
+        data:
+          - refId: A
+            relativeTimeRange: { from: 7200, to: 0 }
+            datasourceUid: sentinel-vm
+            model:
+              refId: A
+              expr: max by (product) (sentinel_roller_shadow_retry_exhausted{job="sentinel-server"})
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              datasource: { type: __expr__, uid: __expr__ }
+              conditions:
+                - type: query
+                  evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [C] }
+                  reducer: { type: last, params: [] }
+
       - uid: sentinel-roller-journal-corruption
         title: Roller skipped corrupt journal block
         condition: C
