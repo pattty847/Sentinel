@@ -97,10 +97,11 @@ JournalPos positionAt(const fs::path& root, int64_t rel) {
 struct Reference {
     JournalReader reader;
     JournalFeed feed{"BTC-USD"};
-    TimeframeAggregator aggregator{Tfs, Caps};
+    TimeframeAggregator aggregator;
     std::vector<TimeframeAggregator*> also;
     int64_t sent = INT64_MIN;
-    explicit Reference(const fs::path& root) : reader(root, "BTC-USD") {
+    explicit Reference(const fs::path& root, const std::vector<int64_t>& tfs = Tfs)
+        : reader(root, "BTC-USD"), aggregator(tfs, Caps) {
         feed.onTrade = [this](const Trade& t) {
             aggregator.onTrade(t);
             for (auto* a : also) a->onTrade(t);
@@ -444,5 +445,236 @@ TEST(CandleRestore, InitialStateExtendsOneFileBackOrIsPartial) {
             EXPECT_DOUBLE_EQ(series.closed.front().open, 300) << tf;
             EXPECT_EQ(series.floorMs, std::optional<int64_t>(Epoch + h + 20 * Minute)) << tf;
         }
+    }
+}
+
+namespace {
+constexpr int64_t Day = 24 * Hour;
+const std::vector<int64_t> OpenTfs = restoreTimeframes({100, 1'000, 300'000, 3'600'000, 86'400'000});
+
+// Irregular trades 0.4 .. 6 s apart at a pseudo-random price over [from, to).
+int irregularRun(Journal& j, int64_t from, int64_t to, int id, uint32_t seed = 11) {
+    for (int64_t t = from;;) {
+        seed = seed * 1'103'515'245u + 12'345u;
+        t += 400 + int64_t(seed >> 16) % 5'600;
+        if (t >= to) return id;
+        j.trade(t, std::to_string(id++), 100 + double(seed % 900) / 10);
+    }
+}
+
+CandleRestoreInput openBarInput(const fs::path& root, const JournalPos& through,
+                                std::vector<int64_t> tfs = OpenTfs) {
+    auto in = input(root, through);
+    in.timeframesMs = std::move(tfs);
+    return in;
+}
+
+void expectOpenBarsEqual(const CandleRestore& restore, const TimeframeAggregator& expected) {
+    for (const auto& [tf, series] : restore.series) {
+        if (tf < Minute) continue;
+        EXPECT_TRUE(series.closed.empty()) << tf; // closed 1 m+ bars come from REST
+        EXPECT_TRUE(sameBar(series.active, expected.exportSeries("BTC-USD", tf).active)) << tf;
+    }
+}
+
+// Every 1 m+ bar the live aggregator closed after the restart, and its open
+// bars, equal the continuous path's.
+void expectLiveOpenBarsEqual(const CandleRestore& restore, const TimeframeAggregator& live,
+                             const TimeframeAggregator& expected) {
+    for (const auto& [tf, series] : restore.series) {
+        if (tf < Minute) continue;
+        auto want = expected.getHistory("BTC-USD", tf, 100'000);
+        std::erase_if(want, [&](const OHLCVBar& b) { return b.timestamp_ms < series.active.timestamp_ms; });
+        const auto got = live.getHistory("BTC-USD", tf, 100'000);
+        if (tf == Minute) ASSERT_FALSE(want.empty()); // a bucket that stays open closes none
+        ASSERT_EQ(got.size(), want.size()) << tf;
+        for (size_t i = 0; i < got.size(); ++i) EXPECT_TRUE(sameBar(got[i], want[i])) << tf << " bar " << i;
+        EXPECT_TRUE(sameBar(live.exportSeries("BTC-USD", tf).active, expected.exportSeries("BTC-USD", tf).active))
+            << tf;
+    }
+}
+} // namespace
+
+// Restarts inside an open 1 m, 5 m, 1 h and 1 d bucket, and one minute into a
+// new day: every open bar equals the continuous path's, and live trades after
+// `through` close it exactly as they close the continuous one.
+TEST(CandleRestore, OpenBarsFromMinuteToDayEqualTheContinuousPath) {
+    ASSERT_EQ(OpenTfs, (std::vector<int64_t>{100, 1'000, 60'000, 300'000, 3'600'000, 86'400'000}));
+    Temp temp;
+    {
+        Journal j(temp.root());
+        irregularRun(j, Day - 90 * Minute, Day + 21 * Hour + 5 * Minute, 1);
+    }
+    for (const int64_t at : {Day + 20 * Hour + 17 * Minute + 31 * Second, Day + Minute + 5 * Second}) {
+        SCOPED_TRACE(at);
+        const auto through = positionAt(temp.root(), at);
+        std::string failure;
+        auto in = openBarInput(temp.root(), through);
+        in.failure = &failure;
+        const auto restore = rebuildCandles(in);
+        ASSERT_TRUE(restore.has_value()) << failure;
+        EXPECT_EQ(restore->outcome, RestoreOutcome::complete);
+        EXPECT_EQ(restore->openBarsFromMs, Epoch + Day);
+        EXPECT_EQ(restore->series.size(), OpenTfs.size());
+        Reference ref(temp.root(), OpenTfs);
+        ref.until(through);
+        expectOpenBarsEqual(*restore, ref.aggregator);
+        for (const int64_t tf : {60'000, 300'000, 3'600'000, 86'400'000}) {
+            const auto& open = restore->series.at(tf).active;
+            EXPECT_GT(open.count, 0u) << tf;
+            EXPECT_LT(open.timestamp_ms, Epoch + at) << tf;
+            EXPECT_EQ(open.timestamp_ms % tf, 0) << tf;
+        }
+        // 100 ms and 1 s windows are unchanged by the longer read.
+        TimeframeAggregator window(Tfs, Caps);
+        for (const int64_t tf : Tfs) ASSERT_TRUE(window.restoreSeries("BTC-USD", tf, restore->series.at(tf)));
+        expectWindowEqual(window, ref.aggregator, restore->windowStartMs);
+
+        TimeframeAggregator live(OpenTfs, Caps);
+        for (const auto& [tf, series] : restore->series) ASSERT_TRUE(live.restoreSeries("BTC-USD", tf, series)) << tf;
+        ref.also.push_back(&live);
+        ref.toEnd();
+        expectLiveOpenBarsEqual(*restore, live, ref.aggregator);
+    }
+}
+
+// `through` is a trade, resent by a reconnect right after it: the rebuild
+// counts it once, the live gate (the rebuild's ids) drops the resend, and the
+// open bars continue exactly.
+TEST(CandleRestore, TradeOnTheHandoffPositionCountsOnce) {
+    Temp temp;
+    const int64_t h = Day + 13 * Hour;
+    const int64_t at = h + 42 * Minute + 17 * Second + 300;
+    const json handoff = tradeJson(at - 150, "handoff", 777);
+    {
+        Journal j(temp.root());
+        int id = irregularRun(j, Day - Hour, at - Second, 1);
+        j.trades(at, {handoff});
+        j.resend(at + 200, {handoff});
+        irregularRun(j, at + Second, h + 50 * Minute, id, 5);
+    }
+    const auto through = positionAt(temp.root(), at);
+    std::string failure;
+    auto in = openBarInput(temp.root(), through);
+    in.failure = &failure;
+    const auto restore = rebuildCandles(in);
+    ASSERT_TRUE(restore.has_value()) << failure;
+    EXPECT_EQ(restore->outcome, RestoreOutcome::complete);
+    EXPECT_TRUE(restore->tradeIds.contains("handoff"));
+    const auto& minute = restore->series.at(60'000).active;
+    EXPECT_EQ(minute.timestamp_ms, Epoch + h + 42 * Minute);
+    EXPECT_DOUBLE_EQ(minute.close, 777);
+    Reference ref(temp.root(), OpenTfs);
+    ref.until(through);
+    expectOpenBarsEqual(*restore, ref.aggregator);
+    ref.toEnd();
+
+    // The live side as the tap runs it: a fresh feed from the record after
+    // `through`, the rebuild's ids as the gate, watermarks after its second.
+    TimeframeAggregator live(OpenTfs, Caps);
+    for (const auto& [tf, series] : restore->series) ASSERT_TRUE(live.restoreSeries("BTC-USD", tf, series));
+    JournalFeed feed("BTC-USD");
+    int gated = 0;
+    feed.onTrade = [&](const Trade& t) {
+        if (restore->tradeIds.contains(t.trade_id)) return void(++gated);
+        live.onTrade(t);
+    };
+    JournalReader reader(temp.root(), "BTC-USD");
+    JournalRecord r;
+    bool after = false;
+    int64_t sent = restore->sentSecond;
+    while (reader.next(r)) {
+        if (!after) {
+            after = r.pos == through;
+            continue;
+        }
+        feed.apply(r);
+        const int64_t ms = r.record.time.systemNs / 1'000'000;
+        if (ms / 1000 > sent) {
+            sent = ms / 1000;
+            live.advance("BTC-USD", ms - 1'000);
+        }
+    }
+    EXPECT_GE(gated, 1);
+    expectLiveOpenBarsEqual(*restore, live, ref.aggregator);
+}
+
+// The journal starts after the 1 h and 1 d buckets began: those open bars hold
+// what the journal holds (from its first trade), nothing is synthesized for
+// the rest, and the outcome is partial.
+TEST(CandleRestore, OpenBucketBeforeTheJournalIsPartial) {
+    Temp temp;
+    const int64_t first = Day + 10 * Hour + 5 * Minute;
+    {
+        Journal j(temp.root());
+        j.trade(first, "first", 150);
+        irregularRun(j, first, Day + 10 * Hour + 45 * Minute, 1);
+    }
+    const auto through = positionAt(temp.root(), Day + 10 * Hour + 40 * Minute);
+    std::string failure;
+    auto in = openBarInput(temp.root(), through);
+    in.failure = &failure;
+    const auto restore = rebuildCandles(in);
+    ASSERT_TRUE(restore.has_value()) << failure;
+    EXPECT_EQ(restore->outcome, RestoreOutcome::partial);
+    EXPECT_EQ(restore->startFile, 0u);
+    for (const int64_t tf : {3'600'000, 86'400'000}) {
+        const auto& open = restore->series.at(tf).active;
+        EXPECT_EQ(open.timestamp_ms, Epoch + Day + (tf == 3'600'000 ? 10 * Hour : 0)) << tf;
+        EXPECT_DOUBLE_EQ(open.open, 150) << tf;
+    }
+    Reference ref(temp.root(), OpenTfs);
+    ref.until(through);
+    expectOpenBarsEqual(*restore, ref.aggregator);
+}
+
+// More capture restarts inside the day than the open-bar file cap: the read
+// starts at the cap and the day bar holds only what the capped read holds.
+TEST(CandleRestore, OpenBarReadStopsAtTheFileCap) {
+    Temp temp;
+    {
+        Journal j(temp.root());
+        int id = irregularRun(j, Day - Hour, Day + Minute, 1);
+        for (size_t run = 0; run < kRestoreOpenBarMaxFiles + 2; ++run) {
+            j.newRun();
+            const int64_t from = Day + Minute + int64_t(run) * 90 * Second;
+            id = irregularRun(j, from, from + 90 * Second, id, uint32_t(run) + 3);
+        }
+    }
+    const int64_t end = Day + Minute + int64_t(kRestoreOpenBarMaxFiles + 2) * 90 * Second;
+    const auto through = positionAt(temp.root(), end - 10 * Second);
+    std::string failure;
+    auto in = openBarInput(temp.root(), through, {60'000, 86'400'000});
+    in.failure = &failure;
+    const auto restore = rebuildCandles(in);
+    ASSERT_TRUE(restore.has_value()) << failure;
+    EXPECT_EQ(restore->outcome, RestoreOutcome::partial);
+    EXPECT_EQ(restore->files, kRestoreOpenBarMaxFiles);
+    Reference ref(temp.root(), {60'000, 86'400'000});
+    ref.until(through);
+    const auto& day = restore->series.at(86'400'000).active;
+    const auto expected = ref.aggregator.exportSeries("BTC-USD", 86'400'000).active;
+    EXPECT_EQ(day.timestamp_ms, expected.timestamp_ms);
+    EXPECT_GT(day.count, 0u);
+    EXPECT_LT(day.count, expected.count);
+    EXPECT_TRUE(sameBar(restore->series.at(60'000).active,
+                        ref.aggregator.exportSeries("BTC-USD", 60'000).active));
+}
+
+TEST(CandleRestore, TimeframeSelection) {
+    EXPECT_EQ(restoreTimeframes({1'000, 300'000, 604'800'000, 90'000, 100, 300'000}),
+              (std::vector<int64_t>{100, 1'000, 60'000, 300'000}));
+    EXPECT_EQ(restoreTimeframes({100, 1'000}), (std::vector<int64_t>{100, 1'000}));
+    Temp temp;
+    { Journal j(temp.root()); tradeRun(j, 10 * Hour, 10 * Hour + 5 * Minute, Second, 1); }
+    const auto through = positionAt(temp.root(), 10 * Hour + 4 * Minute);
+    for (const auto& [tfs, reason] : std::vector<std::pair<std::vector<int64_t>, std::string>>{
+             {{100, 300'000}, "coarse timeframe without 60000"},
+             {{60'000, 604'800'000}, "unsupported timeframe 604800000"}}) {
+        std::string failure;
+        auto in = openBarInput(temp.root(), through, tfs);
+        in.failure = &failure;
+        EXPECT_FALSE(rebuildCandles(in).has_value());
+        EXPECT_EQ(failure, reason);
     }
 }

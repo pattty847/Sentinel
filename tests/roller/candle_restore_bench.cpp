@@ -5,9 +5,11 @@
 //       adds <count> header-only older files per product (one heartbeat each,
 //       earlier run starts) so selection scans a realistic inventory.
 //   candle_restore_bench run <root> [--threads N] [--file-back K] [--minute M]
-//       [--window-ms W] [--force-reread] [--cmp] <product>...
+//       [--window-ms W] [--force-reread] [--open-bars] [--cmp] <product>...
 //       `through` is the last record at or before minute M of the hour of the
-//       file K places before the newest one.
+//       file K places before the newest one. --open-bars also rebuilds the
+//       open bars of the checked-in chart timeframes (1 m .. 1 d); --cmp then
+//       compares those open bars with the continuous pass too.
 // Never point it at a live recording root: synth writes into <root>.
 #include "Crc32.hpp"
 #include "roller/CandleRestore.hpp"
@@ -29,6 +31,7 @@ namespace fs = std::filesystem;
 namespace {
 constexpr int64_t HourMs = 3'600'000;
 const std::vector<int64_t> Tfs{100, 1'000};
+std::vector<int64_t> RestoreTfs = Tfs; // Tfs, plus the open-bar timeframes with --open-bars
 // Continuous retention must hold the whole compared window.
 std::map<int64_t, int> Caps{{100, 20'000}, {1'000, 2'000}};
 
@@ -164,7 +167,7 @@ Cmp compare(const Options& o, const CandleRestore& restore) {
     const auto& start = reader.files().at(restore.startFile);
     const JournalPos startPos{product, start.header.at("run_id"),
                               start.header.at("first_block_ordinal").get<uint64_t>(), 0};
-    TimeframeAggregator continuous(Tfs, Caps);
+    TimeframeAggregator continuous(RestoreTfs, Caps);
     std::unique_ptr<TimeframeAggregator> mirror;
     std::unordered_set<std::string> seen, met; // delivered in the read; met in the read
     Cmp out;
@@ -189,8 +192,8 @@ Cmp compare(const Options& o, const CandleRestore& restore) {
     JournalRecord r;
     while (reader.next(r)) {
         if (!mirror && r.pos == startPos) {
-            mirror = std::make_unique<TimeframeAggregator>(Tfs, Caps);
-            mirror->seedJournalFloor(product, restore.seedWatermarkMs, Tfs);
+            mirror = std::make_unique<TimeframeAggregator>(RestoreTfs, Caps);
+            mirror->seedJournalFloor(product, restore.seedWatermarkMs, RestoreTfs);
         }
         if (mirror) collectTradeIds(r, product, met);
         feed.apply(r);
@@ -203,10 +206,11 @@ Cmp compare(const Options& o, const CandleRestore& restore) {
         }
         if (r.pos == restore.through) break;
     }
-    for (const int64_t tf : Tfs) {
+    for (const int64_t tf : RestoreTfs) {
         const auto c = continuous.exportSeries(product, tf);
         std::map<int64_t, OHLCVBar> expected, actual;
-        for (const auto& b : c.closed) if (b.timestamp_ms >= restore.windowStartMs) expected[b.timestamp_ms] = b;
+        if (tf < 60'000) // open-bar timeframes: the open bar only
+            for (const auto& b : c.closed) if (b.timestamp_ms >= restore.windowStartMs) expected[b.timestamp_ms] = b;
         expected[-1] = c.active;
         const auto& s = restore.series.at(tf);
         for (const auto& b : s.closed) actual[b.timestamp_ms] = b;
@@ -255,7 +259,7 @@ bool runProduct(const Options& o, const std::string& product) {
     in.root = o.root;
     in.product = product;
     in.through = findThrough(o, product);
-    in.timeframesMs = Tfs;
+    in.timeframesMs = RestoreTfs;
     in.historyBars = Caps;
     in.windowMsForTest = o.windowMs;
     in.forceLeadInRereadForTest = o.forceReread;
@@ -280,7 +284,9 @@ bool runProduct(const Options& o, const std::string& product) {
               << " deepRegressions=" << restore->deepRegressions
               << " outcome=" << (restore->outcome == RestoreOutcome::complete ? "complete" : "partial")
               << " tradeIds=" << restore->tradeIds.size() << " windowMin="
-              << (restore->throughMs - restore->windowStartMs) / 60'000 << "\n";
+              << (restore->throughMs - restore->windowStartMs) / 60'000
+              << " openBarsLookbackMin=" << (restore->openBarsFromMs ? (restore->throughMs - restore->openBarsFromMs) / 60'000 : 0)
+              << "\n";
     if (!o.cmp) return restore->outcome == RestoreOutcome::complete;
     const auto c = compare(o, *restore);
     const bool pass = c.differing == 0 && c.sliver == 0 && c.idsMissing == 0 && c.idsExtra == 0 &&
@@ -335,6 +341,8 @@ int main(int argc, char** argv) try {
         else if (args[i] == "--window-ms") o.windowMs = std::stoll(value());
         else if (args[i] == "--force-reread") o.forceReread = true;
         else if (args[i] == "--cmp") o.cmp = true;
+        else if (args[i] == "--open-bars")
+            RestoreTfs = restoreTimeframes({100, 1'000, 60'000, 300'000, 900'000, 3'600'000, 14'400'000, 86'400'000});
         else if (args[i] == "--drop-resent-id-for-test") o.dropResentIdForTest = true;
         else products.push_back(args[i]);
     }

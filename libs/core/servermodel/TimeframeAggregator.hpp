@@ -65,9 +65,11 @@ public:
         std::optional<int64_t> floorMs;
     };
     Series exportSeries(const std::string& symbol, int64_t timeframeMs) const;
-    // Installs closed bars, the open bar and the floor for one configured trade
-    // timeframe (100 ms, 1 s or 1 m). Refused (false) unless that timeframe has
-    // no history, no open bar and no floor. Emits nothing.
+    // Installs closed bars, the open bar and the floor for one configured
+    // timeframe: a trade timeframe (100 ms, 1 s or 1 m), or a rolled one above
+    // 1 m (no floor; its open bar holds the bucket's closed minutes, as built
+    // here, and an absent bar installs none). Refused (false) unless that
+    // timeframe has no history, no open bar and no floor. Emits nothing.
     bool restoreSeries(const std::string& symbol, int64_t timeframeMs, Series series);
     // restoreSeries would install into this timeframe now.
     bool canRestoreSeries(const std::string& symbol, int64_t timeframeMs) const;
@@ -79,6 +81,8 @@ public:
     // listed timeframe that already has a bar is left unchanged.
     void seedJournalFloor(const std::string& symbol, int64_t watermarkMs,
                           const std::vector<int64_t>& timeframesMs);
+    // The served timeframes, sorted (60000 always included); fixed at construction.
+    const std::vector<int64_t>& timeframes() const { return m_timeframesMs; }
 
 signals:
     void barClosed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar);

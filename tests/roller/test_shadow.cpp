@@ -3841,8 +3841,10 @@ void resend(capture::Writer &w, int64_t ms, const std::vector<json> &list) {
 // Uninterrupted path over the whole journal: reader -> feed -> aggregator,
 // one lagged watermark per journal second (the model's own rule).
 struct CandleReference {
-  TimeframeAggregator aggregator{{100, 1000, 60000}, {{100, 60000}, {1000, 10000}}};
-  explicit CandleReference(const std::string &root) {
+  TimeframeAggregator aggregator;
+  explicit CandleReference(const std::string &root,
+                           const std::vector<int64_t> &tfs = {100, 1000, 60000})
+      : aggregator(tfs, {{100, 60000}, {1000, 10000}}) {
     JournalReader reader(root, "PEPE-USD");
     JournalFeed feed("PEPE-USD");
     feed.onTrade = [this](const Trade &t) { aggregator.onTrade(t); };
@@ -4411,8 +4413,7 @@ TEST_F(ShadowTest, CandleRestoreRefusedProductIsReadyWithoutAnAttempt) {
   EXPECT_TRUE(s.has("sentinel_candle_history_restore_failures_total{product=\"PEPE-USD\"} 0"));
 }
 
-// Bypass: the switch off, or no RAM-served trade timeframe, rebuilds nothing,
-// posts nothing and never warms.
+// Bypass: the switch off rebuilds nothing, posts nothing and never warms.
 void bypassedRestore(ShadowTest &t, bool forTest, std::vector<int64_t> timeframes) {
   LogCapture logs;
   RestoreServer s(t);
@@ -4441,8 +4442,52 @@ void bypassedRestore(ShadowTest &t, bool forTest, std::vector<int64_t> timeframe
 TEST_F(ShadowTest, CandleRestoreSwitchedOffNeverWarms) {
   bypassedRestore(*this, false, {100, 1000, 60000});
 }
-TEST_F(ShadowTest, CandleRestoreWithoutRamTimeframesNeverWarms) {
-  bypassedRestore(*this, true, {60000, 300000});
+
+// Without a RAM-served timeframe the rebuild still restores the open 1 m and
+// 5 m bars; live trades then close the 5 m bucket that was open at the
+// restart exactly as an uninterrupted run closes it.
+TEST_F(ShadowTest, CandleRestoreRebuildsTheOpenFiveMinuteBar) {
+  LogCapture logs;
+  RestoreServer s(*this);
+  s.config.chart.timeframesMs = {60000, 300000};
+  s.config.chart.historyBars.clear();
+  int id = 0;
+  for (int t = 64; t <= 400; t += 2, ++id)
+    s.pepe->append(tradeAt(t * 1000, "o" + std::to_string(id), priceOf(id)));
+  s.pepe->flush();
+  ASSERT_TRUE(s.initialize());
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Candle history ready symbol=PEPE-USD restored=complete") == 1;
+  }));
+  const auto ready = LogCapture::line("Candle history ready symbol=PEPE-USD");
+  EXPECT_NE(ready.find("openBars=2"), std::string::npos) << ready; // 1 m and 5 m
+  EXPECT_TRUE(s.has("sentinel_candle_history_warming{product=\"PEPE-USD\"} 0"));
+  EXPECT_TRUE(s.trades.empty());
+  ASSERT_TRUE(eventuallyQt([&] {
+    return LogCapture::count("Journal live seed product=PEPE-USD") >= 1;
+  }));
+  for (int t = 401; t <= 620; t += 3, ++id)
+    s.pepe->append(tradeAt(t * 1000, "o" + std::to_string(id), priceOf(id)));
+  for (int t = 621; t <= 625; ++t)
+    s.pepe->append(record(t * 1000));
+  s.pepe->flush();
+  const auto closedFive = [&] {
+    const auto h = s.model().getHistory("PEPE-USD", 300000, 10);
+    return std::find_if(h.begin(), h.end(), [](const OHLCVBar &b) {
+      return b.timestamp_ms == Epoch + 300000;
+    }) != h.end();
+  };
+  ASSERT_TRUE(eventuallyQt(closedFive));
+  CandleReference ref(cfg.journalRoot, {60000, 300000});
+  const auto got = s.model().getHistory("PEPE-USD", 300000, 10);
+  const auto want = ref.aggregator.getHistory("PEPE-USD", 300000, 10);
+  ASSERT_EQ(got.size(), 1u); // the bucket open at the restart; earlier ones are REST-served
+  ASSERT_EQ(want.size(), 2u);
+  EXPECT_EQ(std::tie(got[0].timestamp_ms, got[0].open, got[0].high, got[0].low, got[0].close,
+                     got[0].volume, got[0].count),
+            std::tie(want[1].timestamp_ms, want[1].open, want[1].high, want[1].low, want[1].close,
+                     want[1].volume, want[1].count));
+  EXPECT_TRUE(s.has("sentinel_candle_history_restore_partial_total{product=\"PEPE-USD\"} 0"));
 }
 
 // Server stop during the rebuild: the read ends within one record, nothing is

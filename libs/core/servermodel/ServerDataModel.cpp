@@ -248,6 +248,9 @@ void ServerDataModel::onFeedWatermark(const std::string& symbol, int64_t journal
     // that ended kJournalCandleLagMs before it, so in-flight trades still land.
     m_aggregator->advance(symbol, journalMs - kJournalCandleLagMs);
 }
+std::vector<int64_t> ServerDataModel::candleTimeframes() const {
+    return m_aggregator ? m_aggregator->timeframes() : std::vector<int64_t>{};
+}
 void ServerDataModel::setCandleHistoryWarming(const std::vector<std::string>& products) {
     for (const auto& product : products) m_candleHistoryReady.try_emplace(product, false);
     sLog_App("Candle history warming products=" << m_candleHistoryReady.size());
@@ -264,7 +267,7 @@ void ServerDataModel::onCandleHistoryRestored(const std::string& symbol,
         return;
     }
     const char* restored = "none";
-    size_t bars100 = 0, bars1000 = 0;
+    size_t bars100 = 0, bars1000 = 0, openBars = 0;
     int64_t installUs = 0;
     if (restore && m_aggregator) {
         const auto began = std::chrono::steady_clock::now();
@@ -274,7 +277,9 @@ void ServerDataModel::onCandleHistoryRestored(const std::string& symbol,
         if (empty) {
             restored = restore->outcome == sentinel::roller::RestoreOutcome::complete ? "complete" : "partial";
             for (auto& [tf, series] : restore->series) {
-                (tf == 100 ? bars100 : bars1000) += series.closed.size();
+                if (tf == 100) bars100 += series.closed.size();
+                else if (tf == 1'000) bars1000 += series.closed.size();
+                else if (series.active.count != 0 || series.active.timestamp_ms != 0) ++openBars;
                 m_aggregator->restoreSeries(symbol, tf, std::move(series));
             }
         } else {
@@ -287,7 +292,7 @@ void ServerDataModel::onCandleHistoryRestored(const std::string& symbol,
     it->second.store(true, std::memory_order_release);
     const auto through = restore ? restore->through : sentinel::roller::JournalPos{};
     sLog_App("Candle history ready symbol=" << symbol << " restored=" << restored << " bars100=" << bars100
-             << " bars1000=" << bars1000 << " through=" << through.run << "/" << through.block << "/"
+             << " bars1000=" << bars1000 << " openBars=" << openBars << " through=" << through.run << "/" << through.block << "/"
              << through.record << " throughMs=" << (restore ? restore->throughMs : 0)
              << " readMs=" << (restore ? restore->readMs : 0.0) << " installUs=" << installUs);
 }
@@ -360,8 +365,8 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
                    return samples;
                });
     r.familyFn("sentinel_candle_history_warming",
-               "1 while this product's startup 100 ms / 1 s candle rebuild has not ended (history requests "
-               "reply warming).",
+               "1 while this product's startup candle rebuild (100 ms / 1 s window, 1 m .. 1 d open bars) has not "
+               "ended (100 ms / 1 s history requests reply warming).",
                Registry::Type::Gauge, [this] {
                    std::vector<Registry::Sample> samples;
                    for (const auto& [symbol, ready] : m_candleHistoryReady)

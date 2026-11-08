@@ -41,7 +41,7 @@ struct ModelSink {
   // The journal header's Coinbase product JSON (no REST).
   std::function<void(const std::string &product, const nlohmann::json &)>
       metadata;
-  // The product's rebuilt 100 ms / 1 s candle window, posted before any
+  // The product's rebuilt candles (100 ms / 1 s window, 1 m .. 1 d open bars), posted before any
   // trade or watermark of the attempt that built it; nullopt when the rebuild
   // failed or the product was refused. At most once per product per process.
   // Optional: absent, nothing is rebuilt.
@@ -111,8 +111,8 @@ struct ShadowConfig {
   // With model: no socket record for this long at the tip invalidates the
   // model's book and reports connected=false (on the liveNowForTest clock).
   int64_t tipSilenceMs = 30000;
-  // With model.candleRestore: the trade timeframes (subset of 100 and 1000)
-  // rebuilt from the journal at the first handshake, and the live model's
+  // With model.candleRestore: the timeframes rebuilt from the journal at the
+  // first handshake (a roller::restoreTimeframes list), and the live model's
   // closed-bar retention. Installed by the server, never read from config.
   std::vector<int64_t> candleTimeframesMs;
   std::map<int64_t, int> candleHistoryBars;

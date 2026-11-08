@@ -235,7 +235,10 @@ TimeframeAggregator::Series TimeframeAggregator::exportSeries(const std::string&
 
 bool TimeframeAggregator::restorable(const std::string& symbol, int64_t timeframeMs) const {
     const int i = tradeIndex(timeframeMs);
-    if (i < 0 || !m_tradeTimeframeOn[i]) return false;
+    if (i >= 0 ? !m_tradeTimeframeOn[i]
+               : (timeframeMs <= kMinuteMs ||
+                  !std::binary_search(m_timeframesMs.begin(), m_timeframesMs.end(), timeframeMs)))
+        return false;
     if (const auto found = m_states.find(symbol); found != m_states.end()) {
         const auto& existing = found->second;
         const auto hist = existing.history.find(timeframeMs);
@@ -243,7 +246,7 @@ bool TimeframeAggregator::restorable(const std::string& symbol, int64_t timefram
         if ((hist != existing.history.end() && !hist->second.empty()) ||
             (bar != existing.activeBars.end() &&
              (bar->second.count != 0 || bar->second.timestamp_ms != 0)) ||
-            existing.floorOn[i])
+            (i >= 0 && existing.floorOn[i]))
             return false;
     }
     return true;
@@ -259,11 +262,19 @@ bool TimeframeAggregator::restoreSeries(const std::string& symbol, int64_t timef
     std::unique_lock lock(m_mutex);
     if (!restorable(symbol, timeframeMs)) return false;
     const int i = tradeIndex(timeframeMs);
+    if (i < 0 && series.floorMs) return false; // rolled timeframes have no floor
     auto& state = m_states[symbol];
     state.history[timeframeMs] = std::move(series.closed);
-    state.activeBars[timeframeMs] = series.active;
-    state.floorOn[i] = series.floorMs.has_value();
-    state.floorMs[i] = series.floorMs.value_or(0);
+    if (i >= 0) {
+        state.activeBars[timeframeMs] = series.active;
+        state.floorOn[i] = series.floorMs.has_value();
+        state.floorMs[i] = series.floorMs.value_or(0);
+    } else if (series.active.count != 0 || series.active.timestamp_ms != 0) {
+        // A rolled bar exists only once a minute closed into it.
+        auto& bar = state.activeBars[timeframeMs];
+        bar = series.active;
+        bar.is_closed = false;
+    }
     return true;
 }
 

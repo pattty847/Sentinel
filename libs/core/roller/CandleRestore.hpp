@@ -10,13 +10,27 @@
 #include <vector>
 
 namespace sentinel::roller {
-// Rebuilds the newest kRestoreWindowMs of trade candles (100 ms and 1 s) from
-// one product's journal, ending at a known record, without the live model.
+// Rebuilds one product's trade candles from its journal, ending at a known
+// record, without the live model: the newest kRestoreWindowMs of 100 ms and
+// 1 s bars, and the open bar of every timeframe from 1 m to 1 d (closed bars
+// of those are served from REST, never installed from here).
 constexpr int64_t kRestoreWindowMs = 1'800'000;
-// Journal time read before the window so its first bar has an initial state.
+// Journal time read before the window (and before the oldest open bucket) so
+// its first bar has an initial state.
 constexpr int64_t kRestoreLeadInMs = 60'000;
-// Most files one rebuild may read (normal spans are 1-2).
+// Most files the 100 ms / 1 s window may need (normal spans are 1-2).
 constexpr size_t kRestoreMaxFiles = 4;
+// Most files one rebuild may read for the open bars (hourly files: a day plus
+// the lead-in and one extension). Beyond it the read starts at the cap and
+// the open bars are partial.
+constexpr size_t kRestoreOpenBarMaxFiles = 32;
+// Longest timeframe whose open bar is rebuilt.
+constexpr int64_t kRestoreMaxTimeframeMs = 86'400'000;
+
+// The configured timeframes the rebuild covers, sorted: 100, 1000 and the
+// whole-minute timeframes up to kRestoreMaxTimeframeMs, plus 60000 whenever a
+// coarser one is present (coarse bars roll up from the minute).
+std::vector<int64_t> restoreTimeframes(const std::vector<int64_t>& configuredMs);
 
 enum class RestoreOutcome { complete, partial };
 
@@ -28,7 +42,7 @@ struct CandleRestoreInput {
     // Empty: past `through` in this reader's journal order.
     std::function<bool(const JournalPos&)> beyond;
     const std::atomic<bool>* stopping = nullptr; // checked after every record
-    std::vector<int64_t> timeframesMs{100, 1'000}; // trade timeframes below 1 m only
+    std::vector<int64_t> timeframesMs{100, 1'000}; // a restoreTimeframes() list
     // Closed-bar retention as configured live; each rebuilt timeframe keeps at
     // least the window plus the lead-in while reading.
     std::map<int64_t, int> historyBars;
@@ -42,9 +56,12 @@ struct CandleRestore {
     std::string product;
     JournalPos through;
     int64_t throughMs = 0, windowStartMs = 0, seedWatermarkMs = 0;
+    // Oldest open-bucket start among the rebuilt 1 m+ timeframes (0: none).
+    int64_t openBarsFromMs = 0;
     int64_t sentSecond = INT64_MIN; // last journal second whose watermark was applied
     RestoreOutcome outcome = RestoreOutcome::complete;
-    // Per timeframe: closed bars at or after windowStartMs, the open bar, the floor.
+    // Per timeframe: closed bars at or after windowStartMs (100 ms and 1 s
+    // only), the open bar (absent when that bucket has none yet), the floor.
     std::map<int64_t, TimeframeAggregator::Series> series;
     std::unordered_set<std::string> tradeIds; // the read's retained trade ids
     // Counters of the final read: records, trades delivered, trades dropped as
@@ -56,8 +73,10 @@ struct CandleRestore {
 };
 
 // Never throws. nullopt on failure or when `stopping` is set; the caller reads
-// `stopping` to tell them apart. Outcome partial: no bar older than the window
-// could be established inside kRestoreMaxFiles; the bars begin at the first
-// accepted trade in the window and the floor guards the rest.
+// `stopping` to tell them apart. Outcome partial: no 100 ms / 1 s bar older
+// than the window, or no 1 m bar older than the oldest open bucket, could be
+// established inside the file caps; those bars begin at the first accepted
+// trade the read holds and the floor guards the rest. Nothing is synthesized
+// for the part of a bucket the journal does not hold.
 std::optional<CandleRestore> rebuildCandles(const CandleRestoreInput& input);
 } // namespace sentinel::roller

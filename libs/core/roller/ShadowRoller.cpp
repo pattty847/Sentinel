@@ -1369,6 +1369,7 @@ struct ShadowRoller::Impl {
                << " clockRegressions=" << restore->clockRegressions
                << " deepRegressions=" << restore->deepRegressions
                << " bars100=" << bars(100) << " bars1000=" << bars(1000)
+               << " openBarsFromMs=" << restore->openBarsFromMs
                << " tradeIds=" << restore->tradeIds.size()
                << " readMs=" << restore->readMs);
       // The gate takes the ids; the model takes the bars. Both precede
