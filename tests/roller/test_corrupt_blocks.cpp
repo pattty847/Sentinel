@@ -1,5 +1,6 @@
 #include "roller/Roller.hpp"
 #include "roller/ShadowRoller.hpp"
+#include "roller/AnchorStore.hpp"
 #include "capture/CaptureFanout.hpp"
 #include <QCoreApplication>
 #include <condition_variable>
@@ -56,7 +57,8 @@ std::string frame(bool snap) {
                             {"product_id", "BTC-USD"}, {"updates", levels}};
     return json{{"channel", "l2_data"}, {"events", json::array({event})}}.dump();
 }
-fs::path fixture(const fs::path& root, bool twoDays = false, capture::JournalObserver observer = {}) {
+fs::path fixture(const fs::path& root, bool twoDays = false, capture::JournalObserver observer = {},
+                 int recoverySecond = 180, int endSecond = 365) {
     capture::WriterConfig c; c.root = qpath(root); c.fsyncBlocks = 0;
     c.onJournal = std::move(observer);
     capture::Writer w(c, {{"product_metadata", {{"product_id", "BTC-USD"},
@@ -65,7 +67,7 @@ fs::path fixture(const fs::path& root, bool twoDays = false, capture::JournalObs
         w.append({capture::Kind::Frame, {(Epoch+t)*1'000'000, (t+1)*1'000'000}, 1, frame(snap)});
         w.flush();
     };
-    for (int t = 0; t <= 365; ++t) append(t*1000, t == 0 || t == 180);
+    for (int t = 0; t <= endSecond; ++t) append(t*1000, t == 0 || t == recoverySecond);
     const auto first = fs::path(w.currentPath().toStdString());
     if (twoDays) {
         append(Day-1000, false);
@@ -103,8 +105,7 @@ void shadowStyle(const RollOptions& options) {
     o.nextRecord = [&](JournalReader& disk, JournalRecord& r) {
         if (++n == 130) {
             reopened = std::make_unique<JournalReader>(o.journalRoot, o.product, applied);
-            JournalRecord overlap;
-            if (!reopened->next(overlap) || overlap.pos != applied) throw std::runtime_error("lost cursor");
+            reopened->skipApplied(applied);
         }
         const bool found = (reopened ? *reopened : disk).next(r);
         if (found) applied = r.pos;
@@ -112,6 +113,109 @@ void shadowStyle(const RollOptions& options) {
     };
     roll(o);
 }
+}
+
+TEST(CorruptCursor, RepeatedReopenMustMakeProgress) {
+    QTemporaryDir temp; const fs::path root = temp.path().toStdString();
+    const auto p = fixture(root/"raw");
+    const auto scan = capture::scan(qpath(p));
+    JournalReader initial(root/"raw", "BTC-USD");
+    JournalRecord applied;
+    for (int i = 0; i <= 75; ++i) ASSERT_TRUE(initial.next(applied));
+    corrupt(p, scan.index[75], false);
+    JournalReader reopened(root/"raw", "BTC-USD", applied.pos);
+    ASSERT_NO_THROW(reopened.skipApplied(applied.pos));
+    JournalRecord first;
+    ASSERT_TRUE(reopened.next(first));
+    EXPECT_TRUE(first.gapBefore);
+    EXPECT_EQ(first.pos.block, applied.pos.block + 1);
+    ASSERT_TRUE(reopened.next(first));
+    EXPECT_FALSE(first.gapBefore);
+    EXPECT_EQ(first.pos.block, applied.pos.block + 2);
+}
+
+TEST(CorruptCursor, PlainMismatchAndBackwardGapAreRejected) {
+    QTemporaryDir temp; const fs::path root = temp.path().toStdString();
+    const auto p = fixture(root/"raw");
+    const auto scan = capture::scan(qpath(p));
+    JournalReader initial(root/"raw", "BTC-USD");
+    JournalRecord applied;
+    for (int i = 0; i <= 75; ++i) ASSERT_TRUE(initial.next(applied));
+    JournalReader clean(root/"raw", "BTC-USD", applied.pos);
+    JournalRecord first;
+    ASSERT_TRUE(clean.next(first));
+    ASSERT_TRUE(first.gapBefore); // the reader's initial boundary is not damage
+    ++first.pos.block;
+    clean.putBack(std::move(first));
+    EXPECT_THROW(clean.skipApplied(applied.pos), std::runtime_error);
+    corrupt(p, scan.index[75], false);
+    for (int mode = 0; mode < 3; ++mode) {
+        JournalReader reopened(root/"raw", "BTC-USD", applied.pos);
+        JournalRecord successor;
+        ASSERT_TRUE(reopened.next(successor)); // real damage must not excuse any mismatch
+        ASSERT_TRUE(successor.gapBefore);
+        if (mode == 0) successor.gapBefore = false;
+        if (mode == 1) successor.pos.block = applied.pos.block - 1;
+        if (mode == 2) successor.pos.product = "ETH-USD";
+        reopened.putBack(std::move(successor));
+        EXPECT_THROW(reopened.skipApplied(applied.pos), std::runtime_error) << mode;
+    }
+}
+
+TEST(CorruptCursor, ReplayInvalidatesOnceAndNeverAnchorsAnUnreportedGap) {
+    QTemporaryDir temp; const fs::path root = temp.path().toStdString();
+    const auto p = fixture(root/"raw", false, {}, 960, 1025);
+    const auto scan = capture::scan(qpath(p));
+    RollOptions o{root/"raw", root/"expected", "BTC-USD", Epoch, Epoch+1'020'000};
+    // An explicit feed gap at the successor is the expected HMC2 semantics.
+    o.nextRecord = [&](JournalReader& reader, JournalRecord& r) {
+        if (!reader.next(r)) return false;
+        if (r.pos.block == 76) r.gapBefore = true;
+        return true;
+    };
+    roll(o);
+    o.outputRoot = root/"resumed";
+    std::unique_ptr<JournalReader> resumed;
+    std::vector<JournalPos> positions;
+    JournalPos applied;
+    unsigned invalidations = 0;
+    o.onInvalid = [&](const auto& reason) {
+        EXPECT_EQ(reason, "journal boundary"); ++invalidations;
+    };
+    o.nextRecord = [&](JournalReader& reader, JournalRecord& r) {
+        if (!resumed && positions.size() == 76) {
+            corrupt(p, scan.index[75], false);
+            resumed = std::make_unique<JournalReader>(o.journalRoot, o.product, applied);
+            resumed->skipApplied(applied);
+        }
+        if (!(resumed ? *resumed : reader).next(r)) return false;
+        positions.push_back(r.pos); applied = r.pos;
+        return true;
+    };
+    const auto report = roll(o);
+    EXPECT_EQ(report["days"][0]["committedThroughMs"], o.toMs);
+    EXPECT_EQ(invalidations, 2u); // initial boundary plus exactly one reconnect gap
+    for (size_t i = 0; i < positions.size(); ++i) {
+        EXPECT_EQ(positions[i].block, i); EXPECT_EQ(positions[i].record, 0u);
+    }
+    equalRange(root/"expected", o.outputRoot, Epoch, o.toMs);
+    const auto rows = recording::Hmc2Store::readRange(o.outputRoot, o.product, "near", Minute, Epoch, o.toMs);
+    ASSERT_EQ(rows.size(), 3u);
+    EXPECT_EQ(rows[1].bucketStartMs, Epoch+Minute);
+    EXPECT_EQ(rows[1].observedMs, 15'000); // validity ends at the last applied receive, 75 s
+    EXPECT_EQ(rows[2].bucketStartMs, Epoch+960'000);
+    bool checked = false;
+    for (const auto& path : AnchorStore::candidates(o.outputRoot, o.product, Epoch)) {
+        const auto anchor = AnchorStore::load(path);
+        if (anchor.boundaryMs != Epoch+900'000) continue;
+        const auto state = json::from_cbor(anchor.feed.bytes);
+        EXPECT_FALSE(state.at("book").at("valid").get<bool>());
+        EXPECT_EQ(anchor.pos.block, 900u);
+        checked = true;
+    }
+    EXPECT_TRUE(checked);
+    const auto cp = json::parse(bytes(o.outputRoot/o.product/"roller.json"));
+    EXPECT_GE(cp.at("pos").at("block").get<uint64_t>(), 1020u);
 }
 
 class CorruptBlock : public testing::TestWithParam<bool> {};
@@ -164,6 +268,7 @@ TEST_P(CorruptBlock, GapSurvivesSegmentBoundaryAndLostCursor) {
     const auto last = scan.index.back(); corrupt(p, last, GetParam());
     const JournalPos lost{"BTC-USD", scan.header.at("run_id"), last.ordinal, 0};
     JournalReader reader(root/"raw", "BTC-USD", lost); JournalRecord r;
+    ASSERT_NO_THROW(reader.skipApplied(lost));
     ASSERT_TRUE(reader.next(r)); EXPECT_GT(r.pos.block, lost.block); EXPECT_TRUE(r.gapBefore);
     EXPECT_EQ(reader.damaged(), 1u);
     JournalReader all(root/"raw", "BTC-USD");
@@ -501,6 +606,24 @@ void truncateIndex(const fs::path& p) {
     save(p, bytes(p).substr(0, last.offset+48+last.compressedBytes+5)); // inside IDX1
 }
 }
+TEST(CorruptCursor, LostFinalCursorCanResumeAtANewerRun) {
+    QTemporaryDir temp; const fs::path root = temp.path().toStdString();
+    auto a = runWriter(root/"raw");
+    const auto file = appendSeconds(*a, 0, 76); a->close();
+    const auto scan = capture::scan(qpath(file));
+    const JournalPos cursor{"BTC-USD", scan.header.at("run_id"), 75, 0};
+    { auto b = runWriter(root/"raw"); appendSeconds(*b, 76, 80); b->close(); }
+    corrupt(file, scan.index.back(), false);
+    JournalReader reader(root/"raw", "BTC-USD", cursor);
+    ASSERT_NO_THROW(reader.skipApplied(cursor));
+    JournalRecord successor;
+    ASSERT_TRUE(reader.next(successor));
+    EXPECT_NE(successor.pos.run, cursor.run);
+    EXPECT_EQ(successor.pos.block, 0u);
+    EXPECT_TRUE(successor.gapBefore);
+    EXPECT_EQ(successor.record.time.systemNs/1'000'000, Epoch+76000);
+}
+
 // T2(d): a corrupt block before a readable cursor is observed once, from the
 // file start and from an interior start position.
 TEST(JournalReaderDamage, CorruptBlockBeforeReadableCursor) {

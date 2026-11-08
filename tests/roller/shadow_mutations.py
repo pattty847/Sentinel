@@ -506,6 +506,37 @@ mutations.extend([
      'shadow.candleTimeframesMs = sentinel::roller::restoreTimeframes({100, 1000});',
      'ShadowTest.CandleRestoreRebuildsTheOpenFiveMinuteBar'),
 ])
+mutations.extend([
+    ('cursor reconnect requires equality again', 'libs/core/roller/JournalReader.cpp',
+     'if (first.pos == applied) return;',
+     'if (first.pos == applied) return; throw std::runtime_error("lost cursor");',
+     'CorruptCursor.RepeatedReopenMustMakeProgress', 'test_roller_corrupt_blocks'),
+    ('cursor reconnect retains the successor', 'libs/core/roller/JournalReader.cpp',
+     'putBack(std::move(first));', ';',
+     'CorruptCursor.ReplayInvalidatesOnceAndNeverAnchorsAnUnreportedGap', 'test_roller_corrupt_blocks'),
+    ('cursor reconnect requires a reported gap', 'libs/core/roller/JournalReader.cpp',
+     '!first.gapBefore || !damaged_', '!damaged_',
+     'CorruptCursor.PlainMismatchAndBackwardGapAreRejected', 'test_roller_corrupt_blocks'),
+    ('cursor reconnect preserves invalidation', 'libs/core/roller/JournalReader.cpp',
+     'putBack(std::move(first));', 'first.gapBefore = false; putBack(std::move(first));',
+     'CorruptCursor.ReplayInvalidatesOnceAndNeverAnchorsAnUnreportedGap', 'test_roller_corrupt_blocks'),
+    ('cursor reconnect finite failure budget', SR,
+     'if (++failuresWithoutProgress >= cfg.maxFailuresWithoutProgress)', 'if (false)',
+     'ShadowTest.RetryLimitCountsChangingFailuresAndStopsWithError'),
+    ('cursor reconnect distinguishes the initial reader boundary', 'libs/core/roller/JournalReader.cpp',
+     '!first.gapBefore || !damaged_ ||', '!first.gapBefore ||',
+     'CorruptCursor.PlainMismatchAndBackwardGapAreRejected', 'test_roller_corrupt_blocks'),
+    ('cursor reconnect budget spans error reasons', SR,
+     'if (!failureSince || reason != lastFailure) {',
+     'if (!failureSince || reason != lastFailure) { failuresWithoutProgress = 0;',
+     'ShadowTest.RetryLimitCountsChangingFailuresAndStopsWithError'),
+])
+if "--cursor-reconnect" in sys.argv:
+    mutations = [m for m in mutations if m[0].startswith('cursor reconnect')]
+if "--reconnect-native" in sys.argv:
+    mutations = [m for m in mutations if m[0] in (
+        'durable admission', 'disk ceiling', 'duplicate overlap',
+        'transport retains applied book state')]
 if "--openbars" in sys.argv:
     mutations = [m for m in mutations if m[0].startswith('openbars')]
 if "--db2" in sys.argv:

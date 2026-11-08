@@ -379,7 +379,10 @@ default without a newer committed watermark**, that product probes once every
 **ten minutes**, including storage faults and unavailable journal volumes.
 `sentinel-roller-shadow-fault-cooldown` pages after the gauge remains set for
 another **two minutes**. Replaying the old checkpoint does not reset
-the streak. Socket/retract/EOF recovery keeps the applied durable book in memory
+the streak. After 32 failures without new committed progress (even with changing
+errors), `Shadow roller retry limit reached` logs an error and stops only that
+product until restart; its running gauge stays zero. Socket/retract/EOF recovery
+keeps the applied durable book in memory
 and resumes the journal at its exclusive applied cursor. Recorder failures and
 process restarts reconstruct from the first incomplete day's anchor with the
 persisted commit floor; resuming a stateless book at a position alone is invalid.

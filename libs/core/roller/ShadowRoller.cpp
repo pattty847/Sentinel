@@ -21,6 +21,7 @@ using json = nlohmann::json;
 namespace {
 constexpr int64_t Hour = 3600000, Day = 86400000;
 struct ShadowStopped {};
+struct ShadowRetryExhausted {};
 int64_t nowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
@@ -938,9 +939,7 @@ public:
           if (!diskDone) {
             catchup = std::make_unique<JournalReader>(cfg.journalRoot, product,
                                                       applied);
-            JournalRecord cursor;
-            if (!catchup->next(cursor) || cursor.pos != *applied)
-              throw std::runtime_error("resume cursor unavailable in journal");
+            catchup->skipApplied(*applied);
           }
           initialDetached = false;
           recovering = false;
@@ -978,9 +977,7 @@ private:
       if (*ceiling != *applied) {
         catchup =
             std::make_unique<JournalReader>(cfg.journalRoot, product, applied);
-        JournalRecord cursor;
-        if (!catchup->next(cursor) || cursor.pos != *applied)
-          throw std::runtime_error("resume cursor unavailable in journal");
+        catchup->skipApplied(*applied);
         diskDone = false;
       }
     }
@@ -1428,6 +1425,7 @@ struct ShadowRoller::Impl {
             "shadow output aliases a configured recorder root");
     if (cfg.retryMin.count() <= 0 || cfg.retryMax < cfg.retryMin ||
         cfg.compareInterval.count() <= 0 || cfg.failureThreshold == 0 ||
+        cfg.maxFailuresWithoutProgress == 0 ||
         cfg.failureMinDuration.count() <= 0 ||
         cfg.failureCooldown < cfg.retryMax ||
         cfg.resnapshotRetryMin.count() <= 0 ||
@@ -1441,7 +1439,7 @@ struct ShadowRoller::Impl {
   void run(Product &p) noexcept {
     auto backoff = cfg.retryMin;
     std::string lastFailure;
-    unsigned consecutive = 0;
+    unsigned consecutive = 0, failuresWithoutProgress = 0;
     std::optional<std::chrono::steady_clock::time_point> failureSince;
     bool coolingDown = false;
     int64_t furthestCommitted = 0;
@@ -1460,6 +1458,12 @@ struct ShadowRoller::Impl {
         return;
       p.running->set(0);
       p.failures->inc();
+      if (++failuresWithoutProgress >= cfg.maxFailuresWithoutProgress) {
+        sLog_Error("Shadow roller retry limit reached product=" << p.name
+                   << " failures=" << failuresWithoutProgress << " error=" << reason
+                   << " action=stop_product restart_required=true");
+        throw ShadowRetryExhausted{};
+      }
       const auto now = cfg.nowForTest ? cfg.nowForTest()
                                       : std::chrono::steady_clock::now();
       if (!failureSince || reason != lastFailure) {
@@ -1602,6 +1606,7 @@ struct ShadowRoller::Impl {
             furthestCommitted = through;
             backoff = cfg.retryMin;
             consecutive = 0;
+            failuresWithoutProgress = 0;
             lastFailure.clear();
             failureSince.reset();
             coolingDown = false;
@@ -1613,10 +1618,21 @@ struct ShadowRoller::Impl {
                  << " day=" << day << " root=" << cfg.outputRoot);
         roll(o);
         // Midnight rotates through the same anchor/replay path as batch.
+      } catch (const ShadowRetryExhausted &) {
+        // Exhaustion from LiveSource must not become another outer retry.
+        return;
       } catch (const std::exception &e) {
-        retry(e.what());
+        try {
+          retry(e.what());
+        } catch (const ShadowRetryExhausted &) {
+          return;
+        }
       } catch (...) {
-        retry("unknown shadow failure");
+        try {
+          retry("unknown shadow failure");
+        } catch (const ShadowRetryExhausted &) {
+          return;
+        }
       }
       p.running->set(0);
     }
