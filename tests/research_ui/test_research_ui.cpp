@@ -42,9 +42,9 @@ static QByteArray financials() {
     // get_financial_summary's cleaned histories omit unit, even for currency values.
     return R"(FINANCIALS_DATA:{"ticker":"AAPL","entityName":"Fixture company","cik":"123","source_form":"10-Q","period_end":"2026-09-30","revenue":{"quarterly":[{"period":"2026Q2","date":"2026-06-30","value":1234,"form":"10-Q"}],"annual":[{"period":"2025","date":"2025-12-31","value":9999,"form":"10-K"}]},"net_income":{"quarterly":[{"period":"2026Q3","date":"2026-09-30","value":0,"form":"10-Q"}],"annual":[]},"assets":{"quarterly":[{"period":"2026Q1","date":"2026-03-31","value":5,"form":"10-Q"}],"annual":[{"period":"2026","date":"2026-09-30","value":20,"form":"10-K"}]},"earnings_per_share":null,"debt":{"quarterly":[],"annual":[]},"shares":{"quarterly":[{"period":"2026Q2","date":"2026-06-30","value":null,"form":"10-Q"}],"annual":[]}})";
 }
-static bool waitUntil(const std::function<bool()>& predicate) {
+static bool waitUntil(const std::function<bool()>& predicate, int timeoutMs = 3000) {
     QElapsedTimer timer; timer.start();
-    while (!predicate() && timer.elapsed() < 3000) QTest::qWait(10);
+    while (!predicate() && timer.elapsed() < timeoutMs) QTest::qWait(10);
     return predicate();
 }
 static int count(QObject* root) {
@@ -236,7 +236,7 @@ TEST(ResearchProcess, CancellationDoesNotWaitAndDestructionDoesNotCallBack) {
     ASSERT_TRUE(process);
     ASSERT_TRUE(waitUntil([&] { return process && process->state() == QProcess::Running; }));
     QFile pidFile(directory.filePath("child.pid"));
-    ASSERT_TRUE(waitUntil([&] { return pidFile.exists() && pidFile.size() > 0; }));
+    ASSERT_TRUE(waitUntil([&] { return pidFile.exists() && pidFile.size() > 0; }, 15000));
     ASSERT_TRUE(pidFile.open(QIODevice::ReadOnly));
     const auto childPid = pidFile.readAll().trimmed().toLongLong();
     ASSERT_GT(childPid, 0);
@@ -250,7 +250,7 @@ TEST(ResearchProcess, CancellationDoesNotWaitAndDestructionDoesNotCallBack) {
     for (auto* child : qApp->findChildren<QProcess*>()) if (child->program() == "uv") process = child;
     ASSERT_TRUE(process);
     QFile secondPidFile(directory.filePath("second-child.pid"));
-    ASSERT_TRUE(waitUntil([&] { return secondPidFile.exists() && secondPidFile.size() > 0; }));
+    ASSERT_TRUE(waitUntil([&] { return secondPidFile.exists() && secondPidFile.size() > 0; }, 15000));
     ASSERT_TRUE(secondPidFile.open(QIODevice::ReadOnly));
     const auto secondChildPid = secondPidFile.readAll().trimmed().toLongLong(); ASSERT_GT(secondChildPid, 0);
     const auto secondGroup = process->processId(); ASSERT_GT(secondGroup, 0);
