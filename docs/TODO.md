@@ -6,7 +6,7 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
 ## Waves (top-down; one recorder/server item at a time; deploys wait for the owner)
 
 - **Wave 2 (now):** duplicate trade id after anchor resume; read-only "are anchors still needed?" check; Codex: PEPE price units, two flaky tests.
-- **Wave 3:** footprint/why-it-moved plan (Fable: footprint, eaten/pulled, bubbles), aesthetics, heatmap seam, trade bubbles rethink.
+- **Wave 3:** footprint/why-it-moved plan (Fable: footprint, CVD, eaten/pulled, bubbles), aesthetics, heatmap seam, trade bubbles rethink.
 - **Wave 4:** Security, land follow-ups, Feature ideas check. Then the Queue.
 
 ## Queue (ordered)
@@ -24,8 +24,8 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
    - heatmap and candles drift apart slightly on wheel zoom-out; both mappings have the same slopes, cause unknown; the owner's note on direction decides the next look (FM-001, INV-004);
    - local-time axis labels: `TimeAxisModel` has a `timezone` property no control sets; `HeatmapGpuLayer.cpp` hard-codes UTC; add a setting and route every time label through one timezone;
    - zoom-to-footprint: candles widen into bid/ask footprint cells, then numbers appear (extends Footprint and text LOD below);
-   - **Trade bubbles rethink** (owner 2026-10-25; folded into the wave 3 footprint plan): at 1m zoomed out bubbles bury the chart; zoomed in they sit at trade time, the owner expected candle centre. Topics: x placement, size scaling, filtering large/price-moving trades from passive flow (min size, per-slot aggregation, sweeps). Bookmap is the floor. After a GUI restart bubbles have no history (2026-10-27).
-   - **Heatmap stops after sub-minute switches** (owner 2026-10-25, to debug): panning/zooming at 1 s, then 1m -> 1s -> 100ms, left the heatmap empty from the switch time on; back on 1m, time after the switch shows the hatched not-built background. Log `~/Library/Logs/Sentinel/sentinel-gui-20261024-235229-50461.log` 18:10-18:14 EDT: `Heatmap CPU ceiling refused visible spans ... tf=3600000 spans=7 bytes=1189108208` at 18:10:35 (the same ceiling refused spans twice overnight), live subscribe `sub=5206` at 18:12:56 on 1m, no live subscribe at 1 s/100 ms. Known context: live heatmap columns are requested only for tf >= 1 minute (`HeatmapSourceController.cpp:882`, order book plan CE-3). Check whether the 1m live resubscribe resumes and whether the CPU ceiling (about 1 GB committed after a long session) is what leaves spans unbuilt.
+   - **Trade bubbles rethink** (owner 2026-10-25; folded into the wave 3 footprint plan): at 1m zoomed out bubbles bury the chart; zoomed in they sit at trade time, the owner expected candle centre. Topics: x placement, size scaling, filtering large/price-moving trades from passive flow (min size, per-slot aggregation, sweeps). Bookmap is the floor. No bubble history after a GUI restart.
+   - **Heatmap stops after sub-minute switches** (owner 2026-10-25, to debug): panning/zooming at 1 s, then 1m -> 1s -> 100ms, left the heatmap empty from the switch time on; back on 1m, time after the switch shows the hatched not-built background. Log `~/Library/Logs/Sentinel/sentinel-gui-20261024-235229-50461.log` 18:10-18:14 EDT: `Heatmap CPU ceiling refused visible spans ... tf=3600000 spans=7 bytes=1189108208` at 18:10:35, live subscribe `sub=5206` at 18:12:56 on 1m, no live subscribe at 1 s/100 ms. Live columns are requested only for tf >= 1m (`HeatmapSourceController.cpp:882`). Check whether the 1m live resubscribe resumes and whether the CPU ceiling (about 1 GB committed after a long session) is what leaves spans unbuilt.
 4. **Repeatable performance benchmark** on the owner's machines; cite its numbers in the README (the old 110 FPS figure was removed 2026-10-07).
 5. **README + ARCHITECTURE pass** for the finished one-world architecture; also fix `docs/MARKETDATA.md` (TLS described as optional, single-quad heatmap, 110 FPS).
 6. **CI** for macOS, Windows, Linux (no `.github/workflows` today). Hosted runners have no GPU (GPU tests skip and report Passed); GPU coverage needs self-hosted runners on the Mac and Windows.
@@ -77,7 +77,8 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
 - W2d live GUI display and the Windows runtime are unverified.
 - Unverified since 2026-09-28 (owner's first look at recording mode): candles overlap the price axis when panned next to it (clip to the plot area); price-axis tick steps disagree with heatmap cell size; confirm the theme dropdown applies to recording mode.
 - Nightly backup of `/Volumes/T7/sentinel-data` (to the MacBook Pro over Tailscale needs Remote Login + an SSH key, or to the owner's new HDD); internal disk space.
-- Liq slider range carries over on symbol switch (ETH dragged very high after BTC->PEPE->ETH); owner 2026-11-08, minor.
+- Axis drag-scaling snaps back between allowed row/column sizes instead of following the drag (owner, to reproduce).
+- Liq slider range carries over on symbol switch (ETH dragged very high after BTC->PEPE->ETH).
 
 ## Feature ideas (unverified against current code since 2026-03; check before starting)
 
