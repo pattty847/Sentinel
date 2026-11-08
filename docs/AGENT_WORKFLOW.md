@@ -112,6 +112,8 @@ AGENTS.md. Remove a note here when it stops being true.
 - `scripts/dev/agent-worktree.sh create <branch>` puts the worktree on the T7 drive when mounted, supplies
   `VCPKG_ROOT` and ninja, and configures the build; ccache makes the first build fast. `land` uses the queue.
   `remove <branch>` cleans up.
+- `land` runs chart-health, doc-health, a fresh CMake configure, build and ctest in a conductor-owned checkout
+  of the rebased commit. It removes that checkout and its build directory after each attempt, including failures.
 - Every `land` attempt keeps its evidence in its own directory,
   `~/Library/Logs/Sentinel/land/<UTC time>-<branch>-<pid>/` (`SENTINEL_LAND_EVIDENCE_DIR` overrides): `build.log`,
   `ctest.log` and `landing.json` (outcome, gate timings, SHAs before and after, trailers, ctest summary, event

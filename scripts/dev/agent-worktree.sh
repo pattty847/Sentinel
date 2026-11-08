@@ -8,7 +8,7 @@
 #   scripts/dev/agent-worktree.sh list
 #
 # land = the merge queue, one branch at a time: rebase the branch onto the
-# current main (rerere on), build and run ctest in its worktree, stop for review
+# current main (rerere on), build and run ctest in a fresh checkout of its tip, stop for review
 # if the rebase changed any commit (git range-diff), refuse if main moved, then
 # merge --no-ff into main and remove the worktree. The rebased tip contains main,
 # so the tested tree is exactly what lands. Run it from the main checkout.
@@ -326,6 +326,44 @@ PY
 # -I: no cwd, PYTHONPATH or user site on sys.path; cd /: the helper takes absolute paths only.
 land_py() { (cd / && python3 -I -c "$LAND_PY" "$@"); }
 
+# The main checkout owns this sibling directory; agent sandboxes cannot write it.
+# Never reuse a prior land's generated build files, including after a crash.
+land_root() { echo "$(dirname "$REPO")/.sentinel-land-$(basename "$REPO")"; }
+
+clean_land_checkout() {
+    local root tree marker worktrees
+    root=$(land_root)
+    tree="$root/tree"
+    marker="$root/owner"
+    [[ -e "$root" || -L "$root" ]] || return 0
+    [[ -d "$root" && ! -L "$root" ]] || { echo "error: unsafe land checkout root $root" >&2; return 1; }
+    if [[ ! -e "$marker" ]]; then
+        rmdir "$root" 2>/dev/null && return 0
+        echo "error: unmarked land checkout root $root; inspect it before retrying" >&2
+        return 1
+    fi
+    [[ -f "$marker" && ! -L "$marker" && "$(cat "$marker")" == "$COMMON_DIR" ]] ||
+        { echo "error: invalid land checkout marker $marker" >&2; return 1; }
+    worktrees=$(git -C "$REPO" worktree list --porcelain) || return 1
+    if grep -Fxq "worktree $tree" <<< "$worktrees"; then
+        git -C "$REPO" worktree remove --force "$tree" || return 1
+    fi
+    rm -rf "$root"
+}
+
+new_land_checkout() {
+    local root
+    root=$(land_root)
+    clean_land_checkout || return 1
+    mkdir "$root" || return 1
+    printf '%s\n' "$COMMON_DIR" > "$root/owner"
+    land_tree="$root/tree"
+    git -C "$REPO" worktree add --detach "$land_tree" "$new_tip" || return 1
+    if [[ -d "$REPO/_agent" ]]; then
+        ln -s "$REPO/_agent" "$land_tree/_agent" || return 1
+    fi
+}
+
 add_problem() { echo "evidence: $1" >&2; problems+="$1"$'\n'; }
 
 gate() {  # enter a land stage; the open one ended ok
@@ -397,6 +435,11 @@ verify_record() {  # landing.json parses, its logs exist, the transfer succeeded
 land_finish() {  # EXIT trap of land: outcome event and final landing.json for every attempt
     local rc=$1 result=failed
     set +e
+    if [[ -n "$land_tree" ]] && ! clean_land_checkout; then
+        add_problem "land checkout cleanup failed"
+        [[ $rc -ne 0 ]] || rc=1
+        [[ $merged -eq 0 ]] || outcome=landed_evidence_incomplete
+    fi
     if [[ $merged -eq 1 && $land_complete -eq 0 ]]; then
         outcome=landed_evidence_incomplete  # merged but removal not finished, whatever stopped it
     elif [[ -z "$outcome" || "$outcome" == running ]]; then
@@ -491,7 +534,7 @@ case "$cmd" in
         [[ "$codex_home" == /* ]] || codex_home="$PWD/$codex_home"
         [[ "$evidence_root" == /* ]] || evidence_root="$PWD/$evidence_root"
         attempt_id="" evidence="" land_gate="" gate_started="" gates="" outcome="" final_rc="" problems=""
-        merged=0 merge_sha="" merge_short="" main_tip="" old_tip="" old_base="" new_tip="" dir="" changed=0
+        merged=0 merge_sha="" merge_short="" main_tip="" old_tip="" old_base="" new_tip="" dir="" land_tree="" changed=0
         trailers="" ctest_summary="" logs="" transfer="" codex="" events_sent="" land_complete=0
         trap 'land_finish $?' EXIT
         gate arguments
@@ -542,9 +585,11 @@ case "$cmd" in
             fi
         fi
         new_tip=$(git -C "$dir" rev-parse HEAD)
+        gate checkout
+        new_land_checkout || { echo "error: could not create clean land checkout" >&2; exit 1; }
         gate chart-health
         health_status=0
-        (cd "$dir" && "$dir/scripts/dev/chart-health.sh") || health_status=$?
+        (cd "$land_tree" && "$land_tree/scripts/dev/chart-health.sh") || health_status=$?
         if [[ "$health_status" -ne 0 ]]; then
             if [[ "$health_status" -eq 1 ]] && grep -q '^Chart-Health-Waiver: ' <<< "$trailers"; then
                 echo "chart-health: waived by Chart-Health-Waiver trailer"
@@ -555,7 +600,7 @@ case "$cmd" in
         fi
         gate doc-health
         health_status=0
-        (cd "$dir" && "$dir/scripts/dev/doc-health.sh") || health_status=$?
+        (cd "$land_tree" && "$land_tree/scripts/dev/doc-health.sh") || health_status=$?
         if [[ "$health_status" -ne 0 ]]; then
             if [[ "$health_status" -eq 1 ]] && grep -q '^Doc-Health-Waiver: ' <<< "$trailers"; then
                 echo "doc-health: waived by Doc-Health-Waiver trailer"
@@ -568,13 +613,15 @@ case "$cmd" in
         gate build
         logs+="build.log"$'\n'
         echo "build log: $evidence/build.log"
-        (cd "$dir" && "$REPO/scripts/dev/build-queue.sh" --label "land $branch (build)" -- cmake --build --preset mac-clang -j 6 > "$evidence/build.log" 2>&1) ||
+        (cd "$land_tree" && "$REPO/scripts/dev/build-queue.sh" --label "land $branch (build)" -- \
+            bash -c 'cmake --preset mac-clang -DCMAKE_MAKE_PROGRAM="$1" && cmake --build --preset mac-clang -j 6' _ "$NINJA" \
+            > "$evidence/build.log" 2>&1) ||
             { echo "error: build failed, see $evidence/build.log" >&2; exit 1; }
         gate ctest
         logs+="ctest.log"$'\n'
         echo "ctest log: $evidence/ctest.log"
         ctest_status=0
-        (cd "$dir" && SENTINEL_REQUIRE_GPU=1 "$REPO/scripts/dev/build-queue.sh" --label "land $branch (ctest)" -- ctest --test-dir build/mac-clang --output-on-failure --timeout 600 -j 4 > "$evidence/ctest.log" 2>&1) || ctest_status=$?
+        (cd "$land_tree" && SENTINEL_REQUIRE_GPU=1 "$REPO/scripts/dev/build-queue.sh" --label "land $branch (ctest)" -- ctest --test-dir build/mac-clang --output-on-failure --timeout 600 -j 4 > "$evidence/ctest.log" 2>&1) || ctest_status=$?
         ctest_summary=$(grep -E "tests passed" "$evidence/ctest.log" | tail -1) || true
         [[ "$ctest_status" -eq 0 ]] ||
             { tail -20 "$evidence/ctest.log" >&2; echo "error: ctest failed, see $evidence/ctest.log" >&2; exit 1; }
@@ -589,15 +636,20 @@ case "$cmd" in
                 exit 3
             fi
         fi
+        gate checkout-cleanup
+        clean_land_checkout || { echo "error: could not remove clean land checkout" >&2; exit 1; }
+        land_tree=""
         gate main-tip
         [[ "$(git -C "$REPO" rev-parse main)" == "$main_tip" ]] ||
             { echo "error: main moved during land; rerun land" >&2; exit 1; }
+        [[ "$(git -C "$REPO" rev-parse "$branch")" == "$new_tip" ]] ||
+            { echo "error: $branch moved during land; rerun land" >&2; exit 1; }
         gate merge
         merge_status=0
         if [[ -n "$trailers" ]]; then
-            git -C "$REPO" merge --no-ff -q "$branch" -m "$message" -m "${trailers%$'\n'}" || merge_status=$?
+            git -C "$REPO" merge --no-ff -q "$new_tip" -m "$message" -m "${trailers%$'\n'}" || merge_status=$?
         else
-            git -C "$REPO" merge --no-ff -q "$branch" -m "$message" || merge_status=$?
+            git -C "$REPO" merge --no-ff -q "$new_tip" -m "$message" || merge_status=$?
         fi
         [[ "$merge_status" -eq 0 ]] || exit "$merge_status"
         # Merged: from here on nothing reports this branch as unmerged (land_finish).

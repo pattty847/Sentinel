@@ -42,8 +42,8 @@ EOF
     cp "$SRC/scripts/dev/agent-worktree.sh" "$SRC/scripts/dev/sentinel-event.sh" "$repo/scripts/dev/"
     cp "$SRC/.gitignore" "$repo/.gitignore"
     printf '#!/usr/bin/env bash\nwhile [[ $# -gt 0 && $1 != -- ]]; do shift; done; shift; exec "$@"\n' > "$repo/scripts/dev/build-queue.sh"
-    printf '#!/bin/sh\nexit 0\n' > "$repo/scripts/dev/chart-health.sh"
-    printf '#!/bin/sh\nexit "${STUB_DOC_HEALTH_STATUS:-0}"\n' > "$repo/scripts/dev/doc-health.sh"
+    printf '#!/bin/sh\n[ ! -e build/mac-clang/build.ninja ] || touch "$STUB_HEALTH_PROBE"\nexit 0\n' > "$repo/scripts/dev/chart-health.sh"
+    printf '#!/bin/sh\n[ ! -e build/mac-clang/build.ninja ] || touch "$STUB_HEALTH_PROBE"\nexit "${STUB_DOC_HEALTH_STATUS:-0}"\n' > "$repo/scripts/dev/doc-health.sh"
     chmod +x "$repo/scripts/dev/"*.sh
     seq 1 10 > "$repo/file.txt"
     git -C "$repo" add -A && git -C "$repo" commit -q -m base
@@ -103,6 +103,41 @@ for missing in Writer Reviewer Risk all; do
     expect "main unchanged" [ "$(git -C "$repo" rev-parse main)" = "$original_main" ]
 done
 
+# Build and health gates must never read ignored files left by the writer.
+setup_case clean-checkout
+export STUB_HEALTH_PROBE="$T/health-poison-ran" STUB_BUILD_PROBE="$T/build-poison-ran"
+cat > "$T/bin/cmake" <<'EOF'
+#!/bin/sh
+[ ! -e build/mac-clang/build.ninja ] || touch "$STUB_BUILD_PROBE"
+echo "stub cmake $*"
+EOF
+cat > "$T/bin/ctest" <<'EOF'
+#!/bin/sh
+[ ! -e build/mac-clang/build.ninja ] || touch "$STUB_BUILD_PROBE"
+echo "100% tests passed, 0 tests failed out of 2"
+exit "${STUB_CTEST_FAIL:-0}"
+EOF
+chmod +x "$T/bin/cmake" "$T/bin/ctest"
+mkdir -p "$wt/build/mac-clang"
+echo 'touch poison-marker' > "$wt/build/mac-clang/build.ninja"
+STUB_CTEST_FAIL=1 land; rc=$?
+expect "fixture ctest fails before merge" [ "$rc" -ne 0 ]
+expect "health ignored writer build.ninja" [ ! -e "$STUB_HEALTH_PROBE" ]
+expect "build and ctest ignored writer build.ninja" [ ! -e "$STUB_BUILD_PROBE" ]
+expect "failed land removes clean checkout" [ ! -e "$T/.sentinel-land-repo" ]
+expect "failed land keeps writer worktree" [ -d "$wt" ]
+root="$T/.sentinel-land-repo"
+mkdir "$root"
+printf '%s\n' "$(cd "$repo/.git" && pwd -P)" > "$root/owner"
+git -C "$repo" worktree add -q --detach "$root/tree" "$(git -C "$wt" rev-parse HEAD)"
+mkdir -p "$root/tree/build/mac-clang"
+echo stale > "$root/tree/build/mac-clang/build.ninja"
+STUB_CTEST_FAIL=1 land; rc=$?
+expect "fixture ctest fails after stale checkout cleanup" [ "$rc" -ne 0 ]
+expect "stale checkout ignored by build" [ ! -e "$STUB_BUILD_PROBE" ]
+expect "stale checkout removed after failure: $(tail -8 "$T/land.out")" [ ! -e "$root" ]
+unset STUB_HEALTH_PROBE STUB_BUILD_PROBE
+
 # Doc-health breaches block land; only exit 1 can be waived.
 setup_case doc-health
 original_main=$(git -C "$repo" rev-parse main)
@@ -155,6 +190,7 @@ expect "logs listed" [ "$(jget "$rec" 'v["logs"]')" = '["build.log", "ctest.log"
 expect "gate_reached remove" [ "$(jget "$rec" 'v["gate_reached"]')" = remove ]
 expect "gates all ok" [ "$(jget "$rec" 'sorted({g["result"] for g in v["gates"]})')" = '["ok"]' ]
 expect "worktree removed" [ ! -e "$wt" ]
+expect "successful land removes clean checkout" [ ! -e "$T/.sentinel-land-repo" ]
 expect "landed event" [ "$(events_with '"kind":"landed"')" -eq 1 ]
 expect "landed event carries slice" grep -q '"slice":"S1"' "$SENTINEL_EVENTS_FILE"
 case_name=codex-candidates
