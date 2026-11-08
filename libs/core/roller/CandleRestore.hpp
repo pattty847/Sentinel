@@ -69,6 +69,7 @@ struct CandleRestore {
     // newest seen, and those older by more than kRestoreLeadInMs.
     uint64_t records = 0, trades = 0, lateDrops = 0, clockRegressions = 0, deepRegressions = 0;
     size_t files = 0, startFile = 0;
+    size_t reads = 0;  // journal passes, re-reads one file earlier included
     double readMs = 0; // wall time of every read, re-reads included
 };
 

@@ -264,6 +264,7 @@ std::optional<CandleRestore> rebuild(const CandleRestoreInput& in, Clock::time_p
     for (;;) {
         auto read = readFrom(plan, start);
         if (!read) return std::nullopt;
+        ++out.reads;
         const bool forced = std::exchange(forceReread, false);
         const auto& aggregator = *read->aggregator;
         const bool ok = !forced &&
@@ -316,7 +317,7 @@ std::optional<CandleRestore> rebuildCandles(const CandleRestoreInput& in) {
                          << " deepRegressions=" << out->deepRegressions);
         sLog_App("Candle restore built product=" << in.product.c_str()
                  << " outcome=" << outcomeName(out->outcome) << " startFile=" << out->startFile
-                 << " files=" << out->files << " records=" << out->records
+                 << " files=" << out->files << " reads=" << out->reads << " records=" << out->records
                  << " trades=" << out->trades << " lateDrops=" << out->lateDrops
                  << " clockRegressions=" << out->clockRegressions
                  << " deepRegressions=" << out->deepRegressions

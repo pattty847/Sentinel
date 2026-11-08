@@ -1363,7 +1363,8 @@ struct ShadowRoller::Impl {
                << restore->through.block << "/" << restore->through.record
                << " throughMs=" << restore->throughMs
                << " startFile=" << restore->startFile
-               << " files=" << restore->files << " records=" << restore->records
+               << " files=" << restore->files << " reads=" << restore->reads
+               << " records=" << restore->records
                << " trades=" << restore->trades
                << " lateDrops=" << restore->lateDrops
                << " clockRegressions=" << restore->clockRegressions

@@ -418,6 +418,7 @@ TEST(CandleRestore, InitialStateExtendsOneFileBackOrIsPartial) {
         EXPECT_EQ(restore->outcome, RestoreOutcome::complete);
         EXPECT_EQ(restore->startFile, 0u); // extended one file back from the 11:00 file
         EXPECT_EQ(restore->files, 2u);
+        EXPECT_EQ(restore->reads, 2u);
         EXPECT_EQ(restore->lateDrops, 1u);
         const auto& second = restore->series.at(1'000).closed;
         ASSERT_FALSE(second.empty());
@@ -515,6 +516,8 @@ TEST(CandleRestore, OpenBarsFromMinuteToDayEqualTheContinuousPath) {
         ASSERT_TRUE(restore.has_value()) << failure;
         EXPECT_EQ(restore->outcome, RestoreOutcome::complete);
         EXPECT_EQ(restore->openBarsFromMs, Epoch + Day);
+        EXPECT_EQ(restore->startFile, 1u); // 23:00, one minute before the day bucket
+        EXPECT_EQ(restore->reads, 1u);
         EXPECT_EQ(restore->series.size(), OpenTfs.size());
         Reference ref(temp.root(), OpenTfs);
         ref.until(through);

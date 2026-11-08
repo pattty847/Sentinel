@@ -41,9 +41,10 @@ struct ModelSink {
   // The journal header's Coinbase product JSON (no REST).
   std::function<void(const std::string &product, const nlohmann::json &)>
       metadata;
-  // The product's rebuilt candles (100 ms / 1 s window, 1 m .. 1 d open bars), posted before any
-  // trade or watermark of the attempt that built it; nullopt when the rebuild
-  // failed or the product was refused. At most once per product per process.
+  // The product's rebuilt candles (100 ms / 1 s window, 1 m .. 1 d open
+  // bars), posted before any trade or watermark of the attempt that built
+  // it; nullopt when the rebuild failed or the product was refused. At most
+  // once per product per process.
   // Optional: absent, nothing is rebuilt.
   std::function<void(const std::string &product,
                      std::optional<CandleRestore> restore)>
