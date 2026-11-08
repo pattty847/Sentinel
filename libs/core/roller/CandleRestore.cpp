@@ -242,6 +242,14 @@ std::optional<CandleRestore> rebuild(const CandleRestoreInput& in, Clock::time_p
     // converge on the uninterrupted path before the first bar that matters.
     const size_t earliest = span(0) > fileCap ? inv->throughFile + 1 - fileCap : 0;
     const size_t start = std::max(selectStart(*inv, cutoffMs - kRestoreSafetyMarginMs), earliest);
+    // A file the read leaves out (file cap) whose header shows the clock past
+    // the bars this rebuild installs, and past the start file's: the live
+    // aggregator saw that watermark, the read would not. The regression guard's
+    // start is out of reach, so no exact result exists: fail, never install.
+    int64_t aheadMs = INT64_MIN;
+    for (size_t i = 0; i < start; ++i) aheadMs = std::max(aheadMs, inv->files[i].openedMs);
+    if (aheadMs > cutoffMs && aheadMs > inv->files[start].openedMs)
+        throw Failure("clock regression beyond the file cap");
     Plan plan{in, *inv, in.historyBars, in.beyond ? in.beyond : defaultBeyond(*inv, in.through)};
     for (const int64_t tf : in.timeframesMs) {
         const int64_t covered = openBarTimeframe(tf) ? out.throughMs - cutoffMs : windowMs + kRestoreLeadInMs;

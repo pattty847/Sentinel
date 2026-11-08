@@ -834,3 +834,41 @@ TEST(CandleRestore, MidnightRestartsRebuildAndRollTheDayBar) {
         EXPECT_EQ(live.exportSeries("BTC-USD", 86'400'000).active.timestamp_ms, Epoch + 2 * Day);
     }
 }
+
+// Review regression: a capture file whose receive clock jumped to 10:00 of the
+// target day, then a correction back to the evening before, and more files
+// after it than the open-bar cap. The live aggregator saw the 10:00 watermark
+// and dropped the morning trades as late; a capped read starting after that
+// file would not. Such a rebuild fails (nothing installed); it is never
+// reported complete with bars that differ from the continuous path.
+TEST(CandleRestore, ClockRegressionBeyondTheFileCapFails) {
+    Temp temp;
+    {
+        Journal j(temp.root());
+        int id = tradeRun(j, Day - 3 * Hour, Day - 2 * Hour - 5 * Minute, 30 * Second, 1);
+        for (int64_t t = Day - 2 * Hour - 4 * Minute; t < Day - 2 * Hour - 2 * Minute; t += 30 * Second, ++id)
+            j.trade(t + 12 * Hour + 4 * Minute, std::to_string(id), 120, t); // receive clock 12 h ahead
+        for (int run = 0; run < 8; ++run) { // capture restarts in the evening
+            const int64_t from = Day - 115 * Minute + run * 12 * Minute;
+            id = tradeRun(j, from, from + 10 * Minute, 30 * Second, id);
+            j.newRun();
+        }
+        tradeRun(j, Day - 15 * Minute, Day + 23 * Hour + 55 * Minute, 60 * Second, id);
+    }
+    const std::vector<int64_t> tfs{60'000, 86'400'000};
+    JournalReader inventory(temp.root(), "BTC-USD");
+    ASSERT_GT(inventory.files().size(), kRestoreOpenBarMaxFiles + 2);
+    const auto through = positionAt(temp.root(), Day + 23 * Hour + 50 * Minute);
+    std::string failure;
+    auto in = openBarInput(temp.root(), through, tfs);
+    in.failure = &failure;
+    const auto restore = rebuildCandles(in);
+    Reference ref(temp.root(), tfs);
+    ref.until(through);
+    if (restore && restore->outcome == RestoreOutcome::complete)
+        for (const int64_t tf : tfs)
+            EXPECT_TRUE(sameBar(restore->series.at(tf).active, ref.aggregator.exportSeries("BTC-USD", tf).active))
+                << tf << ": divergent bars installed as complete";
+    EXPECT_FALSE(restore.has_value());
+    EXPECT_EQ(failure, "clock regression beyond the file cap");
+}
