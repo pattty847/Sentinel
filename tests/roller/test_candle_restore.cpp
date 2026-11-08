@@ -265,34 +265,39 @@ TEST(CandleRestore, SelectsTheNewestFileOpenedBeforeTheCutoff) {
 
 // A file whose header shows the clock already past the cutoff precedes the
 // newest file opened before it: start one file before the oldest such file.
+// (With 1 m in the list, so the 32-file cap, not the 4-file one, applies.)
 TEST(CandleRestore, RegressionGuardStartsBeforeAClockAheadFile) {
     const int64_t ahead = 40 * Minute;
-    // One run, four files: 09:00, 11:00 (clock 40 min ahead), 10:30
-    // (regressed, before the cutoff) and 11:00 again.
+    // One run: 07:00, 09:00 (clock 40 min ahead), 08:30 (regressed, before
+    // the cutoff less the margin, 08:49), then 09:00, 10:00 and 11:00.
     Temp guarded;
     {
         Journal j(guarded.root());
-        int id = tradeRun(j, 9 * Hour + Second, 9 * Hour + 59 * Minute, 10 * Second, 1);
-        for (int64_t t = 10 * Hour + 20 * Minute; t < 10 * Hour + 30 * Minute; t += 10 * Second, ++id)
+        int id = tradeRun(j, 7 * Hour + Second, 7 * Hour + 59 * Minute, 10 * Second, 1);
+        for (int64_t t = 8 * Hour + 20 * Minute; t < 8 * Hour + 30 * Minute; t += 10 * Second, ++id)
             j.trade(t + ahead, std::to_string(id), 120, t); // receive clock ahead, exchange time true
-        id = tradeRun(j, 10 * Hour + 30 * Minute + Second, 11 * Hour + 21 * Minute, 10 * Second, id);
+        id = tradeRun(j, 8 * Hour + 30 * Minute + Second, 11 * Hour + 21 * Minute, 10 * Second, id);
     }
+    const std::vector<int64_t> tfs{100, 1'000, 60'000};
     const auto through = positionAt(guarded.root(), 11 * Hour + 20 * Minute);
     std::string failure;
     auto in = input(guarded.root(), through);
+    in.timeframesMs = tfs;
     in.failure = &failure;
     const auto restore = rebuildCandles(in);
     ASSERT_TRUE(restore.has_value()) << failure;
     JournalReader inventory(guarded.root(), "BTC-USD");
-    ASSERT_EQ(inventory.files().size(), 4u);
-    EXPECT_EQ(restore->startFile, 0u); // without the guard: file 2 (10:30, before the cutoff)
-    EXPECT_EQ(restore->files, 4u);
+    ASSERT_EQ(inventory.files().size(), 6u);
+    EXPECT_EQ(restore->startFile, 0u); // without the guard: file 2 (08:30, before the cutoff)
+    EXPECT_EQ(restore->files, 6u);
     EXPECT_EQ(restore->outcome, RestoreOutcome::complete);
     EXPECT_GT(restore->deepRegressions, 0u);
     EXPECT_LE(restore->deepRegressions, restore->clockRegressions);
-    Reference ref(guarded.root());
+    Reference ref(guarded.root(), tfs);
     ref.until(through);
-    expectRestoreEquals(*restore, ref.aggregator);
+    TimeframeAggregator window(Tfs, Caps);
+    for (const int64_t tf : Tfs) ASSERT_TRUE(window.restoreSeries("BTC-USD", tf, restore->series.at(tf)));
+    expectWindowEqual(window, ref.aggregator, restore->windowStartMs);
 }
 
 TEST(CandleRestore, FailsWhenTheSpanExceedsTheFileCap) {
