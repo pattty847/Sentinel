@@ -112,14 +112,18 @@ AGENTS.md. Remove a note here when it stops being true.
 - `scripts/dev/agent-worktree.sh create <branch>` puts the worktree on the T7 drive when mounted, supplies
   `VCPKG_ROOT` and ninja, and configures the build; ccache makes the first build fast. `land` uses the queue.
   `remove <branch>` cleans up.
+- `land` clones verified objects into a private store beside the T7 worktree root (beside main if T7 is
+  unavailable); its checkout, rebase, health gates, build and ctest read that store. It fetches the tested tip
+  back before merging.
+  It removes that checkout and its build directory after each attempt, including failures.
 - Every `land` attempt keeps its evidence in its own directory,
   `~/Library/Logs/Sentinel/land/<UTC time>-<branch>-<pid>/` (`SENTINEL_LAND_EVIDENCE_DIR` overrides): `build.log`,
   `ctest.log` and `landing.json` (outcome, gate timings, SHAs before and after, trailers, ctest summary, event
   transfer, Codex sessions whose rollout names the branch; candidates only, no role). Attempts older than 180 days
   or beyond the newest 300 are deleted at the next land. Exit codes: 0 `landed`; 3 `land_review` (range-diff
   stop); 4 `landed_evidence_incomplete` (merged, but any evidence problem, the outcome event, event transfer or
-  worktree removal failed: the worktree is kept; read `evidence_problems`, then finish with
-  `agent-worktree.sh remove <branch>`; never land it again); any other code is `land_failed` and nothing was merged.
+  worktree removal failed: read `evidence_problems`, then finish with `agent-worktree.sh remove <branch>` if
+  the writer worktree remains; never land it again); any other code is `land_failed` and nothing was merged.
   Land assumes no writer is still appending to the worktree being landed.
 - `land` runs `scripts/dev/doc-health.sh` after chart-health; exit 1 needs a `Doc-Health-Waiver: <reason>` trailer to proceed, other errors are fatal, and `--report` prints sizes and findings without failing for curation.
 - The conductor rebases agent branches (during `land`); nobody merges `main` into them (they are local and short-lived). Stack a dependent task

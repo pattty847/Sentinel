@@ -7,7 +7,7 @@ set_tests_properties(DeployRuntimeDryRun PROPERTIES LABELS "core")
 
 add_test(NAME AgentWorktreeLandTests
     COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/dev/test_agent_worktree.sh ${CMAKE_SOURCE_DIR})
-set_tests_properties(AgentWorktreeLandTests PROPERTIES LABELS "core" TIMEOUT 120)
+set_tests_properties(AgentWorktreeLandTests PROPERTIES LABELS "core" TIMEOUT 300)
 
 add_test(NAME DocHealthTests
     COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/dev/test_doc_health.sh ${CMAKE_SOURCE_DIR})

@@ -2,13 +2,13 @@
 # agent-worktree.sh — isolated Sentinel worktrees with a ready build, for agents and humans.
 #
 #   scripts/dev/agent-worktree.sh create <branch> [base-ref]   # default base: main
-#   scripts/dev/agent-worktree.sh remove <branch> [--force]
+#   scripts/dev/agent-worktree.sh remove <branch>
 #   scripts/dev/agent-worktree.sh verify-gitdir <branch>
-#   scripts/dev/agent-worktree.sh land <branch> [--yes] [-m <message>] [--trailer 'Key: value']...
+#   scripts/dev/agent-worktree.sh land <branch> [--yes=<main-sha>] [-m <message>] [--trailer 'Key: value']...
 #   scripts/dev/agent-worktree.sh list
 #
 # land = the merge queue, one branch at a time: rebase the branch onto the
-# current main (rerere on), build and run ctest in its worktree, stop for review
+# current main (rerere on), build and run ctest in a fresh checkout of its tip, stop for review
 # if the rebase changed any commit (git range-diff), refuse if main moved, then
 # merge --no-ff into main and remove the worktree. The rebased tip contains main,
 # so the tested tree is exactly what lands. Run it from the main checkout.
@@ -88,7 +88,12 @@ def real(p):
 try:
     common = real(pathlib.Path(sys.argv[1]))
     selector = sys.argv[2]
-    expected = real(pathlib.Path(sys.argv[3])) if len(sys.argv) > 3 else None
+    want_index = selector == '--index'
+    if want_index:
+        if len(sys.argv) != 4:
+            fail('--index requires a branch')
+        selector = sys.argv[3]
+    expected = real(pathlib.Path(sys.argv[3])) if len(sys.argv) > 3 and not want_index else None
     if selector == '--path':
         if expected is None:
             fail('--path requires a worktree')
@@ -151,7 +156,7 @@ try:
     branch = head[len('ref: refs/heads/'):]
     if selector != '--path' and branch != selector:
         fail('HEAD branch changed')
-    print(wt)
+    print(gd / 'index' if want_index else wt)
 except (OSError, ValueError, UnicodeError) as e:
     fail(str(e))
 PYVERIFY
@@ -326,6 +331,65 @@ PY
 # -I: no cwd, PYTHONPATH or user site on sys.path; cd /: the helper takes absolute paths only.
 land_py() { (cd / && python3 -I -c "$LAND_PY" "$@"); }
 
+# The conductor owns a sibling of the T7 worktree root, or a sibling of main
+# when T7 is unavailable. Neither is inside an agent's writable worktree.
+land_root() {
+    local mount
+    mount=$(dirname "$EXTERNAL_ROOT")
+    if [[ -d "$mount" && -w "$mount" ]]; then
+        echo "$mount/.sentinel-land-$(basename "$EXTERNAL_ROOT")-$(basename "$REPO")"
+    else
+        echo "$(dirname "$REPO")/.sentinel-land-$(basename "$REPO")"
+    fi
+}
+
+clean_land_checkout() {
+    local root marker
+    root=$(land_root)
+    marker="$root/owner"
+    git -C "$REPO" worktree prune --expire=now || return 1
+    [[ -e "$root" || -L "$root" ]] || return 0
+    [[ -d "$root" && ! -L "$root" ]] || { echo "error: unsafe land checkout root $root" >&2; return 1; }
+    if [[ ! -e "$marker" ]]; then
+        if rmdir "$root" 2>/dev/null; then
+            git -C "$REPO" worktree prune --expire=now
+            return $?
+        fi
+        echo "error: unmarked land checkout root $root; inspect it before retrying" >&2
+        return 1
+    fi
+    [[ -f "$marker" && ! -L "$marker" && "$(cat "$marker")" == "$COMMON_DIR" ]] ||
+        { echo "error: invalid land checkout marker $marker" >&2; return 1; }
+    # The checkout is registered only in the private bare repo inside this root.
+    rm -rf "$root" || return 1
+    git -C "$REPO" worktree prune --expire=now
+}
+
+new_land_checkout() {
+    local root
+    root=$(land_root)
+    clean_land_checkout || return 1
+    mkdir "$root" || return 1
+    printf '%s\n' "$COMMON_DIR" > "$root/owner"
+    private_repo="$root/repo"
+    land_tree="$root/tree"
+    git clone --no-local --bare "file://$REPO" "$private_repo" || return 1
+    git -C "$private_repo" fsck --no-dangling --no-progress "$old_tip" "$main_tip" || return 1
+    git -C "$private_repo" worktree add --detach "$land_tree" "$old_tip" || return 1
+    if [[ -d "$REPO/_agent" ]]; then
+        ln -s "$REPO/_agent" "$land_tree/_agent" || return 1
+    fi
+}
+
+refuse_object_alternates() {
+    local name path
+    for name in alternates http-alternates; do
+        path="$COMMON_DIR/objects/info/$name"
+        [[ ! -e "$path" && ! -L "$path" ]] ||
+            { echo "error: unexpected object alternates: $path" >&2; return 1; }
+    done
+}
+
 add_problem() { echo "evidence: $1" >&2; problems+="$1"$'\n'; }
 
 gate() {  # enter a land stage; the open one ended ok
@@ -397,6 +461,11 @@ verify_record() {  # landing.json parses, its logs exist, the transfer succeeded
 land_finish() {  # EXIT trap of land: outcome event and final landing.json for every attempt
     local rc=$1 result=failed
     set +e
+    if [[ -n "$land_tree" ]] && ! clean_land_checkout; then
+        add_problem "land checkout cleanup failed"
+        [[ $rc -ne 0 ]] || rc=1
+        [[ $merged -eq 0 ]] || outcome=landed_evidence_incomplete
+    fi
     if [[ $merged -eq 1 && $land_complete -eq 0 ]]; then
         outcome=landed_evidence_incomplete  # merged but removal not finished, whatever stopped it
     elif [[ -z "$outcome" || "$outcome" == running ]]; then
@@ -420,13 +489,17 @@ land_finish() {  # EXIT trap of land: outcome event and final landing.json for e
         landed_evidence_incomplete)
             final_rc=4
             echo "warning: $branch is merged ($merge_short) but its land evidence is incomplete (see $evidence)." >&2
-            echo "Do not land again. Read evidence_problems in landing.json, then finish with: scripts/dev/agent-worktree.sh remove $branch" >&2
+            if [[ -d "$dir" ]]; then
+                echo "Do not land again. Read evidence_problems in landing.json, then finish with: scripts/dev/agent-worktree.sh remove $branch" >&2
+            else
+                echo "Do not land again. The writer worktree is gone; inspect the branch ref and evidence_problems in landing.json before cleanup." >&2
+            fi
             send_event landed_evidence_incomplete warn \
                 "land $branch merged as $merge_short but evidence is incomplete; see $evidence"
             [[ -z "$evidence" ]] || write_record failed || echo "error: could not write $evidence/landing.json" >&2 ;;
         land_review)
             final_rc=3 result=stopped
-            send_event land_review warn "land $branch changed $changed commit(s); review then rerun with --yes" ;;
+            send_event land_review warn "land $branch changed $changed commit(s) on main $main_tip; review then rerun with --yes=$main_tip" ;;
         *)
             send_event land_failed bad "land $branch failed at $land_gate (exit $rc)" ;;
     esac
@@ -465,15 +538,12 @@ case "$cmd" in
         echo "  test:   ctest --test-dir build/mac-clang"
         ;;
     remove)
-        branch=${2:?usage: remove <branch> [--force]}
+        branch=${2:?usage: remove <branch>}
         dir=$(path_of_branch "$branch")
         [[ -z "$dir" ]] && { echo "error: no worktree for branch $branch" >&2; exit 1; }
         git -C "$REPO" worktree unlock "$dir" 2>/dev/null || true
-        if [[ "${3:-}" == "--force" ]]; then
-            git -C "$REPO" worktree remove --force "$dir"
-        else
-            git -C "$REPO" worktree remove "$dir"
-        fi
+        [[ "$(verify_gitdir "$branch")" == "$dir" ]] || { echo "error: $branch gitdir changed before removal" >&2; exit 1; }
+        git -C "$REPO" -c core.fsmonitor=false -c core.hooksPath="$REPO/scripts/dev/hooks" worktree remove --force "$dir"
         if git -C "$REPO" branch -d "$branch" 2>/dev/null; then
             echo "removed $dir and merged branch $branch"
         else
@@ -481,7 +551,7 @@ case "$cmd" in
         fi
         ;;
     land)
-        branch=${2:?usage: land <branch> [--yes] [-m <message>] [--trailer 'Key: value']...}
+        branch=${2:?usage: land <branch> [--yes=<main-sha>] [-m <message>] [--trailer 'Key: value']...}
         shift 2
         land_started=$(date +%s)
         evidence_root=${SENTINEL_LAND_EVIDENCE_DIR:-$HOME/Library/Logs/Sentinel/land}
@@ -491,7 +561,7 @@ case "$cmd" in
         [[ "$codex_home" == /* ]] || codex_home="$PWD/$codex_home"
         [[ "$evidence_root" == /* ]] || evidence_root="$PWD/$evidence_root"
         attempt_id="" evidence="" land_gate="" gate_started="" gates="" outcome="" final_rc="" problems=""
-        merged=0 merge_sha="" merge_short="" main_tip="" old_tip="" old_base="" new_tip="" dir="" changed=0
+        merged=0 merge_sha="" merge_short="" main_tip="" old_tip="" old_base="" new_tip="" dir="" land_tree="" private_repo="" changed=0
         trailers="" ctest_summary="" logs="" transfer="" codex="" events_sent="" land_complete=0
         trap 'land_finish $?' EXIT
         gate arguments
@@ -502,11 +572,13 @@ case "$cmd" in
         outcome=running
         write_record running || add_problem "initial landing.json not written"
         land_py retain "$evidence_root" "$attempt_id" || add_problem "retention pass over $evidence_root failed"
-        confirmed=0
+        confirmed_for=""
         message="merge: $branch"
         while [[ $# -gt 0 ]]; do
             case "$1" in
-                --yes) confirmed=1; shift ;;
+                --yes=*) confirmed_for=${1#--yes=}; [[ -n "$confirmed_for" ]] ||
+                    { echo "error: --yes requires the reviewed main SHA" >&2; exit 2; }; shift ;;
+                --yes) echo "error: use --yes=<reviewed-main-sha>" >&2; exit 2 ;;
                 -m) message=${2:?-m needs a message}; shift 2 ;;
                 --trailer)
                     t=${2:?--trailer needs 'Key: value'}
@@ -527,24 +599,37 @@ case "$cmd" in
         git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet ||
             { echo "error: main checkout has uncommitted changes to tracked files" >&2; exit 1; }
         dir=$(verify_gitdir "$branch")
-        [[ -z "$(git -C "$dir" status --porcelain --untracked-files=no)" ]] ||
-            { echo "error: $dir has uncommitted changes" >&2; exit 1; }
         main_tip=$(git -C "$REPO" rev-parse main)
-        old_tip=$(git -C "$dir" rev-parse HEAD)
-        old_base=$(git -C "$dir" merge-base HEAD main)
+        [[ -z "$confirmed_for" || "$confirmed_for" == "$main_tip" ]] ||
+            { echo "error: reviewed main $confirmed_for differs from current main $main_tip; review the new range-diff" >&2; exit 2; }
+        old_tip=$(git -C "$REPO" rev-parse "refs/heads/$branch")
+        old_base=$(git -C "$REPO" merge-base "$old_tip" "$main_tip")
+        writer_index=$(verify_gitdir --index "$branch")
+        GIT_INDEX_FILE="$writer_index" git -C "$REPO" -c core.fsmonitor=false \
+            -c core.hooksPath="$REPO/scripts/dev/hooks" --work-tree="$dir" \
+            diff-index --quiet --no-ext-diff "$old_tip" -- ||
+            { echo "error: $dir has uncommitted changes" >&2; exit 1; }
+        gate object-integrity
+        refuse_object_alternates || exit 1
+        gate checkout
+        new_tip=$old_tip
+        new_land_checkout || { echo "error: could not create clean land checkout" >&2; exit 1; }
         if [[ "$old_base" != "$main_tip" ]]; then
             gate rebase
             echo "rebasing $branch onto main ($main_tip)..."
-            if ! git -C "$dir" -c rerere.enabled=true -c rerere.autoUpdate=true rebase main; then
-                git -C "$dir" rebase --abort || true
-                echo "error: rebase conflicts. Resolve in $dir (git rebase main), commit, then rerun land." >&2
+            if ! git -C "$land_tree" -c core.fsmonitor=false -c core.hooksPath="$REPO/scripts/dev/hooks" \
+                -c rerere.enabled=true -c rerere.autoUpdate=true rebase main; then
+                git -C "$land_tree" -c core.fsmonitor=false -c core.hooksPath="$REPO/scripts/dev/hooks" rebase --abort || true
+                echo "error: clean-checkout rebase conflicted. Conductor: send a fix round to the writer to resolve against current main, then rerun land." >&2
                 exit 1
             fi
         fi
-        new_tip=$(git -C "$dir" rev-parse HEAD)
+        new_tip=$(git -C "$land_tree" rev-parse HEAD)
+        git -C "$private_repo" fsck --no-dangling --no-progress "$new_tip" "$main_tip" ||
+            { echo "error: private object integrity check failed" >&2; exit 1; }
         gate chart-health
         health_status=0
-        (cd "$dir" && "$dir/scripts/dev/chart-health.sh") || health_status=$?
+        (cd "$land_tree" && "$land_tree/scripts/dev/chart-health.sh") || health_status=$?
         if [[ "$health_status" -ne 0 ]]; then
             if [[ "$health_status" -eq 1 ]] && grep -q '^Chart-Health-Waiver: ' <<< "$trailers"; then
                 echo "chart-health: waived by Chart-Health-Waiver trailer"
@@ -555,7 +640,7 @@ case "$cmd" in
         fi
         gate doc-health
         health_status=0
-        (cd "$dir" && "$dir/scripts/dev/doc-health.sh") || health_status=$?
+        (cd "$land_tree" && "$land_tree/scripts/dev/doc-health.sh") || health_status=$?
         if [[ "$health_status" -ne 0 ]]; then
             if [[ "$health_status" -eq 1 ]] && grep -q '^Doc-Health-Waiver: ' <<< "$trailers"; then
                 echo "doc-health: waived by Doc-Health-Waiver trailer"
@@ -568,36 +653,54 @@ case "$cmd" in
         gate build
         logs+="build.log"$'\n'
         echo "build log: $evidence/build.log"
-        (cd "$dir" && "$REPO/scripts/dev/build-queue.sh" --label "land $branch (build)" -- cmake --build --preset mac-clang -j 6 > "$evidence/build.log" 2>&1) ||
+        (cd "$land_tree" && "$REPO/scripts/dev/build-queue.sh" --label "land $branch (build)" -- \
+            bash -c 'cmake --preset mac-clang -DCMAKE_MAKE_PROGRAM="$1" && cmake --build --preset mac-clang -j 6' _ "$NINJA" \
+            > "$evidence/build.log" 2>&1) ||
             { echo "error: build failed, see $evidence/build.log" >&2; exit 1; }
         gate ctest
         logs+="ctest.log"$'\n'
         echo "ctest log: $evidence/ctest.log"
         ctest_status=0
-        (cd "$dir" && SENTINEL_REQUIRE_GPU=1 "$REPO/scripts/dev/build-queue.sh" --label "land $branch (ctest)" -- ctest --test-dir build/mac-clang --output-on-failure --timeout 600 -j 4 > "$evidence/ctest.log" 2>&1) || ctest_status=$?
+        (cd "$land_tree" && SENTINEL_REQUIRE_GPU=1 "$REPO/scripts/dev/build-queue.sh" --label "land $branch (ctest)" -- ctest --test-dir build/mac-clang --output-on-failure --timeout 600 -j 4 > "$evidence/ctest.log" 2>&1) || ctest_status=$?
         ctest_summary=$(grep -E "tests passed" "$evidence/ctest.log" | tail -1) || true
         [[ "$ctest_status" -eq 0 ]] ||
             { tail -20 "$evidence/ctest.log" >&2; echo "error: ctest failed, see $evidence/ctest.log" >&2; exit 1; }
         grep -E "tests passed" "$evidence/ctest.log" || true
         if [[ "$old_tip" != "$new_tip" ]]; then
             gate range-diff
-            changed=$(git -C "$REPO" range-diff "$old_base..$old_tip" "$main_tip..$new_tip" | grep -c '^[0-9-]*: *[0-9a-f-]* ! ' || true)
-            if [[ "$changed" -gt 0 && "$confirmed" -eq 0 ]]; then
-                git -C "$REPO" range-diff "$old_base..$old_tip" "$main_tip..$new_tip"
-                echo "stop: the rebase changed $changed commit(s) (above). Review, then rerun with --yes." >&2
+            changed=$(git -C "$land_tree" range-diff "$old_base..$old_tip" "$main_tip..$new_tip" | grep -c '^[0-9-]*: *[0-9a-f-]* ! ' || true)
+            if [[ "$changed" -gt 0 && -z "$confirmed_for" ]]; then
+                git -C "$land_tree" range-diff "$old_base..$old_tip" "$main_tip..$new_tip"
+                echo "stop: the rebase changed $changed commit(s) on main $main_tip (above). Review, then rerun with --yes=$main_tip." >&2
                 outcome=land_review
                 exit 3
             fi
         fi
+        gate import
+        refuse_object_alternates || exit 1
+        git -C "$private_repo" update-ref refs/land/tested "$new_tip"
+        git -C "$REPO" fetch --no-tags "file://$private_repo" refs/land/tested ||
+            { echo "error: could not import tested commit from private store" >&2; exit 1; }
+        [[ "$(git -C "$REPO" rev-parse FETCH_HEAD)" == "$new_tip" ]] ||
+            { echo "error: imported commit differs from tested tip" >&2; exit 1; }
+        git -C "$REPO" fsck --no-dangling --no-progress "$new_tip" "$main_tip" ||
+            { echo "error: imported object integrity check failed" >&2; exit 1; }
+        gate checkout-cleanup
+        clean_land_checkout || { echo "error: could not remove clean land checkout" >&2; exit 1; }
+        land_tree=""
         gate main-tip
+        [[ "$(verify_gitdir "$branch")" == "$dir" ]] ||
+            { echo "error: $branch gitdir changed during land" >&2; exit 1; }
         [[ "$(git -C "$REPO" rev-parse main)" == "$main_tip" ]] ||
             { echo "error: main moved during land; rerun land" >&2; exit 1; }
+        [[ "$(git -C "$REPO" rev-parse "$branch")" == "$old_tip" ]] ||
+            { echo "error: $branch moved during land; rerun land" >&2; exit 1; }
         gate merge
         merge_status=0
         if [[ -n "$trailers" ]]; then
-            git -C "$REPO" merge --no-ff -q "$branch" -m "$message" -m "${trailers%$'\n'}" || merge_status=$?
+            git -C "$REPO" merge --no-ff -q "$new_tip" -m "$message" -m "${trailers%$'\n'}" || merge_status=$?
         else
-            git -C "$REPO" merge --no-ff -q "$branch" -m "$message" || merge_status=$?
+            git -C "$REPO" merge --no-ff -q "$new_tip" -m "$message" || merge_status=$?
         fi
         [[ "$merge_status" -eq 0 ]] || exit "$merge_status"
         # Merged: from here on nothing reports this branch as unmerged (land_finish).
@@ -623,7 +726,21 @@ case "$cmd" in
             [[ -n "$problems" ]] || verify_record
         fi
         [[ -z "$problems" ]] || { outcome=landed_evidence_incomplete; exit 4; }
-        "$0" remove "$branch" || { add_problem "worktree remove failed"; outcome=landed_evidence_incomplete; exit 4; }
+        git -C "$REPO" -c core.fsmonitor=false -c core.hooksPath="$REPO/scripts/dev/hooks" \
+            worktree unlock "$dir" 2>/dev/null || true
+        [[ "$(verify_gitdir "$branch")" == "$dir" ]] ||
+            { add_problem "writer gitdir changed before removal"; outcome=landed_evidence_incomplete; exit 4; }
+        git -C "$REPO" -c core.fsmonitor=false -c core.hooksPath="$REPO/scripts/dev/hooks" \
+            worktree remove --force "$dir" || { add_problem "worktree remove failed"; outcome=landed_evidence_incomplete; exit 4; }
+        if [[ "$old_tip" != "$new_tip" ]]; then
+            git -C "$REPO" update-ref "refs/heads/$branch" "$new_tip" "$old_tip" ||
+                { add_problem "rebased branch update failed"; outcome=landed_evidence_incomplete; exit 4; }
+        fi
+        if git -C "$REPO" branch -d "$branch" 2>/dev/null; then
+            echo "removed $dir and merged branch $branch"
+        else
+            echo "removed $dir; branch $branch kept (not merged into HEAD)"
+        fi
         land_complete=1
         echo "queue rule: rebase and retest every other READY branch before it lands (run land on each)."
         ;;

@@ -19,6 +19,46 @@ load() { local d; eval "$1=()"; while IFS= read -r d; do eval "$1+=(\"\$d\")"; d
 attempts() { find "$SENTINEL_LAND_EVIDENCE_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort; }
 events_with() { if [[ -f "$SENTINEL_EVENTS_FILE" ]]; then grep -c "$1" "$SENTINEL_EVENTS_FILE"; else echo 0; fi; }
 legacy_tmp_fallback() { grep -q '/tmp/sentinel-events' "$SRC/scripts/dev/sentinel-event.sh"; }
+arm_after_verify() {
+    export REAL_PYTHON=$(command -v python3) INJECT_ONCE="$T/injected" INJECT_PAYLOAD="$T/inject.sh"
+    cat > "$T/bin/python3" <<'EOF'
+#!/bin/sh
+if [ "$1" = -I ] && [ "$2" = - ] && [ "${4:-}" = feat/x ] && [ ! -e "$INJECT_ONCE" ]; then
+    "$REAL_PYTHON" "$@"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then /bin/sh "$INJECT_PAYLOAD"; touch "$INJECT_ONCE"; fi
+    exit "$rc"
+fi
+exec "$REAL_PYTHON" "$@"
+EOF
+    chmod +x "$T/bin/python3"
+}
+arm_filter_on_remove() {
+    git -C "$repo" config extensions.worktreeConfig true
+    printf 'file.txt filter=evil\n' > "$wt/.gitattributes"
+    git -C "$wt" add .gitattributes
+    git -C "$wt" commit -q -m 'select clean filter for tracked file'
+    export REAL_GIT=$(command -v git) FILTER_WT=$(cd "$wt" && pwd -P) FILTER_GD=$(git -C "$wt" rev-parse --absolute-git-dir) FILTER_STATE="$T"
+    printf '#!/bin/sh\ntouch "%s/filter-executed"\ncat\n' "$T" > "$T/filter-clean.sh"
+    chmod +x "$T/filter-clean.sh"
+    export FILTER_SCRIPT="$T/filter-clean.sh"
+    cat > "$T/bin/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+    *' worktree remove '*)
+        for arg in "$@"; do
+            if [ "$arg" = "$FILTER_WT" ]; then
+                printf '[filter "evil"]\n clean = %s\n required = true\n' "$FILTER_SCRIPT" > "$FILTER_GD/config.worktree"
+                echo late >> "$FILTER_WT/file.txt"
+                touch "$FILTER_STATE/planted"
+                break
+            fi
+        done ;;
+esac
+exec "$REAL_GIT" "$@"
+EOF
+    chmod +x "$T/bin/git"
+}
 
 setup_case() {  # $1 case name; builds $T, $repo and a worktree for branch feat/x with one commit
     case_name=$1
@@ -26,6 +66,7 @@ setup_case() {  # $1 case name; builds $T, $repo and a worktree for branch feat/
     mkdir -p "$T/bin" "$T/home" "$T/codex" "$T/evidence" "$T/trees-mount"
     export HOME="$T/home" CODEX_HOME="$T/codex" SENTINEL_LAND_EVIDENCE_DIR="$T/evidence"
     export SENTINEL_WORKTREE_ROOT="$T/trees-mount/trees" SENTINEL_EVENTS_FILE="$T/home/events.jsonl"
+    land_root="$T/trees-mount/.sentinel-land-trees-repo"
     export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
     export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
     export PATH="$T/bin:$ORIG_PATH"
@@ -42,8 +83,8 @@ EOF
     cp "$SRC/scripts/dev/agent-worktree.sh" "$SRC/scripts/dev/sentinel-event.sh" "$repo/scripts/dev/"
     cp "$SRC/.gitignore" "$repo/.gitignore"
     printf '#!/usr/bin/env bash\nwhile [[ $# -gt 0 && $1 != -- ]]; do shift; done; shift; exec "$@"\n' > "$repo/scripts/dev/build-queue.sh"
-    printf '#!/bin/sh\nexit 0\n' > "$repo/scripts/dev/chart-health.sh"
-    printf '#!/bin/sh\nexit "${STUB_DOC_HEALTH_STATUS:-0}"\n' > "$repo/scripts/dev/doc-health.sh"
+    printf '#!/bin/sh\n[ ! -e build/mac-clang/build.ninja ] || touch "$STUB_HEALTH_PROBE"\nexit 0\n' > "$repo/scripts/dev/chart-health.sh"
+    printf '#!/bin/sh\n[ ! -e build/mac-clang/build.ninja ] || touch "$STUB_HEALTH_PROBE"\nexit "${STUB_DOC_HEALTH_STATUS:-0}"\n' > "$repo/scripts/dev/doc-health.sh"
     chmod +x "$repo/scripts/dev/"*.sh
     seq 1 10 > "$repo/file.txt"
     git -C "$repo" add -A && git -C "$repo" commit -q -m base
@@ -71,6 +112,13 @@ land; expect "land rejects config" [ "$?" -ne 0 ]
 expect "config not executed" [ ! -e "$T/executed" ]
 expect "land names config" grep -q config.worktree "$T/land.out"
 expect "rebase not reached" [ ! -d "$gd/rebase-merge" ]
+rm "$gd/config.worktree"
+mkdir -p "$T/hooks"
+printf '#!/bin/sh\ntouch "%s/hook-executed"\n' "$T" > "$T/hooks/pre-rebase"
+chmod +x "$T/hooks/pre-rebase"
+printf '[core]\n hooksPath = %s/hooks\n' "$T" > "$gd/config.worktree"
+land; expect "land rejects hooksPath config" [ "$?" -ne 0 ]
+expect "planted hook not run" [ ! -e "$T/hook-executed" ]
 rm "$gd/config.worktree"
 mkdir "$gd/rebase-merge"
 verify; expect "rebase state rejected" [ "$?" -ne 0 ]
@@ -102,6 +150,193 @@ for missing in Writer Reviewer Risk all; do
     expect "missing keys named" grep -q 'missing required land trailers:' "$T/missing.out"
     expect "main unchanged" [ "$(git -C "$repo" rev-parse main)" = "$original_main" ]
 done
+
+# Compare the writer's index and tracked files without loading its Git config.
+setup_case dirty-writer
+main_before=$(git -C "$repo" rev-parse main)
+echo dirty >> "$wt/file.txt"
+land; rc=$?
+expect "tracked writer change rejected" [ "$rc" -ne 0 ]
+expect "dirty writer error" grep -q 'has uncommitted changes' "$T/land.out"
+expect "dirty writer not merged" [ "$(git -C "$repo" rev-parse main)" = "$main_before" ]
+expect "dirty writer not checked out" [ ! -e "$land_root" ]
+setup_case staged-writer
+echo staged >> "$wt/file.txt"
+git -C "$wt" add file.txt
+land; rc=$?
+expect "staged writer change rejected" [ "$rc" -ne 0 ]
+expect "staged writer error" grep -q 'has uncommitted changes' "$T/land.out"
+
+# Build and health gates must never read ignored files left by the writer.
+setup_case clean-checkout
+export STUB_HEALTH_PROBE="$T/health-poison-ran" STUB_BUILD_PROBE="$T/build-poison-ran"
+cat > "$T/bin/cmake" <<'EOF'
+#!/bin/sh
+[ ! -e build/mac-clang/build.ninja ] || touch "$STUB_BUILD_PROBE"
+echo "stub cmake $*"
+EOF
+cat > "$T/bin/ctest" <<'EOF'
+#!/bin/sh
+[ ! -e build/mac-clang/build.ninja ] || touch "$STUB_BUILD_PROBE"
+echo "100% tests passed, 0 tests failed out of 2"
+exit "${STUB_CTEST_FAIL:-0}"
+EOF
+chmod +x "$T/bin/cmake" "$T/bin/ctest"
+mkdir -p "$wt/build/mac-clang"
+echo 'touch poison-marker' > "$wt/build/mac-clang/build.ninja"
+STUB_CTEST_FAIL=1 land; rc=$?
+expect "fixture ctest fails before merge" [ "$rc" -ne 0 ]
+expect "health ignored writer build.ninja" [ ! -e "$STUB_HEALTH_PROBE" ]
+expect "build and ctest ignored writer build.ninja" [ ! -e "$STUB_BUILD_PROBE" ]
+expect "failed land removes clean checkout" [ ! -e "$land_root" ]
+expect "failed land keeps writer worktree" [ -d "$wt" ]
+root="$land_root"
+mkdir "$root"
+printf '%s\n' "$(cd "$repo/.git" && pwd -P)" > "$root/owner"
+git -C "$repo" worktree add -q --detach "$root/tree" "$(git -C "$wt" rev-parse HEAD)"
+mkdir -p "$root/tree/build/mac-clang"
+echo stale > "$root/tree/build/mac-clang/build.ninja"
+STUB_CTEST_FAIL=1 land; rc=$?
+expect "fixture ctest fails after stale checkout cleanup" [ "$rc" -ne 0 ]
+expect "stale checkout ignored by build" [ ! -e "$STUB_BUILD_PROBE" ]
+expect "stale checkout removed after failure: $(tail -8 "$T/land.out")" [ ! -e "$root" ]
+unset STUB_HEALTH_PROBE STUB_BUILD_PROBE
+
+# A config.worktree planted immediately after the filesystem verifier must
+# never be loaded by a Git command in the writer worktree.
+setup_case config-race
+echo main-only > "$repo/main-only.txt"
+git -C "$repo" add main-only.txt
+git -C "$repo" commit -q -m 'main moves before config race'
+main_before=$(git -C "$repo" rev-parse main)
+git -C "$repo" config extensions.worktreeConfig true
+gd=$(git -C "$wt" rev-parse --absolute-git-dir)
+mkdir "$T/hooks"
+printf '#!/bin/sh\ntouch "%s/hook-executed"\n' "$T" > "$T/hooks/pre-rebase"
+chmod +x "$T/hooks/pre-rebase"
+cat > "$T/inject.sh" <<EOF
+printf '[core]\n fsmonitor = touch $T/fsmonitor-executed\n hooksPath = $T/hooks\n' > "$gd/config.worktree"
+EOF
+arm_after_verify
+land; rc=$?
+expect "post-verification config rejected" [ "$rc" -ne 0 ]
+expect "fsmonitor never executed" [ ! -e "$T/fsmonitor-executed" ]
+expect "writer hook never executed" [ ! -e "$T/hook-executed" ]
+expect "config change named" grep -q config.worktree "$T/land.out"
+expect "config race did not merge" [ "$(git -C "$repo" rev-parse main)" = "$main_before" ]
+
+# A missing or untrusted conductor checkout root must never be adopted.
+for variant in symlink unmarked bad-marker; do
+    setup_case "root-$variant"
+    main_before=$(git -C "$repo" rev-parse main)
+    case $variant in
+        symlink) mkdir "$T/symlink-target"; ln -s "$T/symlink-target" "$land_root" ;;
+        unmarked) mkdir "$land_root"; touch "$land_root/foreign" ;;
+        bad-marker) mkdir "$land_root"; echo wrong > "$land_root/owner" ;;
+    esac
+    land; rc=$?
+    expect "$variant land root rejected" [ "$rc" -ne 0 ]
+    load dirs
+    expect "$variant not built" [ ! -e "${dirs[0]:-/missing}/build.log" ]
+    expect "$variant root kept" [ -e "$land_root" ]
+    expect "$variant did not merge" [ "$(git -C "$repo" rev-parse main)" = "$main_before" ]
+done
+
+# A deleted checkout with a surviving Git registration is pruned before add.
+setup_case stale-registration
+mkdir "$land_root"
+printf '%s\n' "$(cd "$repo/.git" && pwd -P)" > "$land_root/owner"
+git -C "$repo" worktree add -q --detach "$land_root/tree" "$(git -C "$wt" rev-parse HEAD)"
+rm -rf "$land_root"
+STUB_CTEST_FAIL=1 land; rc=$?
+expect "land reaches ctest after stale registration" [ "$rc" -ne 0 ]
+expect "stale registration removed" [ "$(git -C "$repo" worktree list --porcelain | grep -Fc "$(basename "$land_root")" || true)" -eq 0 ]
+expect "land root removed after failure" [ ! -e "$land_root" ]
+
+# An object whose loose bytes do not match its name must block checkout.
+setup_case corrupt-object
+main_before=$(git -C "$repo" rev-parse main)
+blob=$(git -C "$repo" rev-parse 'HEAD:scripts/dev/chart-health.sh')
+python3 - "$repo/.git/objects/${blob:0:2}/${blob:2}" <<'PY'
+from pathlib import Path
+import os, sys, zlib
+data = b'#!/bin/sh\necho forged\nexit 0\n'
+os.chmod(sys.argv[1], 0o644)
+Path(sys.argv[1]).write_bytes(zlib.compress(b'blob ' + str(len(data)).encode() + b'\0' + data))
+PY
+land; rc=$?
+expect "corrupt object rejected" [ "$rc" -ne 0 ]
+expect "fsck names corruption" grep -Eq 'object integrity check failed|corrupt|hash mismatch' "$T/land.out"
+expect "corrupt object not checked out" [ ! -e "$land_root" ]
+expect "corrupt object not merged" [ "$(git -C "$repo" rev-parse main)" = "$main_before" ]
+
+# Change a shared blob after verification, then restore it before the old
+# second fsck (or the new import). Only the private checkout has stable bytes.
+setup_case swap-after-verification
+blob=$(git -C "$repo" rev-parse 'HEAD:scripts/dev/chart-health.sh')
+export SWAP_OBJECT="$repo/.git/objects/${blob:0:2}/${blob:2}" SWAP_REPO=$(cd "$repo" && pwd -P) SWAP_ROOT="$land_root"
+export SWAP_BACKUP="$T/original-object" SWAP_MARKER="$T/forged-executed" SWAP_STATE="$T"
+cp "$SWAP_OBJECT" "$SWAP_BACKUP"
+cat > "$T/swap.py" <<'PY'
+from pathlib import Path
+import os, sys, zlib
+target = Path(os.environ['SWAP_OBJECT'])
+os.chmod(target, 0o644)
+if sys.argv[1] == 'poison':
+    script = f'#!/bin/sh\ntouch "{os.environ["SWAP_MARKER"]}"\nexit 0\n'.encode()
+    target.write_bytes(zlib.compress(b'blob ' + str(len(script)).encode() + b'\0' + script))
+else:
+    target.write_bytes(Path(os.environ['SWAP_BACKUP']).read_bytes())
+PY
+export REAL_GIT=$(command -v git)
+cat > "$T/bin/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+    *' worktree add --detach '*)
+        for arg in "$@"; do
+            if [ "$arg" = "$SWAP_ROOT/tree" ] && [ ! -e "$SWAP_STATE/poisoned" ]; then
+                python3 "$SWAP_STATE/swap.py" poison
+                touch "$SWAP_STATE/poisoned"
+            fi
+        done ;;
+esac
+if [ -e "$SWAP_STATE/poisoned" ] && [ ! -e "$SWAP_STATE/restored" ] &&
+    [ "$1" = -C ] && [ "$2" = "$SWAP_REPO" ] && { [ "$3" = fsck ] || [ "$3" = fetch ]; }; then
+    python3 "$SWAP_STATE/swap.py" restore
+    touch "$SWAP_STATE/restored"
+fi
+exec "$REAL_GIT" "$@"
+EOF
+chmod +x "$T/bin/git"
+land; rc=$?
+expect "private-store land succeeds ($rc): $(tail -5 "$T/land.out")" [ "$rc" -eq 0 ]
+expect "shared object swap occurred" [ -e "$T/poisoned" ]
+expect "shared object restored before import" [ -e "$T/restored" ]
+expect "forged blob never executed" [ ! -e "$SWAP_MARKER" ]
+expect "private checkout removed after swap" [ ! -e "$land_root" ]
+
+# Object alternates in the writer-writable object store are forbidden.
+setup_case land-alternates
+main_before=$(git -C "$repo" rev-parse main)
+mkdir -p "$T/foreign-objects/info"
+echo "$T/foreign-objects" > "$repo/.git/objects/info/alternates"
+land; rc=$?
+expect "land rejects alternates" [ "$rc" -ne 0 ]
+expect "alternates named" grep -q alternates "$T/land.out"
+expect "alternates not merged" [ "$(git -C "$repo" rev-parse main)" = "$main_before" ]
+
+setup_case alternates-race
+main_before=$(git -C "$repo" rev-parse main)
+mkdir -p "$T/foreign-objects/info"
+cat > "$T/inject.sh" <<EOF
+echo "$T/foreign-objects" > "$repo/.git/objects/info/alternates"
+EOF
+arm_after_verify
+land; rc=$?
+expect "post-verification alternates rejected" [ "$rc" -ne 0 ]
+expect "post-verification alternates named" grep -q alternates "$T/land.out"
+expect "alternate store not checked out" [ ! -e "$land_root" ]
+expect "alternate store not merged" [ "$(git -C "$repo" rev-parse main)" = "$main_before" ]
 
 # Doc-health breaches block land; only exit 1 can be waived.
 setup_case doc-health
@@ -155,6 +390,8 @@ expect "logs listed" [ "$(jget "$rec" 'v["logs"]')" = '["build.log", "ctest.log"
 expect "gate_reached remove" [ "$(jget "$rec" 'v["gate_reached"]')" = remove ]
 expect "gates all ok" [ "$(jget "$rec" 'sorted({g["result"] for g in v["gates"]})')" = '["ok"]' ]
 expect "worktree removed" [ ! -e "$wt" ]
+expect "successful land removes clean checkout" [ ! -e "$land_root" ]
+expect "successful land clears checkout registration" [ "$(git -C "$repo" worktree list --porcelain | grep -Fc "$(basename "$land_root")" || true)" -eq 0 ]
 expect "landed event" [ "$(events_with '"kind":"landed"')" -eq 1 ]
 expect "landed event carries slice" grep -q '"slice":"S1"' "$SENTINEL_EVENTS_FILE"
 case_name=codex-candidates
@@ -218,8 +455,17 @@ expect "finish instruction printed" grep -q "agent-worktree.sh remove feat/x" "$
 
 # 4b: merge succeeds, worktree remove fails -> still reported as merged, never land_failed.
 setup_case remove-fault
-echo stray > "$wt/stray-untracked.txt"
-land; rc=$?
+export REAL_GIT=$(command -v git)
+cat > "$T/bin/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+    *' worktree remove --force '*)
+        if [ "${STUB_REMOVE_FAIL:-0}" = 1 ]; then echo 'stub worktree remove failed' >&2; exit 9; fi ;;
+esac
+exec "$REAL_GIT" "$@"
+EOF
+chmod +x "$T/bin/git"
+STUB_REMOVE_FAIL=1 land; rc=$?
 expect "exit 4 (got $rc)" [ "$rc" -eq 4 ]
 load dirs
 rec="${dirs[0]:-/missing}/landing.json"
@@ -228,6 +474,22 @@ expect "gate_reached remove" [ "$(jget "$rec" 'v["gate_reached"]')" = remove ]
 expect "exactly one merge on main" [ "$(git -C "$repo" rev-list --merges --count main)" -eq 1 ]
 expect "worktree kept" [ -d "$wt" ]
 expect "no land_failed event" [ "$(events_with '"kind":"land_failed"')" -eq 0 ]
+
+# A filter planted after the last gitdir check must not run during either removal.
+setup_case land-remove-filter
+arm_filter_on_remove
+land; rc=$?
+expect "forced land removal succeeds ($rc): $(tail -5 "$T/land.out")" [ "$rc" -eq 0 ]
+expect "land removal planted filter" [ -e "$T/planted" ]
+expect "land removal did not run clean filter" [ ! -e "$T/filter-executed" ]
+expect "land removed writer worktree" [ ! -e "$wt" ]
+setup_case manual-remove-filter
+arm_filter_on_remove
+(cd "$repo" && scripts/dev/agent-worktree.sh remove feat/x) > "$T/remove.out" 2>&1; rc=$?
+expect "forced manual removal succeeds ($rc): $(tail -5 "$T/remove.out")" [ "$rc" -eq 0 ]
+expect "manual removal planted filter" [ -e "$T/planted" ]
+expect "manual removal did not run clean filter" [ ! -e "$T/filter-executed" ]
+expect "manual removal removed writer worktree" [ ! -e "$wt" ]
 
 # 4c: journal unwritable and no sandbox events: the landed event cannot be recorded -> exit 4, worktree kept.
 setup_case journal-unwritable
@@ -354,10 +616,48 @@ expect "exit 3 (got $rc): $(tail -3 "$T/land.out")" [ "$rc" -eq 3 ]
 load dirs
 rec="${dirs[0]:-/missing}/landing.json"
 expect "outcome land_review" [ "$(jget "$rec" 'v["outcome"]')" = land_review ]
-expect "rebased tip recorded" [ "$(jget "$rec" 'v["rebased_tip"]')" = "$(git -C "$wt" rev-parse HEAD)" ]
+new_tip=$(jget "$rec" 'v["rebased_tip"]')
+expect "rebased tip SHA recorded" [ "${#new_tip}" -eq 40 ]
+expect "writer branch stayed at old tip" [ "$(git -C "$wt" rev-parse HEAD)" = "$(jget "$rec" 'v["branch_tip_before"]')" ]
 expect "main unchanged" [ "$(git -C "$repo" rev-parse main)" = "$main_before" ]
 expect "land_review event" [ "$(events_with '"kind":"land_review"')" -eq 1 ]
 expect "no land_failed event" [ "$(events_with '"kind":"land_failed"')" -eq 0 ]
+expect "review prompt pins main" grep -q -- "--yes=$main_before" "$T/land.out"
+land --yes; rc=$?
+expect "bare --yes refused" [ "$rc" -eq 2 ]
+land "--yes=$main_before"; rc=$?
+expect "matching main approval lands ($rc): $(tail -5 "$T/land.out")" [ "$rc" -eq 0 ]
+
+setup_case range-diff-stale-approval
+perl -pi -e 's/^3$/three/' "$repo/file.txt"
+git -C "$repo" commit -q -am 'main moves before review'
+reviewed_main=$(git -C "$repo" rev-parse main)
+land; rc=$?
+expect "range-diff review required" [ "$rc" -eq 3 ]
+echo later > "$repo/later.txt"
+git -C "$repo" add later.txt
+git -C "$repo" commit -q -m 'main moves after review'
+current_main=$(git -C "$repo" rev-parse main)
+land "--yes=$reviewed_main"; rc=$?
+expect "stale main approval refused" [ "$rc" -eq 2 ]
+expect "stale approval explains both SHAs" grep -q "$reviewed_main.*$current_main" "$T/land.out"
+expect "stale approval did not merge" [ "$(git -C "$repo" rev-parse main)" = "$current_main" ]
+
+# A clean rebase merges the detached tested tip and removes the original branch.
+setup_case rebase-success
+old_tip=$(git -C "$wt" rev-parse HEAD)
+echo main-only > "$repo/main-only.txt"
+git -C "$repo" add main-only.txt
+git -C "$repo" commit -q -m 'main moves before successful rebase'
+land; rc=$?
+expect "rebased land succeeds ($rc): $(tail -5 "$T/land.out")" [ "$rc" -eq 0 ]
+load dirs
+rec="${dirs[0]:-/missing}/landing.json"
+expect "rebased tip differs from old tip" [ "$(jget "$rec" 'v["rebased_tip"]')" != "$old_tip" ]
+expect "merge contains tested tip" [ "$(git -C "$repo" rev-parse HEAD^2)" = "$(jget "$rec" 'v["rebased_tip"]')" ]
+expect "rebased writer worktree removed" [ ! -e "$wt" ]
+expect "rebased branch removed" [ -z "$(git -C "$repo" branch --list feat/x)" ]
+expect "rebased clean checkout removed" [ ! -e "$land_root" ]
 
 # 8: every journal line written above parses with SentinelBar's EventParser rules and has an id.
 case_name=journal-format
