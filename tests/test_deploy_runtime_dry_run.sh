@@ -50,9 +50,22 @@ cat > "$scratch/mockbin/sleep" <<'EOF'
 #!/bin/bash
 exit 0
 EOF
+# git mock: "diff" reports a dirty tracked tree when MOCK_DIRTY=1; all else prints a fake HEAD.
 cat > "$scratch/mockbin/git" <<'EOF'
 #!/bin/bash
+[[ " $* " != *" diff "* ]] || exit "${MOCK_DIRTY:-0}"
 printf 'fixture\n'
+EOF
+# ninja mock: a stale target explains itself, a fresh one reports no work. It logs its
+# arguments so the test proves the check ran and never built anything.
+cat > "$scratch/mockbin/ninja" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$HOME/ninja.log"
+if [[ ${MOCK_STALE:-0} == 1 ]]; then
+    printf 'ninja explain: output apps/x is dirty\n[1/2] Linking CXX executable\n'
+else
+    printf 'ninja: no work to do.\n'
+fi
 EOF
 chmod +x "$scratch/mockbin"/*
 export PATH="$scratch/mockbin:/usr/bin:/bin"
@@ -125,3 +138,32 @@ export MOCK_VERIFY=success
 [[ $(cat "$rollback") == 'older signed binary' ]]
 [[ $(wc -l < "$HOME/Sentinel-runtime/bin/DEPLOYED") -eq $((deployed_before + 1)) ]]
 tail -1 "$HOME/Sentinel-runtime/bin/DEPLOYED" | grep -q ' restart sentinel-server$'
+
+# Freshness gate (stale build deployed 2026-11-08): deploy refuses a stale binary or a dirty
+# tracked tree before copying anything; rollback and restart never need a build.
+printf 'older signed binary\n' > "$rollback"
+printf 'stale candidate\n' > "$src"
+export MOCK_VERIFY=success
+deployed_before=$(wc -l < "$HOME/Sentinel-runtime/bin/DEPLOYED")
+export MOCK_STALE=1
+if /bin/bash "$fixture" server > "$scratch/stale.out" 2>&1; then exit 1; fi
+[[ $(cat "$scratch/stale.out") == *"stale"*"build-queue.sh --label deploy -- cmake --build --preset mac-clang -j 6 --target sentinel-server"* ]]
+if /bin/bash "$fixture" --dry-run server > "$scratch/stale-dry.out" 2>&1; then exit 1; fi
+[[ $(cat "$scratch/stale-dry.out") == *"stale"* ]]
+[[ ! -e "$dst.new" && $(cat "$dst") == 'current signed binary' && $(cat "$rollback") == 'older signed binary' ]]
+[[ $(wc -l < "$HOME/Sentinel-runtime/bin/DEPLOYED") -eq $deployed_before ]]
+grep -q -- '-n -d explain apps/sentinel-server/sentinel-server' "$HOME/ninja.log"
+if grep -qv -- ' -n ' "$HOME/ninja.log"; then exit 1; fi # only dry runs, never a build
+/bin/bash "$fixture" --dry-run rollback server > /dev/null
+/bin/bash "$fixture" rollback server > /dev/null
+[[ $(cat "$dst") == 'older signed binary' ]]
+/bin/bash "$fixture" restart server > /dev/null
+export MOCK_STALE=0 MOCK_DIRTY=1
+if /bin/bash "$fixture" server > "$scratch/dirty.out" 2>&1; then exit 1; fi
+[[ $(cat "$scratch/dirty.out") == *"uncommitted changes"* ]]
+[[ $(cat "$dst") == 'older signed binary' ]]
+export MOCK_DIRTY=0
+[[ $(/bin/bash "$fixture" --dry-run server) == *"fresh: sentinel-server is up to date"* ]]
+/bin/bash "$fixture" server > /dev/null
+[[ $(cat "$dst") == 'stale candidate' ]]
+tail -1 "$HOME/Sentinel-runtime/bin/DEPLOYED" | grep -q ' deploy sentinel-server$'

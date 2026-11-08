@@ -86,6 +86,24 @@ verify_writes() { # name label binary
     return 1
 }
 
+# Refuse a deploy of a binary that is not the build of this checkout: change_binary
+# copies the build tree without building, and DEPLOYED records HEAD. Asks ninja
+# (dry run, exact) whether the target is stale, and rejects tracked edits.
+require_fresh_build() { # binary
+    local bin=$1 build="$REPO/build/mac-clang" plan
+    local cmd="scripts/dev/build-queue.sh --label deploy -- cmake --build --preset mac-clang -j 6 --target $bin"
+    if ! git -C "$REPO" diff --quiet HEAD; then
+        echo "refusing to deploy $bin: tracked files in $REPO have uncommitted changes (DEPLOYED records HEAD). Commit or stash them, then build: $cmd" >&2
+        exit 1
+    fi
+    plan=$(ninja -C "$build" -n -d explain "apps/$bin/$bin" 2>&1) || plan="ninja failed"
+    if [[ $plan != *"no work to do"* ]]; then
+        echo "refusing to deploy $bin: $build/apps/$bin/$bin is stale against this checkout (or ninja could not check it). Build it first: $cmd" >&2
+        exit 1
+    fi
+    echo "fresh: $bin is up to date with the checkout at $(git -C "$REPO" rev-parse --short HEAD)"
+}
+
 change_binary() { # name label binary
     local name=$1 label=$2 bin=$3
     local src="$REPO/build/mac-clang/apps/$bin/$bin" dst="$RT/$bin"
@@ -93,6 +111,7 @@ change_binary() { # name label binary
     [[ -x $dst ]] || { echo "missing deployed $dst" >&2; exit 1; }
     if [[ $ACTION == deploy ]]; then
         [[ -x $src ]] || { echo "missing $src (build first)" >&2; exit 1; }
+        require_fresh_build "$bin"
     else
         [[ -x $rollback ]] || { echo "missing rollback $rollback" >&2; exit 1; }
     fi
