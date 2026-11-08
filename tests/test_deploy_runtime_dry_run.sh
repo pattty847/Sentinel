@@ -15,6 +15,7 @@ printf 'current signed binary\n' > "$dst"
 printf 'older signed binary\n' > "$rollback"
 printf 'candidate binary\n' > "$src"
 chmod +x "$dst" "$rollback" "$src"
+printf 'CMAKE_HOME_DIRECTORY:INTERNAL=%s\n' "$scratch/repo" > "$scratch/repo/build/mac-clang/CMakeCache.txt"
 
 # This copied script points only at the fixture. The service/signature commands
 # are mocks, so neither launchd nor the owner's runtime can be touched.
@@ -64,7 +65,7 @@ printf '%s\n' "$*" >> "$HOME/ninja.log"
 if [[ ${MOCK_STALE:-0} == 1 ]]; then
     printf 'ninja explain: output apps/x is dirty\n[1/2] Linking CXX executable\n'
 else
-    printf 'ninja: no work to do.\n'
+    [[ ${MOCK_PHRASE:-0} == 1 ]] && printf '[1/1] would relink: ninja: no work to do. (not really)\n' || printf 'ninja: no work to do.\n'
 fi
 EOF
 chmod +x "$scratch/mockbin"/*
@@ -167,3 +168,29 @@ export MOCK_DIRTY=0
 /bin/bash "$fixture" server > /dev/null
 [[ $(cat "$dst") == 'stale candidate' ]]
 tail -1 "$HOME/Sentinel-runtime/bin/DEPLOYED" | grep -q ' deploy sentinel-server$'
+
+# Review fixes: another source tree, a phrase inside a step line, and a partial `both`.
+export MOCK_PHRASE=1
+if /bin/bash "$fixture" server > "$scratch/phrase.out" 2>&1; then exit 1; fi
+[[ $(cat "$scratch/phrase.out") == *"stale"* ]]
+unset MOCK_PHRASE
+cache="$scratch/repo/build/mac-clang/CMakeCache.txt"
+cp "$cache" "$cache.ok"
+printf 'CMAKE_HOME_DIRECTORY:INTERNAL=%s\n' "$scratch/elsewhere" > "$cache"
+if /bin/bash "$fixture" server > "$scratch/home.out" 2>&1; then exit 1; fi
+[[ $(cat "$scratch/home.out") == *"not configured for this checkout"* ]]
+mv "$cache.ok" "$cache"
+capdst="$HOME/Sentinel-runtime/bin/sentinel-capture"
+capsrc="$scratch/repo/build/mac-clang/apps/sentinel-capture/sentinel-capture"
+mkdir -p "$(dirname "$capsrc")"
+printf 'current capture\n' > "$capdst"; printf 'new capture\n' > "$capsrc"
+printf 'older capture\n' > "$capdst.rollback"; chmod +x "$capdst" "$capsrc" "$capdst.rollback"
+cat > "$scratch/mockbin/ninja" <<'EOF'
+#!/bin/bash
+[[ $* == *sentinel-capture* ]] && printf '[1/1] Linking CXX executable\n' || printf 'ninja: no work to do.\n'
+EOF
+before=$(cat "$dst"); deployed_before=$(wc -l < "$HOME/Sentinel-runtime/bin/DEPLOYED")
+if /bin/bash "$fixture" both > "$scratch/both.out" 2>&1; then exit 1; fi
+[[ $(cat "$scratch/both.out") == *"sentinel-capture"*"stale"* ]]
+[[ $(cat "$dst") == "$before" && $(cat "$capdst") == 'current capture' ]]
+[[ $(wc -l < "$HOME/Sentinel-runtime/bin/DEPLOYED") -eq $deployed_before ]]

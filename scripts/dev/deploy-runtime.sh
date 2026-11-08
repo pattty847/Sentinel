@@ -90,14 +90,19 @@ verify_writes() { # name label binary
 # copies the build tree without building, and DEPLOYED records HEAD. Asks ninja
 # (dry run, exact) whether the target is stale, and rejects tracked edits.
 require_fresh_build() { # binary
-    local bin=$1 build="$REPO/build/mac-clang" plan
+    local bin=$1 build="$REPO/build/mac-clang" plan home
     local cmd="scripts/dev/build-queue.sh --label deploy -- cmake --build --preset mac-clang -j 6 --target $bin"
     if ! git -C "$REPO" diff --quiet HEAD; then
         echo "refusing to deploy $bin: tracked files in $REPO have uncommitted changes (DEPLOYED records HEAD). Commit or stash them, then build: $cmd" >&2
         exit 1
     fi
+    home=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$build/CMakeCache.txt" 2>/dev/null || true)
+    if [[ -z $home || $(cd "$home" 2>/dev/null && pwd -P) != "$(cd "$REPO" && pwd -P)" ]]; then
+        echo "refusing to deploy $bin: $build is not configured for this checkout (source '${home:-unknown}', checkout $REPO)" >&2
+        exit 1
+    fi
     plan=$(ninja -C "$build" -n -d explain "apps/$bin/$bin" 2>&1) || plan="ninja failed"
-    if [[ $plan != *"no work to do"* ]]; then
+    if ! grep -qx 'ninja: no work to do\.' <<<"$plan"; then
         echo "refusing to deploy $bin: $build/apps/$bin/$bin is stale against this checkout (or ninja could not check it). Build it first: $cmd" >&2
         exit 1
     fi
@@ -111,7 +116,6 @@ change_binary() { # name label binary
     [[ -x $dst ]] || { echo "missing deployed $dst" >&2; exit 1; }
     if [[ $ACTION == deploy ]]; then
         [[ -x $src ]] || { echo "missing $src (build first)" >&2; exit 1; }
-        require_fresh_build "$bin"
     else
         [[ -x $rollback ]] || { echo "missing rollback $rollback" >&2; exit 1; }
     fi
@@ -193,6 +197,10 @@ main() {
             capture) restart_service capture com.sentinel.capture sentinel-capture ;;
         esac
         return
+    fi
+    if [[ $ACTION == deploy ]]; then # every binary must be fresh before any is changed
+        [[ $WHICH == capture ]] || require_fresh_build sentinel-server
+        [[ $WHICH == server ]] || require_fresh_build sentinel-capture
     fi
     case $WHICH in
         server) change_binary server com.sentinel.recorder sentinel-server ;;
