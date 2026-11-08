@@ -33,6 +33,32 @@ exec "$REAL_PYTHON" "$@"
 EOF
     chmod +x "$T/bin/python3"
 }
+arm_filter_on_remove() {
+    git -C "$repo" config extensions.worktreeConfig true
+    printf 'file.txt filter=evil\n' > "$wt/.gitattributes"
+    git -C "$wt" add .gitattributes
+    git -C "$wt" commit -q -m 'select clean filter for tracked file'
+    export REAL_GIT=$(command -v git) FILTER_WT=$(cd "$wt" && pwd -P) FILTER_GD=$(git -C "$wt" rev-parse --absolute-git-dir) FILTER_STATE="$T"
+    printf '#!/bin/sh\ntouch "%s/filter-executed"\ncat\n' "$T" > "$T/filter-clean.sh"
+    chmod +x "$T/filter-clean.sh"
+    export FILTER_SCRIPT="$T/filter-clean.sh"
+    cat > "$T/bin/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+    *' worktree remove '*)
+        for arg in "$@"; do
+            if [ "$arg" = "$FILTER_WT" ]; then
+                printf '[filter "evil"]\n clean = %s\n required = true\n' "$FILTER_SCRIPT" > "$FILTER_GD/config.worktree"
+                echo late >> "$FILTER_WT/file.txt"
+                touch "$FILTER_STATE/planted"
+                break
+            fi
+        done ;;
+esac
+exec "$REAL_GIT" "$@"
+EOF
+    chmod +x "$T/bin/git"
+}
 
 setup_case() {  # $1 case name; builds $T, $repo and a worktree for branch feat/x with one commit
     case_name=$1
@@ -244,6 +270,51 @@ expect "fsck names corruption" grep -Eq 'object integrity check failed|corrupt|h
 expect "corrupt object not checked out" [ ! -e "$land_root" ]
 expect "corrupt object not merged" [ "$(git -C "$repo" rev-parse main)" = "$main_before" ]
 
+# Change a shared blob after verification, then restore it before the old
+# second fsck (or the new import). Only the private checkout has stable bytes.
+setup_case swap-after-verification
+blob=$(git -C "$repo" rev-parse 'HEAD:scripts/dev/chart-health.sh')
+export SWAP_OBJECT="$repo/.git/objects/${blob:0:2}/${blob:2}" SWAP_REPO=$(cd "$repo" && pwd -P) SWAP_ROOT="$land_root"
+export SWAP_BACKUP="$T/original-object" SWAP_MARKER="$T/forged-executed" SWAP_STATE="$T"
+cp "$SWAP_OBJECT" "$SWAP_BACKUP"
+cat > "$T/swap.py" <<'PY'
+from pathlib import Path
+import os, sys, zlib
+target = Path(os.environ['SWAP_OBJECT'])
+os.chmod(target, 0o644)
+if sys.argv[1] == 'poison':
+    script = f'#!/bin/sh\ntouch "{os.environ["SWAP_MARKER"]}"\nexit 0\n'.encode()
+    target.write_bytes(zlib.compress(b'blob ' + str(len(script)).encode() + b'\0' + script))
+else:
+    target.write_bytes(Path(os.environ['SWAP_BACKUP']).read_bytes())
+PY
+export REAL_GIT=$(command -v git)
+cat > "$T/bin/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+    *' worktree add --detach '*)
+        for arg in "$@"; do
+            if [ "$arg" = "$SWAP_ROOT/tree" ] && [ ! -e "$SWAP_STATE/poisoned" ]; then
+                python3 "$SWAP_STATE/swap.py" poison
+                touch "$SWAP_STATE/poisoned"
+            fi
+        done ;;
+esac
+if [ -e "$SWAP_STATE/poisoned" ] && [ ! -e "$SWAP_STATE/restored" ] &&
+    [ "$1" = -C ] && [ "$2" = "$SWAP_REPO" ] && { [ "$3" = fsck ] || [ "$3" = fetch ]; }; then
+    python3 "$SWAP_STATE/swap.py" restore
+    touch "$SWAP_STATE/restored"
+fi
+exec "$REAL_GIT" "$@"
+EOF
+chmod +x "$T/bin/git"
+land; rc=$?
+expect "private-store land succeeds ($rc): $(tail -5 "$T/land.out")" [ "$rc" -eq 0 ]
+expect "shared object swap occurred" [ -e "$T/poisoned" ]
+expect "shared object restored before import" [ -e "$T/restored" ]
+expect "forged blob never executed" [ ! -e "$SWAP_MARKER" ]
+expect "private checkout removed after swap" [ ! -e "$land_root" ]
+
 # Object alternates in the writer-writable object store are forbidden.
 setup_case land-alternates
 main_before=$(git -C "$repo" rev-parse main)
@@ -384,8 +455,17 @@ expect "finish instruction printed" grep -q "agent-worktree.sh remove feat/x" "$
 
 # 4b: merge succeeds, worktree remove fails -> still reported as merged, never land_failed.
 setup_case remove-fault
-echo stray > "$wt/stray-untracked.txt"
-land; rc=$?
+export REAL_GIT=$(command -v git)
+cat > "$T/bin/git" <<'EOF'
+#!/bin/sh
+case " $* " in
+    *' worktree remove --force '*)
+        if [ "${STUB_REMOVE_FAIL:-0}" = 1 ]; then echo 'stub worktree remove failed' >&2; exit 9; fi ;;
+esac
+exec "$REAL_GIT" "$@"
+EOF
+chmod +x "$T/bin/git"
+STUB_REMOVE_FAIL=1 land; rc=$?
 expect "exit 4 (got $rc)" [ "$rc" -eq 4 ]
 load dirs
 rec="${dirs[0]:-/missing}/landing.json"
@@ -394,6 +474,22 @@ expect "gate_reached remove" [ "$(jget "$rec" 'v["gate_reached"]')" = remove ]
 expect "exactly one merge on main" [ "$(git -C "$repo" rev-list --merges --count main)" -eq 1 ]
 expect "worktree kept" [ -d "$wt" ]
 expect "no land_failed event" [ "$(events_with '"kind":"land_failed"')" -eq 0 ]
+
+# A filter planted after the last gitdir check must not run during either removal.
+setup_case land-remove-filter
+arm_filter_on_remove
+land; rc=$?
+expect "forced land removal succeeds ($rc): $(tail -5 "$T/land.out")" [ "$rc" -eq 0 ]
+expect "land removal planted filter" [ -e "$T/planted" ]
+expect "land removal did not run clean filter" [ ! -e "$T/filter-executed" ]
+expect "land removed writer worktree" [ ! -e "$wt" ]
+setup_case manual-remove-filter
+arm_filter_on_remove
+(cd "$repo" && scripts/dev/agent-worktree.sh remove feat/x) > "$T/remove.out" 2>&1; rc=$?
+expect "forced manual removal succeeds ($rc): $(tail -5 "$T/remove.out")" [ "$rc" -eq 0 ]
+expect "manual removal planted filter" [ -e "$T/planted" ]
+expect "manual removal did not run clean filter" [ ! -e "$T/filter-executed" ]
+expect "manual removal removed writer worktree" [ ! -e "$wt" ]
 
 # 4c: journal unwritable and no sandbox events: the landed event cannot be recorded -> exit 4, worktree kept.
 setup_case journal-unwritable
@@ -520,11 +616,32 @@ expect "exit 3 (got $rc): $(tail -3 "$T/land.out")" [ "$rc" -eq 3 ]
 load dirs
 rec="${dirs[0]:-/missing}/landing.json"
 expect "outcome land_review" [ "$(jget "$rec" 'v["outcome"]')" = land_review ]
-expect "rebased tip recorded" git -C "$repo" cat-file -e "$(jget "$rec" 'v["rebased_tip"]')^{commit}"
+new_tip=$(jget "$rec" 'v["rebased_tip"]')
+expect "rebased tip SHA recorded" [ "${#new_tip}" -eq 40 ]
 expect "writer branch stayed at old tip" [ "$(git -C "$wt" rev-parse HEAD)" = "$(jget "$rec" 'v["branch_tip_before"]')" ]
 expect "main unchanged" [ "$(git -C "$repo" rev-parse main)" = "$main_before" ]
 expect "land_review event" [ "$(events_with '"kind":"land_review"')" -eq 1 ]
 expect "no land_failed event" [ "$(events_with '"kind":"land_failed"')" -eq 0 ]
+expect "review prompt pins main" grep -q -- "--yes=$main_before" "$T/land.out"
+land --yes; rc=$?
+expect "bare --yes refused" [ "$rc" -eq 2 ]
+land "--yes=$main_before"; rc=$?
+expect "matching main approval lands ($rc): $(tail -5 "$T/land.out")" [ "$rc" -eq 0 ]
+
+setup_case range-diff-stale-approval
+perl -pi -e 's/^3$/three/' "$repo/file.txt"
+git -C "$repo" commit -q -am 'main moves before review'
+reviewed_main=$(git -C "$repo" rev-parse main)
+land; rc=$?
+expect "range-diff review required" [ "$rc" -eq 3 ]
+echo later > "$repo/later.txt"
+git -C "$repo" add later.txt
+git -C "$repo" commit -q -m 'main moves after review'
+current_main=$(git -C "$repo" rev-parse main)
+land "--yes=$reviewed_main"; rc=$?
+expect "stale main approval refused" [ "$rc" -eq 2 ]
+expect "stale approval explains both SHAs" grep -q "$reviewed_main.*$current_main" "$T/land.out"
+expect "stale approval did not merge" [ "$(git -C "$repo" rev-parse main)" = "$current_main" ]
 
 # A clean rebase merges the detached tested tip and removes the original branch.
 setup_case rebase-success
