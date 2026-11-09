@@ -233,11 +233,11 @@ const char* BookLadderFeed::fill(LadderSnapshot& s, const chart_raster::RasterCa
     const int64_t margin = std::min<int64_t>(std::max<int64_t>(1, bins / 4), (LadderSnapshot::kMaxRows - bins) / 2);
     const auto known = knownBins(view, base, group);
     const bool complete = window.lo >= known.lo && window.hi <= known.hi;
-    // An incomplete capture is no observation: it keeps the last accepted reference.
-    if (radar_) walls_.reference.medians = complete ? touchMedians(view, base, group) : tracker_.medians();
-    s.binLo = std::min(window.lo, std::max(window.lo - margin, known.lo));
-    const int64_t binHi = std::max(window.hi, std::min(window.hi + margin, known.hi));
-    s.rowCount = int(binHi - s.binLo + 1);
+    // A partial capture can classify known walls without observing unknown prices.
+    if (radar_) walls_.reference.medians = touchMedians(view, base, group);
+    s.binLo = std::max(window.lo - margin, known.lo);
+    const int64_t binHi = std::min(window.hi + margin, known.hi);
+    s.rowCount = int(std::max<int64_t>(0, binHi - s.binLo + 1));
     s.serverTick = serverTick;
     s.group = group;
     std::fill_n(s.rows.begin(), s.rowCount, LadderRow{});

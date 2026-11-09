@@ -1,6 +1,7 @@
 #include "chart/feeds/LadderTracker.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <span>
 
@@ -17,6 +18,22 @@ uint16_t saturatedCount(uint64_t n) {
 }
 bool hot(const sentinel::book::LevelInfo& info) {
     return info.flickers > 0 && info.sinceLastFlickerMs >= 0 && info.sinceLastFlickerMs <= kFlickerHotMs;
+}
+// Partial snapshots contain known rows only, but do not establish age or flicker
+// continuity. Classify their current sizes without mutating the observation tracker.
+void markPartialRows(LadderSnapshot& s, const sentinel::book::LargeReference& reference) {
+    const auto large = [&](float size, int side) {
+        const double median = reference.medians[size_t(side)];
+        return std::isfinite(size) && size > 0 && std::isfinite(median) && median > 0 &&
+               std::isfinite(reference.multiple) && reference.multiple > 0 && size / median >= reference.multiple;
+    };
+    for (int i = 0; i < s.rowCount; ++i) {
+        auto& row = s.rows[size_t(i)];
+        row.flags = uint8_t((large(row.bid, LadderSnapshot::kBid) ? LadderRow::kBidLarge : 0) |
+                            (large(row.ask, LadderSnapshot::kAsk) ? LadderRow::kAskLarge : 0));
+        row.bidWallMs = row.askWallMs = 0;
+        row.bidFlickers = row.askFlickers = 0;
+    }
 }
 } // namespace
 
@@ -53,6 +70,7 @@ void LadderTracker::publish(LadderSnapshot& s, uint64_t series, int64_t nowMs, c
     s.radar = true;
     s.wallMultiple = walls.reference.multiple;
     if (s.valid && s.complete && observe(s, series, nowMs, walls.reference)) markRows(s);
+    if (s.valid && !s.complete) markPartialRows(s, walls.reference);
     s.bidMedian = float(walls.reference.medians[size_t(Side::Bid)]);
     s.askMedian = float(walls.reference.medians[size_t(Side::Ask)]);
     s.walls = walls.cells;

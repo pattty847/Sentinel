@@ -223,7 +223,9 @@ TEST(LadderFeed, AHeldDragIsCountedOnceAndNeverAccumulates) {
     rig.frame.viewportDragging = true;
     rig.frame.viewportPanVisualOffset = QPointF(0, 200);
     rig.sync();
-    EXPECT_FALSE(rig.layer.drawing()) << "the rest rows do not cover the dragged window";
+    EXPECT_TRUE(rig.layer.drawing()) << "known rows still overlap the dragged window";
+    rig.layer.afterRendering();
+    EXPECT_EQ(rig.requests, 1);
     const auto window = chart::ladderWindow(dragged.drawnMinPrice, dragged.drawnMaxPrice, 0.05);
     ASSERT_TRUE(window.lo < restLo || window.hi > restHi) << "the drag moved past the old rows and margin";
     for (int publication = 0; publication < 3; ++publication) {
@@ -339,7 +341,8 @@ TEST(LadderFeed, OverTheLevelCapIsIncompleteBeyondTheLastCapturedLevel) {
     EXPECT_TRUE(low.valid);
     EXPECT_FALSE(low.complete);
     EXPECT_STREQ(rig.feed.lastReason(), "levels");
-    EXPECT_FALSE(rig.layer.drawing()) << "nothing drawn for an incomplete window";
+    EXPECT_TRUE(rig.layer.drawing()) << "the known part of an incomplete window draws";
+    EXPECT_EQ(low.binLo, 101);
     rig.view(camera(16'000, 16'300, 1)); // above the last captured level
     EXPECT_TRUE(rig.rows(*replica).complete) << rig.feed.lastReason();
     EXPECT_TRUE(rig.layer.drawing());
@@ -642,7 +645,7 @@ TEST(WallRadar, SeenForAndFlickerCountsSaturate) {
     EXPECT_EQ(tracker.rejectedUpdates(), 0u);
 }
 
-// r1 F1: an incomplete capture (zero-filled unknown rows) is no observation.
+// An incomplete capture excludes unknown rows and never advances the observation tracker.
 TEST(WallRadar, AnIncompleteCaptureIsNoObservation) {
     std::vector<BookLevelUpdate> levels;
     for (int i = 0; i < 50; ++i) levels.push_back({true, 99.5 + i * 0.01, 1.0}); // 99.50..99.99
@@ -665,20 +668,20 @@ TEST(WallRadar, AnIncompleteCaptureIsNoObservation) {
     EXPECT_TRUE(t1.valid);
     EXPECT_FALSE(t1.complete);
     EXPECT_STREQ(rig.feed.lastReason(), "scan");
-    EXPECT_FLOAT_EQ(bidAt(t1, 2000), 0.0f) << "an unknown row inside the window reads zero";
+    EXPECT_FLOAT_EQ(bidAt(t1, 2000), -1.0f) << "unknown prices are absent, not empty";
+    EXPECT_EQ(rig.feed.tracker().acceptedUpdates(), 1u);
     EXPECT_TRUE(t1.radar);
     EXPECT_DOUBLE_EQ(t1.wallMultiple, 4);
-    EXPECT_FLOAT_EQ(t1.bidMedian, median) << "the last accepted median";
+    EXPECT_DOUBLE_EQ(rig.feed.tracker().medians()[0], median) << "the last observed reference is retained";
     EXPECT_FALSE(rig.layer.drawing());
-    // Negative control: the same zeros as an observation are a disappearance.
-    std::vector<sentinel::book::LevelSizes> after;
-    for (int i = 0; i < t1.rowCount; ++i) after.push_back({t1.rows[size_t(i)].bid, t1.rows[size_t(i)].ask});
+    // Negative control: padding unknown prices with zeros would invent a disappearance.
+    std::vector<sentinel::book::LevelSizes> after(before.size());
     sentinel::book::LevelTracker naive({.maxRows = 4096});
     using sentinel::book::UpdateStatus;
     ASSERT_EQ(naive.update({1, 0.05, double(binLo) * 0.05, before, 1000}), UpdateStatus::Accepted);
     ASSERT_TRUE(naive.level(size_t(2000 - binLo), sentinel::book::Side::Bid).present);
-    ASSERT_EQ(naive.update({1, 0.05, double(t1.binLo) * 0.05, after, 1067}), UpdateStatus::Accepted);
-    EXPECT_FALSE(naive.level(size_t(2000 - t1.binLo), sentinel::book::Side::Bid).present);
+    ASSERT_EQ(naive.update({1, 0.05, double(binLo) * 0.05, after, 1067}), UpdateStatus::Accepted);
+    EXPECT_FALSE(naive.level(size_t(2000 - binLo), sentinel::book::Side::Bid).present);
 
     rig.feed.setScanBudget(chart::BookLadderFeed::kMaxScanWords, chart::BookLadderFeed::kMaxLevels);
     const auto& t2 = rig.tick(*replica, 1134);

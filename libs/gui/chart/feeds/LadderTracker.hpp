@@ -34,7 +34,7 @@ public:
     LadderTracker();
     void reset();
     // A valid and complete snapshot is an observation; an incomplete one keeps the
-    // state (its unknown rows are zero-filled, never "empty"); an invalid one resets.
+    // tracked state and classifies only known rows without ages; an invalid one resets.
     // `nowMs` is a monotonic clock; stamps are forced strictly increasing.
     void publish(LadderSnapshot& s, uint64_t series, int64_t nowMs, const WallCandidates& walls);
     // The wall reference of the last accepted observation (zero after a reset).

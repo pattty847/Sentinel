@@ -37,7 +37,8 @@ struct WallCandidate {
     bool found = false, capped = false;
 };
 
-// The book on the drawn rows, published by the GUI-thread feed (BookLadderFeed).
+// Known book rows near the drawn window, published by BookLadderFeed. Unknown
+// prices are outside [binLo, binLo + rowCount), never represented as empty levels.
 struct LadderSnapshot {
     static constexpr int kMaxRows = 4096;
     static constexpr int kBid = 0, kAsk = 1, kAbove = 0, kBelow = 1;

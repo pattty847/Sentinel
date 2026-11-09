@@ -131,20 +131,21 @@ QSGNode* LadderLayer::createContainer() {
 bool LadderLayer::drawable(const ChartFrame& frame) const {
     const auto& cam = frame.context.raster;
     const auto& s = *current_;
-    if (frame.context.rightGutterPx <= 0 || !cam.valid || !(cam.tick > 0) || !s.valid || !s.complete) return false;
+    if (frame.context.rightGutterPx <= 0 || !cam.valid || !(cam.tick > 0) || !s.valid) return false;
     if (s.rowCount <= 0 || std::abs(s.binPrice() - cam.tick) > 1e-9 * cam.tick) return false;
-    const auto window = ladderWindow(cam.drawnMinPrice, cam.drawnMaxPrice, s.binPrice());
-    return window.lo >= s.binLo && window.hi < s.binLo + s.rowCount;
+    return cam.drawnMaxPrice > double(s.binLo) * s.binPrice() &&
+           cam.drawnMinPrice < double(s.binLo + s.rowCount) * s.binPrice();
 }
 
 void LadderLayer::sync(const ChartFrame& frame) {
     if (mailbox_.take(current_, generation_)) generation_ = current_->generation;
     drawing_ = drawable(frame);
     const auto& cam = frame.context.raster;
-    if (drawing_ || frame.context.rightGutterPx <= 0 || !cam.valid || !(cam.tick > 0)) return;
+    if (frame.context.rightGutterPx <= 0 || !cam.valid || !(cam.tick > 0)) return;
     // Built for another frame (tick, rows or drag): ask the feed once per snapshot.
     const auto window = ladderWindow(cam.drawnMinPrice, cam.drawnMaxPrice, cam.tick);
     const auto& s = *current_;
+    if (drawing_ && window.lo >= s.binLo && window.hi < s.binLo + s.rowCount) return;
     const bool sameFrame = s.evalTick == cam.tick && s.evalLo == window.lo && s.evalHi == window.hi;
     if (!sameFrame && requestedFor_ != s.serial) {
         requestedFor_ = s.serial;
@@ -179,7 +180,8 @@ void LadderLayer::rebuild(const ChartFrame& frame) {
     }
     const double bin = s.binPrice();
     const auto window = ladderWindow(cam.drawnMinPrice, cam.drawnMaxPrice, bin);
-    const int first = int(window.lo - s.binLo), last = int(window.hi - s.binLo);
+    const int first = int(std::max<int64_t>(0, window.lo - s.binLo));
+    const int last = int(std::min<int64_t>(s.rowCount - 1, window.hi - s.binLo));
     float peak = 0;
     for (int i = first; i <= last; ++i) peak = std::max({peak, s.rows[size_t(i)].bid, s.rows[size_t(i)].ask});
     const float x0 = float(strip.left()) + kInsetPx, x1 = float(strip.right()) - kInsetPx;
