@@ -26,6 +26,7 @@
 #include <functional>
 #include <unordered_map>
 #include "FootprintSlice.hpp"
+#include "../flow/FlowBar.hpp"
 #include "TpoSlice.hpp"
 #include "VolumeProfileSlice.hpp"
 #include "../marketdata/model/TradeData.h"
@@ -39,6 +40,8 @@ namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
 class SentinelStreamClient : public QObject {
+    friend struct FlowWireClientTest;
+    friend struct FlowDataSourceTest;
     friend struct TradeOverlayWireTest;
     friend struct CandleDataSourceTest;
     friend struct SentinelStreamClientWriteTest;
@@ -57,6 +60,33 @@ public:
         double volume = 0.0;
         bool isClosed = false;
     };
+
+    enum class FlowSource { Live, Store };
+    enum class FlowStatus { Complete, Partial, Building, Refused, Live }; // Live is client coverage only.
+    enum class FlowFailure { Retryable, Oversized, Fatal };
+    struct FlowRecord {
+        sentinel::flow::FlowBar bar;
+        uint32_t revision = 0;
+        bool complete = false;
+        FlowSource source = FlowSource::Live;
+    };
+    struct FlowRange {
+        int64_t fromMs = 0, toMs = 0;
+        FlowStatus status = FlowStatus::Building;
+        int64_t priceScale = 0, rowTickUnits = 0;
+    };
+    struct FlowBatch {
+        quint64 id = 0; // request id for history, subscription id for live
+        QString symbol;
+        int64_t timeframeMs = 0;
+        bool history = false;
+        FlowStatus status = FlowStatus::Complete;
+        int64_t oldestMs = 0, sealedThroughMs = 0;
+        QString error;
+        std::vector<FlowRange> ranges;
+        std::vector<FlowRecord> bars;
+    };
+    using FlowBatchPtr = std::shared_ptr<const FlowBatch>;
 
     // Decoded chunk replies are immutable and shared, never copied per receiver.
     using HeatmapChunkPtr = std::shared_ptr<const heatmap::ChunkFrame>;
@@ -90,6 +120,10 @@ public:
                                  const std::vector<int64_t>& starts, const std::vector<uint64_t>& haveHash = {});
     quint64 subscribeHeatmapLive(const std::string& symbol, const std::vector<std::string>& sources, int64_t sinceMs);
     void unsubscribeHeatmapLive(const std::string& symbol);
+    void requestFlowHistory(quint64 req, const std::string& symbol, int64_t timeframeMs,
+                            int64_t endTimeMs, int limit);
+    quint64 subscribeFlowLive(const std::string& symbol, int64_t timeframeMs);
+    void unsubscribeFlowLive(quint64 sub);
     void requestFootprintHistory(const std::string& symbol,
                                  int64_t timeframeMs,
                                  int64_t endTimeMs,
@@ -140,6 +174,9 @@ signals:
                           quint64 deliveryGeneration, const QString& status = {},
                           uint64_t bookVersion = 0);
     // Other signals as needed for aggregated slices
+    void flowBarsReceived(SentinelStreamClient::FlowBatchPtr batch);
+    void flowHistoryFailed(quint64 req, const QString& message, SentinelStreamClient::FlowFailure failure);
+    void flowLiveDropped(quint64 sub, const QString& symbol, int64_t timeframeMs, int64_t bucketStartMs);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
     // After the in-flight tpo_history_chunk's slices were emitted (requestId always set).
@@ -176,6 +213,11 @@ signals:
     void coinbaseLatencyReceived(int milliseconds);
 
 private:
+    struct FlowDropInfo {
+        quint64 sub = 0;
+        QString symbol;
+        int64_t timeframeMs = 0, bucketStartMs = 0;
+    };
     void run();
     void failConnection(const QString& reason);
     static int reconnectDelayMs(unsigned attempt, unsigned jitter);
@@ -189,8 +231,9 @@ private:
     void onWrite(boost::beast::error_code ec, std::size_t bytes_transferred);
     
     void handleMessage(const std::string& msg);
-    void handleBinaryMessage(std::shared_ptr<std::vector<uint8_t>> frame);
-    void decodeBinaryMessage(const std::vector<uint8_t>& frame, quint64 epoch);
+    void handleBinaryMessage(std::shared_ptr<std::vector<uint8_t>> frame, bool flowLive = false,
+                             std::optional<FlowDropInfo> flowDrop = {});
+    void decodeBinaryMessage(const std::vector<uint8_t>& frame, quint64 epoch, bool flowLive = false, quint64 flowRequest = 0);
     bool acceptChunkOrder(const heatmap::ChunkFrame& frame);
     void handleServerConfigMessage(const nlohmann::json& msg);
     void handleSnapshotMessage(const nlohmann::json& msg);
@@ -250,6 +293,8 @@ private:
     std::unordered_map<std::string, quint64> m_bookDeliveryGenerations;
 
     std::atomic<quint64> m_nextChunkRequestId{0};
+    std::atomic<quint64> m_flowHistoryRequest{0};
+    std::map<std::pair<quint64, int64_t>, std::chrono::steady_clock::time_point> m_flowDropNotified;
     // Replies from an older connection are dropped after reconnect.
     std::atomic<quint64> m_connectionEpoch{0};
     std::atomic<size_t> m_decodeBacklogBytes{0};
@@ -274,3 +319,6 @@ Q_DECLARE_METATYPE(QVector<SentinelStreamClient::CandleBar>)
 Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapChunkPtr)
 Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapChunkError)
 Q_DECLARE_METATYPE(protocol::chunkwire::Availability)
+
+Q_DECLARE_METATYPE(SentinelStreamClient::FlowBatchPtr)
+Q_DECLARE_METATYPE(SentinelStreamClient::FlowFailure)

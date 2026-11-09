@@ -1058,6 +1058,11 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
     m_dataSource->setCandleHistoryViewport(symbol, tfMs,
         ready ? renderer->view()->getVisibleTimeStart() : 0,
         ready ? renderer->view()->getVisibleTimeEnd() : 0);
+    // Sub-second charts consume 1 s flow; there is no sub-second flow protocol.
+    const int64_t flowTf = std::max<int64_t>(1000, tfMs);
+    m_dataSource->subscribeFlowLive(ready ? symbol : QString{}, flowTf);
+    if (ready) m_dataSource->requestFlowHistory(symbol, flowTf,
+        renderer->view()->getVisibleTimeStart(), renderer->view()->getVisibleTimeEnd());
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {

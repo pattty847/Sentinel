@@ -29,6 +29,11 @@ public:
 
     virtual void subscribe(const QString& symbol) = 0;
     virtual void unsubscribe(const QString& symbol) = 0;
+    // Flow is optional for datasources without this stream. History arguments
+    // describe the visible half-open window; the remote source adds prefetch.
+    virtual void requestFlowHistory(const QString&, int64_t, int64_t, int64_t) {}
+    virtual void subscribeFlowLive(const QString&, int64_t) {}
+    virtual void unsubscribeFlowLive() {}
     virtual void requestFootprintHistory(const QString& symbol,
                                          int64_t timeframeMs,
                                          int64_t endTimeMs,
@@ -58,6 +63,7 @@ signals:
     void tradeReceived(const Trade& trade);
     void liveOrderBookUpdated(const QString& productId, const std::vector<BookDelta>& deltas);
     void orderBookUpdated(std::shared_ptr<const OrderBook> book);
+    void flowBarsReceived(SentinelStreamClient::FlowBatchPtr batch);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
     void tpoHistoryChunkReceived(const QString& symbol, const QString& requestId, qint64 timeframeMs,
