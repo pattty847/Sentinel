@@ -5,7 +5,7 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
 
 ## Waves (top-down; one recorder/server item at a time; deploys wait for the owner)
 
-- **Wave 2 (now):** duplicate trade id after anchor resume; read-only "are anchors still needed?" check; Codex: PEPE price units.
+- **Wave 2 (now):** PEPE price units (anchors stay; duplicate trade id and flaky tests landed).
 - **Wave 3:** footprint/why-it-moved plan (Fable: footprint, CVD, eaten/pulled, bubbles), aesthetics, heatmap seam, trade bubbles rethink.
 - **Wave 4:** Security, land follow-ups, Feature ideas check. Then the Queue.
 
@@ -66,7 +66,6 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
 - Now-column flicker (owner 2026-10-28): the live column flickers very faintly; suspect the MSDF label update. Confirm on a live run before fixing.
 - Owner 2026-11-07: fix even if not visible. Candle restart-partial bars: the 1m bar and the 5m..1d rollup bars open at a server restart lose their pre-restart part (only 100 ms and 1 s are restored); a GUI keeps the partial closed bar. Owner to confirm it matches the 4h/1d report.
 - `HeatmapGpuBinner` precision self-test intermittently reads back all zeros (1 of 6 starts) and silently drops the fast kernel; suspect readback before dispatch completion in `driveSelfTest`. Seen again 2026-11-05 22:46 (384/384 zeros, Metal M4). Seen again 2026-11-07 on Metal M4 in a reviewer ctest run (fast kernel failed self-test, precise kernel used).
-- An anchor-resumed JournalFeed can re-emit a pre-anchor trade_id on a reconnect snapshot (the v1 anchor sidecar omits the trade-ID window); the fix changes on-disk state and needs owner approval.
 - Straight RGB into a premultiplied material (as the VP had): `CandlestickBatched.cpp` volume bars draw brighter than their alpha; `CandlestickOverlayItem.cpp` body opacity and wick alpha. Fixing changes looks (owner).
 - PEPE at its native 1e-8 tick draws ~200 px rows and logs "native rows exceed int32". Owner 2026-11-08: option A, a scaled display unit with an obvious tag (PEPE x1M: 5.04 = 0.00000504) on axis, book and labels, plus a row-height cap; no fake sub-tick grid.
 - Windows: Paper Trading looks for the backtest binary without the multi-config `Release/`/`Debug/` dir or `.exe` (`PaperTradingDock.cpp`).
