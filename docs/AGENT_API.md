@@ -133,6 +133,47 @@ curl -s -H 'Content-Type: application/json' -d '{"footprintHollowCandles":false,
 To return to the default source, post `{"footprintSource":"q16"}` to the same route.
 The cells look knobs remain stored while q16 is selected.
 
+## Cumulative volume delta strip
+
+`POST /api/v1/layers` and `POST /api/v1/heatmap/settings` accept these keys:
+
+| Key / QML property on `layers` | Values | Default |
+| --- | --- | --- |
+| `cvdStripPx` | Nonnegative integer logical px (at most 2147483647); 0 disables. Drawing clamps to surface height. | `0` |
+| `cvdReset` | `none`, `utcDay`, `tpoSession` | `utcDay` |
+| `cvdStyle` | `line`, `area` | `line` |
+
+Both routes report the current knobs; `GET /api/v1/state` includes them under `layers`.
+Layer-route and QML writes persist, including writes of the current value. The heatmap
+settings route supports `persist:false` for lab comparisons without changing saved settings.
+CVD works with footprint off or either footprint source and has no footprint zoom gate.
+Sub-second charts use the loaded 1 s flow series.
+It sums all loaded flow bars in base asset units, including those outside the viewport,
+then autoscales visible values together with zero. Forming-bar updates replace the
+previous value. `tpoSession` uses the configured `tpo.tpoSessionType` and resets at its
+session open; accumulation continues until the next open, including outside session hours.
+`none` shows “CVD since loaded start” because paging history changes its baseline.
+
+The semi-opaque strip overlays the bottom of the chart surface, leaving price mapping
+unchanged and excluding the time axis, price axis and ladder gutters. `area` fills to
+zero in green above and red below; `line` draws the cumulative curve. Min/max and reset
+labels appear within the strip, with labels omitted where the strip is too small to fit.
+Missing flow data draws nothing. No default or golden scene changes until enabled.
+
+On an isolated lab at port 17116 (each command is process-only):
+
+```sh
+curl -s -H 'Content-Type: application/json' -d '{"cvdStripPx":96,"persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings
+curl -s -H 'Content-Type: application/json' -d '{"cvdReset":"none","persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings
+curl -s -H 'Content-Type: application/json' -d '{"cvdReset":"utcDay","persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings
+curl -s -H 'Content-Type: application/json' -d '{"cvdReset":"tpoSession","persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings
+curl -s -H 'Content-Type: application/json' -d '{"cvdStyle":"area","persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings
+curl -s -H 'Content-Type: application/json' -d '{"cvdStyle":"line","persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings
+curl -s -H 'Content-Type: application/json' -d '{"cvdStripPx":0,"persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings
+```
+
+To save a selection, omit `persist:false`, or post the knobs to `/api/v1/layers`.
+
 ## Trade bubbles (GPU chart)
 
 The toolbar gear menu has **Trades** (off by default) and **Minimum trade notional

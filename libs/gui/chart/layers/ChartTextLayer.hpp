@@ -8,10 +8,11 @@ namespace chart {
 class HeatmapLayer;
 class LadderLayer;
 class FootprintCellsLayer;
+class CvdLayer;
 class ChartTextLayer final : public IChartLayer {
 public:
-    ChartTextLayer(HeatmapLayer& heatmap, LadderLayer& ladder, FootprintCellsLayer& footprint)
-        : heatmap_(heatmap), ladder_(ladder), footprint_(footprint) {}
+    ChartTextLayer(HeatmapLayer& heatmap, LadderLayer& ladder, FootprintCellsLayer& footprint, CvdLayer& cvd)
+        : heatmap_(heatmap), ladder_(ladder), footprint_(footprint), cvd_(cvd) {}
     std::string_view name() const override { return "text"; }
     void onRootRebuilt() override { renderer.onRootRebuilt(); }
     QSGNode* createContainer() override { return renderer.createRoot(); }
@@ -26,5 +27,6 @@ private:
     HeatmapLayer& heatmap_;
     LadderLayer& ladder_;
     FootprintCellsLayer& footprint_;
+    CvdLayer& cvd_;
 };
 } // namespace chart

@@ -137,6 +137,8 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"candleWickColor", QString::fromStdString(s.candleWickColor)},
         {"candleBodyOpacity", s.candleBodyOpacity},
         {"candleWickWidth", s.candleWickWidth},
+        {"cvdStripPx", s.cvdStripPx}, {"cvdReset", QString::fromStdString(s.cvdReset)},
+        {"cvdStyle", QString::fromStdString(s.cvdStyle)},
         {"footprintSource", QString::fromStdString(s.footprintSource)},
         {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
         {"footprintHollowCandles", s.footprintHollowCandles}, {"footprintNumbers", s.footprintNumbers},
@@ -162,6 +164,10 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         if (integers.contains(key) && std::floor(v.toDouble()) != v.toDouble()) return "Expected an integer: " + key;
         if (key == "bubblePlacement" && v != "individual" && v != "auto" && v != "slot")
             return "bubblePlacement must be individual, auto or slot";
+        if (key == "cvdStripPx" && (v.toDouble() < 0 || v.toDouble() > 2147483647 || std::floor(v.toDouble()) != v.toDouble()))
+            return "cvdStripPx must be a nonnegative integer <= 2147483647";
+        if (key == "cvdReset" && v != "none" && v != "utcDay" && v != "tpoSession") return "cvdReset must be none, utcDay or tpoSession";
+        if (key == "cvdStyle" && v != "line" && v != "area") return "cvdStyle must be line or area";
         if (key == "footprintSource" && v != "q16" && v != "cells") return "footprintSource must be q16 or cells";
         if (key == "footprintIntensity" && v != "bar" && v != "window") return "footprintIntensity must be bar or window";
         if (key == "tickMode" && v != "auto" && v != "manual") return "tickMode must be auto or manual";
@@ -203,6 +209,9 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.candleWickColor = merged["candleWickColor"].toString().toStdString();
     out.candleBodyOpacity = merged["candleBodyOpacity"].toDouble();
     out.candleWickWidth = merged["candleWickWidth"].toInt();
+    out.cvdStripPx = merged["cvdStripPx"].toInt();
+    out.cvdReset = merged["cvdReset"].toString().toStdString();
+    out.cvdStyle = merged["cvdStyle"].toString().toStdString();
     out.footprintSource = merged["footprintSource"].toString().toStdString();
     out.footprintIntensity = merged["footprintIntensity"].toString().toStdString();
     out.footprintHollowCandles = merged["footprintHollowCandles"].toBool();

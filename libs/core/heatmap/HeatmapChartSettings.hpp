@@ -42,6 +42,8 @@ struct HeatmapChartSettings {
     double candleBodyOpacity = 1;
     int candleWickWidth = 1; // device pixels
     // Chart-edge book ladder strip (chart menu); width in logical px, 60..240.
+    int cvdStripPx = 0;
+    std::string cvdReset = "utcDay", cvdStyle = "line";
     std::string footprintSource = "q16";
     std::string footprintIntensity = "bar";
     bool footprintHollowCandles = true, footprintNumbers = true;

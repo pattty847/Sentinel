@@ -1,4 +1,5 @@
 #pragma once
+#include "chart/core/CvdSeries.hpp"
 #include <cmath>
 #include <functional>
 #include <QObject>
@@ -8,6 +9,9 @@
 namespace chart {
 class LayerVisibility : public QObject {
     Q_OBJECT
+    Q_PROPERTY(int cvdStripPx READ cvdStripPx WRITE writeCvdStripPx NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(QString cvdReset READ cvdReset WRITE writeCvdReset NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(QString cvdStyle READ cvdStyle WRITE writeCvdStyle NOTIFY layerVisibilityChanged)
     Q_PROPERTY(int primaryField READ primaryField NOTIFY primaryFieldChanged)
     Q_PROPERTY(bool heatmapLayerEnabled READ heatmapEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool footprintLayerEnabled READ footprintEnabled NOTIFY layerVisibilityChanged)
@@ -30,6 +34,39 @@ public:
     std::function<void(std::string_view, bool, bool)> report;
     std::function<void()> requestUpdate;
 
+    int cvdStripPx() const { return cvdStrip_; }
+    CvdReset cvdResetRule() const { return cvdReset_; }
+    QString cvdReset() const {
+        if (cvdReset_ == CvdReset::None) return QStringLiteral("none");
+        return cvdReset_ == CvdReset::UtcDay ? QStringLiteral("utcDay") : QStringLiteral("tpoSession");
+    }
+    QString cvdStyle() const { return cvdArea_ ? QStringLiteral("area") : QStringLiteral("line"); }
+    void setCvdStripPx(int px) {
+        if (px < 0 || cvdStrip_ == px) return;
+        cvdStrip_ = px; changed("cvdStripPx", px > 0);
+    }
+    void setCvdReset(const QString& value) {
+        if (value != "none" && value != "utcDay" && value != "tpoSession") return;
+        const auto reset = value == "none" ? CvdReset::None : value == "utcDay" ? CvdReset::UtcDay : CvdReset::TpoSession;
+        if (cvdReset_ == reset) return;
+        cvdReset_ = reset; changed("cvdReset", true);
+    }
+    void setCvdStyle(const QString& value) {
+        if (value != "line" && value != "area") return;
+        setFootprintOption(cvdArea_, value == "area", "cvdStyle");
+    }
+    void writeCvdStripPx(int px) {
+        setCvdStripPx(px);
+        if (cvdStrip_ == px) emit footprintSettingsRequested({{"cvdStripPx", px}});
+    }
+    void writeCvdReset(const QString& value) {
+        setCvdReset(value);
+        if (cvdReset() == value) emit footprintSettingsRequested({{"cvdReset", value}});
+    }
+    void writeCvdStyle(const QString& value) {
+        setCvdStyle(value);
+        if (cvdStyle() == value) emit footprintSettingsRequested({{"cvdStyle", value}});
+    }
     int primaryField() const { return primaryField_; }
     bool heatmapEnabled() const { return heatmap_; }
     bool footprintEnabled() const { return footprint_; }
@@ -210,6 +247,9 @@ private:
         option = value;
         changed(name, value);
     }
+    int cvdStrip_ = 0;
+    CvdReset cvdReset_ = CvdReset::UtcDay;
+    bool cvdArea_ = false;
     bool footprintCells_ = false;
     bool footprintWindowIntensity_ = false, footprintHollowCandles_ = true, footprintNumbers_ = true;
     void changed(std::string_view field, bool enabled) {

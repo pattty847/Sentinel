@@ -2710,3 +2710,82 @@ TEST(FootprintFlowFeed, PublicationWakesCandlesOnCoverageTransitionsIncludingRee
 }
 
 #include "test_chart_ui.moc"
+
+TEST(CvdKnobs, QmlAndAgentPortPersistAndProcessOnlyChangesStayLocal) {
+    TempStore store;
+    HeatmapSettingsModel model(store.store, "main", store.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
+    auto* layers = renderer.layers();
+    EXPECT_EQ(layers->cvdStripPx(), 0); EXPECT_EQ(layers->cvdReset(), "utcDay"); EXPECT_EQ(layers->cvdStyle(), "line");
+    ASSERT_TRUE(QQmlProperty::write(layers, "cvdStripPx", 96));
+    ASSERT_TRUE(QQmlProperty::write(layers, "cvdReset", "none"));
+    ASSERT_TRUE(QQmlProperty::write(layers, "cvdStyle", "area"));
+    controls.syncNow();
+    auto saved = store.reload();
+    EXPECT_EQ(saved.cvdStripPx, 96); EXPECT_EQ(saved.cvdReset, "none"); EXPECT_EQ(saved.cvdStyle, "area");
+    const QJsonObject patch{{"cvdStripPx", 128}, {"cvdReset", "tpoSession"}, {"cvdStyle", "line"}};
+    ASSERT_TRUE(model.apply(ChartAgentPort::footprintPatch(patch), false).isEmpty()); controls.syncNow();
+    for (auto it = patch.begin(); it != patch.end(); ++it) EXPECT_EQ(renderer.agentPort().footprintSettings()[it.key()], it.value());
+    saved = store.reload();
+    EXPECT_EQ(saved.cvdStripPx, 96); EXPECT_EQ(saved.cvdReset, "none"); EXPECT_EQ(saved.cvdStyle, "area");
+    HeatmapSettingsModel restarted(store.store, "main", store.config);
+    UnifiedGridRenderer second;
+    HeatmapChartControls restored(&restarted); restored.setRenderer(&second);
+    EXPECT_EQ(second.layers()->cvdStripPx(), 96); EXPECT_EQ(second.layers()->cvdReset(), "none"); EXPECT_EQ(second.layers()->cvdStyle(), "area");
+    ASSERT_TRUE(QQmlProperty::write(layers, "cvdStripPx", 128));
+    EXPECT_EQ(store.reload().cvdStripPx, 128);
+}
+
+TEST(CvdFeed, RemoteHistoryAndFormingReplacementWorkWithoutFootprintAtAnyZoom) {
+    RemoteGridDataSource source("127.0.0.1", "1");
+    chart::CvdLayer layer;
+    chart::CvdFeed feed(layer.mailbox(), layer.presentation());
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000;
+    frame.raster = chart_raster::computeRaster({1000, 2000, 95, 105, {}, 1000, 1, 10, 20, 1}, {});
+    QString symbol = "BTC-USD";
+    feed.setPorts({[&] { return frame; }, [&] { return symbol; }, [] { return 4; }, [] {}});
+    feed.bindSource(source);
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = symbol; batch->timeframeMs = 1000;
+    for (int i = 0; i < 2; ++i) {
+        auto& bar = batch->bars.emplace_back().bar;
+        bar.startMs = i * 1000; bar.timeframeMs = 1000; bar.baseScale = 1; bar.delta = 5;
+    }
+    FlowDataSourceTest::deliver(source, batch); // while CVD and footprint are both off
+    layer.presentation().stripPx = 80;
+    feed.onFrameChanged(); feed.publish();
+    auto current = std::make_unique<chart::CvdSnapshot>();
+    ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_EQ(current->series.count, 1);
+    EXPECT_EQ(current->series.points[0].value, 10);
+    batch->bars[1].bar.delta = -2;
+    FlowDataSourceTest::deliver(source, batch); feed.publish();
+    ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_EQ(current->series.count, 1);
+    EXPECT_EQ(current->series.points[0].value, 3);
+    symbol = "ETH-USD"; feed.onFrameChanged(); feed.publish();
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->series.count, 0);
+}
+
+TEST(CvdKnobs, BothApiRoutesPersistAllThreeFields) {
+    TempStore store;
+    HeatmapSettingsModel model(store.store, "main", store.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
+    for (const char* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
+        for (const char* body : {R"({"cvdStripPx":96,"cvdReset":"none","cvdStyle":"area"})",
+                                R"({"cvdStripPx":0,"cvdReset":"utcDay","cvdStyle":"line"})",
+                                R"({"cvdStripPx":64,"cvdReset":"tpoSession","cvdStyle":"line"})"}) {
+            const auto validated = AgentApi::validateControl({"POST", path, {}, body}, std::nullopt);
+            ASSERT_EQ(validated.status, 200);
+            const auto patch = validated.body.layers.isEmpty() ? validated.body.heatmapSettings
+                : ChartAgentPort::footprintPatch(validated.body.layers);
+            ASSERT_TRUE(model.apply(patch).isEmpty()); controls.syncNow();
+            const auto saved = heatmap::settingsJson(store.reload());
+            for (auto it = patch.begin(); it != patch.end(); ++it) {
+                EXPECT_EQ(renderer.agentPort().footprintSettings()[it.key()], it.value());
+                EXPECT_EQ(saved[it.key()], it.value());
+            }
+        }
+    }
+}

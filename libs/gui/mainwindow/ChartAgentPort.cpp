@@ -4,6 +4,7 @@
 #include "chart/core/FrameAck.hpp"
 #include <cmath>
 #include "chart/feeds/FlowFeed.hpp"
+#include "chart/feeds/CvdFeed.hpp"
 #include "chart/shell/LayerVisibility.hpp"
 
 AgentApi::ViewportSnapshot ChartAgentPort::snapshot(AgentApi::Metadata meta) const {
@@ -76,14 +77,19 @@ void ChartAgentPort::setControlRevision(quint64 revision, quint64 selectionEpoch
 
 void ChartAgentPort::bindFlowSource(IGridDataSource& source) const {
     if (flow_) flow_->bindSource(source);
+    if (cvd_) cvd_->bindSource(source);
 }
 QJsonObject ChartAgentPort::footprintSettings() const {
     if (!layers_) return {};
-    return {{"footprintSource", layers_->footprintSource()}, {"footprintIntensity", layers_->footprintIntensity()},
+    return {{"cvdStripPx", layers_->cvdStripPx()}, {"cvdReset", layers_->cvdReset()}, {"cvdStyle", layers_->cvdStyle()},
+            {"footprintSource", layers_->footprintSource()}, {"footprintIntensity", layers_->footprintIntensity()},
             {"footprintHollowCandles", layers_->footprintHollowCandles()}, {"footprintNumbers", layers_->footprintNumbers()}};
 }
 void ChartAgentPort::applyFootprintSettings(const QJsonObject& patch) const {
     if (!layers_) return;
+    if (patch.contains("cvdStripPx")) layers_->setCvdStripPx(patch["cvdStripPx"].toInt());
+    if (patch.contains("cvdReset")) layers_->setCvdReset(patch["cvdReset"].toString());
+    if (patch.contains("cvdStyle")) layers_->setCvdStyle(patch["cvdStyle"].toString());
     if (patch.contains("footprintSource")) layers_->setFootprintSource(patch["footprintSource"].toString());
     if (patch.contains("footprintIntensity")) layers_->setFootprintIntensity(patch["footprintIntensity"].toString());
     if (patch.contains("footprintHollowCandles")) layers_->setFootprintHollowCandles(patch["footprintHollowCandles"].toBool());
@@ -92,7 +98,7 @@ void ChartAgentPort::applyFootprintSettings(const QJsonObject& patch) const {
 
 QJsonObject ChartAgentPort::footprintPatch(const QJsonObject& patch) {
     QJsonObject out;
-    for (const auto& key : {"footprintSource", "footprintIntensity", "footprintHollowCandles", "footprintNumbers"})
+    for (const auto& key : {"cvdStripPx", "cvdReset", "cvdStyle", "footprintSource", "footprintIntensity", "footprintHollowCandles", "footprintNumbers"})
         if (patch.contains(key)) out[key] = patch[key];
     return out;
 }

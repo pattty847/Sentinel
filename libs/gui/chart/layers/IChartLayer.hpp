@@ -23,6 +23,7 @@ public:
     virtual ~IChartLayer() = default;
     virtual std::string_view name() const = 0;
     virtual void onRootRebuilt() = 0;
+    // Return nullptr to defer the container; the registry retries after sync.
     virtual QSGNode* createContainer();
     virtual void sync(const ChartFrame&) {}
     virtual void updateNodes(const ChartFrame&, LayerNodeContext&) = 0;

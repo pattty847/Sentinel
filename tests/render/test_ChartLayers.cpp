@@ -492,3 +492,132 @@ TEST(FootprintCells, FlatBinningReusesStorageAndWindowMaximumExcludesOverscan) {
     EXPECT_DOUBLE_EQ(out->maxRowVolume, 6.8);
     EXPECT_EQ(out->barCount, 2);
 }
+
+TEST(CvdLayer, LazyContainerKeepsDefaultTreeAndInsertsBeforeText) {
+    chart::ChartLayers layers;
+    layers.heatmap.initialize();
+    QSGNode root;
+    layers.registry.onRootRebuilt(&root);
+    ASSERT_EQ(root.childCount(), 7);
+    auto* textRoot = root.lastChild();
+    ChartTextRenderer text; ChartTextAtlas atlas;
+    chart::LayerNodeContext context{nullptr, &root, text, atlas, false};
+    auto frame = footprintChartFrame();
+    layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
+    EXPECT_EQ(root.childCount(), 7); EXPECT_EQ(root.lastChild(), textRoot);
+    layers.cvd.presentation().stripPx = 50;
+    chart::CvdFeed::build(layers.cvd.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::UtcDay, 4);
+    layers.cvd.mailbox().post();
+    layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
+    ASSERT_EQ(root.childCount(), 8); EXPECT_EQ(root.lastChild(), textRoot);
+    EXPECT_EQ(root.childAtIndex(6)->type(), QSGNode::OpacityNodeType);
+    EXPECT_TRUE(layers.cvd.drawing());
+    layers.cvd.presentation().stripPx = 0;
+    layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
+    EXPECT_FALSE(layers.cvd.drawing());
+    EXPECT_EQ(static_cast<QSGOpacityNode*>(root.childAtIndex(6))->opacity(), 0);
+}
+TEST(CvdLayer, LineAreaBoundsAndFreshFramesAllocateNothing) {
+    chart::CvdLayer layer;
+    layer.presentation().stripPx = 50;
+    auto frame = footprintChartFrame();
+    frame.context.surfaceBounds = {0, 0, 112, 100}; // excludes the time axis and price gutter
+    frame.context.itemBounds = {0, 0, 160, 120}; frame.context.rightGutterPx = 48;
+    frame.context.overlays.footprint = false;
+    auto series = footprintSeries();
+    series.bars[1000] = series.bars[0]; series.bars[1000].bar.startMs = 1000;
+    series.bars[1000].bar.delta = -600;
+    chart::CvdFeed::build(layer.mailbox().back(), series, footprintFrame(), chart::CvdReset::UtcDay, 4);
+    layer.mailbox().post(); layer.sync(frame);
+    std::unique_ptr<QSGNode> root(layer.createContainer());
+    ChartTextRenderer text; ChartTextAtlas atlas;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
+    layer.updateNodes(frame, context);
+    ASSERT_TRUE(layer.drawing()); ASSERT_GT(layer.vertexCount(), 12);
+    EXPECT_EQ(layer.strip(), QRectF(0, 50, 112, 50));
+    auto* geometry = static_cast<QSGGeometryNode*>(root->firstChild())->geometry();
+    auto* vertices = geometry->vertexDataAsColoredPoint2D();
+    const auto lineVertex = vertices[13];
+    layer.presentation().area = true;
+    for (int i = 0; i < 2; ++i) {
+        chart::CvdFeed::build(layer.mailbox().back(), series, footprintFrame(), chart::CvdReset::UtcDay, 4);
+        layer.mailbox().post();
+        footprintAllocations = 0; footprintCounting = true;
+        layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+        footprintCounting = false;
+        EXPECT_EQ(footprintAllocations.load(), 0u);
+    }
+    EXPECT_NE(vertices[13].y, lineVertex.y); EXPECT_EQ(vertices[13].a, 110);
+    bool green = false, red = false;
+    for (int i = 0; i < layer.vertexCount(); ++i) {
+        EXPECT_GE(vertices[i].x, 0); EXPECT_LE(vertices[i].x, 112);
+        EXPECT_GE(vertices[i].y, 50); EXPECT_LE(vertices[i].y, 100);
+        green |= vertices[i].g > vertices[i].r;
+        red |= vertices[i].r > vertices[i].g;
+    }
+    EXPECT_TRUE(green); EXPECT_TRUE(red);
+    layer.presentation().stripPx = 1; layer.presentation().area = false;
+    layer.sync(frame); layer.updateNodes(frame, context);
+    for (int i = 0; i < layer.vertexCount(); ++i) {
+        EXPECT_GE(vertices[i].y, 99); EXPECT_LE(vertices[i].y, 100);
+    }
+}
+TEST(CvdFeed, SumsAllLoadedBarsAndRespectsTpoOpenAndBaseScale) {
+    auto source = footprintSeries();
+    auto frame = footprintFrame();
+    frame.raster.drawnStartMs = 1000;
+    source.bars[1000] = source.bars[0]; source.bars[1000].bar.startMs = 1000;
+    source.bars[1000].bar.baseScale = 50;
+    chart::CvdSnapshot snapshot;
+    chart::CvdFeed::build(snapshot, source, frame, chart::CvdReset::None, 4);
+    ASSERT_EQ(snapshot.series.count, 1); EXPECT_EQ(snapshot.series.points[0].value, 9);
+    const int64_t open = 13 * 3600000;
+    source.bars.clear();
+    for (auto time : {open - 1000, open, open + 1000}) {
+        auto& bar = source.bars[time].bar;
+        bar.startMs = time; bar.timeframeMs = 1000; bar.baseScale = 1; bar.delta = 5;
+    }
+    frame.raster.drawnStartMs = open; frame.raster.drawnEndMs = open + 2000;
+    chart::CvdFeed::build(snapshot, source, frame, chart::CvdReset::TpoSession, 0);
+    ASSERT_EQ(snapshot.series.count, 2); EXPECT_EQ(snapshot.series.points[0].value, 5);
+    EXPECT_EQ(snapshot.series.points[1].value, 10);
+}
+
+TEST(CvdLayer, LabelsAreBoundedAndFreshDataFramesAllocateNothing) {
+    QTemporaryDir cache;
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
+    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
+    ChartTextAtlas atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 64; params.charset = " 0123456789.e+-CVDsinceTPOUdaylotr";
+    ASSERT_TRUE(atlas.build(params));
+    chart::CvdLayer layer;
+    layer.presentation().stripPx = 80;
+    auto frame = footprintChartFrame(); frame.context.surfaceBounds.setWidth(400);
+    chart::CvdFeed::build(layer.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::UtcDay, 4);
+    layer.mailbox().post(); layer.sync(frame);
+    std::unique_ptr<QSGNode> root(layer.createContainer());
+    ChartTextRenderer text;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
+    layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+    ASSERT_GT(text.submittedGlyphs(), 0);
+    for (int i = 0; i < 2; ++i) {
+        auto series = footprintSeries(); series.bars[0].bar.delta += i + 1;
+        chart::CvdFeed::build(layer.mailbox().back(), series, footprintFrame(), chart::CvdReset::UtcDay, 4);
+        layer.mailbox().post();
+        footprintAllocations = 0; footprintCounting = true;
+        layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+        footprintCounting = false;
+        EXPECT_EQ(footprintAllocations.load(), 0u);
+    }
+}
+
+TEST(CvdFeed, SubsecondChartUsesOneSecondFlow) {
+    auto frame = footprintFrame(); frame.activeTimeframeMs = 100;
+    chart::CvdSnapshot snapshot;
+    chart::CvdFeed::build(snapshot, footprintSeries(), frame, chart::CvdReset::UtcDay, 4);
+    EXPECT_EQ(snapshot.timeframeMs, 1000); ASSERT_EQ(snapshot.series.count, 1);
+    EXPECT_EQ(snapshot.series.points[0].value, 3);
+}

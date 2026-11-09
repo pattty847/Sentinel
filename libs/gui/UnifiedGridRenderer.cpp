@@ -377,5 +377,5 @@ void UnifiedGridRenderer::applyServerConfig(const ServerConfig& config) { m_look
 
 ChartAgentPort UnifiedGridRenderer::agentPort() {
   return {*m_view, m_frames.published, m_frames.ack,
-          [this] { update(); }, &m_layers.flowFeed, &m_visibility};
+          [this] { update(); }, &m_layers.flowFeed, &m_visibility, &m_layers.cvdFeed};
 }
