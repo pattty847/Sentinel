@@ -1,6 +1,7 @@
 #pragma once
 #include "RecordingLive.hpp"
 #include "flow/FlowBarBuilder.hpp"
+#include "flow/FlowScales.hpp"
 #include "roller/Grid.hpp"
 #include "OverlayTradeSelection.hpp"
 #include <map>
@@ -36,6 +37,7 @@ struct FlowSubscription {
     std::string symbol;
     int64_t timeframeMs = 0;
     std::function<void(std::string)> publish;
+    std::function<void(std::string)> publishError;
     bool initial = true;
 };
 
@@ -168,28 +170,44 @@ private:
     struct FlowSeries {
         sentinel::flow::FlowBarBuilder builder;
         std::vector<FlowSlot> bucketSlots;
-        FlowSeries(int64_t tf, double tick, int64_t price, int64_t base);
+        FlowSeries(int64_t tf, const sentinel::flow::FlowScales& scales);
         uint64_t capacityDrops = 0;
     };
+    struct FlowComposite {
+        sentinel::flow::FlowBar bar;
+        bool complete = false, closed = false, dirty = true;
+        uint32_t revision = 0;
+    };
     struct FlowDay {
-        double tick = 0;
-        int64_t priceScale = 0, baseScale = 0;
-        std::map<int64_t, FlowSeries> series;
+        sentinel::roller::Grid grid;
+        sentinel::flow::FlowScales scales;
+        bool hasBuckets = false;
+        std::map<int64_t, FlowSeries> series; // exactly 1 s and 1 m builders
+        std::map<int64_t, FlowComposite> hours; // closed hours; at most 24 per product
+        std::optional<std::pair<int64_t, FlowComposite>> formingHour;
+        std::map<std::pair<int64_t, int64_t>, FlowComposite> coarse;
     };
     struct FlowProduct {
         int64_t clock = 0;
+        int64_t firstLiveMs = -1;
+        std::set<int64_t> missingGridWarnedDays;
         std::map<int64_t, FlowDay> days;
-        sentinel::flow::Trade scratch; // reused id storage
+        sentinel::flow::Trade scratch;
     };
     std::map<std::string, FlowProduct> m_flowProducts;
     std::vector<std::shared_ptr<FlowSubscription>> m_flowSubscriptions;
     QTimer m_flowTimer;
-    uint64_t m_flowDroppedTrades = 0, m_flowDroppedBuckets = 0;
+    uint64_t m_flowDroppedTrades = 0, m_flowDroppedBuckets = 0, m_flowMissingGridTrades = 0;
     void pruneFlowSeries(int64_t clock, int64_t tf, FlowSeries& series);
     void addFlowTrade(const Trade& trade, int64_t exchangeMs);
     void publishFlow();
     void publishFlowSeries(const std::string& symbol, FlowProduct& product,
                            int64_t tf, FlowSeries& series);
+    void updateHour(FlowDay& day, int64_t hourStart, int64_t clock, int64_t firstLiveMs);
+    void updateCoarse(FlowDay& day, int64_t tf, int64_t bucketStart, int64_t clock);
+    void publishCoarse(const std::string& symbol, FlowProduct& product, FlowDay& day);
+    void publishFlowBar(const std::string& symbol, int64_t tf, const sentinel::flow::FlowBar& bar,
+                        uint32_t revision, bool closed, bool complete, bool initialOnly);
 
 
     // Slots are invoked on the main thread; subsystems assume single-threaded access.

@@ -204,44 +204,56 @@ invalid requests, unsupported products/timeframes and capacity refusals return
 upstream product: it uses the configured journal products.
 
 The server sends JSON `flow_bar` with `schema_version`, `sub`, `symbol`,
-`timeframe_ms`, `bucket_start_ms`, `closed`, `revision`, `row_tick_units`,
+`timeframe_ms`, `bucket_start_ms`, `closed`, `complete`, `revision`, `row_tick_units`,
 `price_scale`, `encoding: "FLB1/base64"`, and `bar` (base64-encoded FLB1 bytes).
 FLB1 contains OHLC, integer base/quote volumes and scales, count, native price
 rows, buy/sell totals, delta, maximum row volume and up to eight notable trades.
 Revision is **only envelope metadata**, never part of FLB1 content. Clients
 replace by `(symbol, timeframe_ms, bucket_start_ms)`, reject lower revisions,
 and apply equal-revision updates in stream order (forming updates and the close
-republish can share a revision). Every accepted late trade behind the published
-close watermark increments the revision; multiple late trades can coalesce into
-one publication with a correspondingly larger revision.
+republish can share a revision). A `complete: false` bar must never replace a
+`complete: true` bar at the same revision. `complete: false` means the live
+series has missing minute coverage from the bucket start, including a server
+that began receiving trades partway through the bucket. Every accepted late
+trade behind the published close watermark increments the revision; multiple
+late trades can coalesce into one publication with a correspondingly larger revision.
 
 Trades use exchange-time, UTC-aligned half-open buckets and the shared
 `flow::FlowBarBuilder`. Its 4,096-id window protects against reconnect resends;
 unknown aggressor side contributes to total volume/count only. The native grid
 is supplied by the recorder for that UTC day, with decimal base-increment
 precision and a quote-volume scale of 100,000,000. The existing TPO/VP tape remains.
-The live model starts at the first live trade after process start; a newly
-subscribed coarse timeframe starts collecting then. No journal rebuild or
-historical coverage is implied by these live messages.
+The live model starts at the first live trade after process start. It builds
+only 1 s and 1 m bars from trades. It composes 5 m, 15 m and 1 h bars from
+retained 1 m bars, and 4 h and 1 d bars from closed-hour composites plus the
+forming hour. Closed-hour composites are retained for the UTC day and its
+60-second rollover grace, at most 24 per product; the forming hour is separate.
+A coarse composite is recomputed only when one of its minutes
+changes. No journal rebuild or historical coverage is implied by these live
+messages.
 
 The model's Qt-thread timer materializes and encodes changed bars at most once
 per `recording.live_publish_ms` (clamped to the configured 250–5,000 ms range).
 A newly attached subscriber receives the newest retained bucket on its next
-turn. A final close is republished once even if the content did not change.
+turn. During midnight rollover, this may include the newest slot of both the
+preceding and current UTC days. A final close is republished once even if the
+content did not change.
 The product clock is its monotonic journal receive watermark minus 1,000 ms;
 wall time and quiet/disconnected intervals do not close bars. Publication
 precedes `sealThrough`; late trades remain revisable until retention drops them.
 
 The 1 s series keeps the last 30 minutes, and the 1 m series keeps the forming
 UTC hour with 60 seconds of rollover grace for the preceding hour. A subscribed
-coarser series keeps its forming bucket and the preceding bucket until 60 seconds
-after close. Fixed slots cap each day/series at 1,802 second buckets, 62 minute
-buckets or two coarser buckets, including clock/publication slack. Only the
+coarse view keeps its forming composite and the preceding composite until 60
+seconds after close. Fixed slots cap each day/series at 1,802 second buckets
+and 62 minute buckets, including clock/publication slack. Only the
 current and preceding UTC day can be held. Watermark maintenance drops only
 already-published, unchanged finals; a stalled publication loop refuses additions
 that would overrun the slots. `sentinel_flow_dropped_trades_total` counts additions
 refused behind the retention watermark or at capacity, and
-`sentinel_flow_dropped_buckets_total` counts retired buckets. These are series
+`sentinel_flow_dropped_buckets_total` counts retired buckets. The sibling
+`sentinel_flow_missing_grid_trades_total` counts trades for a UTC day without
+a recorder grid; the server warns once per product-day. These are series
 counts: one input trade can affect several series. Retention bounds the time
 window and bucket count, not the exchange's trade rate within a bucket.
 

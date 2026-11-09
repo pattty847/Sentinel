@@ -1465,6 +1465,7 @@ public:
     const auto id = j["sub"].get<uint64_t>();
     const auto symbol = j["symbol"].get<std::string>();
     const auto tf = j["timeframe_ms"].get<int64_t>();
+    std::erase_if(flowViews_, [](const auto& entry) { return !entry.second->active.load(); });
     if (symbol.empty() || symbol.size() > 64 || tf < 1000 || tf > 86'400'000 ||
         (!flowViews_.contains(id) && flowViews_.size() >= 32)) {
       send_error("flow_live_subscribe", symbol,
@@ -1484,6 +1485,9 @@ public:
         return;
       if (const auto self = weak.lock())
         self->do_write(std::move(payload), false, subscription);
+    };
+    view->publishError = [weak = weak_from_this()](std::string payload) {
+        if (const auto self = weak.lock()) self->do_write(std::move(payload));
     };
     flowViews_[id] = view;
     // The I/O executor only admits the request; model-thread timer owns all
