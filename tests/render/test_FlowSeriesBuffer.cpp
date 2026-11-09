@@ -448,6 +448,29 @@ TEST(FlowBackfillState, PagingStopStillAllowsBuildingAndLossRefresh) {
     EXPECT_EQ(building->endMs, 3000);
     EXPECT_FALSE(state.next(103));
 }
+TEST(FlowBackfillState, HostRefusalStopsSelectionAndAllRefreshes) {
+    FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 10'000);
+    state.beginLive(9000);
+    state.markLiveEdge(9000);
+    const auto request = state.next(0); ASSERT_TRUE(request);
+    state.refresh(2000, 0);
+    state.refuseSelection();
+    EXPECT_FALSE(state.inFlight());
+    EXPECT_FALSE(state.next(1));
+    EXPECT_EQ(state.wakeAtMs(1), 0);
+    state.refresh(3000, 2);
+    state.observeLive(9000, 2);
+    state.setWindow(0, 20'000);
+    EXPECT_FALSE(state.next(2));
+    EXPECT_FALSE(state.accept(reply(*request, 0), 3));
+    state.select("ETH-USD", 1000);
+    state.setWindow(0, 10'000);
+    const auto other = state.next(10); ASSERT_TRUE(other);
+    EXPECT_TRUE(state.fail(other->id, Client::FlowFailure::Retryable, 10));
+    state.refuseSelection();
+    EXPECT_EQ(state.wakeAtMs(11), 0);
+    EXPECT_FALSE(state.next(1010));
+}
 TEST(FlowBackfillState, MissingReplyTimesOutAndMatchingLateReplyIsAppliedOnce) {
     FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 10'000);
     const auto first = state.next(0); ASSERT_TRUE(first);

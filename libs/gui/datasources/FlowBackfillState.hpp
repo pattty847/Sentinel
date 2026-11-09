@@ -23,6 +23,7 @@ public:
     bool accept(const SentinelStreamClient::FlowBatch& batch, int64_t nowMs);
     bool fail(quint64 id, SentinelStreamClient::FlowFailure failure, int64_t nowMs);
     bool timeout(int64_t nowMs);
+    void refuseSelection();
     std::optional<int64_t> takeRefusedBucket();
     void disconnect();
     bool inFlight() const { return m_pending && !m_pending->held; }

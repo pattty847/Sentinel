@@ -238,6 +238,17 @@ bool FlowBackfillState::timeout(int64_t nowMs) {
     m_timedOut = m_pending;
     return fail(m_pending->id, SentinelStreamClient::FlowFailure::Retryable, nowMs);
 }
+void FlowBackfillState::refuseSelection() {
+    ++m_generation;
+    m_symbol.clear();
+    m_pending.reset();
+    m_timedOut.reset();
+    m_refresh.clear();
+    m_probeDue = 0;
+    m_retryAt = 0;
+    m_liveArmed = m_liveTracking = false;
+    m_pagingStopped = true;
+}
 int64_t FlowBackfillState::flightTimeoutMs() const {
     if (m_pending && m_pending->timeframeMs == 1000 && m_liveCurrentBucket >= 0 &&
         m_pending->endMs < m_liveCurrentBucket - 30 * 60 * 1000)

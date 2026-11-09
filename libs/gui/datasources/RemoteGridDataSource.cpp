@@ -723,8 +723,11 @@ void RemoteGridDataSource::requestNextFlowPage() {
     const auto request = m_flowBackfill.next(now);
     m_flowTimer.stop();
     if (request) {
-        m_client.requestFlowHistory(request->id, request->symbol.toStdString(), request->timeframeMs,
-                                    request->endMs, request->limit);
+        if (!symbolPermitted(request->symbol.toStdString(), "flow history"))
+            m_flowBackfill.refuseSelection();
+        else
+            m_client.requestFlowHistory(request->id, request->symbol.toStdString(), request->timeframeMs,
+                                        request->endMs, request->limit);
     }
     if (const auto at = m_flowBackfill.wakeAtMs(now); at > now) {
         m_flowTimer.start(int(std::min<int64_t>(at - now, INT_MAX)));

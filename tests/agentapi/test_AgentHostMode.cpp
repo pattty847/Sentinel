@@ -288,11 +288,12 @@ TEST(AgentHostModeSources, NoNativeFormatQSettingsInTheGui) {
 TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
     // The legacy heatmap requests (heatmap history, recording view and history) went in S8a.
     const QSet<QString> guarded{"subscribe", "requestFootprintHistory", "requestCandleHistory",
-                                "requestTpoHistory", "sendTradeCommand", "sendAlgoCommand"};
+                                "requestTpoHistory", "subscribeFlowLive", "requestFlowHistory",
+                                "sendTradeCommand", "sendAlgoCommand"};
     // Connection management, releases, cancels and the local generation lookup:
     // they name no new symbol to the server or carry no request.
     const QSet<QString> exempt{"connectToServer", "unsubscribe", "cancelTpoHistory",
-                               "setCandleDeliveryGeneration", "bookDeliveryGeneration"};
+                               "unsubscribeFlowLive", "setCandleDeliveryGeneration", "bookDeliveryGeneration"};
     QFile file(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/datasources/RemoteGridDataSource.cpp");
     ASSERT_TRUE(file.open(QIODevice::ReadOnly));
     const QString text = QString::fromUtf8(file.readAll());
