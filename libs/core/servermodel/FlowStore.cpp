@@ -36,7 +36,9 @@ struct StoredDay {
     FlowStoreGridValues grid;
     nlohmann::json sources;
 };
-struct Cancelled {};
+struct Cancelled : std::exception {
+    const char *what() const noexcept override { return "flow replay cancelled"; }
+};
 void checkStop(std::stop_token stop) {
     if (stop.stop_requested())
         throw Cancelled{};
@@ -375,7 +377,7 @@ FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::stri
         const auto start = firstDurable(catalog, day, stop);
         if (!start)
             throw std::runtime_error("flow grid fallback has no journal record");
-        roller::JournalReader reader(options.journalRoot, symbol, start);
+        roller::JournalReader reader(catalog, start);
         roller::JournalFeed feed(symbol);
         roller::JournalRecord input;
         bool ready = false;
@@ -410,11 +412,21 @@ FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::stri
 }
 std::vector<flow::FlowBar> buildRun(const FlowStore::Options &options, const std::string &symbol,
                                     const flow::FlowScales &scales, int64_t first, int64_t end,
-                                    const roller::JournalPos &start, std::stop_token stop) {
+                                    const roller::JournalPos &start, std::stop_token stop,
+                                    int64_t timeframe = Minute, bool *partial = nullptr,
+                                    const roller::JournalReader *catalog = nullptr) {
     checkStop(stop);
-    roller::JournalReader reader(options.journalRoot, symbol, start);
+    roller::JournalReader reader = catalog ? roller::JournalReader(*catalog, start) :
+        roller::JournalReader(options.journalRoot, symbol, start);
     roller::JournalFeed feed(symbol);
-    flow::FlowBarBuilder builder(Minute, scales.nativeTick, scales.priceScale, scales.baseScale, scales.quoteScale);
+    flow::FlowBarBuilder builder(timeframe, scales.nativeTick, scales.priceScale, scales.baseScale, scales.quoteScale);
+    int64_t firstReceive = INT64_MAX, lastReceive = 0;
+    bool coverageLost = false;
+    if (partial) {
+        feed.onInvalid = [&](int64_t ms, const std::string&) {
+            if (ms > first && ms < end + TradeTail) coverageLost = true;
+        };
+    }
     flow::Trade trade;
     trade.id.reserve(UINT16_MAX);
     feed.onTrade = [&](const ::Trade &value) {
@@ -436,7 +448,10 @@ std::vector<flow::FlowBar> buildRun(const FlowStore::Options &options, const std
     roller::JournalRecord input;
     while (reader.next(input)) {
         checkStop(stop);
-        if (input.record.time.systemNs / 1'000'000 > end + TradeTail)
+        const auto receiveMs = input.record.time.systemNs / 1'000'000;
+        firstReceive = std::min(firstReceive, receiveMs);
+        lastReceive = std::max(lastReceive, receiveMs);
+        if (receiveMs > end + TradeTail)
             break;
         feed.apply(input);
         if (options.afterRecordForTest)
@@ -448,6 +463,8 @@ std::vector<flow::FlowBar> buildRun(const FlowStore::Options &options, const std
     if (builder.rejectedCount())
         sLog_Warning("Flow rejected trades symbol=" << symbol << " start=" << first
                                                     << " count=" << builder.rejectedCount());
+    if (partial) *partial = builder.rejectedCount() != 0 || coverageLost ||
+                            firstReceive > first || lastReceive < end + TradeTail;
     return builder.bars();
 }
 void atomicFile(const fs::path &path, const QByteArray &bytes) {
@@ -516,6 +533,7 @@ void FlowStore::stop() {
         thread_.join();
 }
 void FlowStore::wake() {
+    if (options_.afterWakeForTest) options_.afterWakeForTest();
     {
         std::lock_guard lock(wakeMutex_);
         woken_ = true;
@@ -617,8 +635,44 @@ FlowStore::DayIndex FlowStore::indexFor(const std::string &symbol, int64_t day) 
     return index_.try_emplace(key, std::move(loaded)).first->second;
 }
 void FlowStore::publishIndex(const std::string &symbol, int64_t day, const DayIndex &index) {
+    {
+        std::lock_guard lock(indexMutex_);
+        index_[{symbol, day}] = index;
+    }
+    if (index.valid)
+        for (int h = 0; h < 24; ++h)
+            if (index.hours & (1u << h)) buildFailures_.erase({symbol, day + h * Hour});
+    refreshBuiltThrough(symbol);
+}
+void FlowStore::setLiveRetentionFloor(const std::string &symbol, int64_t hourMs) {
+    sentinel::capture::validateSymbol(symbol);
+    if (hourMs < 0 || hourMs % Hour) throw std::invalid_argument("invalid live retention floor");
     std::lock_guard lock(indexMutex_);
-    index_[{symbol, day}] = index;
+    liveRetentionFloor_[symbol] = hourMs;
+}
+void FlowStore::refreshBuiltThrough(const std::string &symbol) {
+    const auto first = firstHour_.find(symbol);
+    if (first == firstHour_.end()) return;
+    const auto through = options_.hourThrough(symbol) / Hour * Hour;
+    int64_t floor = std::max<int64_t>(0, through - 6 * Hour);
+    {
+        std::lock_guard lock(indexMutex_);
+        if (const auto it = liveRetentionFloor_.find(symbol); it != liveRetentionFloor_.end()) floor = it->second;
+    }
+    auto built = std::max(first->second, floor);
+    for (auto hour = built; hour < through; hour += Hour) {
+        const auto index = indexFor(symbol, dayFloor(hour));
+        if (!index.valid || !(index.hours & (1u << ((hour - dayFloor(hour)) / Hour)))) break;
+        built = hour + Hour;
+    }
+    std::lock_guard lock(indexMutex_);
+    builtThrough_[symbol] = std::min(built, through);
+}
+void FlowStore::noteBuildFailure(const std::string &symbol, int64_t hour, const std::string &reason) {
+    const auto count = ++buildFailures_[{symbol, hour}];
+    if (count == 1 || count % 10 == 0)
+        sLog_Warning("Flow hour build failed symbol=" << symbol << " hour=" << hour
+                     << " count=" << count << " reason=" << reason);
 }
 std::map<fs::path, FlowStore::FileIdentity> FlowStore::inventory(const std::string &symbol,
                                                                  std::stop_token stop) const {
@@ -707,15 +761,21 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
             structuralChanged = true;
         }
     prior = currentFiles;
-    auto &catalog = catalogs_[symbol];
-    if (structuralChanged)
-        catalog.reset();
+    if (structuralChanged) {
+        std::lock_guard catalogLock(catalogMutex_);
+        catalogs_.erase(symbol);
+    }
+    std::shared_ptr<roller::JournalReader> catalog;
     auto getCatalog = [&]() -> roller::JournalReader & {
         if (!catalog) {
             checkStop(stop);
-            catalog = std::make_unique<roller::JournalReader>(options_.journalRoot, symbol);
-            if (options_.afterCatalogConstructForTest)
-                options_.afterCatalogConstructForTest();
+            std::lock_guard catalogLock(catalogMutex_);
+            auto &cached = catalogs_[symbol];
+            if (!cached) {
+                cached = std::make_shared<roller::JournalReader>(options_.journalRoot, symbol);
+                if (options_.afterCatalogConstructForTest) options_.afterCatalogConstructForTest();
+            }
+            catalog = cached;
         }
         return *catalog;
     };
@@ -727,7 +787,13 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
         firstHour_[symbol] = std::max<int64_t>(0, first / Hour * Hour);
     }
     const auto first = firstHour_.at(symbol);
+    // Load the recent committed indexes before any journal replay can block this pass.
+    refreshBuiltThrough(symbol);
     const auto nearDays = hmcDayPaths(options_, symbol, stop);
+    {
+        std::lock_guard catalogLock(catalogMutex_);
+        hmcPaths_[symbol] = nearDays;
+    }
     auto potentiallyChanged = [&](const DayIndex &index, int64_t day) {
         for (const auto &path : changed) {
             if (std::find(index.sourcePaths.begin(), index.sourcePaths.end(), path) != index.sourcePaths.end())
@@ -760,6 +826,11 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
         for (int h = 0; h < 24; ++h)
             if (day + h * Hour >= first && day + (h + 1) * Hour <= through)
                 wanted |= 1u << h;
+        const auto noteRunFailure = [&](int64_t from, int64_t to, const char *reason) {
+            for (auto hour = from; hour < to; hour += Hour)
+                noteBuildFailure(symbol, hour, reason);
+        };
+        try {
         const auto nearIt = nearDays.find(day);
         const fs::path hmcPath = nearIt == nearDays.end() ? fs::path{} : nearIt->second;
         bool sourceChanged = index.valid && potentiallyChanged(index, day);
@@ -772,13 +843,21 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
             publishIndex(symbol, day, index);
             sourceChanged = !index.valid || !sourcesMatch(Sources::parse(index.sources), getCatalog(),
                                                           sourceCutoff(day, index.hours), stop);
+            if (sourceChanged) {
+                index.valid = false;
+                index.hours = 0;
+                publishIndex(symbol, day, index);
+            }
         }
         const bool complete = (index.hours & wanted) == wanted;
         std::optional<FlowStoreGridValues> currentGrid;
         if (wanted && (!index.valid || !complete || sourceChanged || !index.gridKnown || index.gridPath != hmcPath)) {
             currentGrid = dayScales(options_, symbol, day, hmcPath, getCatalog(), stop);
-            if (index.valid && index.grid != *currentGrid)
+            if (index.valid && index.grid != *currentGrid) {
                 sourceChanged = true;
+                index.valid = false;
+                index.hours = 0;
+            }
             index.gridKnown = true;
             index.gridPath = hmcPath;
             publishIndex(symbol, day, index);
@@ -866,12 +945,18 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
                 const auto afterFiles = inventory(symbol, stop);
                 if (afterFiles.size() != currentFiles.size() ||
                     std::any_of(afterFiles.begin(), afterFiles.end(),
-                                [&](const auto &entry) { return !currentFiles.contains(entry.first); }))
+                                [&](const auto &entry) { return !currentFiles.contains(entry.first); })) {
+                    noteRunFailure(runFirst, runEnd, "journal inventory changed");
                     return;
-                if (!sourcesMatch(sources, files, sourceCutoff(day, nextHours), stop))
+                }
+                if (!sourcesMatch(sources, files, sourceCutoff(day, nextHours), stop)) {
+                    noteRunFailure(runFirst, runEnd, "journal source changed");
                     return;
-                if (options_.hourThrough(symbol) < runEnd)
+                }
+                if (options_.hourThrough(symbol) < runEnd) {
+                    noteRunFailure(runFirst, runEnd, "recorder hourThrough regressed");
                     return;
+                }
                 data.bars.insert(data.bars.end(), std::make_move_iterator(bars.begin()),
                                  std::make_move_iterator(bars.end()));
                 data.revisions.insert(data.revisions.end(), bars.size(), revision);
@@ -906,12 +991,104 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
                 high = low - 1;
                 built = true;
             }
-            if (!built)
+            if (!built) {
+                noteRunFailure(day + low * Hour, day + (high + 1) * Hour, "journal tail unavailable");
                 high = low - 1;
+            }
+        }
+        } catch (const Cancelled &) {
+            throw;
+        } catch (const std::exception &e) {
+            const auto current = indexFor(symbol, day);
+            for (int h = 0; h < 24; ++h)
+                if ((wanted & (1u << h)) && (!current.valid || !(current.hours & (1u << h))))
+                    noteBuildFailure(symbol, day + h * Hour, e.what());
+            ++result.failed;
         }
         if (day == 0)
             break;
     }
+}
+int64_t FlowStore::sealedThroughMs(const std::string &symbol) const {
+    sentinel::capture::validateSymbol(symbol);
+    std::lock_guard lock(indexMutex_);
+    const auto it = builtThrough_.find(symbol);
+    return it == builtThrough_.end() ? 0 : it->second;
+}
+
+FlowStore::Reply FlowStore::buildWindow(const std::string &symbol, int64_t from, int64_t to,
+                                            std::stop_token stop) {
+    std::stop_source combined;
+    std::stop_callback callerStop(stop, [&] { combined.request_stop(); });
+    std::stop_callback storeStop(stopSource_.get_token(), [&] { combined.request_stop(); });
+    stop = combined.get_token();
+    sentinel::capture::validateSymbol(symbol);
+    if (from < 0 || to <= from || from % 1000 || to % 1000 || to > INT64_MAX - Day - TradeTail)
+        throw std::invalid_argument("invalid flow second window");
+    if (to - from > kMaxReplayWindowMs)
+        throw std::invalid_argument("1s journal replay cap is 3600000 ms (1 h)");
+    Reply reply;
+    try {
+        std::shared_ptr<roller::JournalReader> catalog;
+        {
+            std::lock_guard lock(catalogMutex_);
+            auto &cached = catalogs_[symbol];
+            if (!cached) {
+                checkStop(stop);
+                cached = std::make_shared<roller::JournalReader>(options_.journalRoot, symbol);
+                if (options_.afterCatalogConstructForTest) options_.afterCatalogConstructForTest();
+            }
+            catalog = cached;
+        }
+        std::map<int64_t, fs::path> grids;
+        bool cataloguedGrids = false;
+        {
+            std::lock_guard lock(catalogMutex_);
+            if (const auto it = hmcPaths_.find(symbol); it != hmcPaths_.end()) {
+                grids = it->second;
+                cataloguedGrids = true;
+            }
+        }
+        if (!cataloguedGrids) {
+            grids = hmcDayPaths(options_, symbol, stop);
+            std::lock_guard lock(catalogMutex_);
+            hmcPaths_[symbol] = grids;
+        }
+        for (auto first = from; first < to;) {
+            const auto day = dayFloor(first), end = std::min(to, day + Day);
+            const auto firstJournalMs = catalog->files().front().header.at("opened_system_ns").get<int64_t>() / 1'000'000;
+            if (firstJournalMs >= end) {
+                reply.ranges.push_back({first, end, "partial", {}});
+                first = end;
+                continue;
+            }
+            const auto start = firstDurable(*catalog, first - TradeTail, stop);
+            if (!start) {
+                reply.ranges.push_back({first, end, "partial", {}});
+                first = end;
+                continue;
+            }
+            const auto grid = dayScales(options_, symbol, day,
+                grids.contains(day) ? grids.at(day) : fs::path{}, *catalog, stop);
+            bool partial = firstJournalMs > first;
+            Sources sources;
+            try {
+                sources = snapshotSources(*catalog, end + TradeTail, sourcePath(*catalog, *start), stop);
+            } catch (const NotReady &) { partial = true; }
+            bool rejected = false;
+            auto bars = buildRun(options_, symbol, grid.scales, first, end, *start, stop, 1000, &rejected, catalog.get());
+            if (!sources.empty() && !sourcesMatch(sources, *catalog, end + TradeTail, stop))
+                throw std::runtime_error("journal changed during flow replay");
+            reply.ranges.push_back({first, end, partial || rejected ? "partial" : "complete", grid.scales});
+            reply.revisions.insert(reply.revisions.end(), bars.size(), 1);
+            reply.bars.insert(reply.bars.end(), std::make_move_iterator(bars.begin()),
+                              std::make_move_iterator(bars.end()));
+            first = end;
+        }
+    } catch (const roller::NoJournalFiles &) {
+        reply.ranges = {{from, to, "partial", {}}};
+    }
+    return reply;
 }
 FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int64_t to) {
     sentinel::capture::validateSymbol(symbol);
@@ -921,19 +1098,26 @@ FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int6
     bool missingSealed = false;
     bool sealedRequested = false;
     try {
-        const auto through = options_.hourThrough(symbol);
+        const auto through = sealedThroughMs(symbol);
+        reply.sealedThroughMs = through;
         for (auto day = dayFloor(from); day < to; day += Day) {
             const auto path = filePath(symbol, day);
             const auto index = indexFor(symbol, day);
+            const bool readable = index.valid && stamp(path) == index.file &&
+                                  stamp(path.string() + ".state") == index.state;
             uint32_t required = 0;
             for (auto hour = std::max(day, from / Hour * Hour); hour < std::min(day + Day, to); hour += Hour) {
+                const bool ready = readable && hour + Hour <= through &&
+                    (index.hours & (1u << ((hour - day) / Hour)));
+                reply.ranges.push_back({std::max(hour, from), std::min(hour + Hour, to),
+                                        ready ? "complete" : "building", index.grid.scales, index.revision});
                 if (hour + Hour > through)
                     reply.building = true;
                 else
                     required |= 1u << ((hour - day) / Hour);
             }
             sealedRequested |= required != 0;
-            if (!index.valid || stamp(path) != index.file || stamp(path.string() + ".state") != index.state) {
+            if (!readable) {
                 reply.building = true;
                 missingSealed |= required != 0;
                 continue;
@@ -957,6 +1141,7 @@ FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int6
             }
         }
     } catch (const std::exception &e) {
+        reply.ranges = {{from, to, "building", {}}};
         reply.bars.clear();
         reply.revisions.clear();
         reply.building = true;

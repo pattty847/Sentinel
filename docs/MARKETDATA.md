@@ -188,8 +188,8 @@ Candle schema version 2 carries timeframes and history boundaries in integer mil
 
 `server_config.flow` announces `schema_version: 1`, `live`, `encoding: "FLB1/base64"`,
 `notable_k: 8`, `live_publish_ms`, `close_delay_ms: 1000`, and
-`second_retention_ms: 1800000`. `history: false` means that this server does not yet
-serve flow history. `grid: "per_bar"` means that `row_tick_units` and `price_scale`
+`second_retention_ms: 1800000`. `history: true`, `history_encoding: "FHE1/FLB1"`,
+`history_max_bars: 512`, and `history_second_replay_max_ms: 3600000` announce flow history. `grid: "per_bar"` means that `row_tick_units` and `price_scale`
 come with each bar: the recorder's grid is specific to the product and UTC day,
 so there is no single global grid in the connection handshake.
 
@@ -204,15 +204,13 @@ invalid requests, unsupported products/timeframes and capacity refusals return
 upstream product: it uses the configured journal products.
 
 The server sends JSON `flow_bar` with `schema_version`, `sub`, `symbol`,
-`timeframe_ms`, `bucket_start_ms`, `closed`, `complete`, `revision`, `row_tick_units`,
-`price_scale`, `encoding: "FLB1/base64"`, and `bar` (base64-encoded FLB1 bytes).
+`timeframe_ms`, `bucket_start_ms`, `closed`, `complete`, `revision`,
+`source: "live"`, `row_tick_units`, `price_scale`, `encoding: "FLB1/base64"`,
+and `bar` (base64-encoded FLB1 bytes).
 FLB1 contains OHLC, integer base/quote volumes and scales, count, native price
 rows, buy/sell totals, delta, maximum row volume and up to eight notable trades.
-Revision is **only envelope metadata**, never part of FLB1 content. Clients
-replace by `(symbol, timeframe_ms, bucket_start_ms)`, reject lower revisions,
-and apply equal-revision updates in stream order (forming updates and the close
-republish can share a revision). A `complete: false` bar must never replace a
-`complete: true` bar at the same revision. Coverage begins when the server
+Revision is **only envelope metadata**, never part of FLB1 content. A forming
+update and close republish can share a live revision. Coverage begins when the server
 receives its first live trade; a bar is complete only if that trade was at or
 before the bucket start and no trade in the bucket was lost or rejected. An
 empty minute is covered, not a loss. Every accepted late
@@ -266,6 +264,131 @@ finish. Disconnect also cancels registrations and publication. The stream I/O
 thread only admits requests and sends prepared messages; model-thread aggregation
 and FLB1/base64/JSON encoding never run there. Flow uses the existing bounded
 16 MiB session write queue and slow-client disconnect policy.
+
+### Flow history
+
+`{"type":"flow_history_request","req":9,"symbol":"BTC-USD","timeframe_ms":60000,
+"end_time_ms":1798765500000,"limit":512}` requests the newest page ending at the
+UTC bucket containing `end_time_ms` (inclusive). All fields are required; `req`
+is an unsigned 64-bit connection-local correlation identifier. Timeframes are
+1 s, 1 m, or configured whole-minute multiples through 1 d that divide a UTC day.
+Sub-second requests, negative/overflowing times and limits outside 1..512 are
+refused. There is one flow history job in flight per connection, including the
+queued model snapshot. A concurrent request or saturated shared history pool
+returns JSON `error` with `context: "flow_history_request"`, `req`, `symbol` and
+`message`; it never returns a successful truncated page.
+
+An accepted request returns one binary WebSocket message:
+
+| Bytes | Meaning |
+| --- | --- |
+| 4 | ASCII `FHE1` envelope magic |
+| 4 | Little-endian uint32 JSON header byte length |
+| header length | UTF-8 JSON header |
+| repeated for each header `bars` entry | Little-endian uint32 FLB1 byte length, then that many FLB1 bytes |
+
+The header contains `type: "flow_history_chunk"`, `schema_version: 1`, `req`,
+`symbol`, `timeframe_ms`, `price_scale`, `row_tick_units`, `status`, `oldest_ms`,
+`sealed_through_ms`, `ranges` and `bars`. `bars` entries carry `bucket_start_ms`,
+uint32 `revision`, boolean `complete`, and `source: "store" | "live"`, in the
+same ascending order as the binary records. The watermark is the store's
+contiguous built-through hour for that symbol (every preceding closed hour is
+built), rather than the recorder's committed `hourThrough`; it refreshes on
+every page. A store read can still report `building` below the watermark if a
+file becomes stale or unreadable after the mark advances.
+Only a bucket ending at or before that boundary is final and served as `store`.
+A coarse bucket crossing it is provisional (`source: "live"`, `complete: false`):
+its FLB1 composes sealed store hours with the live forming part using the shared
+composer. Its revision is the model's live coarse revision if present, otherwise
+zero. Missing constituent hours or minutes also force revision zero. The
+incomplete flag lets a live update at the same revision replace it.
+For a final bucket with partial or building store coverage, an available bar
+is `source: "store"`, `complete: false`, with its store revision; a later
+complete store page replaces it by store revision.
+Store revisions use the FLD1 day generation, including empty constituent hours.
+Revision and completeness are envelope metadata; FLB1 content is unchanged.
+Each range has half-open `from_ms`, `to_ms`, `status`, `price_scale` and
+`row_tick_units`. There is one range per requested bucket, including buckets
+with no trades. Top-level scales describe the first returned bar (zero without
+bars); each FLB1 and range carries its own grid, which can change across UTC days.
+The whole frame is capped at 15 MiB; excess returns a correlated error asking
+for a smaller limit.
+
+Range statuses are:
+
+- `complete`: coverage is proven, including known empty buckets. A forming
+  bucket is complete through the snapshot's observed journal clock if coverage
+  began at or before its start and no loss is known.
+- `partial`: only part of the requested coverage is available (for example a
+  restart inside a minute, a short journal or rejected trades). Returned bars
+  have `complete: false`.
+- `building`: some required store hours or live coverage are not built or are
+  stale/corrupt. Available constituents may be returned with `complete: false`;
+  no empty complete bars are manufactured. Clients show the range as not built.
+- `refused`: invalid request or cap violation. The binary reply includes `error`
+  naming the reason and no bars; its range has `from_ms`, `to_ms` and `status`.
+
+A range can report complete coverage while a crossing bar is still marked
+`complete: false` because it is provisional. The page status is `building` if
+any range is building, otherwise `partial` if any range is partial, otherwise
+`complete`. `oldest_ms` is the oldest requested bucket, including empty or
+building ranges, so paging can always make progress.
+Fetch the next older page with `end_time_ms = oldest_ms - timeframe_ms`, stopping
+at zero. Pages select the newest interval first; bars within each page are
+chronological. Clients should retry building ranges separately after catch-up.
+
+Minute/coarse requests read only the store's sealed-hour index and FLD1 files,
+plus a queued read-only copy of the model's retained minute series for the
+forming hour and times newer than the built-through watermark. Live minutes
+and closed-hour composites remain available until the store builds them, up to
+six extra closed hours; further lag is logged and appears as `building`.
+Minute and coarse requests never replay or scan journals. Coarse bars use
+`flow::composeFlowBars`, the same composition and
+scales as live. Missing sealed hours remain building until the background store
+builder catches up. After a restart, missing unsealed minutes remain building;
+live coverage starts with the first observed trade and cannot prove an earlier
+prefix. Empty observed minutes are covered without fabricating trades.
+
+The built-through watermark scans contiguous indexed hours from the live
+retention floor (the journal clock less the one-minute grace and six closed
+hours). An older unbuilt hour remains `building` in its own range but does not
+hold the watermark behind the live fallback window. On restart, committed day
+indexes establish the watermark before new hours finish building. Repeated
+hour-build failures log the symbol, hour and reason.
+
+Second bars use the retained live 30-minute series. Older portions use a
+worker-local, one-shot journal replay with no persistent writes. The replay
+API has a 3,600,000 ms (1 h) defensive window cap; the 512-bar page limit is
+stricter for server requests. A two-hour 1 s request is refused with both limits
+named in its error. The time cap does not bound replay work to one hour of
+records: a request may read one hourly journal segment plus the requested
+window. Journal replay uses the same grid resolver, trade builder and receive-time
+tail as the store. A missing/short journal returns partial coverage. A
+second replayed inside an unsealed hour remains provisional (`source: "live"`).
+Seconds inside the 30-minute RAM retention are served from RAM without a
+journal read. A covered second ending at or before the built-through watermark
+is labelled `source: "store"` and final; older seconds use replay. A
+RAM-served final second uses store revision zero so a later journal replay with
+a store generation can replace it. Only one
+replay runs server-wide at a time. A concurrent replay gets a `busy` error;
+session close or server stop cancels an active replay per record.
+
+### Client merge of flow bars
+
+Key bars by `(symbol, timeframe_ms, bucket_start_ms)`. A final sealed
+`source: "store"` bar replaces a `source: "live"` bar regardless of revision;
+live never replaces store. Compare revisions only within the same source: the
+higher store generation wins over an older store generation (at equal generation,
+complete wins over incomplete), and the higher
+live revision wins over an older live revision. At equal live revision,
+`complete: true` wins; otherwise apply live updates in stream order. The
+history chunk's `sealed_through_ms` replaces the client's prior watermark for
+that symbol. Drop a later live `flow_bar` only when its bucket end
+(`bucket_start_ms + timeframe_ms`) is at or before that watermark. A coarse
+bucket crossing the boundary remains live and accepts later live updates. Range
+status stays separate: show `building` as not built even if a provisional bar
+exists.
+No client disk cache is required.
 
 ## Heatmap history transport
 

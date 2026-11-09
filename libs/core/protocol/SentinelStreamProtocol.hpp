@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <cstdint>
 #include <vector>
 #include <nlohmann/json.hpp>
 
@@ -10,11 +11,39 @@ namespace SentinelProtocol {
 constexpr int kServerConfigSchemaVersion = 2;
 constexpr int kCandleSchemaVersion = 2;
 constexpr int kFlowSchemaVersion = 1;
+constexpr int kFlowHistoryMaxBars = 512;
+constexpr size_t kFlowHistoryMaxFrameBytes = 15 * 1024 * 1024;
+// Binary flow_history_chunk: magic, LE u32 JSON length, JSON, then LE u32
+// length + FLB1 per header bars entry. Revision/completeness live in the JSON.
+constexpr char kFlowHistoryMagic[] = "FHE1";
 constexpr int kFootprintSchemaVersion = 1;
 constexpr int kTpoSchemaVersion = 1;
 constexpr int kVolumeProfileSchemaVersion = 1;
 constexpr int kMaxGridHeight = 65536;
 constexpr int kMaxPayloadBytes = 262144; // 256 KiB
+}
+
+// Applies to live flow_bar messages after the client has observed a history page.
+inline bool dropLiveFlowBar(int64_t bucketStartMs, int64_t timeframeMs,
+                            int64_t sealedThroughMs) {
+    return bucketStartMs >= 0 && timeframeMs > 0 &&
+           bucketStartMs <= sealedThroughMs &&
+           timeframeMs <= sealedThroughMs - bucketStartMs;
+}
+
+enum class FlowBarSource { Store, Live };
+struct FlowBarVersion {
+    FlowBarSource source = FlowBarSource::Live;
+    uint32_t revision = 0;
+    bool complete = false;
+};
+// Compare revisions only within a source. A sealed store bar owns its bucket.
+inline bool flowBarReplaces(FlowBarVersion existing, FlowBarVersion incoming) {
+    if (existing.source != incoming.source) return incoming.source == FlowBarSource::Store;
+    if (incoming.revision != existing.revision) return incoming.revision > existing.revision;
+    if (incoming.source == FlowBarSource::Store) return incoming.complete && !existing.complete;
+    if (existing.complete != incoming.complete) return incoming.complete;
+    return true; // equal live revision/completeness follows stream order
 }
 
 enum class MessageType {
@@ -32,6 +61,8 @@ enum class MessageType {
     FlowLiveSubscribe,
     FlowLiveUnsubscribe,
     FlowBar,
+    FlowHistoryRequest,
+    FlowHistoryChunk,
     FootprintConfig,
     FootprintSlice,
     FootprintHistoryRequest,
@@ -70,6 +101,8 @@ inline std::string toString(MessageType t) {
         case MessageType::CandleBarClosed: return "candle_bar_closed";
         case MessageType::FlowLiveSubscribe: return "flow_live_subscribe";
         case MessageType::FlowLiveUnsubscribe: return "flow_live_unsubscribe";
+        case MessageType::FlowHistoryRequest: return "flow_history_request";
+        case MessageType::FlowHistoryChunk: return "flow_history_chunk";
         case MessageType::FlowBar: return "flow_bar";
         case MessageType::FootprintConfig: return "footprint_config";
         case MessageType::FootprintSlice: return "footprint_slice";
@@ -108,6 +141,8 @@ inline MessageType fromString(const std::string& s) {
     if (s == "candle_bar_closed") return MessageType::CandleBarClosed;
     if (s == "flow_live_subscribe") return MessageType::FlowLiveSubscribe;
     if (s == "flow_live_unsubscribe") return MessageType::FlowLiveUnsubscribe;
+    if (s == "flow_history_request") return MessageType::FlowHistoryRequest;
+    if (s == "flow_history_chunk") return MessageType::FlowHistoryChunk;
     if (s == "flow_bar") return MessageType::FlowBar;
     if (s == "footprint_config") return MessageType::FootprintConfig;
     if (s == "footprint_slice") return MessageType::FootprintSlice;

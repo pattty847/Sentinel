@@ -28,7 +28,8 @@ std::filesystem::path flowRootFor(const std::string &configured, const std::file
                                   const std::filesystem::path &rollupRoot = {},
                                   const std::vector<std::filesystem::path> &protectedRoots = {});
 
-// Derived 1m trade bars. All replay runs on a dedicated background thread.
+// Derived 1m trade bars. Persistent builds run on a dedicated background thread;
+// bounded one-shot second windows use the caller's history worker.
 // The owner must stop the store before destroying its watermark provider.
 class FlowStore {
   public:
@@ -46,15 +47,24 @@ class FlowStore {
         std::function<void(std::stop_token)> afterRecordForTest;
         std::function<void(const std::filesystem::path &)> beforeCommitForTest;
         std::function<void()> afterCatalogConstructForTest;
+        std::function<void()> afterWakeForTest;
         std::function<void(std::stop_token)> afterInventoryFileForTest;
     };
     struct PassResult {
         uint64_t built = 0, failed = 0;
         bool stopped = false;
     };
+    struct Range {
+        int64_t fromMs = 0, toMs = 0; // half-open, including known empty buckets
+        std::string status; // complete, partial, building
+        sentinel::flow::FlowScales scales;
+        uint32_t revision = 0; // FLD1 day generation, including empty store ranges
+    };
     struct Reply {
         std::vector<sentinel::flow::FlowBar> bars;
         std::vector<uint32_t> revisions; // parallel to bars, from the FLD1 index
+        std::vector<Range> ranges;
+        int64_t sealedThroughMs = 0;
         // True if any intersecting hour is unsealed, missing, stale or corrupt.
         bool building = false;
     };
@@ -69,6 +79,14 @@ class FlowStore {
     // Thread-safe disk read, intended for the history worker pool. No journal replay.
     // Minute bucket starts in [fromMs, toMs); requests must be UTC minute aligned.
     Reply window(const std::string &symbol, int64_t fromMs, int64_t toMs);
+    static constexpr int64_t kMaxReplayWindowMs = 3'600'000;
+    // One-shot 1s replay; worker-local cursor over the cached catalog, no persistent writes.
+    Reply buildWindow(const std::string &symbol, int64_t fromMs, int64_t toMs,
+                      std::stop_token stop = {});
+    // Contiguous built-through closed-hour watermark; safe on a history worker.
+    int64_t sealedThroughMs(const std::string &symbol) const;
+    // Model-thread journal clock floor; the builder uses it only under the index lock.
+    void setLiveRetentionFloor(const std::string &symbol, int64_t hourMs);
     std::filesystem::path filePath(const std::string &symbol, int64_t dayMs) const;
     const std::filesystem::path &root() const { return options_.root; }
 
@@ -97,9 +115,14 @@ class FlowStore {
     };
     mutable std::mutex indexMutex_;
     std::map<std::pair<std::string, int64_t>, DayIndex> index_;
+    std::map<std::string, int64_t> builtThrough_;
+    std::map<std::string, int64_t> liveRetentionFloor_;
     std::map<std::string, std::map<std::filesystem::path, FileIdentity>> journalInventory_;
-    std::map<std::string, std::unique_ptr<sentinel::roller::JournalReader>> catalogs_; // builder thread only
+    mutable std::mutex catalogMutex_;
+    std::map<std::string, std::shared_ptr<sentinel::roller::JournalReader>> catalogs_;
+    std::map<std::string, std::map<int64_t, std::filesystem::path>> hmcPaths_;
     std::map<std::string, int64_t> firstHour_; // builder thread only
+    std::map<std::pair<std::string, int64_t>, uint64_t> buildFailures_; // builder thread only
     std::stop_source stopSource_;
     std::thread thread_;
     void builderLoop(std::stop_token stop);
@@ -112,6 +135,8 @@ class FlowStore {
     DayIndex loadIndex(const std::string &symbol, int64_t day) const;
     DayIndex indexFor(const std::string &symbol, int64_t day);
     void publishIndex(const std::string &symbol, int64_t day, const DayIndex &index);
+    void refreshBuiltThrough(const std::string &symbol);
+    void noteBuildFailure(const std::string &symbol, int64_t hour, const std::string &reason);
     std::map<std::filesystem::path, FileIdentity> inventory(const std::string &symbol, std::stop_token stop) const;
 };
 } // namespace recording

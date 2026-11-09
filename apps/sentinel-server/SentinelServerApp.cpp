@@ -3,6 +3,7 @@
 #include <QMetaObject>
 #include <QPointer>
 #include <QString>
+#include <QTimer>
 #include "metrics/ProcessMetrics.hpp"
 #include "servermodel/RecordingDir.hpp"
 #include <algorithm>
@@ -44,6 +45,7 @@ SentinelServerApp::~SentinelServerApp() {
     if (m_server) {
         m_server->stop();
     }
+    if (m_serverModel) m_serverModel->attachFlowStore(nullptr);
     if (m_flowStore) m_flowStore->stop();
     if (m_serverModel) m_serverModel->setReseedHandler({});
 }
@@ -162,7 +164,10 @@ sentinel::roller::ModelSink SentinelServerApp::journalModelSink() {
         });
     };
     sink.watermark = [modelPtr](const std::string& product, int64_t journalMs) {
-        safeInvoke(modelPtr, [product, journalMs](ServerDataModel& model) { model.onFeedWatermark(product, journalMs); });
+        safeInvoke(modelPtr, [product, journalMs](ServerDataModel& model) {
+            model.onFeedWatermark(product, journalMs);
+            model.wakeFlowStoreOnRecorderHour(product);
+        });
     };
     sink.metadata = [modelPtr](const std::string& product, const nlohmann::json& metadata) {
         safeInvoke(modelPtr, [product, metadata](ServerDataModel& model) { model.onFeedMetadata(product, metadata); });
@@ -236,6 +241,15 @@ bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
                 };
                 m_flowStore = std::make_unique<recording::FlowStore>(std::move(options));
                 m_flowStore->start();
+                m_serverModel->attachFlowStore(m_flowStore.get());
+                auto* wakeTimer = new QTimer(m_serverModel.get());
+                wakeTimer->setInterval(1000);
+                connect(wakeTimer, &QTimer::timeout, m_serverModel.get(),
+                        [model = m_serverModel.get(), products] {
+                            for (const auto& product : products)
+                                model->wakeFlowStoreOnRecorderHour(product);
+                        });
+                wakeTimer->start();
             } catch (const std::exception& e) {
                 sLog_Error("Flow store unavailable error=" << e.what());
             }

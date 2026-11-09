@@ -3,6 +3,9 @@
 #include "../servermodel/TradeOverlayPublisher.hpp"
 #include <boost/asio/steady_timer.hpp>
 #include "SentinelStreamProtocol.hpp"
+#include "flow/FlowCodec.hpp"
+#include "flow/FlowCompose.hpp"
+#include "capture/RawCapture.hpp"
 #include "RecordingCapability.hpp"
 #include "ChunkWire.hpp"
 #include <list>
@@ -151,7 +154,10 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingA
                                        ServerRecordingConfig::kLivePublishMaxMs)},
         {"close_delay_ms", ServerDataModel::kFlowCloseDelayMs},
         {"second_retention_ms", ServerDataModel::kFlowSecondRetentionMs},
-        {"history", false},
+        {"history", true},
+        {"history_encoding", "FHE1/FLB1"},
+        {"history_max_bars", protocol::SentinelProtocol::kFlowHistoryMaxBars},
+        {"history_second_replay_max_ms", recording::FlowStore::kMaxReplayWindowMs},
         {"grid", "per_bar"}};
     payload["trade_overlays"] = {
         {"retention_columns", cfg.tradeOverlays.retentionColumns},
@@ -203,6 +209,191 @@ double resolveMidPrice(const LiveOrderBook& book) {
 
 }
 
+namespace flow_history {
+using Json = nlohmann::json;
+using Reply = recording::FlowStore::Reply;
+constexpr size_t MaxFrameBytes = protocol::SentinelProtocol::kFlowHistoryMaxFrameBytes;
+struct Request {
+    uint64_t req = 0;
+    std::string symbol;
+    int64_t tf = 0, from = 0, to = 0;
+};
+void append32(std::string& out, uint32_t value) {
+    for (unsigned i = 0; i < 4; ++i) out.push_back(char(value >> (8 * i)));
+}
+// FHE1: magic, LE u32 JSON length, UTF-8 header, length-prefixed FLB1 records.
+std::string envelope(Json header, const std::vector<std::vector<uint8_t>>& bars = {}) {
+    std::string body;
+    for (const auto& bytes : bars) {
+        if (body.size() + bytes.size() + 4 > MaxFrameBytes)
+            throw std::runtime_error("flow history frame exceeds 15 MiB cap; reduce limit");
+        append32(body, uint32_t(bytes.size()));
+        body.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    }
+    const auto json = header.dump();
+    if (body.size() + json.size() + 8 > MaxFrameBytes)
+        throw std::runtime_error("flow history frame exceeds 15 MiB cap; reduce limit");
+    std::string out = protocol::SentinelProtocol::kFlowHistoryMagic;
+    append32(out, uint32_t(json.size()));
+    return out + json + body;
+}
+Json header(const Request& q) {
+    return {{"type", "flow_history_chunk"}, {"schema_version", 1}, {"req", q.req},
+            {"symbol", q.symbol}, {"timeframe_ms", q.tf}, {"oldest_ms", q.from},
+            {"price_scale", 0}, {"row_tick_units", 0}, {"sealed_through_ms", 0},
+            {"ranges", Json::array()},
+            {"bars", Json::array()}};
+}
+std::string refused(const Request& q, const std::string& error) {
+    auto h = header(q);
+    h["status"] = "refused";
+    h["error"] = error;
+    h["ranges"].push_back({{"from_ms", q.from}, {"to_ms", q.to}, {"status", "refused"}});
+    return envelope(std::move(h));
+}
+void append(Reply& to, Reply from, int64_t begin, int64_t end) {
+    for (size_t i = 0; i < from.bars.size(); ++i) {
+        if (from.bars[i].startMs < begin || from.bars[i].startMs >= end) continue;
+        to.bars.push_back(std::move(from.bars[i]));
+        to.revisions.push_back(from.revisions[i]);
+    }
+    for (auto& range : from.ranges) {
+        range.fromMs = std::max(begin, range.fromMs);
+        range.toMs = std::min(end, range.toMs);
+        if (range.fromMs < range.toMs) to.ranges.push_back(std::move(range));
+    }
+}
+struct Page {
+    Json metadata;
+    std::vector<sentinel::flow::FlowBar> bars;
+};
+Page buildPage(const Request& q, const ServerDataModel::FlowHistorySnapshot& snapshot,
+               int64_t sealedThroughMs, std::stop_token stop = {}) {
+    Reply source;
+    int64_t replayEnd = q.from;
+    if (q.tf == 1000) {
+        replayEnd = std::clamp(snapshot.retainedFromMs, q.from, q.to);
+        if (q.from < replayEnd && snapshot.store)
+            append(source, snapshot.store->buildWindow(q.symbol, q.from, replayEnd, stop), q.from, replayEnd);
+        append(source, snapshot.data, replayEnd, q.to);
+    } else {
+        auto stored = snapshot.store ? snapshot.store->window(q.symbol, q.from, q.to) : Reply{};
+        const auto seam = std::clamp(sealedThroughMs, q.from, q.to);
+        append(source, std::move(stored), q.from, seam);
+        append(source, snapshot.data, seam, q.to);
+    }
+    std::sort(source.ranges.begin(), source.ranges.end(), [](const auto& a, const auto& b) {
+        return a.fromMs < b.fromMs;
+    });
+    // Sources are disjoint and individually ordered; composition must be chronological.
+    std::map<int64_t, std::vector<std::pair<sentinel::flow::FlowBar, uint32_t>>> buckets;
+    for (size_t i = 0; i < source.bars.size(); ++i) {
+        auto& bar = source.bars[i];
+        buckets[bar.startMs / q.tf * q.tf].emplace_back(std::move(bar), source.revisions[i]);
+    }
+    auto h = header(q);
+    std::vector<sentinel::flow::FlowBar> bars;
+    bool anyBuilding = false, anyPartial = false;
+    for (auto start = q.from; start < q.to; start += q.tf) {
+        const auto end = start + q.tf;
+        // The currently forming bucket is complete through the snapshot's observed clock.
+        const auto neededEnd = snapshot.observedThroughMs > start && snapshot.observedThroughMs < end ?
+            snapshot.observedThroughMs : end;
+        auto covered = start;
+        bool building = false, partial = false;
+        sentinel::flow::FlowScales scales{};
+        for (const auto& r : source.ranges) {
+            if (r.toMs <= start || r.fromMs >= neededEnd) continue;
+            if (r.fromMs > covered) building = true;
+            covered = std::max(covered, r.toMs);
+            building |= r.status == "building";
+            partial |= r.status == "partial";
+            if (r.scales.priceScale) scales = r.scales;
+        }
+        building |= covered < neededEnd;
+        const std::string status = building ? "building" : partial ? "partial" : "complete";
+        anyBuilding |= building; anyPartial |= partial;
+        h["ranges"].push_back({{"from_ms", start}, {"to_ms", end}, {"status", status},
+            {"price_scale", scales.priceScale}, {"row_tick_units", scales.rowTickUnits}});
+        auto it = buckets.find(start);
+        if (it == buckets.end()) continue; // known empty is a range, never a fabricated bar
+        auto& entries = it->second;
+        std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+            return a.first.startMs < b.first.startMs;
+        });
+        std::vector<sentinel::flow::FlowBar> parts;
+        uint64_t revision = 0, storeRevision = 0;
+        for (auto& [bar, rev] : entries) {
+            parts.push_back(std::move(bar)); revision += rev;
+            storeRevision = std::max<uint64_t>(storeRevision, rev);
+        }
+        if (end <= sealedThroughMs && q.tf != 1000) {
+            for (const auto& range : source.ranges)
+                if (range.fromMs < end && range.toMs > start)
+                    storeRevision = std::max<uint64_t>(storeRevision, range.revision);
+            revision = storeRevision;
+        }
+        const bool provisional = start < sealedThroughMs && sealedThroughMs < end;
+        if (provisional) {
+            const auto it = snapshot.liveRevisions.find(start);
+            revision = building || partial || it == snapshot.liveRevisions.end() ? 0 : it->second;
+        }
+        if (revision > UINT32_MAX) throw std::runtime_error("flow history revision overflow");
+        auto bar = q.tf == parts.front().timeframeMs ? std::move(parts.front()) :
+            sentinel::flow::composeFlowBars(parts, q.tf);
+        const bool ramSecond = q.tf == 1000 && start >= replayEnd;
+        const bool storeSource = end <= sealedThroughMs && (!ramSecond || status == "complete");
+        // A RAM copy has no FLD1 generation. Reserve zero so a later journal
+        // replay (generation one or higher) can replace it within store source.
+        if (ramSecond && storeSource) revision = 0;
+        h["bars"].push_back({{"bucket_start_ms", start}, {"revision", revision},
+                              {"complete", !building && !partial && !provisional},
+                              {"source", storeSource ? "store" : "live"}});
+        bars.push_back(std::move(bar));
+    }
+    h["status"] = anyBuilding ? "building" : anyPartial ? "partial" : "complete";
+    if (!bars.empty()) {
+        h["price_scale"] = bars.front().priceScale;
+        h["row_tick_units"] = std::llround(bars.front().nativeTick * bars.front().priceScale);
+    }
+    return {std::move(h), std::move(bars)};
+}
+std::string build(const Request& q, const ServerDataModel::FlowHistorySnapshot& snapshot,
+                  std::stop_token stop = {}) {
+    auto h = header(q);
+    h["status"] = "complete";
+    const auto sealedThroughMs = snapshot.store ? snapshot.store->sealedThroughMs(q.symbol) : 0;
+    h["sealed_through_ms"] = sealedThroughMs;
+    std::vector<std::vector<uint8_t>> bars;
+    size_t encodedBytes = 0;
+    // Bound source memory to a single UTC day even for a 512-day page.
+    for (auto from = q.from; from < q.to;) {
+        const auto to = std::min(q.to, (from / 86'400'000 + 1) * 86'400'000);
+        auto part = q;
+        part.from = from; part.to = to;
+        auto page = buildPage(part, snapshot, sealedThroughMs, stop);
+        if (page.metadata["status"] == "building" ||
+            (page.metadata["status"] == "partial" && h["status"] == "complete"))
+            h["status"] = page.metadata["status"];
+        for (auto& range : page.metadata["ranges"]) h["ranges"].push_back(std::move(range));
+        for (auto& entry : page.metadata["bars"]) h["bars"].push_back(std::move(entry));
+        for (auto& bar : page.bars) {
+            if (bars.empty()) {
+                h["price_scale"] = bar.priceScale;
+                h["row_tick_units"] = std::llround(bar.nativeTick * bar.priceScale);
+            }
+            auto bytes = sentinel::flow::encodeFlowBar(bar);
+            encodedBytes += 4 + bytes.size();
+            if (encodedBytes > MaxFrameBytes)
+                throw std::runtime_error("flow history frame exceeds 15 MiB cap; reduce limit");
+            bars.push_back(std::move(bytes));
+        }
+        from = to;
+    }
+    return envelope(std::move(h), bars);
+}
+} // namespace flow_history
+
 class Session : public std::enable_shared_from_this<Session> {
     friend struct RecordingServerStopTest;
     friend struct HeatmapChunkWireTest;
@@ -226,6 +417,11 @@ class Session : public std::enable_shared_from_this<Session> {
     std::shared_ptr<recording::LiveWriteBudget> rawWriteSlot_ = std::make_shared<recording::LiveWriteBudget>();
     std::map<std::string, std::shared_ptr<recording::LiveService::RawSubscription>> rawViews_;
     std::map<uint64_t, std::shared_ptr<FlowSubscription>> flowViews_;
+    bool flowHistoryBusy_ = false;
+    std::stop_source flowReplayStop_;
+#ifdef SENTINEL_FLOW_HISTORY_TEST
+    std::function<void(std::string, bool)> flowHistoryWriteForTest_;
+#endif
     std::atomic_size_t pendingWriteBytes_{0};
     std::atomic_size_t pendingModelEvents_{0};
     std::atomic_bool closing_{false};
@@ -304,6 +500,7 @@ class Session : public std::enable_shared_from_this<Session> {
     }
 
     void requestClose(const char* reason) {
+        flowReplayStop_.request_stop();
         if (closing_.load(std::memory_order_acquire) || closePosted_.exchange(true)) {
             return;
         }
@@ -346,6 +543,7 @@ class Session : public std::enable_shared_from_this<Session> {
     }
 
     void beginClose(const char* reason) {
+        flowReplayStop_.request_stop();
         if (closing_.exchange(true)) {
             return;
         }
@@ -932,6 +1130,8 @@ public:
                     availability_[symbol].sent.clear();
                     pushAvailability(symbol);
                 }
+            } else if (type == "flow_history_request") {
+                handleFlowHistory(j);
             } else if (type == "flow_live_subscribe") {
                 handleFlowSubscribe(j);
             } else if (type == "flow_live_unsubscribe") {
@@ -1443,6 +1643,102 @@ public:
         do_write(payload.dump());
     }
 
+    void flowHistoryError(const flow_history::Request& q, const std::string& message) {
+        do_write(nlohmann::json{{"type", "error"}, {"context", "flow_history_request"},
+            {"req", q.req}, {"symbol", q.symbol}, {"message", message}}.dump());
+    }
+    void queueFlowHistory(flow_history::Request q, ServerDataModel::FlowHistorySnapshot snapshot) {
+        if (closing_.load()) return;
+        const bool replay = q.tf == 1000 && snapshot.store &&
+            q.from < std::clamp(snapshot.retainedFromMs, q.from, q.to);
+        if (replay && owner_->m_flowReplayBusy.exchange(true, std::memory_order_acq_rel)) {
+            flowHistoryBusy_ = false;
+            flowHistoryError(q, "1s journal replay busy");
+            return;
+        }
+        const auto closeToken = flowReplayStop_.get_token();
+        const auto serverToken = owner_->m_flowReplayStop.get_token();
+        auto* owner = owner_;
+        const bool queued = owner_->submitHistoryTask(
+            [weak = weak_from_this(), executor = ws_.get_executor(), q, snapshot = std::move(snapshot),
+             replay, closeToken, serverToken, owner]() mutable {
+                std::string payload, error;
+                std::stop_source combined;
+                std::stop_callback onClose(closeToken, [&] { combined.request_stop(); });
+                std::stop_callback onServer(serverToken, [&] { combined.request_stop(); });
+                try { payload = flow_history::build(q, snapshot, combined.get_token()); }
+                catch (const std::exception& e) { error = e.what(); }
+                if (replay) owner->m_flowReplayBusy.store(false, std::memory_order_release);
+                net::post(executor, [weak, q, payload = std::move(payload), error = std::move(error)]() mutable {
+                    const auto self = weak.lock();
+                    if (!self || self->closing_.load()) return;
+                    self->flowHistoryBusy_ = false;
+                    if (!error.empty()) self->flowHistoryError(q, error);
+                    else self->do_write(std::move(payload), true);
+                });
+            });
+        if (!queued) {
+            if (replay) owner_->m_flowReplayBusy.store(false, std::memory_order_release);
+            flowHistoryBusy_ = false;
+            flowHistoryError(q, "history worker queue is full");
+        }
+    }
+    void handleFlowHistory(const nlohmann::json& j) {
+        flow_history::Request q;
+        try {
+            if (!j.contains("req") || !j["req"].is_number_unsigned())
+                throw std::invalid_argument("unsigned req is required");
+            q.req = j.at("req").get<uint64_t>();
+            q.symbol = j.at("symbol").get<std::string>();
+            sentinel::capture::validateSymbol(q.symbol);
+            const auto integer = [&](const char* key) {
+                const auto& value = j.at(key);
+                if (!value.is_number_integer() || (value.is_number_unsigned() && value.get<uint64_t>() > INT64_MAX))
+                    throw std::invalid_argument(std::string(key) + " must be an int64");
+                return value.get<int64_t>();
+            };
+            q.tf = integer("timeframe_ms");
+            const auto end = integer("end_time_ms"), limit = integer("limit");
+            const auto& configured = owner_->serverConfig().chart.timeframesMs;
+            if (q.tf != 1000 && q.tf != 60'000 &&
+                !(q.tf >= 60'000 && q.tf <= 86'400'000 && q.tf % 60'000 == 0 &&
+                  86'400'000 % q.tf == 0 && std::find(configured.begin(), configured.end(), q.tf) != configured.end()))
+                throw std::invalid_argument("unsupported timeframe_ms; minimum is 1000 ms");
+            if (limit < 1 || limit > protocol::SentinelProtocol::kFlowHistoryMaxBars)
+                throw std::invalid_argument(q.tf == 1000 ?
+                    "limit must be 1..512; 1s journal replay cap is 3600000 ms (1 h)" : "limit must be 1..512");
+            if (end < 0 || end > INT64_MAX - 2 * 86'400'000)
+                throw std::invalid_argument("end_time_ms is outside the supported range");
+            q.to = end / q.tf * q.tf + q.tf;
+            q.from = std::max<int64_t>(0, q.to - limit * q.tf);
+        } catch (const std::exception& e) {
+            do_write(flow_history::refused(q, e.what()), true);
+            return;
+        }
+        if (flowHistoryBusy_) {
+            flowHistoryError(q, "one flow history job is already in flight");
+            return;
+        }
+        flowHistoryBusy_ = true;
+        QMetaObject::invokeMethod(&model_, [weak = weak_from_this(), q] {
+            const auto self = weak.lock();
+            if (!self || self->closing_.load()) return;
+            try {
+                auto snapshot = self->model_.flowHistorySnapshot(q.symbol, q.tf, q.from, q.to);
+                net::post(self->ws_.get_executor(), [weak, q, snapshot = std::move(snapshot)]() mutable {
+                    if (const auto session = weak.lock()) session->queueFlowHistory(q, std::move(snapshot));
+                });
+            } catch (const std::exception& e) {
+                net::post(self->ws_.get_executor(), [weak, q, error = std::string(e.what())] {
+                    if (const auto session = weak.lock()) {
+                        session->flowHistoryBusy_ = false;
+                        session->flowHistoryError(q, error);
+                    }
+                });
+            }
+        }, Qt::QueuedConnection);
+    }
+
   void handleFlowUnsubscribe(const nlohmann::json& j) {
       if (!j.contains("sub") || !j["sub"].is_number_unsigned()) {
           send_error("flow_live_unsubscribe", "", "sub must be an unsigned integer");
@@ -1571,6 +1867,12 @@ public:
 
     void do_write(std::string payload, bool binary = false,
                   std::shared_ptr<FlowSubscription> flow = {}) {
+#ifdef SENTINEL_FLOW_HISTORY_TEST
+        if (flowHistoryWriteForTest_) {
+            flowHistoryWriteForTest_(std::move(payload), binary);
+            return;
+        }
+#endif
         if (payload.empty() || closing_.load(std::memory_order_acquire)) {
             return;
         }
@@ -1851,6 +2153,8 @@ bool SentinelStreamServer::start() {
             std::lock_guard<std::mutex> lock(m_historyWorkersMutex);
             m_historyWorkers = std::make_unique<net::thread_pool>(kHistoryWorkerCount);
         }
+        m_flowReplayStop = std::stop_source{};
+        m_flowReplayBusy.store(false, std::memory_order_release);
         m_pendingHistoryTasks.store(0, std::memory_order_release);
 
         doAccept(acceptGeneration);
@@ -1907,6 +2211,7 @@ bool SentinelStreamServer::start() {
 }
 
 void SentinelStreamServer::stop() {
+    m_flowReplayStop.request_stop();
     if (m_rollups) m_rollups->stop();
     // Live delivery can hold a Session and post to its executor. Join it while
     // that executor is alive, even when session drain will time out or start failed.

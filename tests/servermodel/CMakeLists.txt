@@ -234,3 +234,10 @@ target_link_libraries(test_flow_store PRIVATE sentinel_core GTest::gtest_main Qt
 add_test(NAME FlowStoreTests COMMAND test_flow_store)
 set_tests_properties(FlowStoreTests PROPERTIES LABELS "servermodel" TIMEOUT 30)
 add_dependencies(servermodel_tests test_flow_store)
+
+add_executable(test_flow_history test_flow_history.cpp)
+target_include_directories(test_flow_history PRIVATE ${CMAKE_SOURCE_DIR}/libs/core ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(test_flow_history PRIVATE sentinel_core GTest::gtest_main Qt6::Core Qt6::Network)
+add_test(NAME FlowHistoryTests COMMAND test_flow_history)
+set_tests_properties(FlowHistoryTests PROPERTIES LABELS "servermodel;flow" TIMEOUT 30)
+add_dependencies(servermodel_tests test_flow_history)

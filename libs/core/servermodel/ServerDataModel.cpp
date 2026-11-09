@@ -2,6 +2,7 @@
 #include "SentinelLogging.hpp"
 #include "RecordingDir.hpp"
 #include "flow/FlowCodec.hpp"
+#include <QThread>
 #include "flow/FlowCompose.hpp"
 #include "protocol/SentinelStreamProtocol.hpp"
 #include "metrics/MetricsRegistry.hpp"
@@ -258,8 +259,9 @@ void ServerDataModel::onFeedMetadata(const std::string& symbol, const nlohmann::
 void ServerDataModel::onFeedWatermark(const std::string& symbol, int64_t journalMs) {
     if (auto it = m_flowProducts.find(symbol); it != m_flowProducts.end()) {
         it->second.clock = std::max(it->second.clock, journalMs - kFlowCloseDelayMs);
+        updateFlowRetentionFloor(symbol, it->second.clock);
         for (auto& [day, state] : it->second.days)
-            pruneFlowSeries(it->second.clock, 1000, state.series.at(1000));
+            pruneFlowSeries(symbol, it->second.clock, 1000, state.series.at(1000));
     }
     if (!m_aggregator) return;
     // Receive time leads exchange time by the feed latency: close only buckets
@@ -834,9 +836,10 @@ void ServerDataModel::publishAggregatedBook(const QString& productId, SymbolHotD
 
 }
 
-ServerDataModel::FlowSeries::FlowSeries(int64_t tf, const sentinel::flow::FlowScales& scales)
+ServerDataModel::FlowSeries::FlowSeries(int64_t tf, const sentinel::flow::FlowScales& scales,
+                                        bool extendedMinutes)
     : builder(tf, scales.nativeTick, scales.priceScale, scales.baseScale, scales.quoteScale),
-      bucketSlots(tf == 1000 ? 1802 : 62) {}
+      bucketSlots(tf == 1000 ? 1802 : extendedMinutes ? 422 : 62) {}
 
 void ServerDataModel::onFlowGrid(const std::string& symbol, int64_t dayStartMs,
                                  const sentinel::roller::Grid& grid,
@@ -865,7 +868,7 @@ void ServerDataModel::onFlowGrid(const std::string& symbol, int64_t dayStartMs,
         day.grid = grid;
         day.scales = scales;
         day.series.try_emplace(1000, 1000, scales);
-        day.series.try_emplace(60'000, 60'000, scales);
+        day.series.try_emplace(60'000, 60'000, scales, m_flowStore != nullptr);
         product.days.emplace(dayStartMs, std::move(day));
         product.scratch.id.reserve(128);
         product.days.erase(product.days.begin(), product.days.lower_bound(dayStartMs - 86'400'000));
@@ -876,6 +879,106 @@ void ServerDataModel::onFlowGrid(const std::string& symbol, int64_t dayStartMs,
         sLog_Warning("Flow grid refused: symbol=" << symbol << " day=" << dayStartMs
             << " error=" << e.what());
     }
+}
+
+void ServerDataModel::attachFlowStore(recording::FlowStore* store) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (store && !m_flowStore) {
+        for (auto& [symbol, product] : m_flowProducts)
+            for (auto& [dayStart, day] : product.days) {
+                auto& buckets = day.series.at(60'000).bucketSlots;
+                if (buckets.size() >= 422) continue;
+                std::vector<FlowSlot> expanded(422);
+                for (auto& slot : buckets)
+                    if (slot.start >= 0) expanded[(slot.start / 60'000) % expanded.size()] = slot;
+                buckets = std::move(expanded);
+            }
+    }
+    m_flowStore = store;
+    m_flowWakeThrough.clear();
+    m_flowRetentionFloor.clear();
+    if (store)
+        for (const auto& [symbol, product] : m_flowProducts)
+            if (product.clock > 0) updateFlowRetentionFloor(symbol, product.clock);
+}
+
+void ServerDataModel::updateFlowRetentionFloor(const std::string& symbol, int64_t clock) {
+    if (!m_flowStore) return;
+    const auto normal = std::max<int64_t>(0, clock - kFlowRolloverGraceMs) /
+        3'600'000 * 3'600'000;
+    const auto floor = std::max<int64_t>(0, normal - 6 * 3'600'000);
+    auto [it, inserted] = m_flowRetentionFloor.try_emplace(symbol, floor);
+    if (!inserted && it->second == floor) return;
+    it->second = floor;
+    m_flowStore->setLiveRetentionFloor(symbol, floor);
+}
+
+void ServerDataModel::onFlowHourThrough(const std::string& symbol, int64_t through) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!m_flowStore) return;
+    auto& prior = m_flowWakeThrough[symbol];
+    if (through > prior) {
+        prior = through;
+        m_flowStore->wake();
+    }
+}
+
+void ServerDataModel::wakeFlowStoreOnRecorderHour(const std::string& symbol) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!m_flowStore || !m_rollerAttached.load()) return;
+    const auto through = std::max(recordingWatermarks(symbol, "near").hourThroughMs,
+                                  recordingWatermarks(symbol, "deep").hourThroughMs);
+    onFlowHourThrough(symbol, through);
+}
+
+ServerDataModel::FlowHistorySnapshot ServerDataModel::flowHistorySnapshot(
+    const std::string& symbol, int64_t tf, int64_t from, int64_t to) const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    FlowHistorySnapshot snapshot;
+    snapshot.store = m_flowStore;
+    const auto found = m_flowProducts.find(symbol);
+    snapshot.retainedFromMs = to;
+    if (found == m_flowProducts.end() || found->second.firstLiveMs < 0) return snapshot;
+    const auto& product = found->second;
+    snapshot.observedThroughMs = product.clock + kFlowCloseDelayMs;
+    const auto sourceTf = tf == 1000 ? 1000 : 60'000;
+    const int64_t retained = sourceTf == 1000 ?
+        product.clock / 1000 * 1000 - kFlowSecondRetentionMs + 1000 :
+        flowMinuteRetainedFrom(symbol, product.clock);
+    snapshot.retainedFromMs = retained;
+    for (const auto& [dayStart, day] : product.days) {
+        if (tf > 60'000) {
+            for (const auto& [key, state] : day.coarse)
+                if (key.first == tf && key.second >= from && key.second < to)
+                    snapshot.liveRevisions[key.second] = state.revision;
+            if (tf == 3'600'000) {
+                for (const auto& [start, state] : day.hours)
+                    if (start >= from && start < to)
+                        snapshot.liveRevisions.try_emplace(start, state.revision);
+                if (day.formingHour && day.formingHour->first >= from &&
+                    day.formingHour->first < to)
+                    snapshot.liveRevisions.try_emplace(day.formingHour->first,
+                                                      day.formingHour->second.revision);
+            }
+        }
+        const auto begin = std::max({from, dayStart, retained});
+        const auto end = std::min({to, dayStart + 86'400'000, snapshot.observedThroughMs});
+        if (begin >= end) continue;
+        const auto& builder = day.series.at(sourceTf).builder;
+        for (auto start = begin / sourceTf * sourceTf; start < end; start += sourceTf) {
+            if (start < from) continue;
+            const bool complete = product.firstLiveMs <= start && start >= retained &&
+                !flowLossIn(product.lossyMinutes, start, start + sourceTf);
+            if (start + sourceTf > product.firstLiveMs)
+                snapshot.data.ranges.push_back({start, std::min(start + sourceTf, end),
+                                               complete ? "complete" : "partial", day.scales});
+            if (auto bar = builder.snapshotBar(start)) {
+                snapshot.data.bars.push_back(std::move(*bar));
+                snapshot.data.revisions.push_back(*builder.revisionAt(start));
+            }
+        }
+    }
+    return snapshot;
 }
 
 void ServerDataModel::subscribeFlow(std::shared_ptr<FlowSubscription> sub) {
@@ -931,9 +1034,14 @@ void ServerDataModel::addFlowTrade(const Trade& trade, int64_t ms) {
                  trade.side == AggressorSide::Sell ? sentinel::flow::Side::Sell : sentinel::flow::Side::Unknown;
     for (auto& [tf, series] : day->second.series) {
         const auto start = ms / tf * tf;
+        // An expired RAM second is replayed from the journal; its rejection does not lose the minute.
+        const bool expiredSecond = tf == 1000 &&
+            ms < product.clock / 1000 * 1000 - kFlowSecondRetentionMs + 1000;
         auto& slot = series.bucketSlots[(ms / tf) % series.bucketSlots.size()];
         if (slot.start >= 0 && slot.start != start) {
-            ++series.capacityDrops; ++m_flowDroppedTrades; markLoss(); continue;
+            ++series.capacityDrops; ++m_flowDroppedTrades;
+            if (!expiredSecond) markLoss();
+            continue;
         }
         const auto dropped = series.builder.droppedRejectCount();
         const auto result = series.builder.add(input);
@@ -941,7 +1049,7 @@ void ServerDataModel::addFlowTrade(const Trade& trade, int64_t ms) {
             slot.start = start; slot.dirty = true;
             day->second.hasBuckets = true;
         } else if (result == sentinel::flow::FlowBarBuilder::AddResult::Rejected) {
-            markLoss();
+            if (!expiredSecond) markLoss();
             if (series.builder.droppedRejectCount() == dropped) ++m_flowDroppedTrades;
         }
         m_flowDroppedTrades += series.builder.droppedRejectCount() - dropped;
@@ -962,6 +1070,7 @@ void ServerDataModel::publishFlowBar(const std::string& symbol, int64_t tf,
                 {"schema_version", protocol::SentinelProtocol::kFlowSchemaVersion},
                 {"symbol", symbol}, {"timeframe_ms", tf}, {"bucket_start_ms", bar.startMs},
                 {"closed", closed}, {"complete", complete}, {"revision", revision},
+                {"source", "live"},
                 {"encoding", "FLB1/base64"}, {"bar", encoded.toStdString()},
                 {"row_tick_units", std::llround(bar.nativeTick * bar.priceScale)},
                 {"price_scale", bar.priceScale}};
@@ -991,13 +1100,22 @@ void ServerDataModel::publishFlowSeries(const std::string& symbol, FlowProduct& 
         slot.dirty = false; slot.closed = closed;
     }
     series.builder.sealThrough(finalEnd);
-    pruneFlowSeries(product.clock, tf, series);
+    pruneFlowSeries(symbol, product.clock, tf, series);
 }
 
-void ServerDataModel::pruneFlowSeries(int64_t clock, int64_t tf, FlowSeries& series) {
+int64_t ServerDataModel::flowMinuteRetainedFrom(const std::string& symbol, int64_t clock) const {
+    const auto normal = std::max<int64_t>(0, clock - kFlowRolloverGraceMs) / 3'600'000 * 3'600'000;
+    if (!m_flowStore) return normal;
+    auto built = m_flowStore->sealedThroughMs(symbol);
+    if (const auto it = m_flowProducts.find(symbol); it != m_flowProducts.end() && it->second.firstLiveMs >= 0)
+        built = std::max(built, it->second.firstLiveMs / 3'600'000 * 3'600'000);
+    return std::min(normal, std::max(built, normal - 6 * 3'600'000));
+}
+
+void ServerDataModel::pruneFlowSeries(const std::string& symbol, int64_t clock, int64_t tf, FlowSeries& series) {
     const auto finalEnd = clock / tf * tf;
     const int64_t drop = tf == 1000 ? finalEnd - kFlowSecondRetentionMs + tf :
-        (clock - kFlowRolloverGraceMs) / 3'600'000 * 3'600'000;
+        flowMinuteRetainedFrom(symbol, clock);
     int64_t safeDrop = drop;
     for (const auto& slot : series.bucketSlots)
         if (slot.start >= 0 && (!slot.closed || slot.dirty)) safeDrop = std::min(safeDrop, slot.start);
@@ -1135,6 +1253,16 @@ void ServerDataModel::publishCoarse(const std::string& symbol, FlowProduct& prod
 void ServerDataModel::publishFlow() {
     std::erase_if(m_flowSubscriptions, [](const auto& s) { return !s->active.load(); });
     for (auto& [symbol, product] : m_flowProducts) {
+        if (m_flowStore) {
+            const auto lag = std::max<int64_t>(0, product.clock - kFlowRolloverGraceMs) / 3'600'000 * 3'600'000 -
+                             std::max(m_flowStore->sealedThroughMs(symbol),
+                                      product.firstLiveMs < 0 ? 0 : product.firstLiveMs / 3'600'000 * 3'600'000);
+            if (lag > 6 * 3'600'000 &&
+                (product.lastLagWarningClock == INT64_MIN || product.clock - product.lastLagWarningClock >= 60'000)) {
+                sLog_Warning("Flow store lag exceeds live retention symbol=" << symbol << " lagMs=" << lag);
+                product.lastLagWarningClock = product.clock;
+            }
+        }
         for (auto& [dayStart, day] : product.days) {
             auto& minute = day.series.at(60'000);
             std::vector<int64_t> changed;
@@ -1173,13 +1301,15 @@ void ServerDataModel::publishFlow() {
             publishFlowSeries(symbol, product, 1000, day.series.at(1000));
             publishFlowSeries(symbol, product, 60'000, minute);
             publishCoarse(symbol, product, day);
-            if (product.clock >= dayStart + 86'400'000 + kFlowRolloverGraceMs)
+            if (dayStart + 86'400'000 <= flowMinuteRetainedFrom(symbol, product.clock))
                 day.hours.clear();
         }
         product.days.erase(product.days.begin(), product.days.lower_bound(
-            std::max<int64_t>(0, product.clock - kFlowSecondRetentionMs) / 86'400'000 * 86'400'000));
+            std::max<int64_t>(0, std::min(product.clock - kFlowSecondRetentionMs,
+                                          flowMinuteRetainedFrom(symbol, product.clock))) /
+                86'400'000 * 86'400'000));
         product.newLossyMinutes.clear();
-        const auto keepFrom = std::max<int64_t>(0, product.clock - kFlowRolloverGraceMs) /
+        const auto keepFrom = std::max<int64_t>(0, flowMinuteRetainedFrom(symbol, product.clock)) /
             86'400'000 * 86'400'000;
         product.lossyMinutes.erase(product.lossyMinutes.begin(), product.lossyMinutes.lower_bound(keepFrom));
     }
