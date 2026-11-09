@@ -9,6 +9,7 @@ namespace protocol {
 namespace SentinelProtocol {
 constexpr int kServerConfigSchemaVersion = 2;
 constexpr int kCandleSchemaVersion = 2;
+constexpr int kFlowSchemaVersion = 1;
 constexpr int kFootprintSchemaVersion = 1;
 constexpr int kTpoSchemaVersion = 1;
 constexpr int kVolumeProfileSchemaVersion = 1;
@@ -28,6 +29,9 @@ enum class MessageType {
     CandleHistoryChunk,
     CandleBarUpdate,
     CandleBarClosed,
+    FlowLiveSubscribe,
+    FlowLiveUnsubscribe,
+    FlowBar,
     FootprintConfig,
     FootprintSlice,
     FootprintHistoryRequest,
@@ -64,6 +68,9 @@ inline std::string toString(MessageType t) {
         case MessageType::CandleHistoryChunk: return "candle_history_chunk";
         case MessageType::CandleBarUpdate: return "candle_bar_update";
         case MessageType::CandleBarClosed: return "candle_bar_closed";
+        case MessageType::FlowLiveSubscribe: return "flow_live_subscribe";
+        case MessageType::FlowLiveUnsubscribe: return "flow_live_unsubscribe";
+        case MessageType::FlowBar: return "flow_bar";
         case MessageType::FootprintConfig: return "footprint_config";
         case MessageType::FootprintSlice: return "footprint_slice";
         case MessageType::FootprintHistoryRequest: return "footprint_history_request";
@@ -99,6 +106,9 @@ inline MessageType fromString(const std::string& s) {
     if (s == "candle_history_chunk") return MessageType::CandleHistoryChunk;
     if (s == "candle_bar_update") return MessageType::CandleBarUpdate;
     if (s == "candle_bar_closed") return MessageType::CandleBarClosed;
+    if (s == "flow_live_subscribe") return MessageType::FlowLiveSubscribe;
+    if (s == "flow_live_unsubscribe") return MessageType::FlowLiveUnsubscribe;
+    if (s == "flow_bar") return MessageType::FlowBar;
     if (s == "footprint_config") return MessageType::FootprintConfig;
     if (s == "footprint_slice") return MessageType::FootprintSlice;
     if (s == "footprint_history_request") return MessageType::FootprintHistoryRequest;

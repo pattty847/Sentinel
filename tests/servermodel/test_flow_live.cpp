@@ -1,0 +1,337 @@
+#include "CandleWireFixture.hpp"
+#include "flow/FlowCodec.hpp"
+#include "roller/JournalFeed.hpp"
+#include "roller/Roller.hpp"
+#include <QTimeZone>
+#include <gtest/gtest.h>
+
+struct FlowLiveTestAccess {
+  static void tick(ServerDataModel &m) { m.publishFlow(); }
+  static void stopTimer(ServerDataModel &m) { m.m_flowTimer.stop(); }
+  static auto &series(ServerDataModel &m, const std::string &symbol,
+                      int64_t day, int64_t tf) {
+    return m.m_flowProducts.at(symbol).days.at(day).series.at(tf);
+  }
+  static size_t subscriptions(ServerDataModel &m) {
+    return m.m_flowSubscriptions.size();
+  }
+  static size_t seriesCount(ServerDataModel &m, int64_t day) {
+    return m.m_flowProducts.at("BTC-USD").days.at(day).series.size();
+  }
+};
+
+struct FlowLiveWireTestAccess {
+  static void subscribe(Session &session, const Json &request) {
+    session.handleFlowSubscribe(request);
+  }
+  static void unsubscribe(Session &session, const Json &request) {
+    session.handleFlowUnsubscribe(request);
+  }
+  static size_t views(const Session &session) {
+    return session.flowViews_.size();
+  }
+  static bool active(const Session &session, uint64_t id) {
+    return session.flowViews_.at(id)->active.load();
+  }
+};
+
+namespace {
+constexpr int64_t Day = 1'791'158'400'000;
+Json metadata() {
+  return {{"product_id", "BTC-USD"},
+          {"quote_increment", "0.01"},
+          {"base_increment", "0.00000001"}};
+}
+void grid(ServerDataModel &model) {
+  model.onFlowGrid("BTC-USD", Day,
+                   sentinel::roller::deriveGrid(metadata(), 100000),
+                   metadata());
+}
+Trade trade(int64_t ms, std::string id, double size = 1,
+            AggressorSide side = AggressorSide::Buy) {
+  return {std::chrono::system_clock::time_point(std::chrono::milliseconds(ms)),
+          "BTC-USD",
+          std::move(id),
+          side,
+          100000,
+          size};
+}
+sentinel::flow::Trade flowTrade(const Trade &t) {
+  return {t.trade_id, tradeTimestampMs(t), t.price, t.size,
+          t.side == AggressorSide::Buy    ? sentinel::flow::Side::Buy
+          : t.side == AggressorSide::Sell ? sentinel::flow::Side::Sell
+                                          : sentinel::flow::Side::Unknown};
+}
+sentinel::flow::Bytes bytes(const Json &frame) {
+  const auto data = QByteArray::fromBase64(
+      QByteArray::fromStdString(frame.at("bar").get<std::string>()));
+  return {data.begin(), data.end()};
+}
+class FlowLive : public testing::Test {
+protected:
+  int argc = 1;
+  char name[16] = "flow-live";
+  char *argv[2] = {name, nullptr};
+  QCoreApplication app{argc, argv};
+  ServerConfig config;
+  std::unique_ptr<ServerDataModel> model;
+  std::vector<Json> frames;
+  void SetUp() override {
+    config.recording.enabled = false;
+    config.rollerShadow.enabled = false;
+    config.rollerShadow.products = {"BTC-USD"};
+    config.chart.timeframesMs = {100, 1000, 60000, 300000};
+    config.recording.livePublishMs = 250;
+    model = std::make_unique<ServerDataModel>(config);
+    FlowLiveTestAccess::stopTimer(*model);
+    grid(*model);
+  }
+  auto subscribe(int64_t tf = 60000, uint64_t id = 1) {
+    auto sub = std::make_shared<FlowSubscription>();
+    sub->sub = id;
+    sub->symbol = "BTC-USD";
+    sub->timeframeMs = tf;
+    sub->publish = [this](std::string payload) {
+      frames.push_back(Json::parse(payload));
+    };
+    model->subscribeFlow(sub);
+    return sub;
+  }
+  void tick(int64_t journalMs) {
+    model->onFeedWatermark("BTC-USD", journalMs);
+    FlowLiveTestAccess::tick(*model);
+  }
+};
+
+TEST_F(FlowLive, CoalescesChangesClosesOnceAndRevisesLateTrade) {
+  auto sub = subscribe();
+  for (int i = 0; i < 100; ++i)
+    model->onTrade(trade(Day + 10000 + i, std::to_string(i)));
+  EXPECT_TRUE(frames.empty());
+  tick(Day + 11000);
+  ASSERT_EQ(frames.size(), 1u);
+  EXPECT_EQ(sentinel::flow::decodeFlowBar(bytes(frames.back())).count, 100u);
+  tick(Day + 12000);
+  EXPECT_EQ(frames.size(), 1u);
+  tick(Day + 60999);
+  EXPECT_EQ(frames.size(), 1u);
+  tick(Day + 61000);
+  ASSERT_EQ(frames.size(), 2u);
+  EXPECT_EQ(frames.back()["closed"], true);
+  EXPECT_EQ(frames.back()["revision"], 0);
+  model->onTrade(trade(Day + 30000, "late"));
+  tick(Day + 62000);
+  ASSERT_EQ(frames.size(), 3u);
+  EXPECT_EQ(frames.back()["revision"], 1);
+  EXPECT_EQ(sentinel::flow::decodeFlowBar(bytes(frames.back())).count, 101u);
+  model->onTrade(trade(Day + 30000, "late")); // resend never dirties a bar
+  tick(Day + 63000);
+  EXPECT_EQ(frames.size(), 3u);
+  sub->active.store(false);
+  model->onTrade(trade(Day + 64000, "after-unsubscribe"));
+  tick(Day + 65000);
+  EXPECT_EQ(frames.size(), 3u);
+}
+
+TEST_F(FlowLive, SecondRetentionDropsOldTradesAndCannotGrowWithoutTimer) {
+  auto sub = subscribe(1000);
+  for (int i = 0; i < 3600; ++i) {
+    model->onTrade(trade(Day + i * 1000, std::to_string(i)));
+    tick(Day + (i + 1) * 1000);
+  }
+  auto &series = FlowLiveTestAccess::series(*model, "BTC-USD", Day, 1000);
+  EXPECT_LE(series.builder.bars().size(), 1800u);
+  const auto before = series.builder.bars().size();
+  const auto drops = series.builder.droppedRejectCount() + series.capacityDrops;
+  model->onTrade(trade(Day + 1000, "expired"));
+  EXPECT_EQ(series.builder.bars().size(), before);
+  EXPECT_EQ(series.builder.droppedRejectCount() + series.capacityDrops,
+            drops + 1);
+  // With no publication opportunity, capacity remains bounded too.
+  for (int i = 3600; i < 9000; ++i)
+    model->onTrade(trade(Day + i * 1000, std::to_string(i)));
+  EXPECT_LE(series.builder.bars().size(), 1802u);
+  EXPECT_GT(series.capacityDrops, 0u);
+}
+
+TEST_F(FlowLive, SubscribedChartTimeframeIsRemovedAndInitialSubscribeResends) {
+  auto minute = subscribe();
+  auto chart = subscribe(300000, 2);
+  model->onTrade(trade(Day + 10000, "1"));
+  tick(Day + 11000);
+  ASSERT_EQ(frames.size(), 2u);
+  EXPECT_EQ(FlowLiveTestAccess::seriesCount(*model, Day), 3u);
+  auto resend = subscribe(60000, 3);
+  tick(Day + 12000);
+  ASSERT_EQ(frames.size(), 3u);
+  EXPECT_EQ(frames.back()["sub"], 3);
+  chart->active.store(false);
+  tick(Day + 13000);
+  EXPECT_EQ(FlowLiveTestAccess::seriesCount(*model, Day), 2u);
+}
+
+TEST_F(FlowLive, LiveHourEqualsJournalBuildWithReconnectAndLateRevision) {
+  using namespace sentinel;
+  using namespace sentinel::roller;
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  capture::WriterConfig cfg;
+  cfg.root = dir.path();
+  cfg.fsyncBlocks = 0;
+  capture::Writer writer(cfg, {{"product_metadata", metadata()}});
+  auto append = [&](int64_t received, int64_t exchange, const std::string &id,
+                    uint64_t connection = 1) {
+    Json print = {{"product_id", "BTC-USD"},
+                  {"trade_id", id},
+                  {"time", QDateTime::fromMSecsSinceEpoch(
+                               exchange, QTimeZone(QTimeZone::UTC))
+                               .toString(Qt::ISODateWithMs)
+                               .toStdString()},
+                  {"price", "100000"},
+                  {"size", "1.25"},
+                  {"side", "BUY"}};
+    Json message = {{"channel", "market_trades"},
+                    {"trades", Json::array({print})}};
+    writer.append({capture::Kind::Frame,
+                   {received * 1'000'000, 0},
+                   connection,
+                   message.dump()});
+  };
+  append(Day + 10000, Day + 10000, "1");
+  append(Day + 61000, Day + 60000, "2");
+  append(Day + 62000, Day + 10000, "1", 2); // reconnect resend
+  append(Day + 63000, Day + 30000, "late", 2);
+  for (int i = 2; i < 60; ++i)
+    append(Day + i * 60000 + 1000, Day + i * 60000, std::to_string(i + 1), 2);
+  writer.close();
+  auto sub = subscribe();
+  flow::FlowBarBuilder store(60000, 1, 100, 100000000, 100000000);
+  JournalFeed stored("BTC-USD"), live("BTC-USD");
+  stored.onTrade = [&](const Trade &t) { store.add(flowTrade(t)); };
+  live.onTrade = [&](const Trade &t) { model->onTrade(t); };
+  JournalReader reader(dir.path().toStdString(), "BTC-USD");
+  JournalRecord record;
+  while (reader.next(record)) {
+    stored.apply(record);
+    live.apply(record);
+    tick(record.record.time.systemNs / 1'000'000);
+  }
+  // Exercise the model's own bounded dedup too, independently of JournalFeed.
+  model->onTrade(trade(Day + 59000 * 60, "60", 1.25, AggressorSide::Sell));
+  tick(Day + 3'601'000);
+  auto &liveBuilder =
+      FlowLiveTestAccess::series(*model, "BTC-USD", Day, 60000).builder;
+  const auto expected = store.bars();
+  const auto actual = liveBuilder.bars();
+  ASSERT_EQ(expected.size(), 60u);
+  ASSERT_EQ(actual.size(), expected.size());
+  for (size_t i = 0; i < expected.size(); ++i) {
+    const auto wire = flow::encodeFlowBar(actual[i]);
+    EXPECT_EQ(flow::encodeFlowBar(flow::decodeFlowBar(wire)),
+              flow::encodeFlowBar(expected[i]));
+  }
+  EXPECT_EQ(liveBuilder.revisionAt(Day), 1u);
+  EXPECT_EQ(store.revisionAt(Day), 0u);
+  auto revised = std::find_if(frames.begin(), frames.end(), [](const Json &j) {
+    return j["bucket_start_ms"] == Day && j["revision"] == 1;
+  });
+  ASSERT_NE(revised, frames.end());
+  EXPECT_EQ(bytes(*revised), flow::encodeFlowBar(expected.front()));
+}
+
+TEST_F(FlowLive, RecorderGridIsDeliveredBeforeLiveTrades) {
+  using namespace sentinel::roller;
+  QTemporaryDir journal, derived;
+  ASSERT_TRUE(journal.isValid());
+  ASSERT_TRUE(derived.isValid());
+  sentinel::capture::WriterConfig cfg;
+  cfg.root = journal.path();
+  cfg.fsyncBlocks = 0;
+  sentinel::capture::Writer writer(cfg, {{"product_metadata", metadata()}});
+  Json snapshot = {
+      {"channel", "l2_data"},
+      {"events",
+       Json::array({{{"type", "snapshot"},
+                     {"product_id", "BTC-USD"},
+                     {"updates", Json::array({{{"side", "bid"},
+                                               {"price_level", "99999"},
+                                               {"new_quantity", "2"}},
+                                              {{"side", "offer"},
+                                               {"price_level", "100001"},
+                                               {"new_quantity", "3"}}})}}})}};
+  writer.append({sentinel::capture::Kind::Frame,
+                 {(Day + 1000) * 1'000'000, 0},
+                 1,
+                 snapshot.dump()});
+  writer.close();
+  ServerDataModel live(config);
+  FlowLiveTestAccess::stopTimer(live);
+  RollOptions options{journal.path().toStdString(),
+                      derived.path().toStdString(), "BTC-USD", Day,
+                      Day + 60'000};
+  options.dryRun = true;
+  int grids = 0;
+  options.onGrid = [&](int64_t day, const Grid &recorded, const Json &header) {
+    ++grids;
+    live.onFlowGrid("BTC-USD", day, recorded, header);
+  };
+  roll(options);
+  EXPECT_EQ(grids, 1);
+  live.onTrade(trade(Day + 2000, "grid"));
+  const auto bars =
+      FlowLiveTestAccess::series(live, "BTC-USD", Day, 60000).builder.bars();
+  ASSERT_EQ(bars.size(), 1u);
+  EXPECT_DOUBLE_EQ(bars.front().nativeTick, 1);
+  EXPECT_EQ(bars.front().priceScale, 100);
+}
+
+TEST_F(FlowLive, RealTimerBoundsBurstAndStopsAfterUnsubscribe) {
+  // Use the real timer, not the deterministic publication seam.
+  model = std::make_unique<ServerDataModel>(config);
+  grid(*model);
+  auto sub = subscribe();
+  for (int i = 0; i < 200; ++i)
+    model->onTrade(trade(Day + 10000, std::to_string(i)));
+  ASSERT_TRUE(spinUntil([&] { return !frames.empty(); }, 500ms));
+  ASSERT_EQ(frames.size(), 1u);
+  const auto until = std::chrono::steady_clock::now() + 220ms;
+  ASSERT_TRUE(
+      spinUntil([&] { return std::chrono::steady_clock::now() >= until; }));
+  EXPECT_EQ(frames.size(), 1u);
+  sub->active.store(false);
+  model->onTrade(trade(Day + 20000, "cancelled"));
+  const auto stopped = std::chrono::steady_clock::now() + 150ms;
+  ASSERT_TRUE(
+      spinUntil([&] { return std::chrono::steady_clock::now() >= stopped; }));
+  EXPECT_EQ(frames.size(), 1u);
+}
+
+TEST_F(FlowLive, WireSubscribeReplaceAndUnsubscribe) {
+  net::io_context io;
+  ssl::context tls{ssl::context::tls_server};
+  auto session =
+      std::make_shared<Session>(tcp::socket(io), tls, *model, nullptr);
+  FlowLiveWireTestAccess::subscribe(
+      *session,
+      {{"sub", uint64_t{7}}, {"symbol", "BTC-USD"}, {"timeframe_ms", 60000}});
+  ASSERT_TRUE(spinUntil(
+      [&] { return FlowLiveTestAccess::subscriptions(*model) == 1; }));
+  EXPECT_EQ(FlowLiveWireTestAccess::views(*session), 1u);
+  model->onTrade(trade(Day + 10000, "wire"));
+  FlowLiveTestAccess::tick(*model);
+  EXPECT_GT(RecordingServerStopTest::pendingWriteBytes(*session), 0u);
+  FlowLiveWireTestAccess::subscribe(
+      *session,
+      {{"sub", uint64_t{7}}, {"symbol", "BTC-USD"}, {"timeframe_ms", 300000}});
+  ASSERT_TRUE(spinUntil([&] {
+    FlowLiveTestAccess::tick(*model);
+    return FlowLiveTestAccess::subscriptions(*model) == 1;
+  }));
+  EXPECT_TRUE(FlowLiveWireTestAccess::active(*session, 7));
+  FlowLiveWireTestAccess::unsubscribe(*session, {{"sub", uint64_t{7}}});
+  EXPECT_EQ(FlowLiveWireTestAccess::views(*session), 0u);
+  FlowLiveTestAccess::tick(*model);
+  EXPECT_EQ(FlowLiveTestAccess::subscriptions(*model), 0u);
+}
+
+} // namespace

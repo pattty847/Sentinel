@@ -1,5 +1,7 @@
 #pragma once
 #include "RecordingLive.hpp"
+#include "flow/FlowBarBuilder.hpp"
+#include "roller/Grid.hpp"
 #include "OverlayTradeSelection.hpp"
 #include <map>
 #include <set>
@@ -27,11 +29,22 @@
 
 namespace sentinel::metrics { class MetricsRegistry; }
 
+// Immutable after registration except active (any thread) and initial (model thread).
+struct FlowSubscription {
+    std::atomic<bool> active{true};
+    uint64_t sub = 0;
+    std::string symbol;
+    int64_t timeframeMs = 0;
+    std::function<void(std::string)> publish;
+    bool initial = true;
+};
+
 class ServerDataModel : public QObject {
     Q_OBJECT
     friend struct TradeOverlayModelTest;
     friend struct ServerFeedAdmissionTest;
     friend struct ShadowServerTestAccess;
+    friend struct FlowLiveTestAccess;
 public:
     struct FootprintTradeSample {
         int64_t timestampMs = 0;
@@ -44,6 +57,14 @@ public:
     ~ServerDataModel();
 
     SymbolHotData& ensureSymbol(const std::string& symbol);
+    void subscribeFlow(std::shared_ptr<FlowSubscription> subscription);
+    // Recorder-derived daily grid, delivered before that day's live trades.
+    void onFlowGrid(const std::string& symbol, int64_t dayStartMs,
+                    const sentinel::roller::Grid& grid, const nlohmann::json& metadata);
+    static constexpr int64_t kFlowCloseDelayMs = 1000;
+    static constexpr int64_t kFlowSecondRetentionMs = 1'800'000;
+    static constexpr int64_t kFlowRolloverGraceMs = 60'000;
+
     
     // History Accessor
     std::vector<OHLCVBar> getHistory(const std::string& symbol, int64_t timeframeMs, size_t limit = 1000) const;
@@ -140,6 +161,36 @@ signals:
 
 private:
     void updateExchangeOffsetMs(int64_t exchangeMs);
+    struct FlowSlot {
+        int64_t start = -1;
+        bool dirty = false, closed = false;
+    };
+    struct FlowSeries {
+        sentinel::flow::FlowBarBuilder builder;
+        std::vector<FlowSlot> bucketSlots;
+        FlowSeries(int64_t tf, double tick, int64_t price, int64_t base);
+        uint64_t capacityDrops = 0;
+    };
+    struct FlowDay {
+        double tick = 0;
+        int64_t priceScale = 0, baseScale = 0;
+        std::map<int64_t, FlowSeries> series;
+    };
+    struct FlowProduct {
+        int64_t clock = 0;
+        std::map<int64_t, FlowDay> days;
+        sentinel::flow::Trade scratch; // reused id storage
+    };
+    std::map<std::string, FlowProduct> m_flowProducts;
+    std::vector<std::shared_ptr<FlowSubscription>> m_flowSubscriptions;
+    QTimer m_flowTimer;
+    uint64_t m_flowDroppedTrades = 0, m_flowDroppedBuckets = 0;
+    void pruneFlowSeries(int64_t clock, int64_t tf, FlowSeries& series);
+    void addFlowTrade(const Trade& trade, int64_t exchangeMs);
+    void publishFlow();
+    void publishFlowSeries(const std::string& symbol, FlowProduct& product,
+                           int64_t tf, FlowSeries& series);
+
 
     // Slots are invoked on the main thread; subsystems assume single-threaded access.
     mutable std::shared_mutex m_mutex;

@@ -1,6 +1,8 @@
 #include "ServerDataModel.hpp"
 #include "SentinelLogging.hpp"
 #include "RecordingDir.hpp"
+#include "flow/FlowCodec.hpp"
+#include "protocol/SentinelStreamProtocol.hpp"
 #include "metrics/MetricsRegistry.hpp"
 #include "roller/Grid.hpp"
 #include <algorithm>
@@ -120,6 +122,11 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     connect(m_aggregator.get(), &TimeframeAggregator::liveRollupsUpdated, this,
             &ServerDataModel::liveRollupsUpdated);
 
+    m_flowTimer.setTimerType(Qt::PreciseTimer);
+    m_flowTimer.setInterval(std::clamp(config.recording.livePublishMs,
+        ServerRecordingConfig::kLivePublishMinMs, ServerRecordingConfig::kLivePublishMaxMs));
+    connect(&m_flowTimer, &QTimer::timeout, this, &ServerDataModel::publishFlow);
+    m_flowTimer.start();
     startRollerServing();
 }
 
@@ -243,6 +250,11 @@ void ServerDataModel::onFeedMetadata(const std::string& symbol, const nlohmann::
     onProductMetadata(symbol, metadata);
 }
 void ServerDataModel::onFeedWatermark(const std::string& symbol, int64_t journalMs) {
+    if (auto it = m_flowProducts.find(symbol); it != m_flowProducts.end()) {
+        it->second.clock = std::max(it->second.clock, journalMs - kFlowCloseDelayMs);
+        for (auto& [day, state] : it->second.days)
+            for (auto& [tf, series] : state.series) pruneFlowSeries(it->second.clock, tf, series);
+    }
     if (!m_aggregator) return;
     // Receive time leads exchange time by the feed latency: close only buckets
     // that ended kJournalCandleLagMs before it, so in-flight trades still land.
@@ -354,6 +366,10 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
                sampleFeeds([](const FeedState& f) { return f.ups; }));
     r.familyFn("sentinel_live_feed_down_total", "Product journal feed down transitions in this process.", Registry::Type::Counter,
                sampleFeeds([](const FeedState& f) { return f.downs; }));
+    r.counterFn("sentinel_flow_dropped_trades_total", "Flow series additions rejected behind retention or at capacity.", {},
+                [this]() -> Value { return double(m_flowDroppedTrades); });
+    r.counterFn("sentinel_flow_dropped_buckets_total", "Published flow buckets retired from live retention.", {},
+                [this]() -> Value { return double(m_flowDroppedBuckets); });
     r.gaugeFn("sentinel_exchange_clock_offset_ms", "Smoothed local minus exchange clock in ms (0 = not yet measured).", {},
               [this]() -> Value { return double(m_exchangeOffsetMs.load(std::memory_order_relaxed)); });
     r.familyFn("sentinel_candle_late_trades_total", "Trades the candle aggregator dropped as older than its open bucket.",
@@ -504,6 +520,7 @@ void ServerDataModel::onTrade(const Trade& trade) {
     const int64_t exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         trade.timestamp.time_since_epoch()).count();
     updateExchangeOffsetMs(exchangeMs);
+    addFlowTrade(trade, exchangeMs);
 
     if (m_aggregator) {
         m_aggregator->onTrade(trade);
@@ -805,4 +822,229 @@ void ServerDataModel::publishAggregatedBook(const QString& productId, SymbolHotD
               << " range=[" << data.rawMinPrice << ".." << data.rawMaxPrice << "]"
               << " tick=" << tickSize);
 
+}
+
+ServerDataModel::FlowSeries::FlowSeries(int64_t tf, double tick, int64_t price,
+                                        int64_t base)
+    : builder(tf, tick, price, base, 100'000'000), bucketSlots(tf == 1000     ? 1802
+                                                         : tf == 60'000 ? 62
+                                                                        : 2) {}
+
+void ServerDataModel::onFlowGrid(const std::string &symbol, int64_t dayStartMs,
+                                 const sentinel::roller::Grid &grid,
+                                 const nlohmann::json &metadata) {
+  if (!m_feeds.contains(symbol) || dayStartMs < 0 ||
+      dayStartMs % 86'400'000 != 0)
+    return;
+  try {
+    // Validation follows the journal metadata's decimal precision, including
+    // increments such as 0.25 (the scale is 100, not its reciprocal).
+    auto text = metadata.at("base_increment").get<std::string>();
+    if (text.empty() ||
+        text.find_first_not_of("0123456789.") != std::string::npos ||
+        std::stod(text) <= 0)
+      throw std::runtime_error("invalid base increment");
+    const auto dot = text.find('.');
+    while (text.size() > 1 && text.back() == '0' && dot != std::string::npos)
+      text.pop_back();
+    const auto places = dot == std::string::npos ? 0 : text.size() - dot - 1;
+    if (places > 15)
+      throw std::runtime_error("base increment precision exceeds 15");
+    int64_t base = 1;
+    for (size_t i = 0; i < places; ++i)
+      base *= 10;
+    if (!std::isfinite(grid.priceScale) || grid.priceScale < 1 ||
+        grid.priceScale >= 0x1p53)
+      throw std::runtime_error("invalid flow price scale");
+    auto &product = m_flowProducts[symbol];
+    if (!product.days.empty() &&
+        dayStartMs < product.days.rbegin()->first - 86'400'000)
+      return;
+    if (product.days.contains(dayStartMs))
+      return; // retry/reconnect keeps the day's grid
+    FlowDay day;
+    day.tick = grid.nearTick;
+    day.priceScale = std::llround(grid.priceScale);
+    day.baseScale = base;
+    for (const auto tf : {1000LL, 60'000LL})
+      day.series.try_emplace(tf, tf, day.tick, day.priceScale, base);
+    for (const auto &sub : m_flowSubscriptions)
+      if (sub->active.load() && sub->symbol == symbol)
+        day.series.try_emplace(sub->timeframeMs, sub->timeframeMs, day.tick,
+                               day.priceScale, base);
+    product.days.emplace(dayStartMs, std::move(day));
+    product.scratch.id.reserve(128);
+    // Only the current and previous UTC day can intersect live retention.
+    product.days.erase(product.days.begin(),
+                       product.days.lower_bound(dayStartMs - 86'400'000));
+  } catch (const std::exception &e) {
+    sLog_Warning("Flow grid refused: symbol=" << symbol << " day=" << dayStartMs
+                                              << " error=" << e.what());
+  }
+}
+
+void ServerDataModel::subscribeFlow(std::shared_ptr<FlowSubscription> sub) {
+  if (!sub->active.load())
+    return;
+  const auto tf = sub->timeframeMs;
+  const auto &configured = m_serverConfig.chart.timeframesMs;
+  const bool supported =
+      tf == 1000 || tf == 60'000 ||
+      (tf >= 60'000 && tf <= 86'400'000 && 86'400'000 % tf == 0 &&
+       std::find(configured.begin(), configured.end(), tf) != configured.end());
+  std::erase_if(m_flowSubscriptions,
+                [](const auto &s) { return !s->active.load(); });
+  if (!supported || !m_feeds.contains(sub->symbol) ||
+      m_flowSubscriptions.size() >= 256) {
+    sub->publish(nlohmann::json{
+        {"type", "error"},
+        {"context", "flow_live_subscribe"},
+        {"sub", sub->sub},
+        {"symbol", sub->symbol},
+        {"message", "unsupported flow series or capacity reached"}}
+                     .dump());
+    return;
+  }
+  auto &product = m_flowProducts[sub->symbol];
+  for (auto &[start, day] : product.days)
+    day.series.try_emplace(tf, tf, day.tick, day.priceScale, day.baseScale);
+  m_flowSubscriptions.push_back(std::move(sub));
+}
+
+void ServerDataModel::addFlowTrade(const Trade &trade, int64_t ms) {
+  const auto it = m_flowProducts.find(trade.product_id);
+  if (it == m_flowProducts.end() || ms < 0)
+    return;
+  auto &product = it->second;
+  const auto day = product.days.find(ms / 86'400'000 * 86'400'000);
+  if (day == product.days.end())
+    return;
+  auto &input = product.scratch;
+  input.id = trade.trade_id;
+  input.exchangeMs = ms;
+  input.price = trade.price;
+  input.size = trade.size;
+  input.side = trade.side == AggressorSide::Buy ? sentinel::flow::Side::Buy
+               : trade.side == AggressorSide::Sell
+                   ? sentinel::flow::Side::Sell
+                   : sentinel::flow::Side::Unknown;
+  for (auto &[tf, series] : day->second.series) {
+    const auto start = ms / tf * tf;
+    auto &slot = series.bucketSlots[(ms / tf) % series.bucketSlots.size()];
+    // A stalled event loop cannot grow the builder past its fixed retention
+    // slots before the publication timer gets a chance to seal and prune.
+    if (slot.start >= 0 && slot.start != start) {
+      ++series.capacityDrops;
+      ++m_flowDroppedTrades;
+      continue;
+    }
+    const auto dropped = series.builder.droppedRejectCount();
+    if (series.builder.add(input) ==
+        sentinel::flow::FlowBarBuilder::AddResult::Accepted) {
+      slot.start = start;
+      slot.dirty = true;
+    }
+    m_flowDroppedTrades += series.builder.droppedRejectCount() - dropped;
+  }
+}
+
+void ServerDataModel::publishFlowSeries(const std::string &symbol,
+                                        FlowProduct &product, int64_t tf,
+                                        FlowSeries &series) {
+  const auto finalEnd = product.clock / tf * tf;
+  int64_t newest = -1;
+  for (const auto &slot : series.bucketSlots)
+    newest = std::max(newest, slot.start);
+  for (auto &slot : series.bucketSlots) {
+    if (slot.start < 0)
+      continue;
+    const bool closed = slot.start < finalEnd;
+    const bool changed = slot.dirty || (closed && !slot.closed);
+    std::optional<nlohmann::json> payload;
+    for (const auto &sub : m_flowSubscriptions) {
+      if (!sub->active.load() || sub->symbol != symbol ||
+          sub->timeframeMs != tf ||
+          (!changed && !(sub->initial && slot.start == newest)))
+        continue;
+      if (!payload) {
+        const auto bar = series.builder.bar(slot.start);
+        const auto bytes = sentinel::flow::encodeFlowBar(*bar);
+        const auto encoded =
+            QByteArray(reinterpret_cast<const char *>(bytes.data()),
+                       bytes.size())
+                .toBase64();
+        payload = nlohmann::json{
+            {"type", "flow_bar"},
+            {"schema_version", protocol::SentinelProtocol::kFlowSchemaVersion},
+            {"symbol", symbol},
+            {"timeframe_ms", tf},
+            {"bucket_start_ms", slot.start},
+            {"closed", closed},
+            {"revision", *series.builder.revisionAt(slot.start)},
+            {"encoding", "FLB1/base64"},
+            {"bar", encoded.toStdString()},
+            {"row_tick_units", std::llround(bar->nativeTick * bar->priceScale)},
+            {"price_scale", bar->priceScale}};
+      }
+      (*payload)["sub"] = sub->sub;
+      sub->publish(payload->dump());
+    }
+    slot.dirty = false;
+    slot.closed = closed;
+  }
+  // Final content is published before advancing the revision watermark.
+  series.builder.sealThrough(finalEnd);
+  pruneFlowSeries(product.clock, tf, series);
+}
+
+void ServerDataModel::pruneFlowSeries(int64_t clock, int64_t tf,
+                                      FlowSeries &series) {
+  const auto finalEnd = clock / tf * tf;
+  const int64_t drop = tf == 1000 ? finalEnd - kFlowSecondRetentionMs + tf
+                                  : (clock - kFlowRolloverGraceMs) /
+                                        (tf == 60'000 ? 3'600'000 : tf) *
+                                        (tf == 60'000 ? 3'600'000 : tf);
+  // Watermarks may retire already-published finals between timer turns, but
+  // never remove a bucket whose final content has not yet been published.
+  int64_t safeDrop = drop;
+  for (const auto &slot : series.bucketSlots)
+    if (slot.start >= 0 && (!slot.closed || slot.dirty))
+      safeDrop = std::min(safeDrop, slot.start);
+  series.builder.dropBefore(safeDrop);
+  for (auto &slot : series.bucketSlots) {
+    if (slot.start >= 0 && slot.start < safeDrop) {
+      slot = {};
+      ++m_flowDroppedBuckets;
+    }
+  }
+}
+
+void ServerDataModel::publishFlow() {
+  std::erase_if(m_flowSubscriptions,
+                [](const auto &s) { return !s->active.load(); });
+  for (auto &[symbol, product] : m_flowProducts) {
+    for (auto &[start, day] : product.days) {
+      for (auto it = day.series.begin(); it != day.series.end();) {
+        const auto tf = it->first;
+        const bool subscribed =
+            std::any_of(m_flowSubscriptions.begin(), m_flowSubscriptions.end(),
+                        [&](const auto &s) {
+                          return s->symbol == symbol && s->timeframeMs == tf;
+                        });
+        if (tf != 1000 && tf != 60'000 && !subscribed) {
+          it = day.series.erase(it);
+          continue;
+        }
+        publishFlowSeries(symbol, product, tf, it->second);
+        ++it;
+      }
+    }
+    product.days.erase(
+        product.days.begin(),
+        product.days.lower_bound(
+            std::max<int64_t>(0, product.clock - kFlowSecondRetentionMs) /
+            86'400'000 * 86'400'000));
+  }
+  for (const auto &sub : m_flowSubscriptions)
+    sub->initial = false;
 }

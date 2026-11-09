@@ -141,6 +141,18 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingA
     for (const auto tf : cfg.chart.timeframesMs) {
         if (candleHistoryFromMemory(tf) || candleHistoryFromRest(tf)) servedTimeframes.push_back(tf);
     }
+    payload["flow"] = {
+        {"schema_version", protocol::SentinelProtocol::kFlowSchemaVersion},
+        {"live", true},
+        {"encoding", "FLB1/base64"},
+        {"notable_k", 8},
+        {"live_publish_ms", std::clamp(cfg.recording.livePublishMs,
+                                       ServerRecordingConfig::kLivePublishMinMs,
+                                       ServerRecordingConfig::kLivePublishMaxMs)},
+        {"close_delay_ms", ServerDataModel::kFlowCloseDelayMs},
+        {"second_retention_ms", ServerDataModel::kFlowSecondRetentionMs},
+        {"history", false},
+        {"grid", "per_bar"}};
     payload["trade_overlays"] = {
         {"retention_columns", cfg.tradeOverlays.retentionColumns},
         {"grid_width", cfg.tradeOverlays.gridWidth}, {"grid_height", cfg.tradeOverlays.gridHeight},
@@ -195,6 +207,7 @@ class Session : public std::enable_shared_from_this<Session> {
     friend struct RecordingServerStopTest;
     friend struct HeatmapChunkWireTest;
     friend struct ServerFeedAdmissionTest;
+    friend struct FlowLiveWireTestAccess;
     websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws_;
     beast::flat_buffer buffer_;
     ServerDataModel& model_;
@@ -207,10 +220,12 @@ class Session : public std::enable_shared_from_this<Session> {
         std::string payload;
         bool binary = false, chunk = false, rawLive = false;
         std::weak_ptr<recording::LiveService::RawSubscription> rawSubscription;
+        std::shared_ptr<FlowSubscription> flowSubscription;
     };
     std::list<PendingWrite> write_queue_; // insertion preserves the in-flight Beast buffer
     std::shared_ptr<recording::LiveWriteBudget> rawWriteSlot_ = std::make_shared<recording::LiveWriteBudget>();
     std::map<std::string, std::shared_ptr<recording::LiveService::RawSubscription>> rawViews_;
+    std::map<uint64_t, std::shared_ptr<FlowSubscription>> flowViews_;
     std::atomic_size_t pendingWriteBytes_{0};
     std::atomic_size_t pendingModelEvents_{0};
     std::atomic_bool closing_{false};
@@ -342,6 +357,8 @@ class Session : public std::enable_shared_from_this<Session> {
         overlayHistory_.clear();
         for (const auto& [symbol, view] : rawViews_) view->active.store(false);
         rawViews_.clear();
+        for (const auto& [id, view] : flowViews_) view->active.store(false);
+        flowViews_.clear();
         if (owner_ && m_tradingBroadcasterRegistered) {
             owner_->unregisterTradingBroadcaster(m_tradingBroadcasterId);
             m_tradingBroadcasterRegistered = false;
@@ -711,6 +728,7 @@ public:
     }
 
     ~Session() {
+        for (const auto& [id, view] : flowViews_) view->active.store(false);
         for (const auto& [symbol, view] : rawViews_) view->active.store(false);
         disconnectModelSignals();
     }
@@ -914,6 +932,10 @@ public:
                     availability_[symbol].sent.clear();
                     pushAvailability(symbol);
                 }
+            } else if (type == "flow_live_subscribe") {
+                handleFlowSubscribe(j);
+            } else if (type == "flow_live_unsubscribe") {
+                handleFlowUnsubscribe(j);
             } else if (type == "heatmap_live_subscribe") {
                 handleLiveSubscribe(j);
             } else if (type == "heatmap_live_unsubscribe") {
@@ -1421,6 +1443,57 @@ public:
         do_write(payload.dump());
     }
 
+  void handleFlowUnsubscribe(const nlohmann::json& j) {
+      if (!j.contains("sub") || !j["sub"].is_number_unsigned()) {
+          send_error("flow_live_unsubscribe", "", "sub must be an unsigned integer");
+          return;
+      }
+      if (const auto it = flowViews_.find(j["sub"].get<uint64_t>()); it != flowViews_.end()) {
+          it->second->active.store(false);
+          flowViews_.erase(it);
+      }
+  }
+
+  void handleFlowSubscribe(const nlohmann::json &j) {
+    if (!j.contains("sub") || !j["sub"].is_number_unsigned() ||
+        !j.contains("symbol") || !j["symbol"].is_string() ||
+        !j.contains("timeframe_ms") || !j["timeframe_ms"].is_number_integer()) {
+      send_error("flow_live_subscribe", "",
+                 "sub, symbol and integer timeframe_ms are required");
+      return;
+    }
+    const auto id = j["sub"].get<uint64_t>();
+    const auto symbol = j["symbol"].get<std::string>();
+    const auto tf = j["timeframe_ms"].get<int64_t>();
+    if (symbol.empty() || symbol.size() > 64 || tf < 1000 || tf > 86'400'000 ||
+        (!flowViews_.contains(id) && flowViews_.size() >= 32)) {
+      send_error("flow_live_subscribe", symbol,
+                 "invalid series or subscription capacity reached");
+      return;
+    }
+    if (const auto old = flowViews_.find(id); old != flowViews_.end())
+      old->second->active.store(false);
+    auto view = std::make_shared<FlowSubscription>();
+    view->sub = id;
+    view->symbol = symbol;
+    view->timeframeMs = tf;
+    view->publish = [weak = weak_from_this(),
+                     token = std::weak_ptr(view)](std::string payload) {
+      const auto subscription = token.lock();
+      if (!subscription || !subscription->active.load())
+        return;
+      if (const auto self = weak.lock())
+        self->do_write(std::move(payload), false, subscription);
+    };
+    flowViews_[id] = view;
+    // The I/O executor only admits the request; model-thread timer owns all
+    // aggregation and FLB1/JSON encoding. Cancellation also covers queued
+    // registration.
+    QMetaObject::invokeMethod(
+        &model_, [model = &model_, view] { model->subscribeFlow(view); },
+        Qt::QueuedConnection);
+  }
+
     void handleLiveSubscribe(const nlohmann::json& j) {
         recording::RawTailView view;
         const auto error = protocol::chunkwire::parseLiveSubscribe(j, view);
@@ -1492,7 +1565,8 @@ public:
             << " sub=" << view.sub << " sources=" << view.sources.size() << " since=" << view.sinceMs);
     }
 
-    void do_write(std::string payload, bool binary = false) {
+    void do_write(std::string payload, bool binary = false,
+                  std::shared_ptr<FlowSubscription> flow = {}) {
         if (payload.empty() || closing_.load(std::memory_order_acquire)) {
             return;
         }
@@ -1522,7 +1596,7 @@ public:
             beast::bind_front_handler(
                 &Session::on_write_post,
                 shared_from_this(),
-                std::move(payload), binary));
+                std::move(payload), binary, std::move(flow)));
     }
 
     void send_error(const std::string& context, const std::string& symbol, const std::string& message) {
@@ -1538,12 +1612,13 @@ public:
         do_write(err.dump());
     }
     
-    void on_write_post(std::string payload, bool binary) {
+    void on_write_post(std::string payload, bool binary,
+                       std::shared_ptr<FlowSubscription> flow) {
         if (closing_.load(std::memory_order_acquire)) {
             releasePendingWriteBytes(payload.size());
             return;
         }
-        write_queue_.push_back({std::move(payload), binary});
+        write_queue_.push_back({std::move(payload), binary, false, false, {}, std::move(flow)});
         
         if (write_queue_.size() > 1) {
             return;
@@ -1555,9 +1630,12 @@ public:
     void internal_async_write() {
         // Unsubscribe/replacement cancels queued raw frames; the in-flight
         // Beast buffer remains owned until its completion callback.
-        while (!write_queue_.empty() && write_queue_.front().rawLive) {
-            const auto subscription = write_queue_.front().rawSubscription.lock();
-            if (subscription && subscription->active.load()) break;
+        while (!write_queue_.empty()) {
+            const auto& front = write_queue_.front();
+            const auto raw = front.rawSubscription.lock();
+            const bool rawCancelled = front.rawLive && (!raw || !raw->active.load());
+            const bool flowCancelled = front.flowSubscription && !front.flowSubscription->active.load();
+            if (!rawCancelled && !flowCancelled) break;
             releaseWrite(write_queue_.front());
             write_queue_.pop_front();
         }

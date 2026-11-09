@@ -19,6 +19,8 @@ struct RollOptions {
     // A false return is cancellation/EOF, never a synthetic tick.
     std::function<bool(JournalReader&, JournalRecord&)> nextRecord;
     std::function<void(int64_t)> onCommitted;
+    // Once per UTC day, after grid validation and before the model tap's trades.
+    std::function<void(int64_t, const Grid&, const nlohmann::json&)> onGrid;
     std::function<bool()> cancelled;
     bool productWriterLease = false;
     std::function<void(const std::string&)> onInvalid;

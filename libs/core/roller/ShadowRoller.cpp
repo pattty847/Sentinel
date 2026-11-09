@@ -1534,6 +1534,11 @@ struct ShadowRoller::Impl {
           restoreCandles(p, source, tap);
         RollOptions o{cfg.journalRoot, cfg.outputRoot, p.name, day, day + Day};
         o.publisher = cfg.publisher;
+        if (tap.enabled() && cfg.model.grid)
+          o.onGrid = [&, product = p.name](int64_t dayStartMs, const Grid& grid,
+                                           const json& metadata) {
+            cfg.model.grid(product, dayStartMs, grid, metadata);
+          };
         o.minuteColumnsCounter = p.minuteColumns;
         o.writeErrorsCounter = p.writeErrors;
         o.onRecorder = [&](recording::BookRecorder *h, const JournalFeed *f,
