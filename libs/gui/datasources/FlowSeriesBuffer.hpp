@@ -23,6 +23,7 @@ public:
     std::vector<int64_t> apply(const Batch& batch, int64_t nowMs);
     void setCoverage(const QString& symbol, int64_t tf, const Range& range);
     const Series* series(int64_t tf) const;
+    const QString& symbol() const { return m_symbol; }
     int64_t sealedThroughMs() const { return m_sealedThroughMs; }
     void clear();
     void retainWindow(int64_t tf, int64_t fromMs, int64_t toMs);

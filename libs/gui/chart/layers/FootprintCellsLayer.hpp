@@ -33,12 +33,13 @@ private:
     };
     static constexpr int kMaxGlyphs = 32000;
     void cells(const ChartFrame&);
+    double windowMaximum(const ChartFrame&) const;
     void labels(const ChartFrame&, const ChartTextAtlas&);
     void number(double, const QRectF&, const ChartTextAtlas&);
     QRectF cellRect(const ChartFrame&, const FlowColumn&, const FlowCell&) const;
-    FlowMailbox mailbox_;
-    std::unique_ptr<FlowSnapshot> current_;
     FootprintPresentation presentation_;
+    FlowMailbox mailbox_{&presentation_.coverage};
+    std::unique_ptr<FlowSnapshot> current_;
     FootprintStage stage_ = FootprintStage::Hidden;
     QSGOpacityNode* gate_ = nullptr;
     QSGGeometryNode* node_ = nullptr;

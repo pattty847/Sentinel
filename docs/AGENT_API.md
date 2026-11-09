@@ -108,7 +108,7 @@ default true). These variants persist through the chart settings model; the resp
 and `GET /api/v1/state` report them in `layers`. The same four keys work in
 `POST /api/v1/heatmap/settings`, including its `persist:false` process-only option.
 QML paths are `unifiedGridRenderer.layers.footprintSource`, `.footprintIntensity`,
-`.footprintHollowCandles`, and `.footprintNumbers` (writable properties).
+`.footprintHollowCandles`, and `.footprintNumbers` (writes persist through the same chart settings model).
 
 `footprint:true` shows the selected source. `q16` retains the existing footprint
 and candle appearance. `cells` selects flow-backed bid-left/ask-right cells;
@@ -117,11 +117,10 @@ at 24 logical pixels per column and 6 per drawn row; numbers enter at 56/12, wit
 a 2 px retention band on zoom-out. Labels use a 12 px font, abbreviate thousands
 and millions, and omit a value when it cannot fit. `footprintNumbers:false` caps
 the stage at Cells. `footprintHollowCandles:true` outlines both up/down bodies
-and uses 1 device px wicks in Cells/Numbers only with source `cells`; false restores the chosen candle look.
+and uses 1 device px wicks in Cells/Numbers only with source `cells` and flow bars covering the visible window; missing/partial history keeps the chosen candle look. False also restores that look.
 `bar` divides row volume by that bar's maximum binned row volume; `window` divides
 by the maximum visible row volume. Native bins wider than the drawn tick span
-those rows without inventing a distribution. No data, incompatible grids, and
-sub-second chart timeframes draw no cells.
+those rows without inventing a distribution. Snapshots include one viewport of overscan on each side and retained cells continue drawing during camera motion. Incompatible bars are skipped; capacity keeps the nearest bars, with a throttled warning and `footprint.feed` probe. No data or sub-second chart timeframes draw no cells. Hidden LOD performs no feed binning.
 
 On an isolated lab instance at port 17115:
 

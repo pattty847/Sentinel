@@ -251,7 +251,7 @@ TEST(FootprintCells, CoarseNativeBinSpansRowsWithoutInventingVolume) {
 }
 TEST(FootprintCells, OffscreenRowsRemainInBarTotalsAndBarMaximum) {
     auto out = std::make_unique<chart::FlowSnapshot>();
-    auto frame = footprintFrame(); frame.raster.drawnMaxPrice = 101;
+    auto frame = footprintFrame(); frame.raster.drawnMinPrice = 100; frame.raster.drawnMaxPrice = 100.25;
     ASSERT_TRUE(chart::FlowFeed::bin(*out, footprintSeries(), frame));
     EXPECT_EQ(out->cellCount, 1);
     EXPECT_EQ(out->bars[0].bidVol, 410); EXPECT_EQ(out->bars[0].askVol, 710);
@@ -282,17 +282,37 @@ TEST(FootprintCells, WindowNormalisationAccountsForEachBarsScale) {
     EXPECT_EQ(before, 230);
     EXPECT_EQ(geometry->vertexDataAsColoredPoint2D()[0].a, 115);
 }
-TEST(FootprintCells, InvalidGridAndCapacityWithdrawInsteadOfTruncating) {
+TEST(FootprintCells, InvalidBarDoesNotWithdrawCompatibleBars) {
     auto out = std::make_unique<chart::FlowSnapshot>();
-    EXPECT_FALSE(chart::FlowFeed::bin(*out, footprintSeries(0.3), footprintFrame()));
-    EXPECT_FALSE(out->valid);
+    auto series = footprintSeries(0.3);
+    auto good = footprintSeries().bars[0]; good.bar.startMs = 1000;
+    series.bars[1000] = good;
+    ASSERT_TRUE(chart::FlowFeed::bin(*out, series, footprintFrame()));
+    EXPECT_TRUE(out->valid); EXPECT_EQ(out->skippedBars, 1);
+    ASSERT_EQ(out->barCount, 1); EXPECT_EQ(out->bars[0].startMs, 1000);
+    EXPECT_EQ(out->bars[0].bidVol, 410); EXPECT_EQ(out->cellCount, 2);
+}
+TEST(FootprintCells, CapacityRetainsNearestBarsAndNeverPartialBarCells) {
+    auto out = std::make_unique<chart::FlowSnapshot>();
     auto series = footprintSeries();
     auto frame = footprintFrame(); frame.raster.drawnEndMs = 600000;
-    for (int i = 1; i <= chart::FlowSnapshot::kMaxBars; ++i) {
+    for (int i = -600; i < 1200; ++i) {
         series.bars[i * 1000] = series.bars[0]; series.bars[i * 1000].bar.startMs = i * 1000;
     }
-    EXPECT_FALSE(chart::FlowFeed::bin(*out, series, frame));
-    EXPECT_FALSE(out->valid);
+    ASSERT_TRUE(chart::FlowFeed::bin(*out, series, frame));
+    EXPECT_TRUE(out->valid); EXPECT_EQ(out->barCount, chart::FlowSnapshot::kMaxBars);
+    EXPECT_GT(out->truncatedBars, 0);
+    EXPECT_EQ(out->bars[0].startMs, 44000);
+    EXPECT_EQ(out->bars[size_t(out->barCount - 1)].startMs, 555000);
+    // The nearest oversized bar cannot corrupt the following small bar's cells.
+    series = footprintSeries();
+    auto huge = series.bars[0]; huge.bar.rows.resize(chart::FlowSnapshot::kMaxCells + 1);
+    series.bars[0] = huge;
+    auto small = footprintSeries().bars[0]; small.bar.startMs = 1000; series.bars[1000] = small;
+    ASSERT_TRUE(chart::FlowFeed::bin(*out, series, footprintFrame()));
+    EXPECT_EQ(out->truncatedBars, 1); ASSERT_EQ(out->barCount, 1);
+    EXPECT_EQ(out->bars[0].firstCell, 0); EXPECT_EQ(out->cellCount, 2);
+    EXPECT_EQ(out->cells[0].bidVol, 240);
 }
 TEST(FootprintCells, RegistrySlotAndNoData) {
     chart::ChartLayers layers;
@@ -319,7 +339,7 @@ TEST(FootprintCells, TwoFramesAfterDataAndChangedSnapshotAllocateNothing) {
     layer.sync(frame); layer.updateNodes(frame, context);
     ASSERT_TRUE(layer.drawing()); ASSERT_EQ(layer.vertexCount(), 24);
     EXPECT_EQ(layer.stage(), chart::FootprintStage::Numbers);
-    EXPECT_TRUE(layer.presentation().hollow(frame.context.raster));
+    EXPECT_FALSE(layer.presentation().hollow(frame.context.raster)) << "only half of the window has flow history";
     // Fresh data and geometry every frame, not just a cache hit.
     for (int i = 0; i < 2; ++i) {
         ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), footprintFrame()));
@@ -418,9 +438,58 @@ TEST(FootprintSource, RegistryDefaultsToQ16AndSwitchesExclusively) {
     layers.footprintCells.sync(frame);
     EXPECT_FALSE(layers.footprint.selected(frame));
     EXPECT_TRUE(layers.footprintCells.drawing());
-    EXPECT_TRUE(look.hollow(frame.context.raster));
+    EXPECT_FALSE(look.hollow(frame.context.raster)) << "partial history keeps normal candles";
     frame.context.overlays.footprint = false;
     layers.footprintCells.sync(frame);
     EXPECT_FALSE(layers.footprint.selected(frame));
     EXPECT_FALSE(layers.footprintCells.drawing());
+}
+
+TEST(FootprintMotion, OverscanRetainsVisibleRowsAcrossPanAndFollowLiveWithoutAllocation) {
+    chart::FootprintCellsLayer layer;
+    layer.presentation().windowIntensity = true;
+    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    auto series = footprintSeries();
+    for (int i : {-2, -1, 1, 2, 3}) {
+        series.bars[i * 1000] = series.bars[0]; series.bars[i * 1000].bar.startMs = i * 1000;
+    }
+    ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), series, footprintFrame()));
+    EXPECT_EQ(layer.mailbox().back().barCount, 6);
+    EXPECT_EQ(layer.mailbox().back().fromMs, -2000); EXPECT_EQ(layer.mailbox().back().toMs, 4000);
+    EXPECT_EQ(layer.mailbox().back().low, 85); EXPECT_EQ(layer.mailbox().back().high, 115);
+    layer.mailbox().post();
+    std::unique_ptr<QSGNode> root(layer.createContainer());
+    ChartTextRenderer text; ChartTextAtlas atlas;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
+    auto frame = footprintChartFrame();
+    layer.sync(frame); layer.updateNodes(frame, context);
+    ASSERT_TRUE(layer.presentation().hollow(frame.context.raster));
+    // 1 px, quarter viewport, follow-live column, and beyond overscan containment.
+    for (double dx : {1., 28., 56., 168.}) {
+        frame = footprintChartFrame();
+        auto& r = frame.context.raster;
+        r.leftF += dx; r.drawnStartMs += dx / 56 * 1000; r.drawnEndMs += dx / 56 * 1000;
+        r.topF += 1; r.drawnMinPrice += 1. / 12; r.drawnMaxPrice += 1. / 12;
+        footprintAllocations = 0; footprintCounting = true;
+        layer.sync(frame); layer.updateNodes(frame, context);
+        footprintCounting = false;
+        EXPECT_EQ(footprintAllocations.load(), 0u);
+        EXPECT_TRUE(layer.drawing()); EXPECT_GT(layer.vertexCount(), 0);
+        EXPECT_EQ(layer.presentation().hollow(r), dx < 168);
+    }
+}
+TEST(FootprintCells, FlatBinningReusesStorageAndWindowMaximumExcludesOverscan) {
+    auto out = std::make_unique<chart::FlowSnapshot>();
+    auto series = footprintSeries();
+    auto far = series.bars[0]; far.bar.startMs = 2000;
+    for (auto& row : far.bar.rows) { row.bidVol *= 100; row.askVol *= 100; }
+    series.bars[2000] = far;
+    const auto frame = footprintFrame();
+    chart::FlowFeed::bin(*out, series, frame);
+    footprintAllocations = 0; footprintCounting = true;
+    chart::FlowFeed::bin(*out, series, frame);
+    footprintCounting = false;
+    EXPECT_EQ(footprintAllocations.load(), 0u);
+    EXPECT_DOUBLE_EQ(out->maxRowVolume, 6.8);
+    EXPECT_EQ(out->barCount, 2);
 }

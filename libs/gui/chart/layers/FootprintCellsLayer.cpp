@@ -45,9 +45,7 @@ void FootprintCellsLayer::sync(const ChartFrame& frame) {
     const auto& cam = frame.context.raster;
     const auto& data = *current_;
     drawing_ = frame.context.overlays.footprint && stage_ != FootprintStage::Hidden && data.valid &&
-        data.cellCount > 0 && data.tick == cam.tick && data.timeframeMs == frame.context.time.activeTimeframeMs &&
-        cam.drawnStartMs >= data.fromMs && cam.drawnEndMs <= data.toMs &&
-        cam.drawnMinPrice >= data.low && cam.drawnMaxPrice <= data.high;
+        data.cellCount > 0 && data.tick == cam.tick && data.timeframeMs == frame.context.time.activeTimeframeMs;
 }
 double FootprintCellsLayer::intensity(const FlowColumn& bar, const FlowCell& cell,
                                       const FlowSnapshot& snapshot, bool window) {
@@ -79,6 +77,7 @@ void FootprintCellsLayer::cells(const ChartFrame& frame) {
         for (int i = bar.firstCell; i < bar.firstCell + bar.cellCount; ++i) {
             const auto& cell = current_->cells[size_t(i)];
             const auto rect = cellRect(frame, bar, cell);
+            if (rect.isEmpty()) continue;
             const double mid = frame.context.surfaceBounds.left() + frame.context.raster.xDev(
                 double(bar.startMs) + current_->timeframeMs * 0.5) / frame.context.raster.dpr;
             const double fill = intensity(bar, cell, *current_, presentation_.windowIntensity);
@@ -101,6 +100,18 @@ void FootprintCellsLayer::cells(const ChartFrame& frame) {
     vertices_ = used;
     geometry->markVertexDataDirty(); node_->markDirty(QSGNode::DirtyGeometry);
 }
+double FootprintCellsLayer::windowMaximum(const ChartFrame& frame) const {
+    double maximum = 0;
+    for (int b = 0; b < current_->barCount; ++b) {
+        const auto& bar = current_->bars[size_t(b)];
+        for (int i = bar.firstCell; i < bar.firstCell + bar.cellCount; ++i) {
+            const auto& cell = current_->cells[size_t(i)];
+            if (!cellRect(frame, bar, cell).isEmpty())
+                maximum = std::max(maximum, double(cell.bidVol + cell.askVol) / bar.baseScale);
+        }
+    }
+    return maximum;
+}
 void FootprintCellsLayer::updateNodes(const ChartFrame& frame, LayerNodeContext&) {
     if (!gate_) return;
     gate_->setOpacity(drawing_ ? 1 : 0);
@@ -110,6 +121,7 @@ void FootprintCellsLayer::updateNodes(const ChartFrame& frame, LayerNodeContext&
                   frame.context.surfaceBounds, presentation_.windowIntensity};
     if (built_ && key == key_) return;
     key_ = key; built_ = true; labelsDirty_ = true;
+    if (presentation_.windowIntensity) current_->maxRowVolume = windowMaximum(frame);
     cells(frame);
 }
 void FootprintCellsLayer::number(double value, const QRectF& box, const ChartTextAtlas& atlas) {
@@ -138,8 +150,9 @@ void FootprintCellsLayer::labels(const ChartFrame& frame, const ChartTextAtlas& 
         for (int i = bar.firstCell; i < bar.firstCell + bar.cellCount; ++i) {
             const auto& cell = current_->cells[size_t(i)];
             const auto rect = cellRect(frame, bar, cell);
-            const double mid = frame.context.surfaceBounds.left() + frame.context.raster.xDev(
-                double(bar.startMs) + current_->timeframeMs * 0.5) / frame.context.raster.dpr;
+            if (rect.isEmpty()) continue;
+            const double mid = std::clamp(frame.context.surfaceBounds.left() + frame.context.raster.xDev(
+                double(bar.startMs) + current_->timeframeMs * 0.5) / frame.context.raster.dpr, rect.left(), rect.right());
             number(double(cell.bidVol) / bar.baseScale, QRectF(rect.left(), rect.top(), mid - rect.left(), rect.height()), atlas);
             number(double(cell.askVol) / bar.baseScale, QRectF(mid, rect.top(), rect.right() - mid, rect.height()), atlas);
         }

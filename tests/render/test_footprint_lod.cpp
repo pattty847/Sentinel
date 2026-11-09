@@ -29,11 +29,24 @@ TEST(FootprintLod, TwoPixelRetentionBandsDoNotFlap) {
     EXPECT_EQ(footprintLod(56, 9.9, stage), FootprintStage::Cells);
 }
 TEST(FootprintLod, SharedHistoryAndKnobs) {
-    struct Raster { bool valid = true; double dpr = 2, colPxF = 112, rowPxF = 24; } raster;
+    struct Raster {
+        bool valid = true;
+        double dpr = 2, colPxF = 112, rowPxF = 24, tick = 1;
+        int64_t tfMs = 1000;
+        double drawnStartMs = 0, drawnEndMs = 2000, drawnMinPrice = 95, drawnMaxPrice = 105;
+    } raster;
     chart::FootprintPresentation look;
     look.enabled = true; look.cellsSource = true;
     EXPECT_EQ(look.stage(raster), FootprintStage::Numbers);
+    EXPECT_FALSE(look.hollow(raster)) << "LOD alone is not flow coverage";
+    look.coverage.tick = 1; look.coverage.timeframeMs = 1000;
+    look.coverage.low = 85; look.coverage.high = 115;
+    look.coverage.add(-2000, 0); look.coverage.add(0, 2000); look.coverage.add(2000, 4000);
     EXPECT_TRUE(look.hollow(raster));
+    raster.drawnStartMs += 500; raster.drawnEndMs += 500;
+    EXPECT_TRUE(look.hollow(raster)) << "coverage retains hollow candles across a pan";
+    raster.tick = 2; EXPECT_FALSE(look.hollow(raster)); raster.tick = 1;
+    raster.tfMs = 2000; EXPECT_FALSE(look.hollow(raster)); raster.tfMs = 1000;
     raster.colPxF = 110;
     EXPECT_TRUE(look.hollow(raster));
     EXPECT_EQ(look.stage(raster), FootprintStage::Numbers);
@@ -49,4 +62,18 @@ TEST(FootprintLod, AbbreviatedNumbers) {
     chart::footprintNumber(1200, out); EXPECT_STREQ(out, "1.2k");
     chart::footprintNumber(3400000, out); EXPECT_STREQ(out, "3.4M");
     chart::footprintNumber(12, out); EXPECT_STREQ(out, "12");
+}
+
+TEST(FootprintCoverage, MissingBarAndWithdrawnSnapshotKeepNormalCandles) {
+    struct Raster {
+        bool valid = true;
+        double tick = 1, drawnStartMs = 0, drawnEndMs = 3000, drawnMinPrice = 95, drawnMaxPrice = 105;
+        int64_t tfMs = 1000;
+    } r;
+    chart::FootprintCoverage coverage;
+    coverage.tick = 1; coverage.timeframeMs = 1000; coverage.low = 85; coverage.high = 115;
+    coverage.add(0, 1000); coverage.add(2000, 3000);
+    EXPECT_FALSE(coverage.covers(r));
+    r.drawnEndMs = 1000; EXPECT_TRUE(coverage.covers(r));
+    coverage.count = 0; EXPECT_FALSE(coverage.covers(r));
 }

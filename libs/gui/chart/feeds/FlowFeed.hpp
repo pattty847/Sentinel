@@ -1,5 +1,6 @@
 #pragma once
 #include "datasources/FlowSeriesBuffer.hpp"
+#include "chart/core/FootprintLod.hpp"
 #include "render/ITimeAxisMappingProvider.hpp"
 #include <QTimer>
 #include <array>
@@ -30,17 +31,20 @@ struct FlowSnapshot {
     int64_t timeframeMs = 0;
     double tick = 0, fromMs = 0, toMs = 0, low = 0, high = 0, maxRowVolume = 0;
     int barCount = 0, cellCount = 0;
+    int skippedBars = 0, truncatedBars = 0;
     std::array<FlowColumn, kMaxBars> bars{};
     std::array<FlowCell, kMaxCells> cells{};
 };
 // Three fixed-capacity buffers: GUI back/pending, render current. No copying on sync.
 class FlowMailbox {
 public:
-    FlowMailbox();
+    explicit FlowMailbox(FootprintCoverage* coverage = nullptr);
     FlowSnapshot& back() { return *back_; }
     void post();
+    bool covers(const chart_raster::RasterCamera& cam) const { return coverage_ && coverage_->covers(cam); }
     bool take(std::unique_ptr<FlowSnapshot>& current);
 private:
+    FootprintCoverage* coverage_;
     std::mutex mutex_;
     std::unique_ptr<FlowSnapshot> back_, pending_;
     bool fresh_ = false;
@@ -67,14 +71,19 @@ public:
 private:
     void selectSymbol();
     void withdraw();
+    void post();
+    bool visible(const MappingFrameContext&);
+    void report(const FlowSnapshot&);
     std::function<const FlowSeriesBuffer*()> sourceBuffer_;
     FlowMailbox& mailbox_;
     FlowFeedPorts ports_;
+    std::function<void()> coverageChanged_;
     FlowSeriesBuffer buffer_;
     QTimer timer_;
     QMetaObject::Connection sourceConnection_;
     QString symbol_;
     uint64_t serial_ = 0;
     bool enabled_ = false;
+    FootprintStage lod_ = FootprintStage::Hidden;
 };
 } // namespace chart

@@ -2,6 +2,7 @@
 #include <cmath>
 #include <functional>
 #include <QObject>
+#include <QJsonObject>
 #include <string_view>
 
 namespace chart {
@@ -10,10 +11,10 @@ class LayerVisibility : public QObject {
     Q_PROPERTY(int primaryField READ primaryField NOTIFY primaryFieldChanged)
     Q_PROPERTY(bool heatmapLayerEnabled READ heatmapEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool footprintLayerEnabled READ footprintEnabled NOTIFY layerVisibilityChanged)
-    Q_PROPERTY(QString footprintSource READ footprintSource WRITE setFootprintSource NOTIFY layerVisibilityChanged)
-    Q_PROPERTY(QString footprintIntensity READ footprintIntensity WRITE setFootprintIntensity NOTIFY layerVisibilityChanged)
-    Q_PROPERTY(bool footprintHollowCandles READ footprintHollowCandles WRITE setFootprintHollowCandles NOTIFY layerVisibilityChanged)
-    Q_PROPERTY(bool footprintNumbers READ footprintNumbers WRITE setFootprintNumbers NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(QString footprintSource READ footprintSource WRITE writeFootprintSource NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(QString footprintIntensity READ footprintIntensity WRITE writeFootprintIntensity NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(bool footprintHollowCandles READ footprintHollowCandles WRITE writeFootprintHollowCandles NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(bool footprintNumbers READ footprintNumbers WRITE writeFootprintNumbers NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool tpoLayerEnabled READ tpoEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool volumeProfileLayerEnabled READ volumeProfileEnabled NOTIFY layerVisibilityChanged)
     // The book ladder strip (independent of the primary field; off by default).
@@ -49,6 +50,22 @@ public:
     }
     void setFootprintHollowCandles(bool value) { setFootprintOption(footprintHollowCandles_, value, "footprintHollowCandles"); }
     void setFootprintNumbers(bool value) { setFootprintOption(footprintNumbers_, value, "footprintNumbers"); }
+    void writeFootprintSource(const QString& value) {
+        setFootprintSource(value);
+        if (value == footprintSource()) emit footprintSettingsRequested({{"footprintSource", value}});
+    }
+    void writeFootprintIntensity(const QString& value) {
+        setFootprintIntensity(value);
+        if (value == footprintIntensity()) emit footprintSettingsRequested({{"footprintIntensity", value}});
+    }
+    void writeFootprintHollowCandles(bool value) {
+        setFootprintHollowCandles(value);
+        emit footprintSettingsRequested({{"footprintHollowCandles", value}});
+    }
+    void writeFootprintNumbers(bool value) {
+        setFootprintNumbers(value);
+        emit footprintSettingsRequested({{"footprintNumbers", value}});
+    }
     bool tpoEnabled() const { return tpo_; }
     bool volumeProfileEnabled() const { return volumeProfile_; }
     bool ladderEnabled() const { return ladder_; }
@@ -184,6 +201,7 @@ public:
         changed("tpo", enabled);
     }
 signals:
+    void footprintSettingsRequested(const QJsonObject& patch);
     void primaryFieldChanged();
     void layerVisibilityChanged();
 private:

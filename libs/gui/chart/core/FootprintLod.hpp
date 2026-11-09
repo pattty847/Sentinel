@@ -1,4 +1,7 @@
 #pragma once
+#include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cmath>
 #include <cstdio>
 
@@ -13,12 +16,35 @@ inline FootprintStage footprintLod(double column, double row, FootprintStage pre
     const double numbersBand = previous == FootprintStage::Numbers ? 2 : 0;
     return column >= 56 - numbersBand && row >= 12 - numbersBand ? FootprintStage::Numbers : FootprintStage::Cells;
 }
+// Published alongside the row mailbox on the GUI thread, read during render sync.
+// Actual contiguous bar intervals distinguish missing history from an empty price row.
+struct FootprintCoverage {
+    static constexpr int kMaxRanges = 512;
+    struct Range { double from = 0, to = 0; };
+    std::array<Range, kMaxRanges> ranges{};
+    int count = 0;
+    double tick = 0, low = 0, high = 0;
+    int64_t timeframeMs = 0;
+    void add(double from, double to) {
+        if (count && from <= ranges[size_t(count - 1)].to)
+            ranges[size_t(count - 1)].to = std::max(to, ranges[size_t(count - 1)].to);
+        else if (count < kMaxRanges) ranges[size_t(count++)] = {from, to};
+    }
+    template<class Raster> bool covers(const Raster& r) const {
+        if (!r.valid || r.tick != tick || r.tfMs != timeframeMs ||
+            r.drawnMinPrice < low || r.drawnMaxPrice > high) return false;
+        for (int i = 0; i < count; ++i)
+            if (ranges[size_t(i)].from <= r.drawnStartMs && ranges[size_t(i)].to >= r.drawnEndMs) return true;
+        return false;
+    }
+};
 // A shared render-owned history makes candle and cell decisions independent of
 // item sync order, root recreation, and a temporarily hidden candle item.
 struct FootprintPresentation {
     bool cellsSource = false;
     bool enabled = false, numbers = true, hollowCandles = true, windowIntensity = false;
     FootprintStage previous = FootprintStage::Hidden;
+    FootprintCoverage coverage;
     template<class Raster> FootprintStage stage(const Raster& raster) {
         previous = raster.valid && raster.dpr > 0
             ? footprintLod(raster.colPxF / raster.dpr, raster.rowPxF / raster.dpr, previous)
@@ -27,7 +53,7 @@ struct FootprintPresentation {
         return !numbers && previous == FootprintStage::Numbers ? FootprintStage::Cells : previous;
     }
     template<class Raster> bool hollow(const Raster& raster) {
-        return stage(raster) != FootprintStage::Hidden && hollowCandles;
+        return stage(raster) != FootprintStage::Hidden && hollowCandles && coverage.covers(raster);
     }
 };
 // Caller owns the fixed buffer: no QString, locale, or heap work in the label path.
