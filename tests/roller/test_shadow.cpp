@@ -4455,8 +4455,8 @@ TEST_F(ShadowTest, CandleRestoreHandsOverExactlyAcrossARotationDuringTheRead) {
 }
 
 // Reconnect resends against a full gate (16,384 restored ids in the window):
-// the roller restarts from an anchor that precedes none of the restored ids,
-// so its own ring holds none of them. The gate drops resent restored ids,
+// duplicate occurrences age those IDs out of the feed window, while the
+// candle gate still protects them. The gate drops resent restored ids,
 // counts only nonempty ids, and expires after exactly 16,384 delivered ones;
 // a resend after that passes as without a restore.
 TEST_F(ShadowTest, CandleRestoreGateDropsReconnectResendsUntilItExpires) {
@@ -4473,8 +4473,7 @@ TEST_F(ShadowTest, CandleRestoreGateDropsReconnectResendsUntilItExpires) {
     }
     s.pepe->append(record(ms, pepeTrades(list)));
   }
-  // The 15:00 anchor holds no restored id in its ring; minute 14 commits
-  // at the 16:00 minute fence.
+  // Minute 14 commits at the 16:00 minute fence, after the 15:00 anchor.
   for (int t = 870; t <= 965; t += 5)
     s.pepe->append(record(t * 1000));
   s.pepe->flush();
@@ -4495,6 +4494,11 @@ TEST_F(ShadowTest, CandleRestoreGateDropsReconnectResendsUntilItExpires) {
   EXPECT_EQ(LogCapture::count("Roller anchor restored product=PEPE-USD"), 1u);
   EXPECT_NE(LogCapture::line("Candle history restored product=PEPE-USD").find("tradeIds=16384"),
             std::string::npos);
+  // A duplicate storm fills the occurrence window, but advances the candle
+  // gate only once. This explicitly exercises the gate's distinct contract.
+  for (int k = 0; k < 128; ++k)
+    s.pepe->append(record(966000 + k, pepeTrades(std::vector<json>(128,
+        pepeTrade(966000 + k - 250, "storm")))));
   const json a = pepeTrade(862000 - 250, "a16383", aPrice);
   const auto deliveredOnce = [&](const std::string &id) {
     return eventuallyQt([&] { return s.broadcasts(id) == 1; });
@@ -4513,11 +4517,11 @@ TEST_F(ShadowTest, CandleRestoreGateDropsReconnectResendsUntilItExpires) {
       list.push_back(pepeTrade(972000 + k * 100 + j / 2 - 250, ""));
     s.pepe->append(record(972000 + k * 100, pepeTrades(list)));
   }
-  // 16,382 more nonempty ids: 16,383 delivered since the handoff, still active.
+  // Storm + x + 16,381 nonempty ids: 16,383 delivered, still active.
   int n = 0;
-  for (int k = 0; n < 16382; ++k) {
+  for (int k = 0; n < 16381; ++k) {
     std::vector<json> list;
-    for (int j = 0; j < 128 && n < 16382; ++j, ++n)
+    for (int j = 0; j < 128 && n < 16381; ++j, ++n)
       list.push_back(pepeTrade(974000 + k * 100 - 250, "n" + std::to_string(n)));
     s.pepe->append(record(974000 + k * 100, pepeTrades(list)));
   }
@@ -4526,8 +4530,8 @@ TEST_F(ShadowTest, CandleRestoreGateDropsReconnectResendsUntilItExpires) {
   ASSERT_TRUE(deliveredOnce("last"));
   EXPECT_EQ(s.broadcasts("a16383"), 0u);
   EXPECT_EQ(s.broadcasts(""), 256u);
-  EXPECT_EQ(s.broadcasts("n16381"), 1u);
-  // Expired: a restored id the roller's own ring never held passes again,
+  EXPECT_EQ(s.broadcasts("n16380"), 1u);
+  // Expired: a restored id aged out of the occurrence window passes again,
   // exactly as a process that never restored would deliver it.
   resend(*s.pepe, 991000, {pepeTrade(100000 - 250, "a100")});
   s.pepe->append(tradeAt(992000, "after"));
@@ -4544,9 +4548,8 @@ TEST_F(ShadowTest, CandleRestoreGateDropsReconnectResendsUntilItExpires) {
 }
 
 // An outer retry after the install (a checkpoint write fails) rebuilds the
-// roller's feeds from an anchor after X with empty trade rings. The model
-// keeps the one install; the gate still knows X, so a reconnect resend of X is
-// dropped. Without the restore the same sequence delivers X twice (today).
+// roller's feeds from an anchor after X. The seeded trade window suppresses
+// a reconnect resend of X both with and without candle restore.
 void outerRetryAfterRestore(ShadowTest &t, bool restore, size_t expectedX) {
   LogCapture logs;
   RestoreServer s(t);
@@ -4602,8 +4605,8 @@ void outerRetryAfterRestore(ShadowTest &t, bool restore, size_t expectedX) {
 TEST_F(ShadowTest, CandleRestoreOuterRetryKeepsTheInstallAndDropsAResentId) {
   outerRetryAfterRestore(*this, true, 1);
 }
-TEST_F(ShadowTest, CandleRestoreBypassedOuterRetryRedeliversAResentId) {
-  outerRetryAfterRestore(*this, false, 2);
+TEST_F(ShadowTest, CandleRestoreBypassedOuterRetryDropsAResentId) {
+  outerRetryAfterRestore(*this, false, 1);
 }
 
 // Q2': a rebuild that cannot read its window (here: more files than the cap)
@@ -4813,7 +4816,7 @@ TEST_F(ShadowTest, CandleRestoreAcrossMidnightKeepsTheGateAndTheRecorder) {
       expected.push_back("b" + std::to_string(t));
     } else {
       // A book snapshot shortly before midnight: day 2 warms up from it, so
-      // its trade rings hold no id received before it.
+      // its trade window must be seeded from records before it.
       s.pepe->append(t == Day - 9000 ? record(t, pepeSnapshot()) : record(t));
     }
     if (t == Day + 61000) // after the rotation: resend a restored and a pre-midnight id
@@ -4844,8 +4847,7 @@ TEST_F(ShadowTest, CandleRestoreAcrossMidnightKeepsTheGateAndTheRecorder) {
   expectRecorderMatchesBatch(*this, s, Epoch + Day); // the midnight anchor
 }
 
-// Transport recovery after a restart from an anchor (so the roller's own rings
-// hold none of the restored ids): capture's fan-out goes away mid-stream,
+// Transport recovery after a restart from an anchor: capture's fan-out goes away mid-stream,
 // capture keeps journaling, the fan-out returns. drop()/unseed() discard the
 // live copy; the gap is delivered from the journal exactly once; reconnect
 // resends of a restored id and of a delivered one are dropped.

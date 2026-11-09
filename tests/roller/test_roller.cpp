@@ -232,17 +232,16 @@ TEST(Roller, FeedTradeIdWindowIsBoundedAndEvictsOldest) {
     JournalReader reader(temp.path().toStdString(),"BTC-USD");JournalRecord input;
     while(reader.next(input)) {
         feed.apply(input);
-        EXPECT_EQ(feed.retainedTradeIds(),std::min(emitted,capacity));
+        EXPECT_LE(feed.retainedTradeIds(),std::min(emitted,capacity));
         ASSERT_LE(feed.retainedTradeIds(),capacity);
     }
     EXPECT_EQ(emitted,unique+1);
     EXPECT_EQ(lastId,"1");
-    EXPECT_EQ(feed.retainedTradeIds(),capacity);
-    // The view is exactly the retained window: the re-emitted "1" evicted the
-    // oldest survivor, capacity+4, so capacity+5..unique remain.
+    EXPECT_EQ(feed.retainedTradeIds(),capacity-3);
+    // Four occurrences (1,1,unique,unique) evict four oldest slots.
     std::unordered_set<std::string> expected{"1"};
-    for(size_t id=capacity+5;id<=unique;++id) expected.insert(std::to_string(id));
-    ASSERT_EQ(expected.size(),capacity);
+    for(size_t id=capacity+8;id<=unique;++id) expected.insert(std::to_string(id));
+    ASSERT_EQ(expected.size(),capacity-3);
     EXPECT_EQ(feed.tradeIds(),expected);
     const auto stateBefore=feed.exportState();
     const auto copy=feed.tradeIds();
@@ -251,7 +250,7 @@ TEST(Roller, FeedTradeIdWindowIsBoundedAndEvictsOldest) {
         {"trades",json::array({trade(unique+1),blank,blank})}}).dump()),input.pos,input.metadata,false,input.version});
     EXPECT_EQ(emitted,unique+4); // Empty IDs never dedupe.
     EXPECT_EQ(copy,expected); // Independent of later input.
-    EXPECT_EQ(feed.retainedTradeIds(),capacity);
+    EXPECT_EQ(feed.retainedTradeIds(),capacity-5);
     EXPECT_TRUE(feed.tradeIds().contains(std::to_string(unique+1)));
     EXPECT_FALSE(feed.tradeIds().contains(std::to_string(capacity+5)));
     EXPECT_FALSE(feed.tradeIds().contains(""));

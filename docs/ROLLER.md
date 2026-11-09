@@ -81,6 +81,8 @@ of unowned files.
   `marketdata/dispatch/BookParser.hpp`, and trade parsing in `MessageDispatcher`.
   Missing or parser-rejected timestamps use journal receive time. Live callers
   retain their original host-clock fallback. No alternate integer L2 parser is used.
+  For trade consumers, dedupe retains the last 16,384 parsed product trade occurrences (duplicates and empty IDs age the window), in journal/frame-sort order; sequence-rejected frames age membership but never deliver trades.
+  Rolls without a trade consumer skip seeding. Anchor and snapshot-fallback starts reconstruct that window backwards from journal segments, then seed forwards without callbacks or disk-format changes; unreadable history is logged and seeded best-effort. Seed decoding is included in `decodedRecords` and also reported as `tradeSeedDecodedRecords`.
 - The driver supplies receive milliseconds explicitly and emits one tick per
   journal record, including heartbeats, lifecycle markers and receipts. EOF is
   never a tick. No elapsed wall time or producer speed determines a column.

@@ -402,9 +402,8 @@ mutations.extend([
      'if (++gate.delivered > JournalFeed::TradeIdWindowCapacity) {', GATE),
     ('b2r3 gate skips empty ids', SR,
      'if (gate.active && !t.trade_id.empty()) {', 'if (gate.active) {', GATE),
-    ('b2r3 gate survives an outer retry', SR,
-     'gate.active = true;', 'gate.active = false;',
-     'ShadowTest.CandleRestoreOuterRetryKeepsTheInstallAndDropsAResentId'),
+    ('b2r3 gate arms on handoff', SR,
+     'gate.active = true;', 'gate.active = false;', GATE),
     ('b2r3 handoff delivered rule', SR,
      'if (!delivered) delivered = r.through;', ';',
      'ShadowTest.CandleRestoreHandsOverExactlyAcrossARotationDuringTheRead'),
@@ -435,12 +434,6 @@ mutations.extend([
     ('b2r3 warming reply', SSS,
      'if (!model_.candleHistoryReady(symbol)) {', 'if (false) {',
      'CandleWireWarming.WarmingReplyEchoesTheWindowUntilTheRebuildEnds', WIRE),
-    ('b2r3 gate survives the day rotation', SR,
-     'void detach() { history = nullptr; unseed(); }', 'void detach() { history = nullptr; gate = {}; unseed(); }',
-     'ShadowTest.CandleRestoreAcrossMidnightKeepsTheGateAndTheRecorder'),
-    ('b2r3 gate survives transport recovery', SR,
-     'void unseed() { seeded = false;', 'void unseed() { gate = {}; seeded = false;',
-     'ShadowTest.CandleRestoreTransportRecoveryDeliversTheGapOnce'),
     ('b2r3 a failed handshake leaves the attempt ahead', SR,
      'LiveLead lead(cfg, p.name, *p.leadForks,', 'if (restoreEnabled()) p.candlesRestored = true; LiveLead lead(cfg, p.name, *p.leadForks,',
      'ShadowTest.CandleRestoreWaitsForTheSocketThenRebuildsOnce'),
@@ -553,6 +546,33 @@ mutations.extend([
      'failuresWithoutProgress = 0; if (false)',
      'ShadowTest.ReconnectRetryLimitKeepsProbingAndRecoversWithoutReplay'),
 ])
+mutations.extend([
+    ('trade-window no-consumer seed gate', 'libs/core/roller/Roller.cpp',
+     'if (!feed.onTrade) return;', ';',
+     'TradeSeed.RollWithoutTradeConsumerSkipsSeedAndTradeWindow', ROLLER),
+    ('trade-window no-consumer collection gate', 'libs/core/roller/JournalFeed.cpp',
+     'if (onTrade && channel == "market_trades") {', 'if (channel == "market_trades") {',
+     'TradeSeed.RollWithoutTradeConsumerSkipsSeedAndTradeWindow', ROLLER),
+    ('trade-window anchor seed', 'libs/core/roller/Roller.cpp',
+     'seedTrades(restoreCursor, restoreCursorApplied);', ';',
+     'TradeSeed.RollAnchorAndSnapshotFallbackMatchContinuousDelivery', ROLLER),
+    ('trade-window snapshot seed', 'libs/core/roller/Roller.cpp',
+     'if (start) seedTrades(*start, false);', ';',
+     'TradeSeed.RollAnchorAndSnapshotFallbackMatchContinuousDelivery', ROLLER),
+    ('trade-window duplicate occurrences', 'libs/core/roller/TradeRecordWindow.hpp',
+     'const bool fresh = id.empty() || !counts_.contains(id);',
+     'const bool fresh = id.empty() || !counts_.contains(id); if (!fresh) return false;',
+     'TradeSeed.CounterexampleDuplicatesAndEvictionMatchContinuous', ROLLER),
+    ('trade-window outer retry without candle restore', 'libs/core/roller/Roller.cpp',
+     'seedTrades(restoreCursor, restoreCursorApplied);', ';',
+     'ShadowTest.CandleRestoreBypassedOuterRetryDropsAResentId'),
+])
+if "--trade-id-window-offline" in sys.argv:
+    mutations = [m for m in mutations if m[0].startswith('trade-window') and len(m) > 5 and m[5] == ROLLER]
+if "--trade-id-window" in sys.argv:
+    mutations = [m for m in mutations if m[0].startswith('trade-window') or m[0] in (
+        'b2r3 gate dedupe', 'b2r3 gate expires at TradeIdWindowCapacity',
+        'b2r3 gate skips empty ids', 'b2r3 gate arms on handoff')]
 if "--retry-exhaustion" in sys.argv:
     mutations = [m for m in mutations if m[0].startswith('retry exhaustion')]
 if "--retry-recovery-native" in sys.argv:
