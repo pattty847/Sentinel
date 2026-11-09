@@ -74,6 +74,18 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     qRegisterMetaType<trading::RiskOrderUpdate>("trading::RiskOrderUpdate");
     qRegisterMetaType<trading::AlgoOrderEvent>("trading::AlgoOrderEvent");
     qRegisterMetaType<trading::PnlSnapshot>("trading::PnlSnapshot");
+    m_flowClock.start();
+    m_flowTimer.setSingleShot(true);
+    connect(&m_flowTimer, &QTimer::timeout, this, &RemoteGridDataSource::requestNextFlowPage);
+    connect(&m_client, &SentinelStreamClient::flowBarsReceived, this,
+            &RemoteGridDataSource::onFlowBarsReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::flowHistoryFailed, this,
+            [this](quint64 id, const QString& message, bool retryable) {
+                if (m_flowBackfill.fail(id, retryable, m_flowClock.elapsed())) {
+                    emit errorOccurred(QStringLiteral("Flow history: ") + message);
+                    requestNextFlowPage();
+                }
+            }, Qt::QueuedConnection);
     m_candleBuffer = std::make_unique<CandleSeriesBuffer>(this);
     m_candleBackfillTimer.setSingleShot(true);
     m_candleBackfillTimer.setInterval(100);
@@ -137,6 +149,10 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this,
             [this]{
                 advanceCandleDeliveryGeneration();
+                m_flowConfigReady = false;
+                m_flowSubscription = 0; // The server already discarded this session.
+                unsubscribeFlowLive();
+                m_flowBackfill.disconnect();
                 m_candleHistoryReady = false;
                 m_candleBackfillTimer.stop();
                 m_bookSnapshotTimer.stop();
@@ -225,6 +241,7 @@ void RemoteGridDataSource::subscribe(const QString& symbol) {
 
 
 void RemoteGridDataSource::unsubscribe(const QString& symbol) {
+    if (symbol == m_flowSymbol) unsubscribeFlowLive();
     const bool wasStale = isBookSnapshotStale(symbol);
     m_marketHealth.subscriptionReleased(symbol);
     m_client.unsubscribe(symbol.toStdString());
@@ -456,6 +473,7 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
 
 void RemoteGridDataSource::onServerConfigReceived(const ServerConfig& config) {
     m_serverConfig = config;
+    m_flowConfigReady = true;
     GuiConfigStore::instance().setServerConfig(config);
 }
 
@@ -651,4 +669,60 @@ void RemoteGridDataSource::onAlgoOrderEventReceived(const trading::AlgoOrderEven
 
 void RemoteGridDataSource::onPnlSnapshotReceived(const trading::PnlSnapshot& snapshot) {
     emit pnlSnapshotReceived(snapshot);
+}
+
+void RemoteGridDataSource::subscribeFlowLive(const QString& symbol, int64_t tf) {
+    if (symbol == m_flowSymbol && tf == m_flowTimeframeMs && m_flowSubscription) return;
+    unsubscribeFlowLive();
+    if (!m_connectionActive || !m_flowConfigReady || symbol.isEmpty() || tf < 1000 ||
+        !symbolPermitted(symbol.toStdString(), "flow live")) return;
+    m_flowSymbol = symbol;
+    m_flowTimeframeMs = tf;
+    m_flowBackfill.select(symbol, tf);
+    m_flowSubscription = m_client.subscribeFlowLive(symbol.toStdString(), tf);
+}
+
+void RemoteGridDataSource::unsubscribeFlowLive() {
+    if (m_flowSubscription) m_client.unsubscribeFlowLive(m_flowSubscription);
+    m_flowSubscription = 0;
+    m_flowSymbol.clear();
+    m_flowTimeframeMs = 0;
+    m_flowTimer.stop();
+    m_flowBuffer.clear();
+    // Retain an old flight until its reply/error, preserving the server's
+    // connection-wide one-job limit even during A -> B -> A switches.
+    m_flowBackfill.select({}, 0);
+}
+
+void RemoteGridDataSource::requestFlowHistory(const QString& symbol, int64_t tf, int64_t start, int64_t end) {
+    if (!m_flowSubscription || symbol != m_flowSymbol || tf != m_flowTimeframeMs || end <= start) return;
+    const auto marginStart = std::max<int64_t>(0, start - (end - start));
+    m_flowBackfill.setWindow(marginStart, end);
+    m_flowBuffer.retainWindow(tf, m_flowBackfill.windowStartMs(), m_flowBackfill.windowEndMs());
+    requestNextFlowPage();
+}
+
+void RemoteGridDataSource::requestNextFlowPage() {
+    if (!m_connectionActive || !m_flowConfigReady || !m_flowSubscription) return;
+    const auto now = m_flowClock.elapsed();
+    const auto request = m_flowBackfill.next(now);
+    m_flowTimer.stop();
+    if (request) {
+        m_client.requestFlowHistory(request->id, request->symbol.toStdString(), request->timeframeMs,
+                                    request->endMs, request->limit);
+    } else if (const auto at = m_flowBackfill.wakeAtMs(now); at > now) {
+        m_flowTimer.start(int(std::min<int64_t>(at - now, INT_MAX)));
+    }
+}
+
+void RemoteGridDataSource::onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr batch) {
+    if (!batch) return;
+    const auto now = m_flowClock.elapsed();
+    if (batch->history) {
+        if (!m_flowBackfill.accept(*batch, now)) { requestNextFlowPage(); return; }
+    } else if (!m_flowSubscription || batch->id != m_flowSubscription || batch->symbol != m_flowSymbol ||
+               batch->timeframeMs != m_flowTimeframeMs) return;
+    for (const auto bucket : m_flowBuffer.apply(*batch, now)) m_flowBackfill.refresh(bucket, now);
+    emit flowBarsReceived(std::move(batch));
+    requestNextFlowPage();
 }

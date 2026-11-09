@@ -121,3 +121,8 @@ target_link_libraries(test_lean_gauge PRIVATE sentinel_book_analytics GTest::gte
 set_target_properties(test_lean_gauge PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 add_test(NAME LeanGaugeTests COMMAND test_lean_gauge)
 set_tests_properties(LeanGaugeTests PROPERTIES LABELS "marketdata")
+
+add_executable(test_flow_wire_client test_flow_wire_client.cpp)
+target_link_libraries(test_flow_wire_client PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME FlowWireClientTests COMMAND test_flow_wire_client)
+set_tests_properties(FlowWireClientTests PROPERTIES LABELS "marketdata" TIMEOUT 30)

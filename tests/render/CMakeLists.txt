@@ -431,3 +431,9 @@ target_link_libraries(test_RenderPerformance PRIVATE sentinel_gui_lib GTest::gte
 target_compile_definitions(test_RenderPerformance PRIVATE SENTINEL_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME RenderPerformanceTests COMMAND test_RenderPerformance)
 set_tests_properties(RenderPerformanceTests PROPERTIES LABELS "render;fast")
+
+add_executable(test_FlowSeriesBuffer test_FlowSeriesBuffer.cpp)
+target_include_directories(test_FlowSeriesBuffer PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_FlowSeriesBuffer PRIVATE sentinel_gui_lib GTest::gtest_main Qt6::Core)
+add_test(NAME FlowSeriesBufferTests COMMAND test_FlowSeriesBuffer)
+set_tests_properties(FlowSeriesBufferTests PROPERTIES LABELS "render" TIMEOUT 30)

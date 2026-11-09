@@ -46,6 +46,10 @@ set(GRID_CORE_SOURCES
     datasources/IGridDataSource.hpp
     datasources/RemoteGridDataSource.hpp
     datasources/RemoteGridDataSource.cpp
+    datasources/FlowSeriesBuffer.hpp
+    datasources/FlowSeriesBuffer.cpp
+    datasources/FlowBackfillState.hpp
+    datasources/FlowBackfillState.cpp
     datasources/CandleSeriesBuffer.hpp
     datasources/CandleSeriesBuffer.cpp
     UnifiedGridRenderer.cpp

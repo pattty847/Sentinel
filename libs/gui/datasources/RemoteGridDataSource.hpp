@@ -2,6 +2,8 @@
 #include "IGridDataSource.hpp"
 #include "CandleSeriesBuffer.hpp"
 #include "CandleBackfillState.hpp"
+#include "FlowBackfillState.hpp"
+#include <QElapsedTimer>
 #include "../models/MarketHealth.hpp"
 #include <QDateTime>
 #include <QTimer>
@@ -18,6 +20,10 @@ public:
 
     void subscribe(const QString& symbol) override;
     void unsubscribe(const QString& symbol) override;
+    void requestFlowHistory(const QString& symbol, int64_t timeframeMs, int64_t startMs, int64_t endMs) override;
+    void subscribeFlowLive(const QString& symbol, int64_t timeframeMs) override;
+    void unsubscribeFlowLive() override;
+    const FlowSeriesBuffer& flowBuffer() const { return m_flowBuffer; }
     void requestFootprintHistory(const QString& symbol,
                                  int64_t timeframeMs,
                                  int64_t endTimeMs,
@@ -63,6 +69,17 @@ private slots:
 
 private:
     friend struct CandleDataSourceTest;
+    friend struct FlowDataSourceTest;
+    void requestNextFlowPage();
+    void onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr batch);
+    FlowSeriesBuffer m_flowBuffer;
+    FlowBackfillState m_flowBackfill;
+    QTimer m_flowTimer;
+    QElapsedTimer m_flowClock;
+    QString m_flowSymbol;
+    int64_t m_flowTimeframeMs = 0;
+    quint64 m_flowSubscription = 0;
+    bool m_flowConfigReady = false;
     void processBookSnapshotDeadlines(qint64 nowMs);
     void onL2UpdateReceivedAt(const QString& productId, const std::vector<BookLevelUpdate>& updates,
                               double tickSize, quint64 deliveryGeneration, qint64 nowMs,

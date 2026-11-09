@@ -68,7 +68,8 @@ Exchange → capture → RAWL2 journal + fan-out → roller → ServerDataModel 
 WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor → UnifiedGridRenderer → GPU
 ```
 
-- **SentinelStreamClient** — Boost.Beast WebSocket client; parses, validates, and emits typed slice DTOs. See `docs/SENTINEL_STREAM_CLIENT.md`.
+- **SentinelStreamClient** — Boost.Beast WebSocket client; parses, validates, and emits typed slice DTOs. Flow live JSON/FLB1 and FHE1 history share the bounded FIFO decode worker, with immutable batches delivered through queued Qt connections. See `docs/SENTINEL_STREAM_CLIENT.md`.
+- **FlowSeriesBuffer / FlowBackfillState** — `RemoteGridDataSource` owns the GUI-thread flow series, source-aware revision merge, separate complete/partial/building/refused coverage mask, and one connection-wide history flight. Pages move backward using `oldest_ms - timeframe_ms`; busy responses retry with capped exponential backoff, building and provisional buckets retry after 30 seconds, and live coverage loss triggers a rate-limited authoritative re-fetch. An advancing seal withdraws provisional finals and requests their store replacements. A symbol or timeframe switch unsubscribes and clears all flow buffers; stale replies cannot repopulate them. Requests wait for connection and `server_config`, cover the visible window plus one screen of older margin (bounded to 8,192 buckets), and use 1 s flow on sub-second charts. The old footprint path remains active independently.
 - **RemoteGridDataSource** — Book replica, candles and trade-overlay slices (footprint, TPO, volume profile).
 - **DataProcessor** — Stages the trade overlays on their own grids off the GUI thread (INV-068).
 - **HeatmapDataService / HeatmapGpuLayer** — The heatmap: chunk requests and the live raw tail on the heatmap-data thread, drawn by `HeatmapTileNode` (S5-S6; the legacy band renderer was removed in S8a).
