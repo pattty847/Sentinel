@@ -53,18 +53,19 @@ TEST(FlowBar, NonDyadicComposeIsByteEqualAndProvisionalReadsDoNotRevise) {
         Trade t{std::to_string(i + 10), times[i],
                 100.01 + (i % 3) * 0.01, sizes[i], i % 2 ? Side::Sell : Side::Buy};
         accepted(minute, t); accepted(direct, t);
-        minute.bars(); // S3a-style provisional publication after each trade.
+        minute.bars();
     }
     auto smaller = minute.bars();
     const auto composed = composeFlowBars(smaller, 300'000);
     const auto built = direct.bars().front();
-    EXPECT_EQ(composed.revision, 0);
+    EXPECT_EQ(minute.revisionAt(0), 0);
     EXPECT_EQ(encodeFlowBar(composed), encodeFlowBar(built));
     EXPECT_EQ(decodeFlowBar(encodeFlowBar(built)), built);
     DayFile day;
     day.product = "BTC-USD"; day.dayStartMs = 0; day.timeframeMs = 60'000;
     day.nativeTick = 1; day.priceScale = 100; day.baseScale = Base;
     day.quoteScale = Quote; day.sourceFingerprint.fill(0x5a); day.bars = smaller;
+    day.revisions.resize(smaller.size(), 0);
     EXPECT_EQ(decodeFlowDay(encodeFlowDay(day)), day);
 }
 
@@ -89,9 +90,50 @@ TEST(FlowBar, ExplicitSealRevisionAndDrop) {
     EXPECT_EQ(encodeFlowBar(live.bars().front()), encodeFlowBar(history.bars().front()));
     live.sealThrough(60'000);
     accepted(live, {"3", 2000, 102, 0.1, Side::Buy});
-    EXPECT_EQ(live.bars().front().revision, 1);
+    EXPECT_EQ(live.revisionAt(0), 1);
     live.dropBefore(60'000);
     EXPECT_TRUE(live.bars().empty());
+}
+
+TEST(FlowBar, DroppedBucketRejectsLateTradeAndDropClampsToSeal) {
+    auto live = builder();
+    accepted(live, {"1", 1000, 100, 1, Side::Buy});
+    EXPECT_THROW(live.sealThrough(30'000), std::invalid_argument);
+    live.sealThrough(60'000);
+    live.dropBefore(120'000);
+    EXPECT_TRUE(live.bars().empty());
+    EXPECT_EQ(live.add({"2", 2000, 101, 1, Side::Sell}),
+              FlowBarBuilder::AddResult::Rejected);
+    EXPECT_EQ(live.droppedRejectCount(), 1);
+    EXPECT_EQ(live.rejectedCount(), 1);
+    EXPECT_TRUE(live.bars().empty());
+    accepted(live, {"3", 60'000, 102, 1, Side::Buy});
+    ASSERT_EQ(live.bars().size(), 1);
+    EXPECT_EQ(live.bars().front().startMs, 60'000);
+}
+
+TEST(FlowBar, EmptySealedMinuteRevisesButContentMatchesHistory) {
+    auto live = builder(), history = builder();
+    live.sealThrough(60'000);
+    Trade first{"1", 1000, 100, 0.1, Side::Buy};
+    Trade second{"2", 2000, 101, 0.2, Side::Sell};
+    accepted(live, first);
+    EXPECT_EQ(live.revisionAt(0), 1);
+    accepted(live, second);
+    EXPECT_EQ(live.revisionAt(0), 2);
+    accepted(history, first); accepted(history, second);
+    EXPECT_EQ(encodeFlowBar(live.bars().front()), encodeFlowBar(history.bars().front()));
+    DayFile day;
+    day.product = "BTC-USD"; day.dayStartMs = 0; day.timeframeMs = 60'000;
+    day.nativeTick = 1; day.priceScale = 100; day.baseScale = Base;
+    day.quoteScale = Quote; day.bars = live.bars(); day.revisions = {*live.revisionAt(0)};
+    EXPECT_EQ(decodeFlowDay(encodeFlowDay(day)), day);
+}
+
+TEST(FlowBar, QuoteRoundHalfUpUsesExactUnits) {
+    FlowBarBuilder b(60'000, 0.5, 2, 1, 1);
+    accepted(b, {"tie", 0, 1.5, 3002399751580331.0, Side::Buy});
+    EXPECT_EQ(b.bars().front().quoteVolume, 4503599627370497LL);
 }
 
 TEST(FlowBar, RecorderRowFloorAndRejectedInputs) {
@@ -123,6 +165,12 @@ TEST(FlowBar, CodecRejectsNonfiniteAndInvalidNotable) {
     accepted(b, {"2", 1, 101, 2, Side::Sell});
     auto bar = b.bars().front();
     auto frame = encodeFlowBar(bar);
+    frame[124] ^= 1; // Delta's fixed offset in FLB1.
+    EXPECT_THROW(decodeFlowBar(frame), std::invalid_argument);
+    frame = encodeFlowBar(bar);
+    std::fill(frame.begin() + 140, frame.begin() + 148, 0);
+    EXPECT_THROW(decodeFlowBar(frame), std::invalid_argument);
+    frame = encodeFlowBar(bar);
     frame[frame.size() - 2] = 0; frame[frame.size() - 1] = 0;
     EXPECT_THROW(decodeFlowBar(frame), std::invalid_argument);
     bar.open = std::numeric_limits<double>::infinity();

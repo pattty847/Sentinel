@@ -107,6 +107,7 @@ int main(int argc, char** argv) {
         file.product = "BTC-USD"; file.dayStartMs = start; file.timeframeMs = 60'000;
         file.nativeTick = tick; file.priceScale = priceScale; file.baseScale = baseScale;
         file.quoteScale = quoteScale; file.bars = builder->bars();
+        file.revisions.resize(file.bars.size(), 0);
         const auto bytes = encodeFlowDay(file).size();
         std::cout << "day=" << argv[2] << " tick=" << tick << " bars=" << file.bars.size()
                   << " trades=" << trades << " bytes_per_day=" << bytes

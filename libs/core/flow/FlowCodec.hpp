@@ -13,6 +13,7 @@ struct DayFile {
     int64_t priceScale = 0, baseScale = 0, quoteScale = 0;
     std::array<uint8_t, 32> sourceFingerprint{};
     std::vector<FlowBar> bars;
+    std::vector<uint32_t> revisions; // FLD1 index metadata, parallel to bars.
     bool operator==(const DayFile&) const = default;
 };
 Bytes encodeFlowBar(const FlowBar& bar); // FLB1

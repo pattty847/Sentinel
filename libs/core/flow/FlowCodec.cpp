@@ -62,12 +62,17 @@ void validate(const FlowBar& b) {
         if (!std::isfinite(v)) throw std::invalid_argument("nonfinite flow price");
     if (b.baseVolume < 0 || b.quoteVolume < 0 || b.buyVol < 0 || b.sellVol < 0 ||
         b.maxRowVol < 0) throw std::invalid_argument("negative flow volume");
+    if (b.delta != b.buyVol - b.sellVol)
+        throw std::invalid_argument("flow delta disagrees with side totals");
     int last = -1;
+    uint64_t knownCount = 0;
     for (const auto& r : b.rows) {
         if (r.offset < 0 || r.offset <= last) throw std::invalid_argument("invalid flow row offset");
         if (r.bidVol < 0 || r.askVol < 0) throw std::invalid_argument("negative flow row volume");
+        knownCount += uint64_t(r.bidCount) + r.askCount;
         last = r.offset;
     }
+    if (knownCount > b.count) throw std::invalid_argument("flow count below known row count");
     for (size_t i = 0; i < b.notable.size(); ++i) {
         const auto& n = b.notable[i];
         if (!std::isfinite(n.price) || !std::isfinite(n.minPrice) || !std::isfinite(n.maxPrice) ||
@@ -91,7 +96,7 @@ Bytes encodeFlowBar(const FlowBar& b) {
     w.u(b.priceScale, 8); w.u(b.baseScale, 8); w.u(b.quoteScale, 8);
     for (double v : {b.open, b.high, b.low, b.close}) w.d(v);
     for (int64_t v : {b.baseVolume, b.quoteVolume, b.buyVol, b.sellVol, b.delta, b.maxRowVol}) w.u(v, 8);
-    w.u(b.count, 8); w.u(b.revision, 4);
+    w.u(b.count, 8);
     w.u(b.rows.size(), 2);
     for (const auto& r : b.rows) {
         w.u(static_cast<uint16_t>(r.offset), 2);
@@ -118,7 +123,7 @@ FlowBar decodeFlowBar(std::span<const uint8_t> bytes) {
     b.baseVolume = static_cast<int64_t>(r.u(8)); b.quoteVolume = static_cast<int64_t>(r.u(8));
     b.buyVol = static_cast<int64_t>(r.u(8)); b.sellVol = static_cast<int64_t>(r.u(8));
     b.delta = static_cast<int64_t>(r.u(8)); b.maxRowVol = static_cast<int64_t>(r.u(8));
-    b.count = r.u(8); b.revision = r.u(4);
+    b.count = r.u(8);
     const auto rowCount = r.u(2);
     for (size_t i = 0; i < rowCount; ++i) {
         Row row; row.offset = static_cast<int16_t>(r.u(2));
@@ -142,7 +147,8 @@ FlowBar decodeFlowBar(std::span<const uint8_t> bytes) {
 }
 Bytes encodeFlowDay(const DayFile& day) {
     if (day.dayStartMs % 86'400'000 != 0 || day.timeframeMs <= 0 ||
-        day.bars.size() > UINT32_MAX) throw std::invalid_argument("invalid flow day");
+        day.bars.size() > UINT32_MAX || day.revisions.size() != day.bars.size())
+        throw std::invalid_argument("invalid flow day");
     std::vector<Bytes> frames;
     frames.reserve(day.bars.size());
     int64_t previous = day.dayStartMs - 1;
@@ -161,9 +167,10 @@ Bytes encodeFlowDay(const DayFile& day) {
     w.u(day.priceScale, 8); w.u(day.baseScale, 8); w.u(day.quoteScale, 8);
     w.b.insert(w.b.end(), day.sourceFingerprint.begin(), day.sourceFingerprint.end());
     w.u(frames.size(), 4);
-    uint64_t offset = w.b.size() + frames.size() * 20;
+    uint64_t offset = w.b.size() + frames.size() * 24;
     for (size_t i = 0; i < frames.size(); ++i) {
         w.u(day.bars[i].startMs, 8); w.u(offset, 8); w.u(frames[i].size(), 4);
+        w.u(day.revisions[i], 4);
         offset += frames[i].size();
     }
     for (const auto& frame : frames) w.b.insert(w.b.end(), frame.begin(), frame.end());
@@ -178,17 +185,19 @@ DayFile decodeFlowDay(std::span<const uint8_t> bytes) {
     day.quoteScale = static_cast<int64_t>(r.u(8));
     for (auto& byte : day.sourceFingerprint) byte = r.u(1);
     const auto count = r.u(4);
-    if (count > (bytes.size() - r.p) / 20) throw std::runtime_error("truncated flow index");
-    struct Entry { int64_t start; uint64_t offset; uint32_t length; };
+    if (count > (bytes.size() - r.p) / 24) throw std::runtime_error("truncated flow index");
+    struct Entry { int64_t start; uint64_t offset; uint32_t length; uint32_t revision; };
     std::vector<Entry> index;
     for (size_t i = 0; i < count; ++i)
-        index.push_back({static_cast<int64_t>(r.u(8)), r.u(8), static_cast<uint32_t>(r.u(4))});
+        index.push_back({static_cast<int64_t>(r.u(8)), r.u(8),
+                         static_cast<uint32_t>(r.u(4)), static_cast<uint32_t>(r.u(4))});
     size_t end = r.p;
     for (const auto& e : index) {
         if (e.offset != end || e.length > bytes.size() - end) throw std::runtime_error("invalid flow index");
         auto bar = decodeFlowBar(bytes.subspan(end, e.length));
         if (bar.startMs != e.start) throw std::runtime_error("flow index key mismatch");
-        day.bars.push_back(std::move(bar)); end += e.length;
+        day.bars.push_back(std::move(bar)); day.revisions.push_back(e.revision);
+        end += e.length;
     }
     if (end != bytes.size()) throw std::runtime_error("flow day trailing bytes");
     // Apply the same day and ordering validation as the writer.

@@ -44,7 +44,6 @@ FlowBar composeFlowBars(std::span<const FlowBar> bars, int64_t timeframeMs) {
         out.count += bar.count;
         add(out.buyVol, bar.buyVol);
         add(out.sellVol, bar.sellVol);
-        out.revision = std::max(out.revision, bar.revision);
         for (const auto& row : bar.rows) {
             auto& dest = rows[bar.lowRow + row.offset];
             add(dest.bidVol, row.bidVol); add(dest.askVol, row.askVol);

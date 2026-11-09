@@ -45,7 +45,6 @@ struct FlowBar {
     int64_t baseVolume = 0, quoteVolume = 0;
     uint64_t count = 0;
     int64_t buyVol = 0, sellVol = 0, delta = 0, maxRowVol = 0;
-    uint32_t revision = 0;
     std::vector<Row> rows;
     std::vector<Notable> notable; // At most eight, descending notional.
     bool operator==(const FlowBar&) const = default;
