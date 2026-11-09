@@ -6,7 +6,7 @@
 #include <limits>
 
 namespace chart {
-enum class CvdReset { None, UtcDay, TpoSession };
+enum class CvdReset { Visible, UtcDay, TpoSession };
 struct CvdPoint {
     int64_t timeMs = 0, resetMs = 0;
     double value = 0;
@@ -16,15 +16,15 @@ struct CvdScale {
     double min = 0, max = 0;
     double fraction(double value) const { return (value - min) / (max - min); }
 };
-// Feed all loaded bars in time order; retain only the visible window. Replaying
-// the complete loaded series makes history paging and forming replacements exact.
+// Day/session resets consume loaded history; visible mode consumes only bars
+// starting inside the drawn window. Repeated forming times replace their value.
 class CvdSeries {
 public:
     static constexpr int kCapacity = 8192;
     std::array<CvdPoint, kCapacity> points{};
     int count = 0;
     static int64_t resetStart(int64_t time, CvdReset rule, int64_t tpoStart) {
-        if (rule == CvdReset::None) return 0;
+        if (rule == CvdReset::Visible) return time;
         if (rule == CvdReset::TpoSession) return tpoStart;
         constexpr int64_t day = 86400000;
         const auto remainder = time % day;
@@ -50,6 +50,11 @@ public:
             points[size_t(count++)] = {time, reset, total_, periodLoadedFrom_};
         }
         return true;
+    }
+    bool pushVisible(int64_t time, double delta, double from, double to) {
+        if (double(time) < from || double(time) >= to || !std::isfinite(delta)) return false;
+        const auto anchor = count ? points[0].timeMs : time;
+        return push(time, time == anchor ? 0 : delta, anchor, true);
     }
     int64_t incompleteStart() const {
         for (int i = 0; i < count; ++i)

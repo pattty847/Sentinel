@@ -167,7 +167,7 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
             return "bubblePlacement must be individual, auto or slot";
         if (key == "cvdStripPx" && std::floor(v.toDouble()) != v.toDouble())
             return "cvdStripPx must be an integer";
-        if (key == "cvdReset" && v != "none" && v != "utcDay" && v != "tpoSession") return "cvdReset must be none, utcDay or tpoSession";
+        if (key == "cvdReset" && v != "visible" && v != "utcDay" && v != "tpoSession") return "cvdReset must be visible, utcDay or tpoSession";
         if (key == "cvdStyle" && v != "line" && v != "area") return "cvdStyle must be line or area";
         if (key == "footprintSource" && v != "q16" && v != "cells") return "footprintSource must be q16 or cells";
         if (key == "footprintIntensity" && v != "bar" && v != "window") return "footprintIntensity must be bar or window";
@@ -249,6 +249,7 @@ HeatmapChartSettings HeatmapSettingsStore::loadAt(const QString &prefix, Heatmap
             if (value != "true" && value != "false") continue;
             decoded = value == "true";
         }
+        if (it.key() == "cvdReset" && decoded == "none") decoded = QStringLiteral("visible");
         auto check = defaults;
         if (applySettingsPatch(check, {{it.key(), decoded}}).isEmpty()) patch[it.key()] = decoded;
     }

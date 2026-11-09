@@ -2717,22 +2717,22 @@ TEST(CvdKnobs, QmlAndAgentPortPersistAndProcessOnlyChangesStayLocal) {
     UnifiedGridRenderer renderer;
     HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
     auto* layers = renderer.layers();
-    EXPECT_EQ(layers->cvdStripPx(), 0); EXPECT_EQ(layers->cvdReset(), "utcDay"); EXPECT_EQ(layers->cvdStyle(), "line");
+    EXPECT_EQ(layers->cvdStripPx(), 0); EXPECT_EQ(layers->cvdReset(), "visible"); EXPECT_EQ(layers->cvdStyle(), "line");
     ASSERT_TRUE(QQmlProperty::write(layers, "cvdStripPx", 96));
-    ASSERT_TRUE(QQmlProperty::write(layers, "cvdReset", "none"));
+    ASSERT_TRUE(QQmlProperty::write(layers, "cvdReset", "visible"));
     ASSERT_TRUE(QQmlProperty::write(layers, "cvdStyle", "area"));
     controls.syncNow();
     auto saved = store.reload();
-    EXPECT_EQ(saved.cvdStripPx, 96); EXPECT_EQ(saved.cvdReset, "none"); EXPECT_EQ(saved.cvdStyle, "area");
+    EXPECT_EQ(saved.cvdStripPx, 96); EXPECT_EQ(saved.cvdReset, "visible"); EXPECT_EQ(saved.cvdStyle, "area");
     const QJsonObject patch{{"cvdStripPx", 128}, {"cvdReset", "tpoSession"}, {"cvdStyle", "line"}};
     ASSERT_TRUE(model.apply(ChartAgentPort::footprintPatch(patch), false).isEmpty()); controls.syncNow();
     for (auto it = patch.begin(); it != patch.end(); ++it) EXPECT_EQ(renderer.agentPort().footprintSettings()[it.key()], it.value());
     saved = store.reload();
-    EXPECT_EQ(saved.cvdStripPx, 96); EXPECT_EQ(saved.cvdReset, "none"); EXPECT_EQ(saved.cvdStyle, "area");
+    EXPECT_EQ(saved.cvdStripPx, 96); EXPECT_EQ(saved.cvdReset, "visible"); EXPECT_EQ(saved.cvdStyle, "area");
     HeatmapSettingsModel restarted(store.store, "main", store.config);
     UnifiedGridRenderer second;
     HeatmapChartControls restored(&restarted); restored.setRenderer(&second);
-    EXPECT_EQ(second.layers()->cvdStripPx(), 96); EXPECT_EQ(second.layers()->cvdReset(), "none"); EXPECT_EQ(second.layers()->cvdStyle(), "area");
+    EXPECT_EQ(second.layers()->cvdStripPx(), 96); EXPECT_EQ(second.layers()->cvdReset(), "visible"); EXPECT_EQ(second.layers()->cvdStyle(), "area");
     ASSERT_TRUE(QQmlProperty::write(layers, "cvdStripPx", 128));
     EXPECT_EQ(store.reload().cvdStripPx, 128);
 }
@@ -2740,6 +2740,7 @@ TEST(CvdKnobs, QmlAndAgentPortPersistAndProcessOnlyChangesStayLocal) {
 TEST(CvdFeed, RemoteHistoryAndFormingReplacementWorkWithoutFootprintAtAnyZoom) {
     RemoteGridDataSource source("127.0.0.1", "1");
     chart::CvdLayer layer;
+    layer.presentation().reset = chart::CvdReset::UtcDay;
     chart::CvdFeed feed(layer.mailbox(), layer.presentation());
     MappingFrameContext frame;
     frame.activeTimeframeMs = 1000;
@@ -2773,7 +2774,7 @@ TEST(CvdKnobs, BothApiRoutesPersistAllThreeFields) {
     UnifiedGridRenderer renderer;
     HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
     for (const char* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
-        for (const char* body : {R"({"cvdStripPx":96,"cvdReset":"none","cvdStyle":"area"})",
+        for (const char* body : {R"({"cvdStripPx":96,"cvdReset":"visible","cvdStyle":"area"})",
                                 R"({"cvdStripPx":0,"cvdReset":"utcDay","cvdStyle":"line"})",
                                 R"({"cvdStripPx":64,"cvdReset":"tpoSession","cvdStyle":"line"})"}) {
             const auto validated = AgentApi::validateControl({"POST", path, {}, body}, std::nullopt);
@@ -2792,6 +2793,7 @@ TEST(CvdKnobs, BothApiRoutesPersistAllThreeFields) {
 
 TEST(CvdFeed, FallbackAccumulatesWhileOffAndCanEnableWithoutAnotherBatch) {
     chart::CvdLayer layer;
+    layer.presentation().reset = chart::CvdReset::UtcDay;
     chart::CvdFeed feed(layer.mailbox(), layer.presentation());
     MappingFrameContext frame;
     frame.activeTimeframeMs = 1000; frame.raster.valid = true;
@@ -2829,4 +2831,22 @@ TEST(CvdKnobs, HeightClampsAndPersistsOnQmlAndBothApiRoutes) {
     }
     heatmap::HeatmapChartSettings direct;
     direct.cvdStripPx = INT_MAX; heatmap::clampSettings(direct); EXPECT_EQ(direct.cvdStripPx, 400);
+}
+
+TEST(CvdKnobs, RemovedResetIsRejectedByQmlAndNormalisedOnlyOnLoad) {
+    TempStore store;
+    EXPECT_EQ(store.reload().cvdReset, "visible");
+    store.settings.setValue("heatmap/main/cvdReset", "none");
+    EXPECT_EQ(store.reload().cvdReset, "visible");
+    // A saved layout must also choose the default, even over a current day reset.
+    store.settings.setValue("heatmap/main/cvdReset", "utcDay");
+    store.settings.setValue("layouts/lab/heatmap/main/cvdReset", "none");
+    EXPECT_EQ(store.store.restoreLayout("lab", "main", store.config).cvdReset, "visible");
+    HeatmapSettingsModel model(store.store, "main", store.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
+    EXPECT_EQ(renderer.layers()->cvdReset(), "visible");
+    ASSERT_TRUE(QQmlProperty::write(renderer.layers(), "cvdReset", "utcDay")); controls.syncNow();
+    ASSERT_TRUE(QQmlProperty::write(renderer.layers(), "cvdReset", "none")); controls.syncNow();
+    EXPECT_EQ(renderer.layers()->cvdReset(), "utcDay"); EXPECT_EQ(store.reload().cvdReset, "utcDay");
 }

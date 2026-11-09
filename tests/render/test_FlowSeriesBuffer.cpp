@@ -622,6 +622,9 @@ TEST_F(FlowDataSourceTest, CvdResetAnchorRequestsAndRetainsMidnightAcrossPans) {
     source.requestFlowHistory("BTC-USD", tf, 12 * hour, 15 * hour,
         chart::cvdHistoryAnchor(12 * hour, tf, 0, chart::CvdReset::UtcDay, 4));
     EXPECT_EQ(flowStart(), 9 * hour); EXPECT_EQ(source.flowBuffer().series(tf)->bars.begin()->first, 9 * hour);
+    source.requestFlowHistory("BTC-USD", tf, 12 * hour, 15 * hour,
+        chart::cvdHistoryAnchor(12 * hour, tf, 96, chart::CvdReset::Visible, 4));
+    EXPECT_EQ(flowStart(), 9 * hour); EXPECT_EQ(source.flowBuffer().series(tf)->bars.begin()->first, 9 * hour);
 }
 TEST_F(FlowDataSourceTest, CvdSecondBarsRespectCapAndLabelActualLoadedTime) {
     constexpr int64_t hour = 3600000, tf = 1000;

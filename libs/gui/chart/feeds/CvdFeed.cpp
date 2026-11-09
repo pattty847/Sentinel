@@ -21,12 +21,23 @@ int64_t loadedStart(const FlowSeriesBuffer::Series& source, int64_t firstBar, in
     }
     return std::max(boundary, reached);
 }
+void buildVisible(CvdSnapshot& out, const FlowSeriesBuffer::Series& source, double from, double to) {
+    if (!std::isfinite(from) || !std::isfinite(to) || from >= to ||
+        from >= double(std::numeric_limits<int64_t>::max())) return;
+    auto it = from <= double(std::numeric_limits<int64_t>::min()) ? source.bars.begin() :
+        source.bars.lower_bound(int64_t(from));
+    for (; it != source.bars.end() && double(it->first) < to; ++it) {
+        const auto& bar = it->second.bar;
+        if (bar.baseScale <= 0 || bar.timeframeMs != out.timeframeMs) continue;
+        out.series.pushVisible(it->first, double(bar.delta) / bar.baseScale, from, to);
+    }
+}
 void baselineLabel(CvdSnapshot& out) {
-    const char* label = out.reset == CvdReset::None ? "CVD since loaded start" :
+    const char* label = out.reset == CvdReset::Visible ? "CVD since view start" :
         out.reset == CvdReset::UtcDay ? "CVD since UTC day" : "CVD since TPO session";
     std::snprintf(out.label.data(), out.label.size(), "%s", label);
     const auto loaded = out.series.incompleteStart();
-    if (out.reset == CvdReset::None || loaded < 0 || !out.series.count) return;
+    if (out.reset == CvdReset::Visible || loaded < 0 || !out.series.count) return;
     const auto at = QDateTime::fromMSecsSinceEpoch(loaded, Qt::UTC);
     const auto last = QDateTime::fromMSecsSinceEpoch(out.series.points[size_t(out.series.count - 1)].timeMs, Qt::UTC);
     const auto text = at.toString(at.date() == last.date() ? QStringLiteral("HH:mm") : QStringLiteral("yyyy-MM-dd HH:mm")).toLatin1();
@@ -100,6 +111,11 @@ void CvdFeed::build(CvdSnapshot& out, const FlowSeriesBuffer::Series& source,
     out.series.clear(); out.timeframeMs = frame.activeTimeframeMs > 0 ? std::max<int64_t>(1000, frame.activeTimeframeMs) : 0; out.reset = reset;
     const auto& cam = frame.raster;
     if (!cam.valid || out.timeframeMs <= 0) return;
+    if (reset == CvdReset::Visible) {
+        buildVisible(out, source, cam.drawnStartMs, cam.drawnEndMs);
+        baselineLabel(out);
+        return;
+    }
     int64_t period = std::numeric_limits<int64_t>::min(), from = 0;
     for (const auto& [time, record] : source.bars) {
         const auto& bar = record.bar;

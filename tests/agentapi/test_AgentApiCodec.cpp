@@ -588,11 +588,11 @@ TEST(AgentApiControls, FootprintSourceHasStrictTypesOnBothRoutes) {
 TEST(AgentApiControls, CvdKnobsValidateBothRoutesAtomically) {
     for (const auto* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
         for (const auto* body : {R"({"cvdStripPx":0,"cvdReset":"utcDay","cvdStyle":"line"})",
-                                R"({"cvdStripPx":128,"cvdReset":"none","cvdStyle":"area"})",
+                                R"({"cvdStripPx":128,"cvdReset":"visible","cvdStyle":"area"})",
                                 R"({"cvdReset":"tpoSession"})"})
             EXPECT_EQ(validateControl({"POST", path, {}, body}, std::nullopt).status, 200);
         for (const auto* body : {R"({"cvdStripPx":1.5})", R"({"cvdStripPx":true})",
-                                R"({"cvdReset":"day"})", R"({"cvdReset":1})",
+                                R"({"cvdReset":"none"})", R"({"cvdReset":"day"})", R"({"cvdReset":1})",
                                 R"({"cvdStyle":"bars"})", R"({"cvdStyle":false})"})
             EXPECT_EQ(validateControl({"POST", path, {}, body}, std::nullopt).status, 422);
     }

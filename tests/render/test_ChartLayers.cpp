@@ -506,7 +506,7 @@ TEST(CvdLayer, LazyContainerKeepsDefaultTreeAndInsertsBeforeText) {
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
     EXPECT_EQ(root.childCount(), 7); EXPECT_EQ(root.lastChild(), textRoot);
     layers.cvd.presentation().stripPx = 50;
-    chart::CvdFeed::build(layers.cvd.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::UtcDay, 4);
+    chart::CvdFeed::build(layers.cvd.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
     layers.cvd.mailbox().post();
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
     ASSERT_EQ(root.childCount(), 8); EXPECT_EQ(root.lastChild(), textRoot);
@@ -519,6 +519,7 @@ TEST(CvdLayer, LazyContainerKeepsDefaultTreeAndInsertsBeforeText) {
 }
 TEST(CvdLayer, LineAreaBoundsAndFreshFramesAllocateNothing) {
     chart::CvdLayer layer;
+    layer.presentation().reset = chart::CvdReset::UtcDay;
     layer.presentation().stripPx = 50;
     auto frame = footprintChartFrame();
     frame.context.surfaceBounds = {0, 0, 112, 100}; // excludes the time axis and price gutter
@@ -569,7 +570,7 @@ TEST(CvdFeed, SumsAllLoadedBarsAndRespectsTpoOpenAndBaseScale) {
     source.bars[1000] = source.bars[0]; source.bars[1000].bar.startMs = 1000;
     source.bars[1000].bar.baseScale = 50;
     chart::CvdSnapshot snapshot;
-    chart::CvdFeed::build(snapshot, source, frame, chart::CvdReset::None, 4);
+    chart::CvdFeed::build(snapshot, source, frame, chart::CvdReset::UtcDay, 4);
     ASSERT_EQ(snapshot.series.count, 1); EXPECT_EQ(snapshot.series.points[0].value, 9);
     const int64_t open = 13 * 3600000;
     source.bars.clear();
@@ -591,12 +592,12 @@ TEST(CvdLayer, LabelsAreBoundedAndFreshDataFramesAllocateNothing) {
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
-    params.fontPx = 64; params.charset = " 0123456789.e+-CVDsinceTPOUdaylotr";
+    params.fontPx = 64; params.charset = " 0123456789.e+-CVDsinceTPOUdaylotrvw";
     ASSERT_TRUE(atlas.build(params));
     chart::CvdLayer layer;
     layer.presentation().stripPx = 80;
     auto frame = footprintChartFrame(); frame.context.surfaceBounds.setWidth(400);
-    chart::CvdFeed::build(layer.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::UtcDay, 4);
+    chart::CvdFeed::build(layer.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
     layer.mailbox().post(); layer.sync(frame);
     std::unique_ptr<QSGNode> root(layer.createContainer());
     ChartTextRenderer text;
@@ -605,7 +606,7 @@ TEST(CvdLayer, LabelsAreBoundedAndFreshDataFramesAllocateNothing) {
     ASSERT_GT(text.submittedGlyphs(), 0);
     for (int i = 0; i < 2; ++i) {
         auto series = footprintSeries(); series.bars[0].bar.delta += i + 1;
-        chart::CvdFeed::build(layer.mailbox().back(), series, footprintFrame(), chart::CvdReset::UtcDay, 4);
+        chart::CvdFeed::build(layer.mailbox().back(), series, footprintFrame(), chart::CvdReset::Visible, 4);
         layer.mailbox().post();
         footprintAllocations = 0; footprintCounting = true;
         layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
@@ -642,9 +643,32 @@ TEST(CvdFeed, CoverageAndEachResetPeriodDetermineTheBaselineLabel) {
     frame.raster.drawnEndMs = 86401000;
     chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::UtcDay, 4);
     EXPECT_STREQ(snapshot.label.data(), "CVD since 1970-01-01 09:00 loaded");
-    chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::None, 4);
-    EXPECT_STREQ(snapshot.label.data(), "CVD since loaded start");
+    chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::Visible, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since view start");
     frame.raster.drawnStartMs = 86400000;
     chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::UtcDay, 4);
     EXPECT_STREQ(snapshot.label.data(), "CVD since UTC day");
+}
+
+TEST(CvdFeed, VisibleStartsInsideDrawnWindowAndReanchorsOnPan) {
+    auto source = footprintSeries(); source.bars.clear();
+    auto frame = footprintFrame();
+    for (int i = -20; i < 8; ++i) {
+        auto& bar = source.bars[i * 1000].bar;
+        bar.startMs = i * 1000; bar.timeframeMs = 1000; bar.baseScale = 2; bar.delta = 2 * (i + 1);
+    }
+    frame.raster.drawnStartMs = 500; frame.raster.drawnEndMs = 6000;
+    chart::CvdSnapshot first, panned;
+    chart::CvdFeed::build(first, source, frame, chart::CvdReset::Visible, 4);
+    ASSERT_EQ(first.series.count, 5);
+    EXPECT_EQ(first.series.points[0].timeMs, 1000); EXPECT_EQ(first.series.points[0].value, 0);
+    EXPECT_EQ(first.series.points[4].value, 18); EXPECT_STREQ(first.label.data(), "CVD since view start");
+    frame.raster.drawnStartMs = 2500;
+    chart::CvdFeed::build(panned, source, frame, chart::CvdReset::Visible, 4);
+    ASSERT_EQ(panned.series.count, 3); EXPECT_EQ(panned.series.points[0].timeMs, 3000);
+    EXPECT_EQ(panned.series.points[0].value, 0);
+    for (int i = 0; i < 3; ++i) EXPECT_EQ(first.series.points[size_t(i + 2)].value - panned.series.points[size_t(i)].value, 7);
+    source.bars[5000].bar.delta = -2;
+    chart::CvdFeed::build(panned, source, frame, chart::CvdReset::Visible, 4);
+    ASSERT_EQ(panned.series.count, 3); EXPECT_EQ(panned.series.points[2].value, 4);
 }

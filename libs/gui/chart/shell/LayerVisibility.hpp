@@ -37,7 +37,7 @@ public:
     int cvdStripPx() const { return cvdStrip_; }
     CvdReset cvdResetRule() const { return cvdReset_; }
     QString cvdReset() const {
-        if (cvdReset_ == CvdReset::None) return QStringLiteral("none");
+        if (cvdReset_ == CvdReset::Visible) return QStringLiteral("visible");
         return cvdReset_ == CvdReset::UtcDay ? QStringLiteral("utcDay") : QStringLiteral("tpoSession");
     }
     QString cvdStyle() const { return cvdArea_ ? QStringLiteral("area") : QStringLiteral("line"); }
@@ -49,8 +49,8 @@ public:
         if (gateChanged) emit cvdHistoryChanged();
     }
     void setCvdReset(const QString& value) {
-        if (value != "none" && value != "utcDay" && value != "tpoSession") return;
-        const auto reset = value == "none" ? CvdReset::None : value == "utcDay" ? CvdReset::UtcDay : CvdReset::TpoSession;
+        if (value != "visible" && value != "utcDay" && value != "tpoSession") return;
+        const auto reset = value == "visible" ? CvdReset::Visible : value == "utcDay" ? CvdReset::UtcDay : CvdReset::TpoSession;
         if (cvdReset_ == reset) return;
         cvdReset_ = reset; changed("cvdReset", true);
         if (cvdStrip_ > 0) emit cvdHistoryChanged();
@@ -253,7 +253,7 @@ private:
         changed(name, value);
     }
     int cvdStrip_ = 0;
-    CvdReset cvdReset_ = CvdReset::UtcDay;
+    CvdReset cvdReset_ = CvdReset::Visible;
     bool cvdArea_ = false;
     bool footprintCells_ = false;
     bool footprintWindowIntensity_ = false, footprintHollowCandles_ = true, footprintNumbers_ = true;

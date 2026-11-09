@@ -140,7 +140,7 @@ The cells look knobs remain stored while q16 is selected.
 | Key / QML property on `layers` | Values | Default |
 | --- | --- | --- |
 | `cvdStripPx` | Integer logical px, clamped to 0..400 by API and QML setters; 0 disables. Drawing also clamps to surface height. | `0` |
-| `cvdReset` | `none`, `utcDay`, `tpoSession` | `utcDay` |
+| `cvdReset` | `visible`, `utcDay`, `tpoSession` | `visible` |
 | `cvdStyle` | `line`, `area` | `line` |
 
 Both routes report the current knobs; `GET /api/v1/state` includes them under `layers`.
@@ -148,17 +148,30 @@ Layer-route and QML writes persist, including writes of the current value. The h
 settings route supports `persist:false` for lab comparisons without changing saved settings.
 CVD works with footprint off or either footprint source and has no footprint zoom gate.
 Sub-second charts use the loaded 1 s flow series.
-It sums all loaded flow bars in base asset units, including those outside the viewport,
-then autoscales visible values together with zero. Forming-bar updates replace the
-previous value. `tpoSession` uses the configured `tpo.tpoSessionType` and resets at its
-session open; accumulation continues until the next open, including outside session hours.
-With a reset enabled, flow requests and retention extend to the reset boundary of
-the earliest visible flow bar, within the existing 8,192-bar limit. Panning or zooming
-inside a fully loaded reset period preserves its baseline. Until history reaches the
-boundary, or when the cap excludes it, the label says “CVD since HH:MM loaded” (with
-a UTC date across days). Complete coverage of earlier empty buckets counts as loaded.
-Each visible reset period tracks its own loaded start; any truncated period makes the
-label explicit. `none` keeps “CVD since loaded start” and the usual viewport history window.
+The default `visible` mode anchors at zero on the first bar whose start time is at
+or after the drawn window's left edge (`drawnStartMs`), then accumulates subsequent
+bar deltas up to (excluding) the right edge. The label is “CVD since view start”.
+Panning recomputes the anchor: overlapping points shift vertically by a constant,
+while their pairwise differences stay unchanged. Publishing visits only visible
+bars after a lookup of the left edge; this mode needs no extra history.
+All modes use base asset units, autoscale visible values together with zero, and
+replace the forming bar's previous value.
+
+`utcDay` and `tpoSession` sum loaded bars from their reset boundary, including bars
+outside the viewport. `tpoSession` uses the configured `tpo.tpoSessionType` and
+resets at its session open; accumulation continues until the next open, including
+outside session hours. Only these two modes, while the strip is enabled, extend
+flow requests and retention to the earliest visible flow bar's reset boundary,
+within the existing 8,192-bar limit. Panning or zooming inside a fully loaded reset
+period preserves its baseline. Until history reaches the boundary, or when the
+cap excludes it, the label says “CVD since HH:MM loaded” (with a UTC date across
+days). Complete coverage of earlier empty buckets counts as loaded. Each visible
+reset period tracks its own loaded start; any truncated period makes the label explicit.
+A disabled strip or `visible` mode keeps the usual viewport history window.
+
+The removed `none` value is rejected by both API routes; QML writes leave the
+current value unchanged. A persisted `none` is normalized to `visible` on load,
+including saved layouts.
 
 The semi-opaque strip overlays the bottom of the chart surface, leaving price mapping
 unchanged and excluding the time axis, price axis and ladder gutters. `area` fills to
@@ -171,7 +184,7 @@ On an isolated lab at port 17116 (each command is process-only):
 
 ```sh
 curl -s -H 'Content-Type: application/json' -d '{"cvdStripPx":96,"persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings
-curl -s -H 'Content-Type: application/json' -d '{"cvdReset":"none","persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings
+curl -s -H 'Content-Type: application/json' -d '{"cvdReset":"visible","persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings
 curl -s -H 'Content-Type: application/json' -d '{"cvdReset":"utcDay","persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings
 curl -s -H 'Content-Type: application/json' -d '{"cvdReset":"tpoSession","persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings
 curl -s -H 'Content-Type: application/json' -d '{"cvdStyle":"area","persist":false}' http://127.0.0.1:17116/api/v1/heatmap/settings

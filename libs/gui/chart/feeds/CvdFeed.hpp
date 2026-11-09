@@ -12,13 +12,13 @@ class LayerVisibility;
 class ChartTpoQml;
 struct CvdPresentation {
     int stripPx = 0;
-    CvdReset reset = CvdReset::UtcDay;
+    CvdReset reset = CvdReset::Visible;
     bool area = false;
 };
 struct CvdSnapshot {
     CvdSeries series;
     int64_t timeframeMs = 0;
-    CvdReset reset = CvdReset::UtcDay;
+    CvdReset reset = CvdReset::Visible;
     std::array<char, 80> label{};
 };
 class CvdMailbox {

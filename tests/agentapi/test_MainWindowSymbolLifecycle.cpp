@@ -1165,7 +1165,11 @@ TEST(MainWindowCandleViewport, CvdEnableResetAndSessionChangesRefreshTheFlowAnch
     const auto originalWindow = captured->flowRequests.back();
     captured->flowRequests.clear();
     renderer->layers()->setCvdStripPx(96); QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
-    ASSERT_FALSE(captured->flowRequests.empty()); EXPECT_EQ(captured->flowRequests.back().anchor, day);
+    ASSERT_FALSE(captured->flowRequests.empty()); EXPECT_EQ(captured->flowRequests.back().anchor, -1);
+    EXPECT_EQ(captured->flowRequests.back().start, originalWindow.start);
+    EXPECT_EQ(captured->flowRequests.back().end, originalWindow.end);
+    renderer->layers()->setCvdReset("utcDay"); QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
+    EXPECT_EQ(captured->flowRequests.back().anchor, day);
     renderer->layers()->setCvdReset("tpoSession"); renderer->tpo()->setTpoSessionType(0);
     QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
     EXPECT_EQ(captured->flowRequests.back().anchor, day + 13 * hour);

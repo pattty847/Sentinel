@@ -14,11 +14,36 @@ TEST(CvdSeries, UtcDayAndTpoSessionReset) {
     }
     EXPECT_EQ(CvdSeries::resetStart(-1, CvdReset::UtcDay, 0), -86400000);
 }
-TEST(CvdSeries, NoneAccumulatesInvisibleLoadedHistory) {
+TEST(CvdSeries, VisibleAnchorsAtZeroAndReplacesTheFormingBar) {
     CvdSeries series;
-    ASSERT_TRUE(series.push(1000, 4, CvdSeries::resetStart(1000, CvdReset::None, 0), false));
-    ASSERT_TRUE(series.push(86400000, -1, CvdSeries::resetStart(86400000, CvdReset::None, 0), true));
-    ASSERT_EQ(series.count, 1); EXPECT_EQ(series.points[0].value, 3);
+    EXPECT_FALSE(series.pushVisible(1000, 100, 1500, 5000));
+    ASSERT_TRUE(series.pushVisible(2000, 9, 1500, 5000));
+    EXPECT_EQ(series.points[0].timeMs, 2000); EXPECT_EQ(series.points[0].value, 0);
+    series.pushVisible(2000, 12, 1500, 5000);
+    ASSERT_EQ(series.count, 1); EXPECT_EQ(series.points[0].value, 0);
+    series.pushVisible(3000, 4, 1500, 5000);
+    series.pushVisible(3000, -2, 1500, 5000);
+    ASSERT_EQ(series.count, 2); EXPECT_EQ(series.points[1].value, -2);
+    series.pushVisible(4000, 3, 1500, 5000);
+    EXPECT_EQ(series.points[2].value, 1);
+    EXPECT_FALSE(series.pushVisible(5000, 99, 1500, 5000));
+    EXPECT_EQ(series.count, 3);
+}
+TEST(CvdSeries, PanningVisibleAnchorPreservesOverlappingDifferences) {
+    CvdSeries original, panned;
+    for (int i = 0; i < 8; ++i) {
+        original.pushVisible(i * 1000, i - 1, 0, 8000);
+        panned.pushVisible(i * 1000, i - 1, 3000, 8000);
+    }
+    ASSERT_EQ(panned.count, 5); EXPECT_EQ(panned.points[0].value, 0);
+    const auto offset = original.points[3].value;
+    EXPECT_NE(offset, 0);
+    for (int i = 0; i < panned.count; ++i) {
+        EXPECT_EQ(original.points[size_t(i + 3)].value - panned.points[size_t(i)].value, offset);
+        for (int j = 0; j < panned.count; ++j)
+            EXPECT_EQ(original.points[size_t(i + 3)].value - original.points[size_t(j + 3)].value,
+                      panned.points[size_t(i)].value - panned.points[size_t(j)].value);
+    }
 }
 TEST(CvdSeries, PagingDoesNotChangeValuesAfterResetBoundary) {
     for (auto rule : {CvdReset::UtcDay, CvdReset::TpoSession}) {
@@ -61,7 +86,7 @@ TEST(CvdHistory, ResetAnchorsUseEarliestVisibleBarAndOffLeavesWindowAlone) {
     EXPECT_EQ(cvdHistoryAnchor(12 * hour, 60000, 96, CvdReset::UtcDay, 4), 0);
     EXPECT_EQ(cvdHistoryAnchor(14 * hour, 60000, 96, CvdReset::TpoSession, 0), 13 * hour);
     EXPECT_EQ(cvdHistoryAnchor(12 * hour, 60000, 0, CvdReset::UtcDay, 4), -1);
-    EXPECT_EQ(cvdHistoryAnchor(12 * hour, 60000, 96, CvdReset::None, 4), -1);
+    EXPECT_EQ(cvdHistoryAnchor(12 * hour, 60000, 96, CvdReset::Visible, 4), -1);
     EXPECT_EQ(cvdHistoryAnchor(86400000 + 5, 100, 96, CvdReset::UtcDay, 4), 86400000);
 }
 TEST(CvdSeries, EveryVisibleResetPeriodTracksItsOwnLoadedStart) {
