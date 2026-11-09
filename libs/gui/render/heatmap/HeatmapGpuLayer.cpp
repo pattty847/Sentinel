@@ -157,6 +157,7 @@ void HeatmapGpuLayer::destroyController() {
 
 void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     if (symbol_ == symbol) return;
+    const bool hadTick = manualMode_ && tickUnits_ > 0;
     if (!startupTickReady_) startupTickTimer_->stop();
     symbol_ = symbol;
     priceKnown_ = false;
@@ -168,7 +169,16 @@ void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     resetLabels(true); // the old symbol's labels never draw on the new picture
     refreshStyle();
     autoUnits_ = 0; // Auto evaluates fresh on the new symbol's data
+    if (manualMode_) {
+        tickUnits_ = 0;
+        postedTickUnits_ = -1;
+        tickKey_ = {};
+        invalidateTickProposal();
+    }
+    offered_.clear();
+    emit presetsChanged();
     restoreTick();
+    if (hadTick) emit tickChanged();
     noteLimits();
     viewChanged(); // the controller serial switches; the node holds the old picture
     emit symbolChanged();
@@ -176,12 +186,22 @@ void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
 
 void HeatmapGpuLayer::setTimeframeMs(int64_t tfMs) {
     if (tfMs <= 0 || tfMs_ == tfMs) return;
+    const bool hadTick = manualMode_ && tickUnits_ > 0;
     if (!startupTickReady_) startupTickTimer_->stop();
     tfMs_ = tfMs;
     autoPriceTick_.reset();
     invalidateTickProposal();
     autoUnits_ = 0;
-    restoreTick(); // Manual: this timeframe's remembered tick
+    if (manualMode_) {
+        tickUnits_ = 0;
+        postedTickUnits_ = -1;
+        tickKey_ = {};
+        invalidateTickProposal();
+    }
+    offered_.clear();
+    emit presetsChanged();
+    restoreTick();
+    if (hadTick) emit tickChanged();
     noteLimits();
     viewChanged(); // the old picture keeps drawing until the new timeframe's spans are ready
 }
@@ -214,15 +234,18 @@ void HeatmapGpuLayer::setSettings(const HeatmapChartSettings &settings, bool exp
     const bool wasManual = manualMode_;
     const int64_t wasUnits = manualUnits_;
     manualMode_ = settings.tickMode == TickMode::Manual;
+    if (!manualMode_) manualFallback_ = false;
     if (manualMode_) startupTickTimer_->stop();
     else armStartupTick();
     if (manualMode_) {
         if (explicitManualTick && isPresetUnits(settings.manualTick)) {
             manualUnits_ = settings.manualTick;
             tickMemory_.set(symbol_, tfMs_, manualUnits_);
+            manualFallback_ = false;
         } else if (!wasManual) {
             const auto remembered = tickMemory_.get(symbol_, tfMs_);
-            manualUnits_ = remembered ? *remembered : settings.manualTick;
+            manualFallback_ = !remembered;
+            manualUnits_ = remembered.value_or(tickUnits_);
         }
     }
     if (wasManual != manualMode_) autoUnits_ = 0; // back to Auto: the rule resumes from the current zoom
@@ -274,12 +297,13 @@ void HeatmapGpuLayer::adoptDisplayScale(const SpanSet &snapshot) {
     }
 }
 
-// Manual: the tick remembered for (symbol, timeframe) wins; with none, the locked
-// tick stays (nothing is written: only an explicit choice is remembered).
 void HeatmapGpuLayer::restoreTick() {
     if (!manualMode_) return;
-    if (const auto units = tickMemory_.get(symbol_, tfMs_); units && *units != manualUnits_) {
-        manualUnits_ = *units;
+    const auto units = tickMemory_.get(symbol_, tfMs_);
+    const int64_t next = units.value_or(tickUnits_);
+    manualFallback_ = !units;
+    if (next != manualUnits_) {
+        manualUnits_ = next;
         emit tickChanged();
     }
 }
@@ -296,7 +320,7 @@ bool HeatmapGpuLayer::priceScaleCurrent() const {
 }
 
 double HeatmapGpuLayer::maxPriceSpan() const {
-    if (!active_ || !manualMode_ || !isPresetUnits(manualUnits_) || !priceScaleCurrent()) return 0.0;
+    if (!active_ || !manualMode_ || manualFallback_ || !isPresetUnits(manualUnits_) || !priceScaleCurrent()) return 0.0;
     return maxManualPriceSpan(heightPx_ * dpr_, fromUnits(manualUnits_, priceScale()));
 }
 
@@ -304,7 +328,8 @@ double HeatmapGpuLayer::minTimeSpanMs() const { return active_ && tfMs_ > 0 ? do
 
 double HeatmapGpuLayer::minPriceSpan() const {
     if (!active_ || !priceScaleCurrent()) return 0.0;
-    const int64_t units = manualMode_ && isPresetUnits(manualUnits_) ? manualUnits_ : (offered_.empty() ? 0 : offered_.front());
+    const int64_t units = manualMode_ && !manualFallback_ && isPresetUnits(manualUnits_)
+                              ? manualUnits_ : (offered_.empty() ? 0 : offered_.front());
     return units > 0 ? kMinZoomRows * fromUnits(units, priceScale()) : 0.0;
 }
 
@@ -396,7 +421,7 @@ int64_t HeatmapGpuLayer::oldestAvailableMs() const {
 }
 
 void HeatmapGpuLayer::refreshPresets() {
-    if (!snapshot_ || snapshot_->tfMs != tfMs_) return;
+    if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_) return;
     int64_t finest = 0;
     for (const auto &column : snapshot_->resolution.columns)
         for (const auto &source : column.sources)
@@ -412,8 +437,11 @@ void HeatmapGpuLayer::refreshPresets() {
 // ------------------------------------------------------------------ frame
 int64_t HeatmapGpuLayer::chooseTick(const ViewWindow &view) {
     if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_) return tickUnits_; // nothing built yet
-    if (manualMode_) return isPresetUnits(manualUnits_) ? manualUnits_ : tickUnits_;
-    if (autoPriceTick_) return autoUnits_ = *autoPriceTick_;
+    if (manualMode_ && !manualFallback_) return isPresetUnits(manualUnits_) ? manualUnits_ : 0;
+    if (autoPriceTick_) {
+        autoUnits_ = *autoPriceTick_;
+        return autoUnits_;
+    }
 
     // Auto: the history summary merged with the live window's columns (S5L-b
     // latestResolution(); a live revision never replaces the SpanSet).
@@ -479,6 +507,7 @@ void HeatmapGpuLayer::commitProposedTick() {
         return; // chosen under another symbol, timeframe or tick setting: the next frame proposes again
     }
     tickUnits_ = tick;
+    if (manualFallback_) manualUnits_ = tick;
     ++tickChanges_;
     sLog_Probe("heatmap.gpu.tick", "tf=" << tfMs_ << " units=" << tick << " mode=" << (manualMode_ ? "manual" : "auto"));
     emit tickChanged();
@@ -486,7 +515,7 @@ void HeatmapGpuLayer::commitProposedTick() {
 
 int64_t HeatmapGpuLayer::predictTickUnits(const ViewWindow &view) const {
     if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_ || !priceKnown_) return tickUnits_;
-    if (manualMode_) return isPresetUnits(manualUnits_) ? manualUnits_ : tickUnits_;
+    if (manualMode_ && !manualFallback_) return isPresetUnits(manualUnits_) ? manualUnits_ : 0;
     if (autoPriceTick_) return *autoPriceTick_;
 
     const ResolutionSummary &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;

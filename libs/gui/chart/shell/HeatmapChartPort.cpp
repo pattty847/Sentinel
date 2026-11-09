@@ -6,7 +6,7 @@ namespace chart {
 
 double HeatmapChartPort::drawnTick() const { return layer_ ? layer_->tickPrice() : 0.0; }
 double HeatmapChartPort::priceScale() const { return layer_ ? layer_->priceScale() : 0.0; }
-bool HeatmapChartPort::manualTick() const { return layer_ && layer_->manualMode(); }
+bool HeatmapChartPort::manualTick() const { return layer_ && layer_->manualTickLocked(); }
 bool HeatmapChartPort::hasCurrentResolution() const { return layer_ && layer_->hasCurrentResolution(); }
 bool HeatmapChartPort::priceScaleCurrent() const { return layer_ && layer_->priceScaleCurrent(); }
 SpanLimits HeatmapChartPort::limits() const {

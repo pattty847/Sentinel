@@ -3963,6 +3963,106 @@ TEST(UgrTickCpu, ManualTickBypassesStartupHold) {
     layer.setService(nullptr);
 }
 
+TEST(UgrTickCpu, ManualTickNeverCarriesAcrossSymbolOrTimeframe) {
+    heatmap::gpu::HeatmapGpuLayer layer;
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 3 * kHourMs),
+                                        100120, 100180};
+    layer.setSymbol("ETH-USD");
+    layer.setTimeframeMs(minute);
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    auto settings = layer.settings();
+    settings.tickMode = heatmap::TickMode::Manual;
+    settings.manualTick = 2000;
+    layer.setSettings(settings);
+    heatmap::ManualTickMemory memory;
+    ASSERT_TRUE(memory.set("ETH-USD", minute, 500));
+    layer.setTickMemory(memory);
+    std::vector<int64_t> announced;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::tickChanged, &layer,
+                     [&] { announced.push_back(layer.tickUnits()); });
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    const auto pump = [&](int64_t wantedTf) {
+        QElapsedTimer elapsed;
+        elapsed.start();
+        while (!layer.hasCurrentResolution() && elapsed.elapsed() < 10'000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        if (!layer.hasCurrentResolution()) return false;
+        EXPECT_EQ(layer.tfMs(), wantedTf);
+        layer.chooseTickForView(view);
+        QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+        return true;
+    };
+    layer.setSymbol("BTC-USD");
+    layer.setView(view, true);
+    EXPECT_EQ(layer.manualTickUnits(), 0);
+    EXPECT_EQ(layer.tickUnits(), 0);
+    EXPECT_FALSE(layer.manualTickLocked());
+    heatmap::gpu::HeatmapTileNode::Frame firstFallbackFrame;
+    ASSERT_TRUE(layer.prepareFrame(firstFallbackFrame, QRectF(0, 0, 640, 320), view));
+    EXPECT_EQ(firstFallbackFrame.tickUnits, 0);
+    ASSERT_TRUE(pump(minute));
+    const auto firstSnapshot = layer.snapshot();
+    ASSERT_TRUE(firstSnapshot);
+    const int64_t firstAutomatic = heatmap::autoTickUnits(firstSnapshot->resolution, 0, view.timeLoMs,
+                                                          view.timeHiMs, view.priceLo, view.priceHi, 320,
+                                                          {settings.minRowPx, settings.hysteresis});
+    ASSERT_GT(firstAutomatic, 0);
+    EXPECT_EQ(layer.tickUnits(), firstAutomatic);
+    EXPECT_FALSE(layer.tickMemory().get("BTC-USD", minute));
+    layer.setSettings(settings, true);
+    layer.chooseTickForView(view);
+    QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+    ASSERT_EQ(layer.tickUnits(), 2000);
+    EXPECT_TRUE(layer.manualTickLocked());
+
+    layer.setSymbol("ETH-USD");
+    EXPECT_EQ(layer.manualTickUnits(), 500);
+    EXPECT_EQ(layer.tickUnits(), 0);
+    EXPECT_EQ(layer.predictTickUnits(view), 0);
+    layer.chooseTickForView(view);
+    EXPECT_EQ(layer.tickUnits(), 0);
+    heatmap::gpu::HeatmapTileNode::Frame firstSymbolFrame;
+    ASSERT_TRUE(layer.prepareFrame(firstSymbolFrame, QRectF(0, 0, 640, 320), view));
+    EXPECT_EQ(firstSymbolFrame.tickUnits, 0);
+    ASSERT_FALSE(announced.empty());
+    EXPECT_EQ(announced.back(), 0);
+
+    layer.setSymbol("BTC-USD");
+    EXPECT_EQ(layer.manualTickUnits(), 2000);
+    EXPECT_EQ(layer.tickUnits(), 0);
+    layer.setView(view, true);
+    ASSERT_TRUE(pump(minute));
+    EXPECT_EQ(layer.tickUnits(), 2000);
+
+    layer.setTimeframeMs(5 * minute);
+    EXPECT_EQ(layer.manualTickUnits(), 0);
+    EXPECT_EQ(layer.tickUnits(), 0);
+    EXPECT_FALSE(layer.manualTickLocked());
+    EXPECT_EQ(layer.predictTickUnits(view), 0);
+    heatmap::gpu::HeatmapTileNode::Frame firstTimeframeFrame;
+    ASSERT_TRUE(layer.prepareFrame(firstTimeframeFrame, QRectF(0, 0, 640, 320), view));
+    EXPECT_EQ(firstTimeframeFrame.tickUnits, 0);
+    ASSERT_TRUE(pump(5 * minute));
+    const auto snapshot = layer.snapshot();
+    ASSERT_TRUE(snapshot);
+    const int64_t automatic = heatmap::autoTickUnits(snapshot->resolution, 0, view.timeLoMs, view.timeHiMs,
+                                                     view.priceLo, view.priceHi, 320,
+                                                     {settings.minRowPx, settings.hysteresis});
+    ASSERT_GT(automatic, 0);
+    EXPECT_EQ(layer.tickUnits(), automatic);
+    EXPECT_EQ(layer.manualTickUnits(), automatic);
+    EXPECT_FALSE(layer.tickMemory().get("BTC-USD", 5 * minute));
+
+    layer.setTimeframeMs(minute);
+    EXPECT_EQ(layer.manualTickUnits(), 2000);
+    EXPECT_EQ(layer.tickUnits(), 0);
+    ASSERT_TRUE(pump(minute));
+    EXPECT_EQ(layer.tickUnits(), 2000);
+    layer.setService(nullptr);
+}
+
 // Exercise the chart QWheelEvent and the same C++ axis entries called by QML,
 // without QRhi. Fixed Manual ticks make the one-rung assertion independent of Auto.
 class UgrWheelCpu : public UgrZoomCpu {
