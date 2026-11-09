@@ -898,6 +898,20 @@ ServerDataModel::FlowHistorySnapshot ServerDataModel::flowHistorySnapshot(
         product.clock / 1000 * 1000 - kFlowSecondRetentionMs + 1000 :
         (product.clock - kFlowRolloverGraceMs) / 3'600'000 * 3'600'000;
     for (const auto& [dayStart, day] : product.days) {
+        if (tf > 60'000) {
+            for (const auto& [key, state] : day.coarse)
+                if (key.first == tf && key.second >= from && key.second < to)
+                    snapshot.liveRevisions[key.second] = state.revision;
+            if (tf == 3'600'000) {
+                for (const auto& [start, state] : day.hours)
+                    if (start >= from && start < to)
+                        snapshot.liveRevisions.try_emplace(start, state.revision);
+                if (day.formingHour && day.formingHour->first >= from &&
+                    day.formingHour->first < to)
+                    snapshot.liveRevisions.try_emplace(day.formingHour->first,
+                                                      day.formingHour->second.revision);
+            }
+        }
         const auto begin = std::max({from, dayStart, retained});
         const auto end = std::min({to, dayStart + 86'400'000, snapshot.observedThroughMs});
         if (begin >= end) continue;

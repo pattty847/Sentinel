@@ -331,11 +331,16 @@ Page buildPage(const Request& q, const ServerDataModel::FlowHistorySnapshot& sna
         for (auto& [bar, rev] : entries) {
             parts.push_back(std::move(bar)); revision += rev;
         }
+        const bool provisional = start < sealedThroughMs && sealedThroughMs < end;
+        if (provisional) {
+            const auto it = snapshot.liveRevisions.find(start);
+            revision = it == snapshot.liveRevisions.end() ? 0 : it->second;
+        }
         if (revision > UINT32_MAX) throw std::runtime_error("flow history revision overflow");
         auto bar = q.tf == parts.front().timeframeMs ? std::move(parts.front()) :
             sentinel::flow::composeFlowBars(parts, q.tf);
         h["bars"].push_back({{"bucket_start_ms", start}, {"revision", revision},
-                              {"complete", !building && !partial},
+                              {"complete", !building && !partial && !provisional},
                               {"source", end <= sealedThroughMs && status == "complete" ? "store" : "live"}});
         bars.push_back(std::move(bar));
     }

@@ -62,6 +62,7 @@ public:
     SymbolHotData& ensureSymbol(const std::string& symbol);
     struct FlowHistorySnapshot {
         recording::FlowStore::Reply data;
+        std::map<int64_t, uint32_t> liveRevisions; // cached coarse buckets, model thread snapshot
         recording::FlowStore* store = nullptr; // app owns it; server workers stop before destruction
         int64_t observedThroughMs = 0;
     };

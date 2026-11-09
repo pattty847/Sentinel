@@ -293,6 +293,11 @@ The header contains `type: "flow_history_chunk"`, `schema_version: 1`, `req`,
 uint32 `revision`, boolean `complete`, and `source: "store" | "live"`, in the
 same ascending order as the binary records. The watermark is the recorder's
 committed closed-hour boundary for that symbol; it refreshes on every page.
+Only a bucket ending at or before that boundary is final and served as `store`.
+A coarse bucket crossing it is provisional (`source: "live"`, `complete: false`):
+its FLB1 composes sealed store hours with the live forming part using the shared
+composer. Its revision is the model's live coarse revision if present, otherwise
+zero. The incomplete flag lets a live update at the same revision replace it.
 Revision and completeness are envelope metadata; FLB1 content is unchanged.
 Each range has half-open `from_ms`, `to_ms`, `status`, `price_scale` and
 `row_tick_units`. There is one range per requested bucket, including buckets
@@ -315,9 +320,11 @@ Range statuses are:
 - `refused`: invalid request or cap violation. The binary reply includes `error`
   naming the reason and no bars; its range has `from_ms`, `to_ms` and `status`.
 
-The page status is `building` if any range is building, otherwise `partial` if
-any range is partial, otherwise `complete`. `oldest_ms` is the oldest requested
-bucket, including empty or building ranges, so paging can always make progress.
+A range can report complete coverage while a crossing bar is still marked
+`complete: false` because it is provisional. The page status is `building` if
+any range is building, otherwise `partial` if any range is partial, otherwise
+`complete`. `oldest_ms` is the oldest requested bucket, including empty or
+building ranges, so paging can always make progress.
 Fetch the next older page with `end_time_ms = oldest_ms - timeframe_ms`, stopping
 at zero. Pages select the newest interval first; bars within each page are
 chronological. Clients should retry building ranges separately after catch-up.
@@ -349,11 +356,11 @@ higher store generation wins over an older store generation, and the higher
 live revision wins over an older live revision. At equal live revision,
 `complete: true` wins; otherwise apply live updates in stream order. The
 history chunk's `sealed_through_ms` replaces the client's prior watermark for
-that symbol. Drop a later live `flow_bar` when its `bucket_start_ms` is below
-that watermark. This also suppresses live updates to a forming coarse bucket
-that spans the sealed boundary; a history page can still return its provisional
-composition for that bucket, so refresh its page when needed. Range status
-stays separate: show `building` as not built even if a provisional bar exists.
+that symbol. Drop a later live `flow_bar` only when its bucket end
+(`bucket_start_ms + timeframe_ms`) is at or before that watermark. A coarse
+bucket crossing the boundary remains live and accepts later live updates. Range
+status stays separate: show `building` as not built even if a provisional bar
+exists.
 No client disk cache is required.
 
 ## Heatmap history transport

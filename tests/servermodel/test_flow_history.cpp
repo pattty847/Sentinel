@@ -70,7 +70,7 @@ struct FlowFixture {
         config.recording.enabled = false;
         config.rollerShadow.enabled = false;
         config.rollerShadow.products = {"BTC-USD"};
-        config.chart.timeframesMs = {100, 1000, 60000, 300000, 3600000, 86400000};
+        config.chart.timeframesMs = {100, 1000, 60000, 300000, 3600000, 14'400'000, 86400000};
         model = std::make_unique<ServerDataModel>(config);
         auth = std::make_unique<Authenticator>((dir.path() + "/no-credentials").toStdString());
         server = std::make_unique<SentinelStreamServer>(*model, *auth, config, 0);
@@ -125,7 +125,7 @@ protected:
         fixture->model->onFeedWatermark("BTC-USD", Epoch + rel + ServerDataModel::kFlowCloseDelayMs);
         FlowLiveTestAccess::tick(*fixture->model);
     }
-    void seed() {
+    void seed(bool late = false) {
         Journal writer(journal);
         writer.snapshot(0);
         for (int i = 0; i < 60; ++i) {
@@ -134,6 +134,11 @@ protected:
             writer.trades(i * Minute + 100, {print});
             live(i * Minute, std::to_string(i), 100000 + i % 3);
             tick(i * Minute);
+        }
+        if (late) {
+            auto print = trade(Hour - Minute + 1000, "late", 100003, "SELL");
+            print["size"] = "1";
+            writer.trades(Hour + 500, {print});
         }
         writer.heartbeat(Hour + Minute + 1);
         writer.close();
@@ -145,6 +150,10 @@ protected:
         for (int i = 0; i < 5; ++i) {
             live(Hour + i * Minute, "live" + std::to_string(i), 100003 + i);
             tick(Hour + i * Minute);
+            if (late && i == 0) {
+                live(Hour - Minute + 1000, "late", 100003);
+                tick(Hour);
+            }
         }
         tick(Hour + 5 * Minute);
     }
@@ -188,8 +197,9 @@ TEST(FlowHistoryMerge, StoreOwnershipBeatsLargerLiveRevision) {
     EXPECT_TRUE(protocol::flowBarReplaces(store, {FlowBarSource::Store, 2, true}));
     EXPECT_TRUE(protocol::flowBarReplaces(live, {FlowBarSource::Live, 2, true}));
     EXPECT_FALSE(protocol::flowBarReplaces({FlowBarSource::Live, 2, true}, live));
-    EXPECT_TRUE(protocol::dropLiveFlowBar(Epoch, Epoch + Hour));
-    EXPECT_FALSE(protocol::dropLiveFlowBar(Epoch + Hour, Epoch + Hour));
+    EXPECT_TRUE(protocol::dropLiveFlowBar(Epoch, Hour, Epoch + Hour));
+    EXPECT_FALSE(protocol::dropLiveFlowBar(Epoch, 4 * Hour, Epoch + Hour));
+    EXPECT_FALSE(protocol::dropLiveFlowBar(Epoch + Hour, Hour, Epoch + Hour));
 }
 TEST_F(FlowHistory, DetachesStoreAfterHistoryWorkersDrain) {
     connect();
@@ -236,6 +246,9 @@ TEST_F(FlowHistory, SealedStoreRevisionOneOwnsLiveRevisionTwoBucket) {
     tick(Hour);
     live(59 * Minute + 1000, "late1");
     live(59 * Minute + 2000, "late2");
+    tick(Hour);
+    const auto& liveHour = FlowLiveTestAccess::hour(*fixture->model, Epoch, Epoch);
+    ASSERT_EQ(liveHour.revision, 2u);
     ASSERT_EQ(store->runPass().built, 1u);
     const auto snapshot = fixture->model->flowHistorySnapshot(
         "BTC-USD", Minute, Epoch + 59 * Minute, Epoch + Hour);
@@ -250,6 +263,15 @@ TEST_F(FlowHistory, SealedStoreRevisionOneOwnsLiveRevisionTwoBucket) {
     EXPECT_TRUE(protocol::flowBarReplaces(
         {protocol::FlowBarSource::Live, snapshot.data.revisions[0], true},
         {protocol::FlowBarSource::Store, 1, true}));
+    const auto hourPage = request(Hour, Epoch, 1);
+    ASSERT_EQ(hourPage.bars.size(), 1u);
+    EXPECT_EQ(hourPage.header["bars"][0]["source"], "store");
+    EXPECT_EQ(hourPage.header["bars"][0]["revision"], 1u);
+    EXPECT_EQ(flow::encodeFlowBar(hourPage.bars[0]), flow::encodeFlowBar(liveHour.bar));
+    EXPECT_TRUE(protocol::flowBarReplaces(
+        {protocol::FlowBarSource::Live, liveHour.revision, true},
+        {protocol::FlowBarSource::Store, 1, true}));
+    EXPECT_TRUE(protocol::dropLiveFlowBar(Epoch, Hour, Epoch + Hour));
 }
 TEST_F(FlowHistory, SealedSecondsNeverComeFromRetainedLiveSeries) {
     seed();
@@ -359,6 +381,50 @@ TEST_F(FlowHistory, RetainedSecondsDoNotOpenJournal) {
     EXPECT_EQ(reply.header["status"], "complete");
     EXPECT_TRUE(reply.header["bars"][0]["complete"].get<bool>());
 }
+TEST_F(FlowHistory, PartiallySealedFourHourBarKeepsLiveRevisionAndAcceptsUpdates) {
+    auto sub = std::make_shared<FlowSubscription>();
+    sub->symbol = "BTC-USD"; sub->timeframeMs = 4 * Hour;
+    std::vector<Json> frames;
+    sub->publish = [&](std::string payload) { frames.push_back(Json::parse(payload)); };
+    fixture->model->subscribeFlow(sub);
+    seed(true);
+    const auto snapshot = fixture->model->flowHistorySnapshot(
+        "BTC-USD", 4 * Hour, Epoch, Epoch + 4 * Hour);
+    ASSERT_TRUE(snapshot.liveRevisions.contains(Epoch));
+    ASSERT_EQ(snapshot.liveRevisions.at(Epoch), 1u);
+    ASSERT_FALSE(frames.empty());
+    const auto liveBar = frames.back();
+    EXPECT_EQ(liveBar["revision"], 1u);
+    EXPECT_EQ(liveBar["source"], "live");
+    fs::rename(journal, journal.string() + "-offline");
+    connect();
+    const auto page = request(4 * Hour, Epoch, 1);
+    ASSERT_EQ(page.bars.size(), 1u);
+    EXPECT_EQ(page.header["sealed_through_ms"], Epoch + Hour);
+    EXPECT_EQ(page.header["bars"][0]["source"], "live");
+    EXPECT_FALSE(page.header["bars"][0]["complete"].get<bool>());
+    EXPECT_EQ(page.header["bars"][0]["revision"], 1u);
+    EXPECT_FALSE(protocol::dropLiveFlowBar(Epoch, 4 * Hour, Epoch + Hour));
+    EXPECT_TRUE(protocol::flowBarReplaces(
+        {protocol::FlowBarSource::Live, 1, false},
+        {protocol::FlowBarSource::Live, 1, true}));
+    const auto raw = QByteArray::fromBase64(QByteArray::fromStdString(liveBar["bar"].get<std::string>()));
+    EXPECT_EQ(flow::encodeFlowBar(page.bars[0]), flow::Bytes(raw.begin(), raw.end()));
+    sub->active.store(false);
+}
+TEST_F(FlowHistory, PartiallySealedBarWithoutLiveCopyUsesRevisionZero) {
+    seed();
+    const auto snapshot = fixture->model->flowHistorySnapshot(
+        "BTC-USD", 4 * Hour, Epoch, Epoch + 4 * Hour);
+    ASSERT_FALSE(snapshot.liveRevisions.contains(Epoch));
+    fs::rename(journal, journal.string() + "-offline");
+    connect();
+    const auto page = request(4 * Hour, Epoch, 1);
+    ASSERT_EQ(page.bars.size(), 1u);
+    EXPECT_EQ(page.header["bars"][0]["source"], "live");
+    EXPECT_FALSE(page.header["bars"][0]["complete"].get<bool>());
+    EXPECT_EQ(page.header["bars"][0]["revision"], 0u);
+}
 TEST_F(FlowHistory, DayCompositeAcrossStoreAndLiveMatchesLivePublication) {
     seed();
     auto sub = std::make_shared<FlowSubscription>();
@@ -376,6 +442,7 @@ TEST_F(FlowHistory, DayCompositeAcrossStoreAndLiveMatchesLivePublication) {
     EXPECT_EQ(reply.header["status"], "complete");
     EXPECT_EQ(reply.header["sealed_through_ms"], Epoch + Hour);
     EXPECT_EQ(reply.header["bars"][0]["source"], "live");
+    EXPECT_FALSE(reply.header["bars"][0]["complete"].get<bool>());
     EXPECT_EQ(flow::encodeFlowBar(reply.bars[0]), flow::Bytes(raw.begin(), raw.end()));
     sub->active.store(false);
 }

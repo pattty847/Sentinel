@@ -24,8 +24,11 @@ constexpr int kMaxPayloadBytes = 262144; // 256 KiB
 }
 
 // Applies to live flow_bar messages after the client has observed a history page.
-inline bool dropLiveFlowBar(int64_t bucketStartMs, int64_t sealedThroughMs) {
-    return bucketStartMs < sealedThroughMs;
+inline bool dropLiveFlowBar(int64_t bucketStartMs, int64_t timeframeMs,
+                            int64_t sealedThroughMs) {
+    return bucketStartMs >= 0 && timeframeMs > 0 &&
+           bucketStartMs <= sealedThroughMs &&
+           timeframeMs <= sealedThroughMs - bucketStartMs;
 }
 
 enum class FlowBarSource { Store, Live };
