@@ -23,7 +23,7 @@ struct FrameContext;
 namespace chart {
 struct LadderSnapshot;
 
-constexpr int kMaxBadges = 64;      // row/band badges per frame, first from the top; the rest are counted
+constexpr int kMaxBadges = 64;      // strongest row/band badges per frame; the rest are counted
 constexpr int kEdgePills = 4;       // [bid|ask] x [top|bottom edge]
 constexpr int kBadgeChars = 24;     // longest badge text plus room
 constexpr int kMaxBadgeGlyphs = (kMaxBadges + kEdgePills) * kBadgeChars;
@@ -97,15 +97,19 @@ private:
     double textWidth(const BadgePill& p) const;
     void placeEdges(const LadderSnapshot& s, const FrameContext& f);
     void placeRows(const LadderSnapshot& s, const FrameContext& f, bool cellLabels);
-    void placeBands(const LadderSnapshot& s, const FrameContext& f, int first, int last, bool cellLabels);
-    void addRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels, bool banded);
-    bool placeRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels, bool banded);
+    void prepareRows(const LadderSnapshot& s, const FrameContext& f);
+    bool overlapsRow(int index, double rowHeight, double spacing) const;
+    bool placeRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels);
     void finishPill(BadgePill& p, double right, double top, double dpr);
     void compose(const BadgePill& p);
     std::array<UnitGlyph, 128> unit_{};
     const ChartTextAtlas* atlas_ = nullptr;
     qint64 atlasKey_ = 0;
     double scale_ = 0, boxH_ = 0;
+    struct RowCandidate { int index = 0, band = 0; double usd = 0; };
+    std::vector<RowCandidate> candidates_;
+    std::vector<uint8_t> occupiedBands_;
+    std::vector<int> selectedRows_;
     std::vector<BadgePill> pills_;
     std::vector<ChartGlyphInstance> glyphs_;
     BadgeStats stats_;

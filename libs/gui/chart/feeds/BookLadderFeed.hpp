@@ -28,7 +28,8 @@ struct LadderFeedPorts {
 // is the median size of its nonempty display bins among the kWallReferenceBins from its
 // touch outward, from the whole capture (not the published rows), so dust far from the
 // market at a wide zoom does not lower it and a view panned away from the market keeps
-// it. A publication that is no observation (an incomplete capture) keeps the last one.
+// it. Partial captures classify known rows against the captured reference without
+// advancing the wall-age tracker.
 class BookLadderFeed final : public QObject {
 public:
     static constexpr int kIntervalMs = 67;

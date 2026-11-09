@@ -133,10 +133,15 @@ int formatFlickers(uint32_t count, char* out) {
 LadderBadges::LadderBadges() {
     pills_.reserve(kMaxBadges + kEdgePills);
     glyphs_.reserve(kMaxBadgeGlyphs);
+    candidates_.reserve(LadderSnapshot::kMaxRows);
+    occupiedBands_.reserve(LadderSnapshot::kMaxRows);
+    selectedRows_.reserve(kMaxBadges);
 }
 
 size_t LadderBadges::capacityBytes() const {
-    return pills_.capacity() * sizeof(BadgePill) + glyphs_.capacity() * sizeof(ChartGlyphInstance);
+    return pills_.capacity() * sizeof(BadgePill) + glyphs_.capacity() * sizeof(ChartGlyphInstance) +
+           candidates_.capacity() * sizeof(RowCandidate) + occupiedBands_.capacity() * sizeof(uint8_t) +
+           selectedRows_.capacity() * sizeof(int);
 }
 
 bool LadderBadges::prepareAtlas(const ChartTextAtlas* atlas) {
@@ -262,59 +267,71 @@ void LadderBadges::placeEdges(const LadderSnapshot& s, const FrameContext& f) {
     }
 }
 
-void LadderBadges::placeRows(const LadderSnapshot& s, const FrameContext& f, bool cellLabels) {
+// Absolute price bands keep membership fixed during a pan. Sort all candidates by
+// notional so collisions and the frame cap favor larger walls, including lower bands.
+void LadderBadges::prepareRows(const LadderSnapshot& s, const FrameContext& f) {
+    candidates_.clear();
+    occupiedBands_.clear();
+    selectedRows_.clear();
     const auto& cam = f.raster;
     const auto window = ladderWindow(cam.drawnMinPrice, cam.drawnMaxPrice, s.binPrice());
     const int first = int(std::max<int64_t>(0, window.lo - s.binLo));
     const int last = int(std::min<int64_t>(s.rowCount - 1, window.hi - s.binLo));
-    if (cam.rowPxF / cam.dpr < kPillH) {
-        placeBands(s, f, first, last, cellLabels);
-        return;
-    }
-    for (int i = last; i >= first; --i) { // from the top
-        if (s.rows[size_t(i)].flags & (LadderRow::kBidLarge | LadderRow::kAskLarge))
-            addRow(s, f, i, cellLabels, false);
-    }
-}
-
-// Row centres partition the surface into pill-height bands. Keep the largest wall
-// notional in each band (ties keep the top row), without moving it to the band centre.
-void LadderBadges::placeBands(const LadderSnapshot& s, const FrameContext& f, int first, int last, bool cellLabels) {
-    const auto& cam = f.raster;
-    int winner = -1;
-    double band = 0, largest = -1;
-    for (int i = last; i >= first; --i) {
+    if (first > last) return;
+    const int64_t rowsPerBand = std::max<int64_t>(1, int64_t(std::ceil(kPillH * cam.dpr / cam.rowPxF)));
+    const int64_t firstBand = floorDiv(s.binLo + first, rowsPerBand);
+    occupiedBands_.resize(size_t(floorDiv(s.binLo + last, rowsPerBand) - firstBand + 1), 0);
+    for (int i = first; i <= last; ++i) {
         const auto& row = s.rows[size_t(i)];
         if (!(row.flags & (LadderRow::kBidLarge | LadderRow::kAskLarge))) continue;
         const double price = (double(s.binLo + i) + 0.5) * s.binPrice();
-        const double nextBand = std::floor(cam.yDev(price) / (cam.dpr * kPillH));
-        if (winner >= 0 && nextBand != band) {
-            addRow(s, f, winner, cellLabels, true);
-            winner = -1;
-        }
         const double bid = row.flags & LadderRow::kBidLarge ? double(row.bid) * price : -1;
         const double ask = row.flags & LadderRow::kAskLarge ? double(row.ask) * price : -1;
         const double usd = std::max(bid, ask);
-        if (winner < 0 || usd > largest) {
-            winner = i;
-            largest = usd;
-        }
-        band = nextBand;
+        if (!std::isfinite(usd) || usd <= 0) continue;
+        const int band = int(floorDiv(s.binLo + i, rowsPerBand) - firstBand);
+        candidates_.push_back({i, band, usd});
     }
-    if (winner >= 0) addRow(s, f, winner, cellLabels, true);
+    std::sort(candidates_.begin(), candidates_.end(), [](const RowCandidate& a, const RowCandidate& b) {
+        return a.usd != b.usd ? a.usd > b.usd : a.index > b.index;
+    });
 }
 
-void LadderBadges::addRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels, bool banded) {
-    if (stats_.rowBadges >= kMaxBadges) {
-        ++stats_.dropped;
-        return;
+// Compare price-row distances before pixel snapping: a drag must not change which
+// row wins a collision just because rounded rectangles happen to touch on that frame.
+bool LadderBadges::overlapsRow(int index, double rowHeight, double spacing) const {
+    for (const int selected : selectedRows_)
+        if (std::abs(index - selected) * rowHeight < spacing) return true;
+    return false;
+}
+
+void LadderBadges::placeRows(const LadderSnapshot& s, const FrameContext& f, bool cellLabels) {
+    prepareRows(s, f);
+    const double rowHeight = f.raster.rowPxF / f.raster.dpr;
+    const double spacing = std::ceil(kPillH * f.raster.dpr) / f.raster.dpr;
+    for (const auto& candidate : candidates_) {
+        auto& occupied = occupiedBands_[size_t(candidate.band)];
+        if (occupied) continue;
+        if (stats_.rowBadges >= kMaxBadges) {
+            ++stats_.dropped;
+            occupied = 1;
+        } else if (!overlapsRow(candidate.index, rowHeight, spacing) &&
+                   placeRow(s, f, candidate.index, cellLabels)) {
+            occupied = 1;
+            selectedRows_.push_back(candidate.index);
+            ++stats_.rowBadges;
+        }
     }
-    stats_.rowBadges += placeRow(s, f, index, cellLabels, banded) ? 1 : 0;
+    // Keep geometry and glyph submission in the established top-to-bottom order.
+    std::sort(pills_.begin() + stats_.edgePills, pills_.end(), [](const BadgePill& a, const BadgePill& b) {
+        return a.rect.top() < b.rect.top();
+    });
 }
 
 // The larger notional's side when both are walls (tie: ask). Keep the pill wholly
-// inside the surface and clear of edge pills; thin-band winners also avoid earlier rows.
-bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels, bool banded) {
+// inside the surface and clear of edge pills. An unplaceable winner leaves its band
+// available for the next-largest candidate.
+bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels) {
     const auto& cam = f.raster;
     const LadderRow& row = s.rows[size_t(index)];
     const double bin = s.binPrice(), k = double(s.binLo + index);
@@ -329,11 +346,13 @@ bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int 
     const bool hot = row.flags & (ask ? LadderRow::kAskHot : LadderRow::kBidHot);
     BadgePill p;
     p.colour = hot ? BadgePill::Hot : ask ? BadgePill::Ask : BadgePill::Bid;
-    rowText(p, ask ? askUsd : bidUsd, ask ? row.askWallMs : row.bidWallMs, ask ? row.askFlickers : row.bidFlickers,
-            !cellLabels);
+    if (s.complete)
+        rowText(p, ask ? askUsd : bidUsd, ask ? row.askWallMs : row.bidWallMs,
+                ask ? row.askFlickers : row.bidFlickers, !cellLabels);
+    else
+        p.length = formatMoney(ask ? askUsd : bidUsd, p.text); // partial captures have no observed age
     finishPill(p, snap(f.itemBounds.right() - kBadgeInsetPx, cam.dpr), top, cam.dpr);
-    const int obstacles = banded ? int(pills_.size()) : stats_.edgePills;
-    for (int j = 0; j < obstacles; ++j)
+    for (int j = 0; j < stats_.edgePills; ++j)
         if (pills_[size_t(j)].rect.intersects(p.rect)) return false; // already placed pills win
     pills_.push_back(p);
     return true;

@@ -3,6 +3,8 @@
 // the badge node outside the strip's clip, the text stage, the text renderer's
 // reservation (zero tail, no allocation through endFrame on a real window).
 #include "chart/layers/ChartLayers.hpp"
+#include "chart/feeds/BookLadderFeed.hpp"
+#include "marketdata/model/TradeData.h"
 #include "chart/layers/LadderBadges.hpp"
 #include "chart/layers/LadderGrid.hpp"
 #include "chart/layers/LadderLayer.hpp"
@@ -247,7 +249,7 @@ TEST(LadderBadges, ThinBandWinnersRespectRowCollisionsEdgePillsAndSurfaceBounds)
         rig.wall(179, S::kAsk, 20); // centre at 2: outside the surface
         rig.wall(175, S::kAsk, 20); // centre at 18: under the top edge pill
         rig.wall(172, S::kAsk, 30); // same band, larger: centre at 30, clear of edge
-        rig.wall(171, S::kBid, 40); // next band, centre at 34: collides with row 172
+        rig.wall(171, S::kBid, 40); // next band: larger wall wins the collision with 172
         rig.wall(163, S::kBid, 20); // centre at 66: clear
         rig.wall(102, S::kBid, 20); // centre at 310: under the bottom edge pill
         rig.candidate(S::kAsk, S::kAbove, 185, 100);
@@ -255,7 +257,7 @@ TEST(LadderBadges, ThinBandWinnersRespectRowCollisionsEdgePillsAndSurfaceBounds)
         rig.post();
         ASSERT_EQ(rig.layer.badges().stats().edgePills, 2);
         ASSERT_EQ(rig.rowBadges(), 2);
-        EXPECT_EQ(text(rig.pills()[2]), "$5.18k  1m00s");
+        EXPECT_EQ(text(rig.pills()[2]), "$6.86k  1m00s");
         EXPECT_EQ(text(rig.pills()[3]), "$3.27k  1m00s");
         for (size_t i = 0; i < rig.pills().size(); ++i) {
             EXPECT_TRUE(rig.frame().context.surfaceBounds.contains(rig.pills()[i].rect));
@@ -290,6 +292,175 @@ TEST(LadderBadges, ThinRowsSurviveCoarseAndFractionalTicksAndCellLabelTransition
         ASSERT_EQ(rig.rowBadges(), 1);
         EXPECT_EQ(rig.pills()[0].rect, rect);
     }
+}
+
+TEST(LadderBadges, PriceBandsKeepTheSameWinnerAcrossSmallPans) {
+    for (const double dpr : {1.0, 1.5, 2.0}) {
+        BadgeRig rig(chart_raster::continuousRaster(inputs(100, 180, 1, dpr, 320)));
+        const auto base = rig.cam;
+        rig.snapshot();
+        rig.wall(171, S::kAsk, 10);
+        rig.wall(168, S::kBid, 100); // same absolute band, larger but lower
+        rig.post();
+        ASSERT_EQ(rig.rowBadges(), 1);
+        const auto winner = text(rig.pills()[0]);
+        const double top = rig.pills()[0].rect.top();
+        for (const double dy : {-3.0, -2.0, 0.0, 2.0, 3.0, 6.0}) {
+            SCOPED_TRACE(testing::Message() << "dpr=" << dpr << " pan=" << dy);
+            rig.cam = chart_raster::shiftedRaster(base, 0, dy * dpr);
+            rig.draw();
+            ASSERT_EQ(rig.rowBadges(), 1);
+            EXPECT_EQ(text(rig.pills()[0]), winner);
+            EXPECT_EQ(rig.pills()[0].colour, BadgePill::Bid);
+            EXPECT_NEAR(rig.pills()[0].rect.top(), top + dy, 1 / dpr);
+        }
+    }
+}
+
+TEST(LadderBadges, TheLargerWallWinsAcrossCollidingBands) {
+    BadgeRig rig(camera(100, 180));
+    rig.snapshot();
+    rig.wall(172, S::kAsk, 10);
+    rig.wall(171, S::kBid, 100);
+    rig.post();
+    ASSERT_EQ(rig.rowBadges(), 1);
+    EXPECT_EQ(rig.pills()[0].colour, BadgePill::Bid);
+    EXPECT_NEAR(rig.pills()[0].rect.center().y(), rig.cam.yDev(171.5), 0.5);
+}
+
+TEST(LadderBadges, AClippedBandWinnerFallsBackToTheNextWall) {
+    BadgeRig rig(camera(100, 180));
+    rig.snapshot();
+    rig.wall(179, S::kAsk, 100); // largest, but centre at 2 is clipped
+    rig.wall(176, S::kBid, 10); // same band, fits at centre 14
+    rig.post();
+    ASSERT_EQ(rig.rowBadges(), 1);
+    EXPECT_EQ(rig.pills()[0].colour, BadgePill::Bid);
+    EXPECT_NEAR(rig.pills()[0].rect.center().y(), rig.cam.yDev(176.5), 0.5);
+}
+
+TEST(LadderBadges, AnEdgeCollisionFallsBackWithinTheBand) {
+    BadgeRig rig(camera(100, 180));
+    rig.snapshot();
+    rig.wall(175, S::kAsk, 100); // centre at 18 under the edge pill
+    rig.wall(172, S::kBid, 10); // same band, centre at 30 is clear
+    rig.candidate(S::kAsk, S::kAbove, 185, 100);
+    rig.post();
+    ASSERT_EQ(rig.layer.badges().stats().edgePills, 1);
+    ASSERT_EQ(rig.rowBadges(), 1);
+    EXPECT_EQ(rig.pills()[1].colour, BadgePill::Bid);
+    EXPECT_FALSE(rig.pills()[0].rect.intersects(rig.pills()[1].rect));
+}
+
+TEST(LadderBadges, ARowCollisionFallsBackWithinTheBand) {
+    BadgeRig rig(camera(100, 180));
+    rig.snapshot();
+    rig.wall(172, S::kAsk, 1000); // wins first
+    rig.wall(171, S::kAsk, 100); // next band's largest collides with 172
+    rig.wall(168, S::kBid, 50); // next in the same band, clear of 172
+    rig.post();
+    ASSERT_EQ(rig.rowBadges(), 2);
+    EXPECT_EQ(rig.pills()[1].colour, BadgePill::Bid);
+    EXPECT_NEAR(rig.pills()[1].rect.center().y(), rig.cam.yDev(168.5), 0.5);
+    EXPECT_FALSE(rig.pills()[0].rect.intersects(rig.pills()[1].rect));
+}
+
+TEST(LadderBadges, TheFrameCapKeepsTheLargestWallsIncludingLowerBands) {
+    BadgeRig rig(camera(1000, 1360, 1, 1, 1440)); // 90 four-row bands
+    rig.snapshot();
+    for (int band = 0; band < 90; ++band)
+        rig.wall(1002 + 4 * band, S::kBid, float((90 - band) * 1000));
+    rig.post();
+    ASSERT_EQ(rig.rowBadges(), chart::kMaxBadges);
+    EXPECT_EQ(rig.layer.badges().stats().dropped, 90 - chart::kMaxBadges);
+    EXPECT_NEAR(rig.pills().front().rect.center().y(), rig.cam.yDev(1254.5), 0.5);
+    EXPECT_NEAR(rig.pills().back().rect.center().y(), rig.cam.yDev(1002.5), 0.5);
+    for (size_t i = 1; i < rig.pills().size(); ++i)
+        EXPECT_FALSE(rig.pills()[i - 1].rect.intersects(rig.pills()[i].rect));
+}
+
+TEST(LadderBadges, ACappedCaptureDrawsOnlyKnownRowsAndNoUnobservedAges) {
+    for (const int mode : {0, 1, 2}) { // level cap, word budget, book band
+        SCOPED_TRACE(mode);
+        BadgeRig rig(camera(90, 150));
+        chart::BookLadderFeed feed(rig.layer.mailbox());
+        feed.setPorts({[&] { MappingFrameContext f; f.raster = rig.cam; return f; }, {}, {}, {}, {}});
+        feed.setEnabled(true);
+        feed.setRadar(true, 4);
+        feed.setScanBudget(mode == 1 ? 2 : chart::BookLadderFeed::kMaxScanWords,
+                          mode == 0 ? 12 : chart::BookLadderFeed::kMaxLevels);
+        LiveOrderBook book("TEST");
+        book.initialize(mode == 2 ? 100 : 0, mode == 0 ? 400 : mode == 1 ? 191 : 139, 1);
+        std::vector<BookLevelUpdate> levels;
+        for (int k = 100; k < 140; ++k)
+            levels.push_back({k < 120, double(k), k == 110 || k == 129 ? 100.0 : 1.0});
+        book.applyUpdates(levels, {}, nullptr);
+        feed.publish(book);
+        feed.publishRows();
+        rig.draw();
+        const auto& snapshot = rig.layer.current();
+        ASSERT_TRUE(snapshot.valid);
+        ASSERT_FALSE(snapshot.complete);
+        const int knownLo[] = {108, 72, 100}, knownEnd[] = {132, 128, 140};
+        const int populated[] = {24, 28, 40}, badges[] = {2, 1, 2};
+        const char* reasons[] = {"levels", "scan", "band"};
+        EXPECT_STREQ(feed.lastReason(), reasons[mode]);
+        EXPECT_EQ(snapshot.binLo, knownLo[mode]);
+        EXPECT_EQ(snapshot.rowCount, knownEnd[mode] - knownLo[mode]);
+        ASSERT_TRUE(rig.layer.drawing());
+        EXPECT_EQ(rig.layer.vertexCount(), populated[mode] * 6);
+        ASSERT_EQ(rig.rowBadges(), badges[mode]);
+        for (const auto& pill : rig.pills()) {
+            EXPECT_EQ(text(pill).find('$'), 0u);
+            EXPECT_EQ(text(pill).find(' '), std::string::npos) << "no invented age/new status";
+        }
+        EXPECT_EQ(feed.tracker().acceptedUpdates(), 0u);
+        EXPECT_EQ(feed.tracker().rejectedUpdates(), 0u);
+        auto* clip = static_cast<QSGClipNode*>(rig.gate()->firstChild());
+        const auto* bars = static_cast<QSGGeometryNode*>(clip->firstChild())->geometry()->vertexDataAsColoredPoint2D();
+        for (int i = 0; i < rig.layer.vertexCount(); ++i) {
+            EXPECT_GE(bars[i].y, rig.cam.yDev(knownEnd[mode]));
+            EXPECT_LE(bars[i].y, rig.cam.yDev(knownLo[mode]));
+        }
+        rig.cam = camera(150, 170); // no overlap, even before the next publication
+        rig.draw();
+        EXPECT_FALSE(rig.layer.drawing());
+        EXPECT_EQ(rig.gate()->opacity(), 0);
+        EXPECT_EQ(rig.text.submittedGlyphs(), 0);
+        feed.publishRows();
+        rig.draw();
+        EXPECT_EQ(rig.layer.current().rowCount, 0);
+        EXPECT_FALSE(rig.layer.drawing());
+    }
+}
+
+TEST(LadderBadges, APartiallyOverlappingViewClipsTheKnownRowsAndRequestsAPublish) {
+    BadgeRig rig(camera(100, 180));
+    auto& snapshot = rig.snapshot(120, 20);
+    snapshot.complete = false;
+    snapshot.evalTick = 1;
+    snapshot.evalLo = 100;
+    snapshot.evalHi = 180;
+    rig.wall(125, S::kBid, 10);
+    rig.wall(135, S::kAsk, 20);
+    int requests = 0;
+    rig.layer.setRepublishRequest([&] { ++requests; });
+    rig.post();
+    ASSERT_TRUE(rig.layer.drawing());
+    ASSERT_EQ(rig.rowBadges(), 2);
+    rig.layer.afterRendering();
+    EXPECT_EQ(requests, 0);
+    rig.cam = camera(130, 190); // only row 135 is in view, still overlaps known rows
+    rig.draw();
+    EXPECT_TRUE(rig.layer.drawing());
+    EXPECT_EQ(rig.layer.vertexCount(), 6);
+    EXPECT_EQ(rig.rowBadges(), 1);
+    rig.layer.afterRendering();
+    EXPECT_EQ(requests, 1);
+    rig.cam = camera(100, 120); // touches the first known bin, but contains none of it
+    rig.draw();
+    EXPECT_FALSE(rig.layer.drawing());
+    EXPECT_EQ(rig.text.submittedGlyphs(), 0);
 }
 
 TEST(LadderBadges, ThinLayoutReusesReservedStorageWithoutAllocating) {
@@ -662,7 +833,7 @@ void fillFrame(BadgeRig& rig, int f) {
     for (int j = 0; j < walls; ++j) {
         const int64_t k = 1074 - j;
         const int side = f >= 30 && j % 2 ? S::kAsk : S::kBid;
-        const float size = float((995'000.0 + f * 1000.0) / (double(k) + 0.5));
+        const float size = float((995'000.0 + f * 1000.0) * (j == 5 ? 1.1 : 1.0) / (double(k) + 0.5));
         rig.wall(k, side, size, uint32_t((f + 50) * 1000), uint16_t(j == 1 ? f : 0), f >= 45 && j == 5);
     }
     if (f >= 60) {
