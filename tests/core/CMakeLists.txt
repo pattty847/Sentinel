@@ -1,5 +1,13 @@
 find_package(Qt6 REQUIRED COMPONENTS Core)
 
+add_executable(test_flow_bar test_flow_bar.cpp)
+target_link_libraries(test_flow_bar PRIVATE sentinel_core GTest::gtest_main)
+add_test(NAME FlowBarTests COMMAND test_flow_bar)
+set_tests_properties(FlowBarTests PROPERTIES LABELS "core")
+
+add_executable(flow_store_size_bench EXCLUDE_FROM_ALL flow_store_size_bench.cpp)
+target_link_libraries(flow_store_size_bench PRIVATE sentinel_core)
+
 add_test(NAME DeployRuntimeDryRun
     COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_deploy_runtime_dry_run.sh
             ${CMAKE_SOURCE_DIR}/scripts/dev/deploy-runtime.sh)

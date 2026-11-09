@@ -3,6 +3,13 @@ project(sentinel_core)
 add_subdirectory(marketdata/analytics)
 
 add_library(sentinel_core
+    flow/FlowBar.hpp
+    flow/FlowBarBuilder.hpp
+    flow/FlowBarBuilder.cpp
+    flow/FlowCompose.hpp
+    flow/FlowCompose.cpp
+    flow/FlowCodec.hpp
+    flow/FlowCodec.cpp
     roller/AnchorStore.cpp
     roller/JournalReader.cpp
     roller/JournalFeed.cpp
