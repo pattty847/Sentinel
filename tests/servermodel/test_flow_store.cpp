@@ -1,14 +1,27 @@
 #include "servermodel/FlowStore.hpp"
 #include "ConfigLoader.hpp"
 #include "flow/FlowBarBuilder.hpp"
+#include "flow/FlowScales.hpp"
 #include "roller/fixtures/FlowJournal.hpp"
+#include "roller/JournalFeed.hpp"
 #include "roller/JournalReader.hpp"
+#include "servermodel/Hmc2Store.hpp"
+#include "servermodel/ServerDataModel.hpp"
 #include "trading/MarketEventSource.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
+#include <QCoreApplication>
 #include <QFile>
 #include <future>
 #include <fstream>
+#include <iostream>
+
+struct FlowLiveTestAccess {
+    static void stopTimer(ServerDataModel &model) { model.m_flowTimer.stop(); }
+    static auto &series(ServerDataModel &model, const std::string &symbol, int64_t day) {
+        return model.m_flowProducts.at(symbol).days.at(day).series.at(60'000);
+    }
+};
 
 namespace fs = std::filesystem;
 namespace flow = sentinel::flow;
@@ -54,6 +67,20 @@ class FlowStoreTest : public testing::Test {
         const auto path = firstJournal();
         fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
     }
+    void recordedGrid(const std::string &symbol, double priceScale, int64_t tickUnits, double midpoint,
+                      uint64_t configHash = 42) {
+        recording::Hmc2Store store(hmc2);
+        recording::Hmc2Record record;
+        record.header = {symbol, "near", Minute, priceScale, tickUnits, {}, configHash};
+        record.bucketStartMs = Epoch;
+        record.observedMs = Minute;
+        record.bidRowLo = record.askRowLo = 0;
+        record.bidRowHi = record.askRowHi = 100;
+        record.midOpen = record.midClose = record.midMin = record.midMax = midpoint;
+        record.entries = {{9, false, recording::encodeSize(2), recording::encodeSize(4)},
+                          {9, true, recording::encodeSize(3), recording::encodeSize(6)}};
+        ASSERT_TRUE(store.append(record));
+    }
     QByteArray bytes(const fs::path &p) {
         QFile f(QString::fromStdString(p.string()));
         if (!f.open(QIODevice::ReadOnly))
@@ -97,8 +124,8 @@ TEST_F(FlowStoreTest, FingerprintChangeRefusesStaleDayAndRebuildsWithNewRevision
     const auto old = store.window("BTC-USD", Epoch, Epoch + 2 * Hour);
     changeFingerprint();
     const auto stale = store.window("BTC-USD", Epoch, Epoch + 2 * Hour);
-    EXPECT_TRUE(stale.building);
-    EXPECT_TRUE(stale.bars.empty());
+    EXPECT_FALSE(stale.building); // window is journal-free; the worker detects source changes.
+    EXPECT_EQ(stale.bars, old.bars);
     EXPECT_EQ(store.runPass().built, 2);
     EXPECT_NE(bytes(path), before);
     const auto fresh = store.window("BTC-USD", Epoch, Epoch + 2 * Hour);
@@ -185,21 +212,35 @@ TEST_F(FlowStoreTest, RefusesOverlapsAndSymlinksWithEitherSource) {
     EXPECT_GT(store.runPass().failed, 0);
     EXPECT_TRUE(fs::is_empty(hmc2));
 }
+TEST_F(FlowStoreTest, RefusesRollupAndProtectedRootOverlap) {
+    const auto rollups = base / "rollups";
+    const auto protectedRoot = base / "protected";
+    for (const auto &candidate : {rollups, rollups / "flow", base, protectedRoot,
+                                   protectedRoot / "flow"}) {
+        auto o = options();
+        o.root = candidate;
+        o.rollupRoot = rollups;
+        o.protectedRoots = {protectedRoot};
+        EXPECT_THROW(FlowStore{std::move(o)}, std::invalid_argument);
+    }
+}
 TEST_F(FlowStoreTest, BuildsNewestHourFirstAndStopJoinsDuringReplay) {
     fixture();
+    recordedGrid("BTC-USD", 100, 50, 100000);
     auto o = options();
     std::promise<void> entered;
     auto ready = entered.get_future();
     std::atomic<int> records{0};
     o.afterRecordForTest = [&](std::stop_token stop) {
         if (++records != 2)
-            return; // Past daily grid discovery, inside hour replay.
+            return;
         entered.set_value();
         std::mutex mutex;
         std::condition_variable_any cv;
         std::unique_lock lock(mutex);
         cv.wait(lock, stop, [] { return false; });
     };
+    o.lowerPriority = false;
     FlowStore store(o);
     store.start();
     ASSERT_EQ(ready.wait_for(std::chrono::seconds(5)), std::future_status::ready);
@@ -211,17 +252,16 @@ TEST_F(FlowStoreTest, BuildsNewestHourFirstAndStopJoinsDuringReplay) {
     o.afterRecordForTest = {};
     int commits = 0;
     o.beforeCommitForTest = [&](const fs::path &) {
-        if (++commits == 2)
+        if (++commits == 1)
             throw std::runtime_error("simulated interruption");
     };
     FlowStore partial(o);
     const auto pass = partial.runPass();
-    EXPECT_EQ(pass.built, 1);
+    EXPECT_EQ(pass.built, 0);
     EXPECT_EQ(pass.failed, 1);
-    EXPECT_FALSE(partial.window("BTC-USD", Epoch + Hour, Epoch + 2 * Hour).building);
-    EXPECT_TRUE(partial.window("BTC-USD", Epoch, Epoch + Hour).building);
+    EXPECT_TRUE(partial.window("BTC-USD", Epoch, Epoch + 2 * Hour).building);
     FlowStore restarted(options());
-    EXPECT_EQ(restarted.runPass().built, 1);
+    EXPECT_EQ(restarted.runPass().built, 2);
 }
 TEST_F(FlowStoreTest, MismatchedCompletionSidecarIsRefusedAndRebuilt) {
     fixture();
@@ -293,13 +333,13 @@ TEST_F(FlowStoreTest, InterruptedSourceRebuildResumesWithSameRevisionGeneration)
     auto o = options();
     int commits = 0;
     o.beforeCommitForTest = [&](const fs::path &) {
-        if (++commits == 2)
+        if (++commits == 1)
             throw std::runtime_error("simulated rebuild interruption");
     };
     FlowStore interrupted(o);
-    EXPECT_EQ(interrupted.runPass().built, 1);
+    EXPECT_EQ(interrupted.runPass().built, 0);
     FlowStore resumed(options());
-    EXPECT_EQ(resumed.runPass().built, 1);
+    EXPECT_EQ(resumed.runPass().built, 2);
     const auto fresh = resumed.window("BTC-USD", Epoch, Epoch + 2 * Hour);
     ASSERT_EQ(fresh.revisions.size(), old.revisions.size());
     for (size_t i = 0; i < fresh.revisions.size(); ++i)
@@ -352,5 +392,147 @@ TEST_F(FlowStoreTest, OpenJournalMustProveReceiveTailBeforePublishing) {
     EXPECT_FALSE(reply.building);
     EXPECT_EQ(reply.bars.size(), 2);
     live.close();
+}
+TEST_F(FlowStoreTest, RecorderGridAndProductScalesMatchLiveModelBytes) {
+    int argc = 1;
+    char name[] = "flow-scale";
+    char *argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    for (const auto &[symbol, baseIncrement, bid, ask, priceScale, tickUnits, price] :
+         {std::tuple<std::string, std::string, std::string, std::string, double, int64_t, double>{
+              "BTC-USD", "0.00000001", "99999", "100001", 100, 50, 100000.5},
+          {"PEPE-USD", "0.01", "0.0009999", "0.0010001", 100'000'000, 10, 0.0010001}}) {
+        const auto caseJournal = journal / symbol;
+        fs::create_directories(caseJournal);
+        Journal j(caseJournal, symbol, baseIncrement, bid, ask);
+        j.snapshot(0);
+        j.trades(1000, {trade(800, "1", price, "BUY", symbol)});
+        j.trades(Minute + 1000, {trade(Minute + 800, "2", price, "SELL", symbol)});
+        j.heartbeat(Hour + Minute + 1);
+        j.close();
+        recordedGrid(symbol, priceScale, tickUnits, price);
+        auto o = options();
+        o.symbols = {symbol};
+        o.journalRoot = caseJournal;
+        through = Epoch + Hour;
+        int replayRecords = 0;
+        o.afterRecordForTest = [&](std::stop_token) { ++replayRecords; };
+        FlowStore store(o);
+        const auto started = std::chrono::steady_clock::now();
+        ASSERT_EQ(store.runPass().built, 1) << symbol;
+        const auto dayMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - started).count();
+        std::cout << "flow-day symbol=" << symbol << " replay_records=" << replayRecords
+                  << " build_ms=" << dayMs << '\n';
+        EXPECT_EQ(replayRecords, 3); // snapshot and two trade frames, once each
+        ServerConfig config;
+        config.recording.enabled = false;
+        config.rollerShadow.enabled = false;
+        config.rollerShadow.products = {symbol};
+        ServerDataModel live(config);
+        FlowLiveTestAccess::stopTimer(live);
+        sentinel::roller::Grid grid;
+        grid.priceScale = priceScale;
+        grid.nearTick = double(tickUnits) / priceScale;
+        live.onFlowGrid(symbol, Epoch, grid,
+                        {{"product_id", symbol}, {"base_increment", baseIncrement}, {"quote_increment", "0.01"}});
+        sentinel::roller::JournalReader reader(caseJournal, symbol);
+        sentinel::roller::JournalFeed feed(symbol);
+        feed.onTrade = [&](const ::Trade &t) { live.onTrade(t); };
+        sentinel::roller::JournalRecord input;
+        while (reader.next(input))
+            feed.apply(input);
+        const auto expected = FlowLiveTestAccess::series(live, symbol, Epoch).builder.bars();
+        const auto actual = store.window(symbol, Epoch, Epoch + Hour);
+        ASSERT_FALSE(actual.building);
+        ASSERT_EQ(actual.bars.size(), expected.size());
+        ASSERT_EQ(actual.bars.size(), 2u);
+        for (size_t i = 0; i < expected.size(); ++i)
+            EXPECT_EQ(flow::encodeFlowBar(flow::decodeFlowBar(flow::encodeFlowBar(actual.bars[i]))),
+                      flow::encodeFlowBar(flow::decodeFlowBar(flow::encodeFlowBar(expected[i]))));
+        EXPECT_EQ(actual.bars.front().nativeTick, grid.nearTick);
+        EXPECT_EQ(actual.bars.front().baseScale, symbol == "PEPE-USD" ? 100 : 100'000'000);
+    }
+}
+TEST_F(FlowStoreTest, ChangedRecorderGridRebuildsDay) {
+    fixture();
+    recordedGrid("BTC-USD", 100, 50, 100000);
+    FlowStore store(options());
+    ASSERT_EQ(store.runPass().built, 2);
+    const auto old = store.window("BTC-USD", Epoch, Epoch + 2 * Hour);
+    ASSERT_FALSE(old.bars.empty());
+    EXPECT_DOUBLE_EQ(old.bars.front().nativeTick, 0.5);
+    recordedGrid("BTC-USD", 100, 25, 100000, 43);
+    EXPECT_EQ(store.runPass().built, 2);
+    const auto fresh = store.window("BTC-USD", Epoch, Epoch + 2 * Hour);
+    ASSERT_FALSE(fresh.bars.empty());
+    EXPECT_DOUBLE_EQ(fresh.bars.front().nativeTick, 0.25);
+    EXPECT_GT(fresh.revisions.front(), old.revisions.front());
+}
+TEST_F(FlowStoreTest, LargeSegmentStopJoinsUnderTwoSeconds) {
+    Journal j(journal);
+    j.snapshot(0);
+    for (int i = 0; i < 30'000; ++i)
+        j.heartbeat(i % (Hour - Minute));
+    j.heartbeat(Hour + Minute + 1);
+    j.close();
+    recordedGrid("BTC-USD", 100, 50, 100000);
+    const auto catalogStart = std::chrono::steady_clock::now();
+    sentinel::roller::JournalReader catalog(journal, "BTC-USD");
+    const auto catalogMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - catalogStart).count();
+    std::cout << "large-segment catalog_ms=" << catalogMs << " files=" << catalog.files().size() << '\n';
+    through = Epoch + Hour;
+    auto o = options();
+    o.lowerPriority = false;
+    std::promise<void> entered;
+    auto ready = entered.get_future();
+    std::atomic<int> records{0};
+    o.afterRecordForTest = [&](std::stop_token stop) {
+        if (++records != 1000)
+            return;
+        entered.set_value();
+        std::mutex mutex;
+        std::condition_variable_any cv;
+        std::unique_lock lock(mutex);
+        cv.wait(lock, stop, [] { return false; });
+    };
+    FlowStore store(o);
+    store.start();
+    ASSERT_EQ(ready.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+    const auto start = std::chrono::steady_clock::now();
+    store.stop();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start).count();
+    std::cout << "large-segment stop_ms=" << ms << " records=" << records << '\n';
+    EXPECT_LT(ms, 2000);
+    EXPECT_FALSE(fs::exists(store.filePath("BTC-USD", Epoch)));
+}
+TEST_F(FlowStoreTest, TornStatePreservesRevisionHintAndScaleVersionRebuilds) {
+    fixture();
+    FlowStore original(options());
+    ASSERT_EQ(original.runPass().built, 2);
+    const auto old = original.window("BTC-USD", Epoch, Epoch + 2 * Hour);
+    auto path = original.filePath("BTC-USD", Epoch);
+    path += ".state";
+    QFile file(QString::fromStdString(path.string()));
+    ASSERT_TRUE(file.open(QIODevice::ReadWrite));
+    ASSERT_TRUE(file.seek(file.size() - 1));
+    ASSERT_EQ(file.write("x", 1), 1);
+    file.close();
+    FlowStore repaired(options());
+    ASSERT_EQ(repaired.runPass().built, 2);
+    const auto newer = repaired.window("BTC-USD", Epoch, Epoch + 2 * Hour);
+    ASSERT_FALSE(newer.revisions.empty());
+    EXPECT_EQ(newer.revisions.front(), old.revisions.front() + 1);
+    ASSERT_TRUE(file.open(QIODevice::ReadWrite));
+    ASSERT_TRUE(file.seek(4));
+    ASSERT_EQ(file.write("\0", 1), 1);
+    file.close();
+    FlowStore versioned(options());
+    ASSERT_EQ(versioned.runPass().built, 2);
+    const auto fresh = versioned.window("BTC-USD", Epoch, Epoch + 2 * Hour);
+    ASSERT_FALSE(fresh.revisions.empty());
+    EXPECT_EQ(fresh.revisions.front(), newer.revisions.front() + 1);
 }
 } // namespace

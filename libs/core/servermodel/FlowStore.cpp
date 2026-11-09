@@ -3,6 +3,8 @@
 #include "PersistenceIo.hpp"
 #include "SentinelLogging.hpp"
 #include "flow/FlowBarBuilder.hpp"
+#include "flow/FlowScales.hpp"
+#include "Hmc2Store.hpp"
 #include "roller/Grid.hpp"
 #include "roller/JournalFeed.hpp"
 #include <QCryptographicHash>
@@ -13,12 +15,9 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
-#if defined(__APPLE__)
-#include <pthread.h>
-#include <sys/qos.h>
-#elif !defined(_WIN32)
-#include <sys/resource.h>
-#endif
+#include <bit>
+#include <cctype>
+#include <set>
 
 namespace recording {
 namespace {
@@ -29,10 +28,12 @@ constexpr int64_t Minute = 60'000, Hour = 60 * Minute, Day = 24 * Hour;
 // Same receive-time tail as JournalTradeEventSource. Buckets use exchange time.
 constexpr int64_t TradeTail = Minute;
 constexpr qint64 MaxDayBytes = 64 * 1024 * 1024;
+constexpr uint8_t ScaleRuleVersion = 1;
 using Fingerprint = std::array<uint8_t, 32>;
 struct StoredDay {
     flow::DayFile day;
     uint32_t hours = 0, revision = 1;
+    Fingerprint gridFingerprint{};
     nlohmann::json sources;
 };
 struct Cancelled {};
@@ -169,12 +170,33 @@ Fingerprint fingerprint(const Sources &sources) {
     std::copy_n(reinterpret_cast<const uint8_t *>(digest.constData()), out.size(), out.begin());
     return out;
 }
-QByteArray completion(const QByteArray &bytes, uint32_t hours, uint32_t revision, const std::string &sources) {
+Fingerprint gridFingerprint(const FlowStore::Options &options, const std::string &symbol, int64_t day,
+                            std::stop_token stop = {}) {
+    const auto dir = options.hmc2Root / symbol / "near-60000";
+    const auto name = QDateTime::fromMSecsSinceEpoch(day, QTimeZone::UTC).toString("yyyy-MM-dd").toStdString();
+    Sources files = Sources::array();
+    std::error_code ec;
+    if (fs::is_directory(dir, ec))
+        for (const auto &entry : fs::directory_iterator(dir)) {
+            checkStop(stop);
+            const auto filename = entry.path().filename().string();
+            if (entry.is_regular_file() &&
+                (filename == name + ".hmc2" || (filename.starts_with(name + ".g") && entry.path().extension() == ".hmc2")))
+                files.push_back({{"path", entry.path().generic_string()}, {"size", entry.file_size()},
+                                 {"mtime", entry.last_write_time().time_since_epoch().count()}});
+        }
+    std::sort(files.begin(), files.end(), [](const auto &a, const auto &b) { return a.at("path") < b.at("path"); });
+    return fingerprint(files);
+}
+QByteArray completion(const QByteArray &bytes, uint32_t hours, uint32_t revision, const Fingerprint &grid,
+                      const std::string &sources) {
     QByteArray state("FLS1", 4);
+    state.append(char(ScaleRuleVersion));
     for (unsigned i = 0; i < 4; ++i)
         state.append(char(hours >> (i * 8)));
     for (unsigned i = 0; i < 4; ++i)
         state.append(char(revision >> (i * 8)));
+    state.append(reinterpret_cast<const char *>(grid.data()), qsizetype(grid.size()));
     state.append(QByteArray::fromStdString(sources));
     QCryptographicHash hash(QCryptographicHash::Sha256);
     hash.addData(state);
@@ -186,15 +208,17 @@ std::optional<StoredDay> loadDay(const fs::path &path, const std::string &symbol
     try {
         const auto bytes = readFile(path, MaxDayBytes);
         const auto state = readFile(path.string() + ".state", MaxDayBytes);
-        if (state.size() < 46)
+        if (state.size() < 79 || uint8_t(state[4]) != ScaleRuleVersion)
             return {};
         uint32_t hours = 0, revision = 0;
         for (unsigned i = 0; i < 4; ++i) {
-            hours |= uint32_t(uint8_t(state[4 + i])) << (i * 8);
-            revision |= uint32_t(uint8_t(state[8 + i])) << (i * 8);
+            hours |= uint32_t(uint8_t(state[5 + i])) << (i * 8);
+            revision |= uint32_t(uint8_t(state[9 + i])) << (i * 8);
         }
-        const auto sourceText = state.mid(12, state.size() - 44).toStdString();
-        if (!hours || hours >> 24 || !revision || state != completion(bytes, hours, revision, sourceText))
+        Fingerprint grid{};
+        std::copy_n(reinterpret_cast<const uint8_t *>(state.constData() + 13), grid.size(), grid.begin());
+        const auto sourceText = state.mid(45, state.size() - 77).toStdString();
+        if (!hours || hours >> 24 || !revision || state != completion(bytes, hours, revision, grid, sourceText))
             return {};
         auto sources = Sources::parse(sourceText);
         auto decoded = flow::decodeFlowDay(spanOf(bytes));
@@ -204,99 +228,179 @@ std::optional<StoredDay> loadDay(const fs::path &path, const std::string &symbol
         for (const auto &bar : decoded.bars)
             if (!(hours & (1u << ((bar.startMs - day) / Hour))))
                 return {};
-        return StoredDay{std::move(decoded), hours, revision, std::move(sources)};
+        return StoredDay{std::move(decoded), hours, revision, grid, std::move(sources)};
     } catch (const std::exception &) {
         return {};
     }
 }
-flow::DayFile dayGrid(const FlowStore::Options &options, const std::string &symbol, int64_t day,
-                      roller::JournalReader &catalog, std::string &sourceBegin, std::stop_token stop) {
-    checkStop(stop);
-    const auto anchor = catalog.anchor(day);
-    sourceBegin = catalog.files().front().path.generic_string();
-    if (anchor)
-        for (const auto &file : catalog.files())
-            if (file.header.at("run_id") == anchor->run &&
-                file.header.at("first_block_ordinal").get<uint64_t>() <= anchor->block)
-                sourceBegin = file.path.generic_string();
-    checkStop(stop);
-    roller::JournalReader reader(options.journalRoot, symbol, anchor);
-    roller::JournalFeed feed(symbol);
-    roller::JournalRecord input;
-    std::optional<roller::Grid> grid;
-    feed.onSnapshot = [&](int64_t, int64_t, std::vector<Level> levels) {
-        double bid = 0, ask = INFINITY;
-        for (const auto &l : levels)
-            if (l.size > 0) {
-                if (l.isBid)
-                    bid = std::max(bid, l.price);
-                else
-                    ask = std::min(ask, l.price);
-            }
-        if (bid > 0 && std::isfinite(ask))
-            grid = roller::deriveGrid(input.metadata, std::midpoint(bid, ask));
-    };
-    while (!grid && reader.next(input)) {
+// A journal start is the first durable record in the last segment opened no
+// later than the run's warmup fence. The reader applies every frame from there.
+std::optional<roller::JournalPos> firstDurable(const roller::JournalReader &catalog, int64_t before,
+                                               std::stop_token stop) {
+    const auto &files = catalog.files();
+    size_t candidate = 0;
+    for (size_t i = 0; i < files.size(); ++i)
+        if (files[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= before)
+            candidate = i;
+    for (size_t i = candidate; i < files.size(); ++i) {
         checkStop(stop);
-        if (input.record.time.systemNs / 1'000'000 >= day + Day)
+        const auto &file = files[i];
+        sentinel::capture::RecordReader probe(QString::fromStdString(file.path.string()), !file.superseded, {},
+                                              [&](const sentinel::capture::BlockIndex &block, const char *reason) {
+                                                  sLog_Warning("Flow start skipped block file="
+                                                               << file.path.string() << " offset=" << block.offset
+                                                               << " reason=" << reason);
+                                              });
+        sentinel::capture::Record record;
+        if (!probe.next(record))
+            continue;
+        checkStop(stop);
+        return roller::JournalPos{file.header.at("product_metadata").at("product_id").get<std::string>(),
+                                  file.header.at("run_id"), probe.result().recordOrdinal, probe.result().recordIndex};
+    }
+    return {};
+}
+std::string sourcePath(const roller::JournalReader &catalog, const roller::JournalPos &start) {
+    std::string path;
+    for (const auto &file : catalog.files())
+        if (file.header.at("run_id") == start.run &&
+            file.header.at("first_block_ordinal").get<uint64_t>() <= start.block)
+            path = file.path.generic_string();
+    if (path.empty())
+        throw std::runtime_error("flow replay cursor has no segment");
+    return path;
+}
+uint32_t revisionHint(const fs::path &path) {
+    QFile file(QString::fromStdString(path.string()));
+    if (!file.open(QIODevice::ReadOnly))
+        return 0;
+    const auto header = file.read(13);
+    if (header.size() != 13 || header.left(4) != "FLS1")
+        return 0;
+    uint32_t revision = 0;
+    for (unsigned i = 0; i < 4; ++i)
+        revision |= uint32_t(uint8_t(header[9 + i])) << (8 * i);
+    return revision;
+}
+flow::FlowScales dayScales(const FlowStore::Options &options, const std::string &symbol, int64_t day,
+                           const roller::JournalReader &catalog, std::stop_token stop) {
+    nlohmann::json metadata;
+    for (const auto &file : catalog.files()) {
+        if (file.header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= day || metadata.is_null())
+            metadata = file.header.at("product_metadata");
+    }
+    const auto hmcDir = options.hmc2Root / symbol / "near-60000";
+    const auto name = QDateTime::fromMSecsSinceEpoch(day, QTimeZone::UTC).toString("yyyy-MM-dd").toStdString();
+    bool hasDay = false;
+    std::error_code ec;
+    if (fs::is_directory(hmcDir, ec))
+        for (const auto &entry : fs::directory_iterator(hmcDir)) {
+            checkStop(stop);
+            const auto filename = entry.path().filename().string();
+            if (entry.is_regular_file() && (filename == name + ".hmc2" || (filename.starts_with(name + ".g") &&
+                                                                           entry.path().extension() == ".hmc2"))) {
+                hasDay = true;
+                break;
+            }
+        }
+    roller::Grid grid;
+    if (hasDay) {
+        Hmc2Reader reader(options.hmc2Root);
+        ReadControl control;
+        control.stop = stop;
+        struct Found {};
+        std::optional<Hmc2Header> header;
+        try {
+            reader.visit(
+                symbol, "near", Minute, day, day + Day,
+                [&](const Hmc2Record &record) {
+                    header = record.header;
+                    throw Found{};
+                },
+                control);
+        } catch (const Found &) {
+        }
+        checkStop(stop);
+        if (!header || control.status == ReadStatus::IoError)
+            throw std::runtime_error("HMC2 day exists without a readable near grid");
+        grid.priceScale = header->priceScale;
+        grid.nearTick = double(header->rowTickUnits) / header->priceScale;
+        grid.sizeFloor = header->sizeScale.floor;
+    } else {
+        sLog_Warning("Flow grid using journal fallback symbol=" << symbol << " day=" << day);
+        const auto start = firstDurable(catalog, day, stop);
+        if (!start)
+            throw std::runtime_error("flow grid fallback has no journal record");
+        roller::JournalReader reader(options.journalRoot, symbol, start);
+        roller::JournalFeed feed(symbol);
+        roller::JournalRecord input;
+        bool ready = false;
+        feed.onSnapshot = [&](int64_t, int64_t, std::vector<Level> levels) {
+            double bid = 0, ask = INFINITY;
+            for (const auto &level : levels)
+                if (level.size > 0) {
+                    if (level.isBid)
+                        bid = std::max(bid, level.price);
+                    else
+                        ask = std::min(ask, level.price);
+                }
+            if (bid > 0 && std::isfinite(ask)) {
+                grid = roller::deriveGrid(input.metadata, std::midpoint(bid, ask));
+                ready = true;
+            }
+        };
+        while (!ready && reader.next(input)) {
+            checkStop(stop);
+            if (input.record.time.systemNs / 1'000'000 >= day + Day)
+                break;
+            feed.apply(input);
+            if (options.afterRecordForTest)
+                options.afterRecordForTest(stop);
+        }
+        if (!ready)
+            throw std::runtime_error("flow grid fallback found no two-sided snapshot");
+    }
+    return flow::flowScales(grid, metadata);
+}
+std::vector<flow::FlowBar> buildRun(const FlowStore::Options &options, const std::string &symbol,
+                                    const flow::FlowScales &scales, int64_t first, int64_t end,
+                                    const roller::JournalPos &start, std::stop_token stop) {
+    checkStop(stop);
+    roller::JournalReader reader(options.journalRoot, symbol, start);
+    roller::JournalFeed feed(symbol);
+    flow::FlowBarBuilder builder(Minute, scales.nativeTick, scales.priceScale, scales.baseScale, scales.quoteScale);
+    flow::Trade trade;
+    trade.id.reserve(UINT16_MAX);
+    feed.onTrade = [&](const ::Trade &value) {
+        const auto ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(value.timestamp.time_since_epoch()).count();
+        if (ms < first || ms >= end)
+            return;
+        if (value.trade_id.size() > UINT16_MAX)
+            throw std::runtime_error("flow trade id exceeds codec limit");
+        trade.id.assign(value.trade_id);
+        trade.exchangeMs = ms;
+        trade.price = value.price;
+        trade.size = value.size;
+        trade.side = value.side == AggressorSide::Buy    ? flow::Side::Buy
+                     : value.side == AggressorSide::Sell ? flow::Side::Sell
+                                                         : flow::Side::Unknown;
+        builder.add(trade);
+    };
+    roller::JournalRecord input;
+    while (reader.next(input)) {
+        checkStop(stop);
+        if (input.record.time.systemNs / 1'000'000 > end + TradeTail)
             break;
         feed.apply(input);
         if (options.afterRecordForTest)
             options.afterRecordForTest(stop);
     }
     checkStop(stop);
-    if (!grid)
-        throw std::runtime_error("no daily grid snapshot");
-    flow::DayFile out;
-    out.product = symbol;
-    out.dayStartMs = day;
-    out.timeframeMs = Minute;
-    out.nativeTick = grid->nearTick;
-    out.priceScale = std::llround(grid->priceScale);
-    out.baseScale = options.baseScale;
-    out.quoteScale = options.quoteScale;
-    return out;
-}
-std::vector<flow::FlowBar> buildHour(const FlowStore::Options &options, const flow::DayFile &day, int64_t hour,
-                                     roller::JournalReader &catalog, std::stop_token stop) {
-    checkStop(stop);
-    const auto anchor = catalog.anchor(hour);
-    checkStop(stop);
-    roller::JournalReader reader(options.journalRoot, day.product, anchor);
-    roller::JournalFeed feed(day.product);
-    flow::FlowBarBuilder builder(Minute, day.nativeTick, day.priceScale, day.baseScale, day.quoteScale);
-    flow::Trade trade; // reuse the adapter's string storage across callbacks
-    // FLB1 strings are u16-sized. Reserve once, so adapting a print never allocates.
-    trade.id.reserve(UINT16_MAX);
-    feed.onTrade = [&](const ::Trade &t) {
-        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t.timestamp.time_since_epoch()).count();
-        if (ms < hour || ms >= hour + Hour)
-            return;
-        if (t.trade_id.size() > UINT16_MAX)
-            throw std::runtime_error("flow trade id exceeds codec limit");
-        trade.id.assign(t.trade_id);
-        trade.exchangeMs = ms;
-        trade.price = t.price;
-        trade.size = t.size;
-        trade.side = t.side == AggressorSide::Buy    ? flow::Side::Buy
-                     : t.side == AggressorSide::Sell ? flow::Side::Sell
-                                                     : flow::Side::Unknown;
-        builder.add(trade);
-    };
-    roller::JournalRecord input;
-    while (reader.next(input)) {
-        checkStop(stop);
-        if (input.record.time.systemNs / 1'000'000 > hour + Hour + TradeTail)
-            break;
-        feed.apply(input); // All channels: sequence identity and reconnect dedupe need every frame.
-        if (options.afterRecordForTest)
-            options.afterRecordForTest(stop);
-    }
-    checkStop(stop);
     if (reader.damaged())
-        throw std::runtime_error("damaged journal in flow hour");
+        throw std::runtime_error("damaged journal in flow run");
     if (builder.rejectedCount())
-        sLog_Warning("Flow rejected trades symbol=" << day.product << " hour=" << hour
+        sLog_Warning("Flow rejected trades symbol=" << symbol << " start=" << first
                                                     << " count=" << builder.rejectedCount());
     return builder.bars();
 }
@@ -321,7 +425,8 @@ void atomicFile(const fs::path &path, const QByteArray &bytes) {
 }
 } // namespace
 
-fs::path flowRootFor(const std::string &configured, const fs::path &hmc2Root, const fs::path &journalRoot) {
+fs::path flowRootFor(const std::string &configured, const fs::path &hmc2Root, const fs::path &journalRoot,
+                     const fs::path &rollupRoot, const std::vector<fs::path> &protectedRoots) {
     if (hmc2Root.empty() || journalRoot.empty())
         return {};
     try {
@@ -332,16 +437,22 @@ fs::path flowRootFor(const std::string &configured, const fs::path &hmc2Root, co
         const auto root = rollupRootFor(configuredRoot, hmc2Root);
         if (root.empty() || rollupRootFor(root.string(), journalRoot).empty())
             return {};
+        const auto rollup = rollupRoot.empty() ? rollupRootFor("", hmc2Root) : rollupRoot;
+        if (rollup.empty() || rollupRootFor(root.string(), rollup).empty())
+            return {};
+        for (const auto &protectedRoot : protectedRoots)
+            if (!protectedRoot.empty() && rollupRootFor(root.string(), protectedRoot).empty())
+                return {};
         return root;
     } catch (const fs::filesystem_error &) {
         return {};
     }
 }
 FlowStore::FlowStore(Options options) : options_(std::move(options)) {
-    options_.root = flowRootFor(options_.root.string(), options_.hmc2Root, options_.journalRoot);
-    if (options_.root.empty() || !options_.hourThrough || options_.rescan.count() <= 0 || options_.baseScale <= 0 ||
-        options_.quoteScale <= 0)
-        throw std::invalid_argument("flow store needs disjoint roots, scales and an hour watermark");
+    options_.root = flowRootFor(options_.root.string(), options_.hmc2Root, options_.journalRoot, options_.rollupRoot,
+                                options_.protectedRoots);
+    if (options_.root.empty() || !options_.hourThrough || options_.rescan.count() <= 0)
+        throw std::invalid_argument("flow store needs disjoint roots and an hour watermark");
     for (const auto &symbol : options_.symbols)
         sentinel::capture::validateSymbol(symbol);
 }
@@ -368,13 +479,7 @@ void FlowStore::wake() {
 void FlowStore::builderLoop(std::stop_token stop) {
     try {
         sentinel::logging::setCurrentThreadName("flow-builder");
-#if defined(__APPLE__)
-        const bool lowered = pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0) == 0;
-#elif defined(_WIN32)
-        const bool lowered = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) != 0;
-#else
-        const bool lowered = setpriority(PRIO_PROCESS, 0, 19) == 0;
-#endif
+        const bool lowered = !options_.lowerPriority || lowerThreadPriority();
         if (!lowered)
             sLog_Warning("Flow builder could not lower thread priority");
         sLog_Data("Flow builder started root=" << options_.root.string() << " symbols=" << options_.symbols.size());
@@ -407,7 +512,8 @@ bool FlowStore::ownedPath(const fs::path &path) const {
     if (relative.empty() || *relative.begin() == "..")
         return false;
     // Recheck canonical roots as well as every descendant before reads/writes.
-    if (flowRootFor(options_.root.string(), options_.hmc2Root, options_.journalRoot) != options_.root)
+    if (flowRootFor(options_.root.string(), options_.hmc2Root, options_.journalRoot, options_.rollupRoot,
+                    options_.protectedRoots) != options_.root)
         return false;
     fs::path at = options_.root;
     if (fs::is_symlink(fs::symlink_status(at)))
@@ -419,7 +525,70 @@ bool FlowStore::ownedPath(const fs::path &path) const {
     }
     return true;
 }
-void FlowStore::writeDay(const flow::DayFile &day, uint32_t hours, uint32_t revision, const std::string &sources,
+FlowStore::FileIdentity FlowStore::stamp(const fs::path &path) {
+    std::error_code ec;
+    const auto status = fs::symlink_status(path, ec);
+    if (ec == std::errc::no_such_file_or_directory || status.type() == fs::file_type::not_found)
+        return {};
+    if (ec || !fs::is_regular_file(status))
+        throw std::runtime_error("invalid flow file: " + path.string());
+    FileIdentity result;
+    result.present = true;
+    result.size = fs::file_size(path);
+    result.modified = fs::last_write_time(path);
+    return result;
+}
+FlowStore::DayIndex FlowStore::loadIndex(const std::string &symbol, int64_t day) const {
+    const auto path = filePath(symbol, day);
+    if (!ownedPath(path) || !ownedPath(path.string() + ".state"))
+        throw std::runtime_error("unsafe flow path");
+    DayIndex result;
+    result.file = stamp(path);
+    result.state = stamp(path.string() + ".state");
+    if (auto stored = loadDay(path, symbol, day)) {
+        result.hours = stored->hours;
+        result.revision = stored->revision;
+        result.sources = stored->sources.dump();
+        result.fingerprint = stored->day.sourceFingerprint;
+        result.gridFingerprint = stored->gridFingerprint;
+        result.valid = true;
+        for (const auto &source : stored->sources)
+            result.sourcePaths.emplace_back(source.at("path").get<std::string>());
+    } else if (result.state.present) {
+        result.revision = revisionHint(path.string() + ".state");
+    }
+    return result;
+}
+FlowStore::DayIndex FlowStore::indexFor(const std::string &symbol, int64_t day) {
+    const auto key = std::pair{symbol, day};
+    {
+        std::lock_guard lock(indexMutex_);
+        if (auto it = index_.find(key); it != index_.end())
+            return it->second;
+    }
+    auto loaded = loadIndex(symbol, day);
+    std::lock_guard lock(indexMutex_);
+    return index_.try_emplace(key, std::move(loaded)).first->second;
+}
+void FlowStore::publishIndex(const std::string &symbol, int64_t day, const DayIndex &index) {
+    std::lock_guard lock(indexMutex_);
+    index_[{symbol, day}] = index;
+}
+std::map<fs::path, FlowStore::FileIdentity> FlowStore::inventory(const std::string &symbol,
+                                                                 std::stop_token stop) const {
+    fs::path dir = options_.journalRoot / symbol;
+    if (!fs::is_directory(dir))
+        dir = options_.journalRoot;
+    std::map<fs::path, FileIdentity> result;
+    for (fs::recursive_directory_iterator it(dir), end; it != end; ++it) {
+        checkStop(stop);
+        if (it->path().extension() == ".rawl2" && it->is_regular_file())
+            result.emplace(it->path(), stamp(it->path()));
+    }
+    return result;
+}
+void FlowStore::writeDay(const flow::DayFile &day, uint32_t hours, uint32_t revision, const Fingerprint &grid,
+                         const std::string &sources,
                          std::stop_token stop) {
     const auto path = filePath(day.product, day.dayStartMs);
     if (!ownedPath(path) || !ownedPath(path.string() + ".state"))
@@ -444,7 +613,7 @@ void FlowStore::writeDay(const flow::DayFile &day, uint32_t hours, uint32_t revi
         throw std::runtime_error("unsafe flow path");
     atomicFile(path, bytes);
     // A crash between renames leaves a mismatched digest: readers refuse it and rebuild.
-    atomicFile(path.string() + ".state", completion(bytes, hours, revision, sources));
+    atomicFile(path.string() + ".state", completion(bytes, hours, revision, grid, sources));
 }
 FlowStore::PassResult FlowStore::runPass(std::stop_token stop) {
     std::lock_guard lock(passMutex_);
@@ -469,81 +638,197 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
     const auto through = options_.hourThrough(symbol) / Hour * Hour;
     if (through <= 0)
         return;
-    roller::JournalReader catalog(options_.journalRoot, symbol);
-    int64_t first = through;
-    for (const auto &f : catalog.files())
-        first = std::min(first, f.header.at("opened_system_ns").get<int64_t>() / 1'000'000);
-    first = std::max<int64_t>(0, first / Hour * Hour);
+    const auto currentFiles = inventory(symbol, stop);
+    std::vector<fs::path> changed;
+    std::set<fs::path> added;
+    auto &prior = journalInventory_[symbol];
+    for (const auto &[path, identity] : currentFiles) {
+        const auto it = prior.find(path);
+        if (it == prior.end()) {
+            changed.push_back(path);
+            added.insert(path);
+        } else if (it->second != identity)
+            changed.push_back(path);
+    }
+    for (const auto &[path, _] : prior)
+        if (!currentFiles.contains(path))
+            changed.push_back(path);
+    prior = currentFiles;
+    std::unique_ptr<roller::JournalReader> catalog;
+    auto getCatalog = [&]() -> roller::JournalReader & {
+        if (!catalog)
+            catalog = std::make_unique<roller::JournalReader>(options_.journalRoot, symbol);
+        return *catalog;
+    };
+    if (!firstHour_.contains(symbol) || !changed.empty()) {
+        auto &files = getCatalog().files();
+        int64_t first = through;
+        for (const auto &file : files)
+            first = std::min(first, file.header.at("opened_system_ns").get<int64_t>() / 1'000'000);
+        firstHour_[symbol] = std::max<int64_t>(0, first / Hour * Hour);
+    }
+    const auto first = firstHour_.at(symbol);
+    auto potentiallyChanged = [&](const DayIndex &index, int64_t day) {
+        for (const auto &path : changed) {
+            if (std::find(index.sourcePaths.begin(), index.sourcePaths.end(), path) != index.sourcePaths.end())
+                return true;
+            // A newly discovered segment on this UTC date can change a day's
+            // journal window, including a previous empty hour.
+            if (!added.contains(path))
+                continue;
+            const auto parentDay = path.parent_path().filename().string();
+            if (parentDay.size() == 2 && std::all_of(parentDay.begin(), parentDay.end(), ::isdigit)) {
+                auto date = path.parent_path();
+                const auto dateText = date.parent_path().parent_path().filename().string() + "-" +
+                                      date.parent_path().filename().string() + "-" + date.filename().string();
+                const auto parsed = QDate::fromString(QString::fromStdString(dateText), "yyyy-MM-dd");
+                if (parsed.isValid() && parsed.startOfDay(QTimeZone::UTC).toMSecsSinceEpoch() <= day)
+                    return true;
+            }
+        }
+        return false;
+    };
     for (auto day = dayFloor(through - 1); day >= dayFloor(first); day -= Day) {
         checkStop(stop);
         const auto path = filePath(symbol, day);
-        if (!ownedPath(path) || !ownedPath(path.string() + ".state"))
-            throw std::runtime_error("unsafe flow path");
-        auto old = loadDay(path, symbol, day);
-        const auto wanted = [&](int64_t hour) { return hour >= first && hour + Hour <= through; };
-        uint32_t hours = 0, revision = 1;
-        flow::DayFile data;
-        std::string sourceBegin;
-        if (old && sourcesMatch(old->sources, catalog, sourceCutoff(day, old->hours), stop) &&
-            old->day.baseScale == options_.baseScale && old->day.quoteScale == options_.quoteScale) {
-            hours = old->hours;
-            revision = old->revision;
-            data = std::move(old->day);
-            sourceBegin = old->sources.front().at("path").get<std::string>();
-        } else {
-            if (old) {
-                if (old->revision == UINT32_MAX)
-                    throw std::runtime_error("flow revision exhausted");
-                revision = old->revision + 1;
-            }
-            data = dayGrid(options_, symbol, day, catalog, sourceBegin, stop);
+        auto index = indexFor(symbol, day);
+        if (stamp(path) != index.file || stamp(path.string() + ".state") != index.state) {
+            index = loadIndex(symbol, day);
+            publishIndex(symbol, day, index);
         }
-        for (int h = 23; h >= 0; --h) {
-            const auto hour = day + h * Hour;
-            if (!wanted(hour) || (hours & (1u << h)))
+        const auto grid = gridFingerprint(options_, symbol, day, stop);
+        bool sourceChanged = index.valid && (potentiallyChanged(index, day) || index.gridFingerprint != grid);
+        if (sourceChanged) {
+            index = loadIndex(symbol, day); // only reload the FLD1 pair on an observed source change
+            publishIndex(symbol, day, index);
+            sourceChanged = !index.valid || index.gridFingerprint != grid ||
+                            !sourcesMatch(Sources::parse(index.sources), getCatalog(),
+                                          sourceCutoff(day, index.hours), stop);
+        }
+        uint32_t wanted = 0;
+        for (int h = 0; h < 24; ++h)
+            if (day + h * Hour >= first && day + (h + 1) * Hour <= through)
+                wanted |= 1u << h;
+        if (!sourceChanged && (index.hours & wanted) == wanted) {
+            if (day == 0)
+                break;
+            continue;
+        }
+        auto &files = getCatalog();
+        uint32_t hours = sourceChanged ? 0 : index.hours;
+        uint32_t revision = index.revision ? index.revision : 1;
+        if (sourceChanged || (!index.valid && index.revision)) {
+            if (revision == UINT32_MAX)
+                throw std::runtime_error("flow revision exhausted");
+            ++revision;
+        }
+        flow::DayFile data;
+        if (hours) {
+            auto existing = loadDay(path, symbol, day);
+            if (!existing) {
+                hours = 0;
+                if (index.revision == UINT32_MAX)
+                    throw std::runtime_error("flow revision exhausted");
+                revision = std::max<uint32_t>(revision, index.revision + 1);
+            } else
+                data = std::move(existing->day);
+        }
+        auto scales = dayScales(options_, symbol, day, files, stop);
+        if (hours && (data.nativeTick != scales.nativeTick || data.priceScale != scales.priceScale ||
+                      data.baseScale != scales.baseScale || data.quoteScale != scales.quoteScale)) {
+            hours = 0;
+            if (revision == UINT32_MAX)
+                throw std::runtime_error("flow revision exhausted");
+            ++revision;
+        }
+        if (!hours) {
+            data = {};
+            data.product = symbol;
+            data.dayStartMs = day;
+            data.timeframeMs = Minute;
+            data.nativeTick = scales.nativeTick;
+            data.priceScale = scales.priceScale;
+            data.baseScale = scales.baseScale;
+            data.quoteScale = scales.quoteScale;
+        }
+        for (int high = 23; high >= 0;) {
+            if (!(wanted & (1u << high)) || (hours & (1u << high))) {
+                --high;
                 continue;
-            checkStop(stop);
-            const auto started = std::chrono::steady_clock::now();
-            const auto nextHours = hours | (1u << h);
-            Sources sources;
-            try {
-                sources = snapshotSources(catalog, sourceCutoff(day, nextHours), sourceBegin, stop);
-            } catch (const NotReady &) {
-                continue;
-            } // Wait for the durable receive tail; still backfill older hours.
-            auto bars = buildHour(options_, data, hour, catalog, stop);
-            // Re-discover too: a segment added during replay must invalidate the snapshot.
-            roller::JournalReader current(options_.journalRoot, symbol);
-            if (!sourcesMatch(sources, current, sourceCutoff(day, nextHours), stop))
-                return;
-            data.sourceFingerprint = fingerprint(sources);
-            if (options_.hourThrough(symbol) < hour + Hour)
-                return;
-            const auto count = bars.size();
-            data.bars.insert(data.bars.begin(), std::make_move_iterator(bars.begin()),
-                             std::make_move_iterator(bars.end()));
-            data.revisions.insert(data.revisions.begin(), count, revision);
-            hours |= 1u << h;
-            // Existing completed hours may be earlier than newly sealed ones.
-            std::vector<size_t> order(data.bars.size());
-            std::iota(order.begin(), order.end(), 0);
-            std::sort(order.begin(), order.end(),
-                      [&](size_t a, size_t b) { return data.bars[a].startMs < data.bars[b].startMs; });
-            auto unordered = std::move(data.bars);
-            auto revisions = std::move(data.revisions);
-            data.bars.clear();
-            data.revisions.clear();
-            for (auto i : order) {
-                data.bars.push_back(std::move(unordered[i]));
-                data.revisions.push_back(revisions[i]);
             }
-            writeDay(data, hours, revision, sources.dump(), stop);
-            ++result.built;
-            const auto ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
-                    .count();
-            sLog_Probe("flow.store", "symbol=" << symbol << " hour=" << hour << " bars=" << count << " ms=" << ms);
-            sLog_Data("Flow hour built symbol=" << symbol << " hour=" << hour << " bars=" << count << " ms=" << ms);
+            int low = high;
+            while (low > 0 && (wanted & (1u << (low - 1))) && !(hours & (1u << (low - 1))))
+                --low;
+            bool built = false;
+            for (int endHour = high; endHour >= low && !built; --endHour) {
+                const auto runFirst = day + low * Hour, runEnd = day + (endHour + 1) * Hour;
+                const auto start = firstDurable(files, runFirst - TradeTail, stop);
+                if (!start)
+                    continue;
+                const auto startPath = sourcePath(files, *start);
+                std::string sourceBegin = startPath;
+                if (hours) {
+                    const auto oldSources = Sources::parse(index.sources);
+                    const auto oldPath = oldSources.front().at("path").get<std::string>();
+                    const auto &listed = files.files();
+                    auto position = [&](const std::string &p) {
+                        return std::find_if(listed.begin(), listed.end(),
+                                            [&](const auto &f) { return f.path.generic_string() == p; }) -
+                               listed.begin();
+                    };
+                    if (position(oldPath) < position(startPath))
+                        sourceBegin = oldPath;
+                }
+                const auto nextHours = hours | (((1u << (endHour - low + 1)) - 1) << low);
+                Sources sources;
+                try {
+                    sources = snapshotSources(files, sourceCutoff(day, nextHours), sourceBegin, stop);
+                } catch (const NotReady &) {
+                    continue;
+                }
+                const auto started = std::chrono::steady_clock::now();
+                auto bars = buildRun(options_, symbol, scales, runFirst, runEnd, *start, stop);
+                roller::JournalReader current(options_.journalRoot, symbol);
+                if (!sourcesMatch(sources, current, sourceCutoff(day, nextHours), stop))
+                    return;
+                if (gridFingerprint(options_, symbol, day, stop) != grid)
+                    return;
+                if (options_.hourThrough(symbol) < runEnd)
+                    return;
+                data.bars.insert(data.bars.end(), std::make_move_iterator(bars.begin()),
+                                 std::make_move_iterator(bars.end()));
+                data.revisions.insert(data.revisions.end(), bars.size(), revision);
+                std::vector<size_t> order(data.bars.size());
+                std::iota(order.begin(), order.end(), 0);
+                std::sort(order.begin(), order.end(),
+                          [&](size_t a, size_t b) { return data.bars[a].startMs < data.bars[b].startMs; });
+                auto unsorted = std::move(data.bars);
+                auto revisions = std::move(data.revisions);
+                data.bars.clear();
+                data.revisions.clear();
+                for (auto i : order) {
+                    data.bars.push_back(std::move(unsorted[i]));
+                    data.revisions.push_back(revisions[i]);
+                }
+                hours = nextHours;
+                data.sourceFingerprint = fingerprint(sources);
+                writeDay(data, hours, revision, grid, sources.dump(), stop);
+                auto fresh = loadIndex(symbol, day);
+                publishIndex(symbol, day, fresh);
+                index = std::move(fresh);
+                result.built += endHour - low + 1;
+                const auto ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
+                        .count();
+                sLog_Data("Flow run built symbol=" << symbol << " hour=" << runFirst << " hours=" << (endHour - low + 1)
+                                                   << " bars=" << bars.size() << " ms=" << ms);
+                sLog_Probe("flow.store",
+                           "symbol=" << symbol << " hour=" << runFirst << " bars=" << bars.size() << " ms=" << ms);
+                high = low - 1;
+                built = true;
+            }
+            if (!built)
+                high = low - 1;
         }
         if (day == 0)
             break;
@@ -554,40 +839,65 @@ FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int6
     if (from < 0 || to <= from || from % Minute || to % Minute || to > INT64_MAX - Day - TradeTail)
         throw std::invalid_argument("invalid flow minute window");
     Reply reply;
+    bool missingSealed = false;
+    bool sealedRequested = false;
     try {
         const auto through = options_.hourThrough(symbol);
-        roller::JournalReader catalog(options_.journalRoot, symbol);
         for (auto day = dayFloor(from); day < to; day += Day) {
             const auto path = filePath(symbol, day);
-            auto stored =
-                ownedPath(path) && ownedPath(path.string() + ".state") ? loadDay(path, symbol, day) : std::nullopt;
-            if (!stored || !sourcesMatch(stored->sources, catalog, sourceCutoff(day, stored->hours)) ||
-                stored->day.baseScale != options_.baseScale || stored->day.quoteScale != options_.quoteScale) {
+            const auto index = indexFor(symbol, day);
+            uint32_t required = 0;
+            for (auto hour = std::max(day, from / Hour * Hour); hour < std::min(day + Day, to); hour += Hour) {
+                if (hour + Hour > through)
+                    reply.building = true;
+                else
+                    required |= 1u << ((hour - day) / Hour);
+            }
+            sealedRequested |= required != 0;
+            if (!index.valid || stamp(path) != index.file || stamp(path.string() + ".state") != index.state) {
                 reply.building = true;
+                missingSealed |= required != 0;
                 continue;
             }
-            const auto &data = stored->day;
-            for (auto hour = std::max(day, from / Hour * Hour); hour < std::min(day + Day, to); hour += Hour)
-                if (hour + Hour > through || !(stored->hours & (1u << ((hour - day) / Hour))))
-                    reply.building = true;
+            const auto absent = required & ~index.hours;
+            if (absent) {
+                reply.building = true;
+                missingSealed = true;
+            }
+            const auto bytes = readFile(path, MaxDayBytes);
+            auto data = flow::decodeFlowDay(spanOf(bytes));
+            if (data.product != symbol || data.dayStartMs != day || data.sourceFingerprint != index.fingerprint)
+                throw std::runtime_error("flow indexed file changed");
             for (size_t i = 0; i < data.bars.size(); ++i) {
                 const auto &bar = data.bars[i];
-                if (bar.startMs >= from && bar.startMs < to && bar.startMs / Hour * Hour + Hour <= through) {
+                if (bar.startMs >= from && bar.startMs < to && bar.startMs / Hour * Hour + Hour <= through &&
+                    (index.hours & (1u << ((bar.startMs - day) / Hour)))) {
                     reply.bars.push_back(bar);
                     reply.revisions.push_back(data.revisions[i]);
                 }
             }
         }
-    } catch (const roller::NoJournalFiles &) {
-        reply.building = true;
     } catch (const std::exception &e) {
         reply.bars.clear();
         reply.revisions.clear();
         reply.building = true;
+        missingSealed = sealedRequested;
         sLog_Warning("Flow read failed symbol=" << symbol << " error=" << e.what());
     }
-    if (reply.building)
-        wake();
+    if (missingSealed) {
+        const auto now = std::chrono::steady_clock::now();
+        bool send = false;
+        {
+            std::lock_guard lock(wakeMutex_);
+            if (lastWindowWake_ == std::chrono::steady_clock::time_point{} ||
+                now - lastWindowWake_ >= std::chrono::seconds(10)) {
+                lastWindowWake_ = now;
+                send = true;
+            }
+        }
+        if (send)
+            wake();
+    }
     return reply;
 }
 } // namespace recording

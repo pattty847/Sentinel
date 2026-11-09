@@ -27,6 +27,8 @@
 #include <thread>
 
 namespace recording {
+// Shared low-priority builder policy for rollup and flow stores.
+bool lowerThreadPriority();
 // One closed UTC day of a series composed from its minutes: `hour` is the 1h
 // level over [day, day + 1d); `day` the single 1d bucket over the same range.
 struct DayRollup {

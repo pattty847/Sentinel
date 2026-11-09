@@ -225,6 +225,10 @@ bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
                 options.hmc2Root = shadow.outputRoot;
                 options.journalRoot = shadow.journalRoot;
                 options.root = m_serverConfig.recording.flowDir;
+                options.rollupRoot = recording::rollupRootFor(m_serverConfig.recording.rollupDir,
+                                                              shadow.outputRoot);
+                for (const auto& protectedRoot : shadow.protectedRoots)
+                    options.protectedRoots.push_back(protectedRoot);
                 options.symbols = products;
                 options.hourThrough = [roller](const std::string& product) {
                     return std::max(roller->watermarks(product, "near").hourThroughMs,
