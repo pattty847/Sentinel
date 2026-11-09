@@ -1,6 +1,7 @@
 #pragma once
 #include <QObject>
 #include "roller/ShadowRoller.hpp"
+#include "servermodel/FlowStore.hpp"
 #include <memory>
 #include "../../libs/core/marketdata/auth/Authenticator.hpp"
 #include "../../libs/core/servermodel/ServerDataModel.hpp"
@@ -39,6 +40,7 @@ private:
     std::unique_ptr<ServerDataModel> m_serverModel;
     std::unique_ptr<SentinelStreamServer> m_server;
     std::unique_ptr<sentinel::roller::ShadowRoller> m_shadowRoller;
+    std::unique_ptr<recording::FlowStore> m_flowStore;
     // Declared last: destroyed first, so no scrape renders a destroyed component.
     std::unique_ptr<sentinel::metrics::MetricsHttpServer> m_httpServer;
 };

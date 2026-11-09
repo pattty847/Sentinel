@@ -83,6 +83,9 @@ struct ServerRecordingConfig {
     // Derived 1h/1d rollup store (recording.rollup_dir). Empty: "<roller_shadow.dir>-rollups",
     // a sibling of the HMC2 tree. Never inside it. Safe to delete: the server rebuilds it.
     std::string rollupDir;
+    // Derived journal-built 1m flow bars; empty: "<roller_shadow.dir>-flow".
+    // Must be disjoint from both the HMC2 and RAWL2 trees.
+    std::string flowDir;
     double priceScale = 100.0;        // price units per 1.0 quote (0.01 increment)
     double sizeFloor = 1e-6;
     double codesPerOctave = 819.0;
