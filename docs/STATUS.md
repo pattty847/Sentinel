@@ -31,6 +31,8 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 - `lt-astra/flow-history` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-flow-history`): plan S3b. Tip `5cefc891` (store attached at startup; `source` store|live; final = bucket_end <= sealed_through_ms; partially sealed coarse bars provisional live complete=false). Opus review FAIL (2 major: hourly store/live seam hole; uncancellable, uncapped-cost 1 s journal replay on the shared history pool). Fix round 1 sent 2026-11-09 (packet `astra-s3b-fix1.txt`; also owns S3a retention + the store wake). Writer gpt-6-astra thread `01a1bf84-c80c-7da0-b45c-d5707f89449e`, reviewer Claude Opus. MEDIUM.
 
+- `lt-astra/bubble-placement` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-bubble-placement`): plan S8a, from `7d209c3e`. Writer gpt-6-astra (high) dispatched 2026-11-09 (packet `astra-s8a.txt`): setting `bubblePlacement` individual|auto|slot (default individual), sweep capsules, auto size reference, tradeMinNotional auto. Reviewer Claude Opus. MEDIUM.
+
 Lab branches that never land: `lt-astra/hmc2-rollup-lab`, `lt-claude/hmc2-layout-lab` (results in `/Volumes/T7/sentinel-datalab/hmc2-*`).
 
 ## Waiting on the owner
