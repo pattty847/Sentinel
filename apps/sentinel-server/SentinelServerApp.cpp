@@ -44,6 +44,7 @@ SentinelServerApp::~SentinelServerApp() {
     if (m_server) {
         m_server->stop();
     }
+    if (m_flowStore) m_flowStore->stop();
     if (m_serverModel) m_serverModel->setReseedHandler({});
 }
 
@@ -216,6 +217,28 @@ bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
                     return roller->watermarks(product, layer);
                 },
                 [roller](const std::string& product) { return roller->running(product); });
+        }
+        if (serving && m_shadowRoller->active()) {
+            try {
+                auto* roller = m_shadowRoller.get();
+                recording::FlowStore::Options options;
+                options.hmc2Root = shadow.outputRoot;
+                options.journalRoot = shadow.journalRoot;
+                options.root = m_serverConfig.recording.flowDir;
+                options.rollupRoot = recording::rollupRootFor(m_serverConfig.recording.rollupDir,
+                                                              shadow.outputRoot);
+                for (const auto& protectedRoot : shadow.protectedRoots)
+                    options.protectedRoots.push_back(protectedRoot);
+                options.symbols = products;
+                options.hourThrough = [roller](const std::string& product) {
+                    return std::max(roller->watermarks(product, "near").hourThroughMs,
+                                    roller->watermarks(product, "deep").hourThroughMs);
+                };
+                m_flowStore = std::make_unique<recording::FlowStore>(std::move(options));
+                m_flowStore->start();
+            } catch (const std::exception& e) {
+                sLog_Error("Flow store unavailable error=" << e.what());
+            }
         }
         {
             if (!m_shadowRoller->active()) throw std::runtime_error("the journal live feed needs the roller");

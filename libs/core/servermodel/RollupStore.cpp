@@ -110,16 +110,6 @@ std::optional<RollupFileHeader> parseHeader(std::span<const uint8_t> bytes, uint
         return std::nullopt;
     return h;
 }
-// True when the calling thread now runs at background priority.
-bool lowerThreadPriority() {
-#if defined(__APPLE__)
-    return pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0) == 0; // CPU and I/O throttled
-#elif defined(_WIN32)
-    return SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) != 0;
-#else
-    return setpriority(PRIO_PROCESS, 0, 19) == 0; // the calling thread on Linux
-#endif
-}
 // Makes a rename durable (POSIX); best effort elsewhere.
 void syncDirectory(const std::filesystem::path& dir) {
 #if !defined(_WIN32)
@@ -173,6 +163,16 @@ std::string sourceFor(const std::string& layer) {
 }
 } // namespace
 
+// True when the calling thread now runs at background priority.
+bool lowerThreadPriority() {
+#if defined(__APPLE__)
+    return pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0) == 0; // CPU and I/O throttled
+#elif defined(_WIN32)
+    return SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) != 0;
+#else
+    return setpriority(PRIO_PROCESS, 0, 19) == 0; // the calling thread on Linux
+#endif
+}
 DayRollup composeDay(Hmc2Reader& reader, const std::string& symbol, const std::string& layer, int64_t dayMs,
                      ReadControl& control) {
     if (dayMs % kDayMs) throw std::invalid_argument("rollup day must be a UTC day start");
