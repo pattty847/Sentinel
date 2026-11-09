@@ -90,12 +90,13 @@ std::span<const Bubble> Layout::build(Samples trades, const TimeAxisMapping& map
         const double x = map.timeToScreenX(t.timeMs), y = map.priceToScreenY(t.price);
         const double lowY = map.priceToScreenY(t.maxPrice), highY = map.priceToScreenY(t.minPrice);
         if (!std::isfinite(float(x)) || !std::isfinite(float(y)) || !std::isfinite(float(lowY)) || !std::isfinite(float(highY))) continue;
-        points_[pointCount++] = {x, y, t.notional, lowY, highY, t.moving ? 1.0 : 0.35, t.aggregate, AggressorSide(t.side)};
+        points_[pointCount++] = {x, y, t.notional, lowY, highY, t.moving ? 1.0 : 0.35, t.radiusCap, t.aggregate, AggressorSide(t.side)};
         maxX = std::max(maxX, x-map.drawRect.x());
         maxY = std::max(maxY, y-map.drawRect.y());
     }
     const auto appendBubble = [&](const Point& p) {
-        bubbles_[count_++] = {float(p.x), float(p.y), float(radius(p.notional, p.aggregate ? options.reference.aggregateP95 : options.reference.p95)), p.side,
+        const double reference = options.mode == chart::bubbles::Mode::Slot ? options.reference.aggregateP95 : options.reference.p95;
+        bubbles_[count_++] = {float(p.x), float(p.y), float(std::min(p.radiusCap, radius(p.notional, reference))), p.side,
                              float(p.minY), float(p.maxY), float(p.opacity), p.notional};
     };
     if (pointCount <= MaxBubbles) {
@@ -118,6 +119,7 @@ std::span<const Bubble> Layout::build(Samples trades, const TimeAxisMapping& map
             dst.minY = dst.y - halfExtent;
             dst.maxY = dst.y + halfExtent;
             dst.opacity = std::max(dst.opacity, src.opacity);
+            dst.radiusCap = MaxRadius;
             dst.aggregate = dst.aggregate || src.aggregate;
             dst.notional = total;
         };

@@ -1870,6 +1870,9 @@ TEST(TradeBubbleControls, GuiIngestionKeepsHiddenSessionTradesAndIsolatesSymbols
     EXPECT_EQ(TradeBubbleRendererTest::referenceUpdates(renderer), updates); // outside the window
     mapping.viewStartMs += 1000; mapping.viewEndMs += 1000;
     TradeBubbleRendererTest::publish(renderer, mapping);
+    EXPECT_EQ(TradeBubbleRendererTest::referenceUpdates(renderer), updates);
+    QTest::qWait(260);
+    TradeBubbleRendererTest::publish(renderer, mapping);
     EXPECT_NEAR(frame->options.reference.p95, 430.539, .01);
     EXPECT_EQ(TradeBubbleRendererTest::referenceUpdates(renderer), updates + 1);
     renderer.view()->setTimeframe(300000);
@@ -1931,12 +1934,12 @@ TEST(TradeBubbleControls, DialogPlacementAndMinimumPersistAndResetWithChartTab) 
     EXPECT_FALSE(minimum->isEnabled());
     auto* minimumMode = dialog.findChild<QComboBox*>("tradeMinNotionalMode");
     ASSERT_NE(minimumMode,nullptr);
-    EXPECT_EQ(minimumMode->currentData().toInt(), -1);
+    EXPECT_EQ(minimumMode->currentData().toInt(), 0);
     placement->setCurrentIndex(placement->findData("slot"));
     minimumMode->setCurrentIndex(1);
-    EXPECT_EQ(model.settings().tradeMinNotional,0);
-    minimumMode->setCurrentIndex(0);
     EXPECT_EQ(model.settings().tradeMinNotional,-1);
+    minimumMode->setCurrentIndex(0);
+    EXPECT_EQ(model.settings().tradeMinNotional,0);
     minimumMode->setCurrentIndex(2);
     minimum->setValue(1234);
     EXPECT_EQ(t.reload().bubblePlacement, "slot");
@@ -1946,7 +1949,7 @@ TEST(TradeBubbleControls, DialogPlacementAndMinimumPersistAndResetWithChartTab) 
     EXPECT_EQ(minimum->value(), 4321);
     ASSERT_TRUE(model.resetKeys(HeatmapSettingsDialog::tabKeys("Chart")).isEmpty());
     EXPECT_EQ(t.reload().bubblePlacement, "individual");
-    EXPECT_EQ(t.reload().tradeMinNotional, -1);
+    EXPECT_EQ(t.reload().tradeMinNotional, 0);
 }
 
 // ----------------------------------------------------------- telemetry dock

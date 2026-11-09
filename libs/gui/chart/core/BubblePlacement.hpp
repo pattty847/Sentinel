@@ -24,15 +24,17 @@ struct Reference {
 struct Options {
     Mode mode = Mode::Individual;
     Reference reference;
-    double minimum = -1;
+    double minimum = 0;
     bool operator==(const Options&) const = default;
 };
+inline constexpr double MinRadius = 2.0, MaxRadius = 18.0;
 struct Mark {
     double timeMs = 0, price = 0, notional = 0;
     double minPrice = 0, maxPrice = 0;
     int side = 0;
     size_t sweepLevels = 1;
     bool moving = true, aggregate = false;
+    double radiusCap = MaxRadius;
 };
 class PlacementMode {
 public:
@@ -47,7 +49,6 @@ public:
 private:
     bool initialized_ = false, slot_ = false;
 };
-inline constexpr double MinRadius = 2.0, MaxRadius = 18.0;
 inline double radius(double notional, double reference) {
     if (!(notional > 0) || !std::isfinite(notional) || !(reference > 0) || !std::isfinite(reference)) return 0;
     return std::clamp(9 * std::sqrt(notional / reference), MinRadius, MaxRadius);
@@ -64,7 +65,7 @@ struct WindowStamp {
     size_t count = 0, slotCount = 0;
     bool operator==(const WindowStamp&) const = default;
 };
-struct VisibleView { double startMs = 0, endMs = 0, tfMs = 0, minimum = -1; };
+struct VisibleView { double startMs = 0, endMs = 0, tfMs = 0, minimum = 0; };
 class ReferenceStatistics {
 public:
     static constexpr size_t Capacity = 100000;
@@ -77,14 +78,14 @@ public:
     Reference update(const Rows& rows, const SlotRows& slotRows, WindowStamp stamp,
                      VisibleView view, Mode mode, int64_t nowMs) {
         const double width = lastView_.endMs - lastView_.startMs;
-        const bool shifted = initialized_ && width > 0 &&
-            (std::abs(view.startMs-lastView_.startMs) > .1*width ||
-             std::abs(view.endMs-lastView_.endMs) > .1*width);
+        const double nextWidth = view.endMs - view.startMs;
+        const bool widthJump = initialized_ && width > 0 && nextWidth > 0 &&
+                               (nextWidth >= 2*width || width >= 2*nextWidth);
         const bool settingsChanged = mode != lastMode_ || view.tfMs != lastView_.tfMs ||
                                      view.minimum != lastView_.minimum;
-        const bool changed = stamp != lastStamp_ || shifted || settingsChanged;
-        if (initialized_ && (!changed || (nowMs-lastUpdateMs_ < 250 && !shifted &&
-                             !settingsChanged))) return active_;
+        const bool urgent = widthJump || settingsChanged;
+        const bool changed = stamp != lastStamp_ || urgent;
+        if (initialized_ && (!changed || nowMs-lastUpdateMs_ < (urgent ? 100 : 250))) return active_;
         const Reference raw = reference(rows);
         if (!initialized_) active_ = {0, 0, 0};
         settle(active_.median, raw.median, true);
@@ -140,8 +141,7 @@ private:
         return count;
     }
     template<class Rows> double aggregateReference(const Rows& rows, VisibleView view, double median) {
-        const double minimum = view.minimum < 0 ? 0 :
-                               view.minimum > 0 ? view.minimum : median;
+        const double minimum = view.minimum < 0 ? median : view.minimum;
         const size_t count = aggregate(rows, view.tfMs, minimum);
         return count ? select(aggregates_.get(), count, size_t(std::ceil(.95*double(count)))-1) : 1;
     }
@@ -168,8 +168,7 @@ public:
                                                     double tfMs, double previousPrice = 0) {
         count_ = 0;
         if (!std::isfinite(tfMs) || tfMs <= 0) return {};
-        const double minimum = options.minimum < 0 ? 0 :
-                               options.minimum > 0 ? options.minimum : options.reference.median;
+        const double minimum = options.minimum < 0 ? options.reference.median : options.minimum;
         Bar bar;
         for (size_t i = 0; i < rows.size() && i < Capacity;) {
             const auto first = rows[i];
@@ -177,13 +176,13 @@ public:
             auto mark = sweep(rows, i, previousPrice);
             if (options.mode == Mode::Slot) {
                 const double start = std::floor(mark.timeMs / tfMs) * tfMs;
-                if (bar.used && start != bar.start) { flush(bar, minimum); bar = {}; }
+                if (bar.used && start != bar.start) { flush(bar, minimum, options.reference.aggregateP95); bar = {}; }
                 bar.start = start;
                 mark.timeMs = start + tfMs / 2;
                 accumulate(bar, mark);
             } else if (mark.notional >= minimum) append(mark);
         }
-        if (bar.used) flush(bar, minimum);
+        if (bar.used) flush(bar, minimum, options.reference.aggregateP95);
         return {marks_.get(), count_};
     }
 private:
@@ -255,7 +254,7 @@ private:
         if (count_ < MaxMarks && std::isfinite(mark.notional) && std::isfinite(mark.price))
             marks_[count_++] = mark;
     }
-    void flush(const Bar& bar, double minimum) {
+    void flush(const Bar& bar, double minimum, double aggregateP95) {
         for (size_t side = 0; side < 2; ++side) {
             auto mark = bar.sides[side];
             if (mark.notional <= 0 || mark.notional < minimum) continue;
@@ -265,9 +264,10 @@ private:
             append(mark);
         }
         size_t emitted = 0;
-        for (const auto& mark : bar.notable) {
+        for (auto mark : bar.notable) {
             if (mark.notional > 0 && mark.notional >= minimum &&
                 bar.counts[size_t(mark.side)] > 1) {
+                mark.radiusCap = radius(bar.sides[size_t(mark.side)].notional, aggregateP95);
                 append(mark);
                 if (++emitted == NotableCount) break;
             }

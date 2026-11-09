@@ -91,6 +91,7 @@ private:
     struct Point {
         double x = 0, y = 0, notional = 0;
         double minY = 0, maxY = 0, opacity = 1;
+        double radiusCap = chart::bubbles::MaxRadius;
         bool aggregate = false;
         AggressorSide side = AggressorSide::Unknown;
         uint32_t cellX = 0, cellY = 0;

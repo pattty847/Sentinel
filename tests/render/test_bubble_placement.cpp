@@ -1,6 +1,7 @@
 #include "chart/core/BubblePlacement.hpp"
 #include <gtest/gtest.h>
 #include <cstdlib>
+#include <cstdio>
 #include <new>
 #include <vector>
 
@@ -81,8 +82,8 @@ TEST(BubblePlacement, VisibleReferenceAndMedianChangeAndExplicitMinimumOverrides
     auto ref = stats.reference(rows);
     EXPECT_DOUBLE_EQ(ref.median, 200);
     EXPECT_DOUBLE_EQ(ref.p95, 1000);
-    EXPECT_EQ(p.build(rows, {Mode::Individual, ref, -1}, 60000).size(), 3);
-    EXPECT_EQ(p.build(rows, {Mode::Individual, ref, 0}, 60000).size(), 2);
+    EXPECT_EQ(p.build(rows, {Mode::Individual, ref, 0}, 60000).size(), 3);
+    EXPECT_EQ(p.build(rows, {Mode::Individual, ref, -1}, 60000).size(), 2);
     EXPECT_EQ(p.build(rows, {Mode::Individual, ref, 100}, 60000).size(), 3);
     EXPECT_EQ(p.build(rows, {Mode::Individual, ref, 201}, 60000).size(), 1);
     auto moved = stats.reference(std::span(rows).first(2));
@@ -105,7 +106,7 @@ TEST(BubblePlacement, SweepIsFilteredAfterMergeAndSlotsIncludeAllSideNotional) {
     ASSERT_EQ(marks.size(), 1);
     EXPECT_EQ(marks[0].notional, 201);
 }
-TEST(BubblePlacement, SlotAggregatesUseTheirOwnP95AndNotablesUseTradeP95) {
+TEST(BubblePlacement, SlotAggregatesAndNotablesShareReferenceWithNotableRadiusCap) {
     ReferenceStatistics statistics;
     BubblePlacement placement;
     std::vector<Execution> rows;
@@ -118,19 +119,30 @@ TEST(BubblePlacement, SlotAggregatesUseTheirOwnP95AndNotablesUseTradeP95) {
     const auto ref = statistics.update(rows, rows, {1,120,1,120,120,120},
                                        {1000,2401000,60000}, Mode::Slot, 1000);
     EXPECT_GT(ref.aggregateP95,ref.p95);
-    auto marks = placement.build(rows,{Mode::Slot,ref,-1},60000);
-    size_t aggregate = 0, capped = 0, uncapped = 0;
+    auto marks = placement.build(rows,{Mode::Slot,ref,0},60000);
+    size_t aggregate = 0, notable = 0, smaller = 0;
     double smallest = 18, largest = 0;
-    for (const auto& mark : marks) if (mark.aggregate) {
-        ++aggregate;
-        smallest = std::min(smallest, radius(mark.notional,ref.aggregateP95));
-        largest = std::max(largest, radius(mark.notional,ref.aggregateP95));
-        if (radius(mark.notional,ref.aggregateP95) >= 18) ++capped;
-        else ++uncapped;
+    for (const auto& mark : marks) {
+        if (mark.aggregate) { ++aggregate; continue; }
+        ++notable;
+        const auto sideNotional = [&, bar = std::floor(mark.timeMs/60000)] {
+            double total = 0;
+            for (const auto& row : rows)
+                if (std::floor(row.timeMs/60000) == bar && row.side == mark.side)
+                    total += row.price * row.size;
+            return total;
+        }();
+        const double aggregateRadius = radius(sideNotional,ref.aggregateP95);
+        const double notableRadius = std::min(mark.radiusCap,radius(mark.notional,ref.aggregateP95));
+        EXPECT_DOUBLE_EQ(mark.radiusCap,aggregateRadius);
+        EXPECT_LE(notableRadius,aggregateRadius);
+        smaller += notableRadius < aggregateRadius;
+        smallest = std::min(smallest,notableRadius);
+        largest = std::max(largest,notableRadius);
     }
     EXPECT_EQ(aggregate,40);
-    EXPECT_GT(uncapped,0);
-    EXPECT_LT(capped,aggregate);
+    EXPECT_GT(notable,50);
+    EXPECT_GT(smaller,notable/2);
     EXPECT_GT(largest-smallest,4);
 }
 TEST(BubblePlacement, ReferencesThrottleBurstsAndHoldOneStepChanges) {
@@ -141,7 +153,7 @@ TEST(BubblePlacement, ReferencesThrottleBurstsAndHoldOneStepChanges) {
     const VisibleView view{1000,5000,60000};
     auto active = stats.update(rows,rows,{1,100,1,100,100,100},view,Mode::Individual,1000);
     const double initialRadius = radius(100,active.p95);
-    const size_t initialVisible = BubblePlacement().build(rows,{Mode::Individual,active,0},60000).size();
+    const size_t initialVisible = BubblePlacement().build(rows,{Mode::Individual,active,-1},60000).size();
     for (int i=0; i<1000; ++i) {
         rows.push_back({1100.+i,100,1,0});
         active = stats.update(rows,rows,{1,uint64_t(101+i),1,uint64_t(101+i),rows.size(),rows.size()},
@@ -153,7 +165,7 @@ TEST(BubblePlacement, ReferencesThrottleBurstsAndHoldOneStepChanges) {
     active = stats.update(rows,rows,{1,1099,1,1099,rows.size(),rows.size()},view,Mode::Individual,1250);
     EXPECT_EQ(stats.updates(),2);
     EXPECT_EQ(radius(100,active.p95),initialRadius);
-    EXPECT_EQ(BubblePlacement().build(rows,{Mode::Individual,active,0},60000).size(),rows.size());
+    EXPECT_EQ(BubblePlacement().build(rows,{Mode::Individual,active,-1},60000).size(),rows.size());
     EXPECT_EQ(initialVisible,100);
     for (auto& row : rows) row.size *= 10;
     active = stats.update(rows,rows,{2,1100,2,1100,rows.size(),rows.size()},view,Mode::Individual,1500);
@@ -162,21 +174,61 @@ TEST(BubblePlacement, ReferencesThrottleBurstsAndHoldOneStepChanges) {
 }
 TEST(BubblePlacement, OneRowEnteringAndLeavingDoesNotRescaleOrHide) {
     ReferenceStatistics stats;
-    std::vector<Execution> rows(100);
-    for (int i=0;i<100;++i) rows[size_t(i)] = {1000.+i,100,1,0};
+    std::vector<Execution> rows(21);
+    for (int i=0;i<21;++i) rows[size_t(i)] = {1000.+i,98.+i,1,0};
     const VisibleView view{1000,2000,60000};
-    auto initial = stats.update(rows,rows,{1,100,1,100,100,100},view,Mode::Individual,1000);
-    const double radiusBefore = radius(100,initial.p95);
+    auto initial = stats.update(rows,rows,{1,21,1,21,21,21},view,Mode::Individual,1000);
+    const auto rawInitial = stats.reference(rows);
     BubblePlacement placement;
-    EXPECT_EQ(placement.build(rows,{Mode::Individual,initial,0},60000).size(),100);
-    rows.push_back({1100,109,1,0});
-    auto entered = stats.update(rows,rows,{1,101,1,101,101,101},view,Mode::Individual,1250);
-    EXPECT_EQ(radius(100,entered.p95),radiusBefore);
-    EXPECT_EQ(placement.build(rows,{Mode::Individual,entered,0},60000).size(),101);
+    const size_t visible = placement.build(rows,{Mode::Individual,initial,-1},60000).size();
+    rows.push_back({1100,50,1,0});
+    auto entered = stats.update(rows,rows,{1,22,1,22,22,22},view,Mode::Individual,1250);
+    const auto rawWithLow = stats.reference(rows);
+    EXPECT_NE(rawWithLow.median,rawInitial.median);
+    EXPECT_NE(int(std::floor(4*std::log2(rawWithLow.median))),
+              int(std::floor(4*std::log2(rawInitial.median))));
+    EXPECT_DOUBLE_EQ(entered.median,initial.median);
+    EXPECT_EQ(placement.build(rows,{Mode::Individual,entered,-1},60000).size(),visible);
     rows.pop_back();
-    auto left = stats.update(rows,rows,{1,100,1,100,100,100},view,Mode::Individual,1500);
-    EXPECT_EQ(radius(100,left.p95),radiusBefore);
-    EXPECT_EQ(placement.build(rows,{Mode::Individual,left,0},60000).size(),100);
+    auto left = stats.update(rows,rows,{1,21,1,21,21,21},view,Mode::Individual,1500);
+    EXPECT_DOUBLE_EQ(left.median,initial.median);
+    EXPECT_EQ(placement.build(rows,{Mode::Individual,left,-1},60000).size(),visible);
+    rows.push_back({1100,200,1,0});
+    entered = stats.update(rows,rows,{1,23,1,23,22,22},view,Mode::Individual,1750);
+    const auto rawWithHigh = stats.reference(rows);
+    EXPECT_NE(rawWithHigh.p95,rawInitial.p95);
+    EXPECT_NE(std::llround(4*std::log2(rawWithHigh.p95)),
+              std::llround(4*std::log2(rawInitial.p95)));
+    EXPECT_DOUBLE_EQ(entered.p95,initial.p95);
+    rows.pop_back();
+    left = stats.update(rows,rows,{1,21,1,21,21,21},view,Mode::Individual,2000);
+    EXPECT_DOUBLE_EQ(left.p95,initial.p95);
+}
+TEST(BubblePlacement, PanIsRateLimitedAndModeSwitchRecomputesNextFrame) {
+    ReferenceStatistics stats;
+    std::vector<Execution> rows(100000);
+    for (int i=0;i<100000;++i) rows[size_t(i)] = {1000.+i*10.,100,1,0};
+    for (int frame=0;frame<120;++frame) {
+        const double start = 1000. + frame*10000.;
+        const size_t begin = size_t(start/10)%90000;
+        const std::span window(rows.data()+begin,10000);
+        stats.update(window,window,{begin,begin+10000,0,0,window.size(),0},
+                     {start,start+100000,60000,0},Mode::Individual,1000+frame*8);
+    }
+    std::printf("PAN_120_FRAMES recomputes=%llu\n",static_cast<unsigned long long>(stats.updates()));
+    EXPECT_LE(stats.updates(),5);
+    EXPECT_GE(stats.updates(),3);
+    const auto before = stats.updates();
+    const std::span window(rows.data()+12000,10000);
+    stats.update(window,window,{12000,22000,0,0,window.size(),0},
+                 {1201000,1301000,60000,0},Mode::Slot,1960);
+    EXPECT_EQ(stats.updates(),before+1);
+    stats.update(window,window,{12000,22000,0,0,window.size(),0},
+                 {1201000,1401000,60000,0},Mode::Slot,2050);
+    EXPECT_EQ(stats.updates(),before+1);
+    stats.update(window,window,{12000,22000,0,0,window.size(),0},
+                 {1201000,1401000,60000,0},Mode::Slot,2060);
+    EXPECT_EQ(stats.updates(),before+2);
 }
 TEST(BubblePlacement, CapsuleRetainsAtLeastMinimumHalfWidth) {
     EXPECT_GE(capsuleHalfWidth(2,100),1.5);
@@ -185,7 +237,7 @@ TEST(BubblePlacement, CapsuleRetainsAtLeastMinimumHalfWidth) {
 TEST(BubblePlacement, FirstExecutionWithoutPredecessorIsPassive) {
     BubblePlacement p;
     const std::array rows{Execution{1500,100,1,0}, Execution{1501,101,1,0}};
-    const auto marks = p.build(rows,{Mode::Individual,{},-1},60000);
+    const auto marks = p.build(rows,{Mode::Individual,{},0},60000);
     ASSERT_EQ(marks.size(),2);
     EXPECT_FALSE(marks[0].moving);
     EXPECT_TRUE(marks[1].moving);
@@ -198,9 +250,9 @@ TEST(BubblePlacement, ReferenceAndPlacementDoNotAllocateAfterConstruction) {
     allocations = 0;
     countAllocations = true;
     auto ref = stats.update(rows,rows,{1,100000,1,100000,100000,100000},
-                            {1000,101000,60000,-1},Mode::Slot,1000);
-    const auto individual = p.build(rows, {Mode::Individual, ref, -1}, 60000).size();
-    const auto slot = p.build(rows, {Mode::Slot, ref, -1}, 60000).size();
+                            {1000,101000,60000,0},Mode::Slot,1000);
+    const auto individual = p.build(rows, {Mode::Individual, ref, 0}, 60000).size();
+    const auto slot = p.build(rows, {Mode::Slot, ref, 0}, 60000).size();
     countAllocations = false;
     EXPECT_GT(individual, 0);
     EXPECT_GT(slot, 0);

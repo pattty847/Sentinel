@@ -415,8 +415,8 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     });
     m_tradeMinMode = new QComboBox(page);
     m_tradeMinMode->setObjectName("tradeMinNotionalMode");
-    m_tradeMinMode->addItem("All trades", -1);
-    m_tradeMinMode->addItem("Auto (visible median)", 0);
+    m_tradeMinMode->addItem("All trades", 0);
+    m_tradeMinMode->addItem("Auto (visible median)", -1);
     m_tradeMinMode->addItem("Custom minimum", 1);
     form->addRow("Minimum trade notional (quote)", m_tradeMinMode);
     m_tradeMinNotional = doubleSpin(page, "tradeMinNotional", 0.01, 1e12, 100, 2);
@@ -839,7 +839,7 @@ void HeatmapSettingsDialog::refreshFromModel() {
     }
     {
         const QSignalBlocker mode(m_tradeMinMode);
-        m_tradeMinMode->setCurrentIndex(s.tradeMinNotional < 0 ? 0 : s.tradeMinNotional == 0 ? 1 : 2);
+        m_tradeMinMode->setCurrentIndex(s.tradeMinNotional == 0 ? 0 : s.tradeMinNotional < 0 ? 1 : 2);
         m_tradeMinNotional->setEnabled(s.tradeMinNotional > 0);
     }
     if (s.tradeMinNotional > 0) set(m_tradeMinNotional, s.tradeMinNotional);

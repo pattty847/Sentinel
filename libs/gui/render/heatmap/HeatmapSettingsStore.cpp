@@ -230,8 +230,6 @@ HeatmapChartSettings HeatmapSettingsStore::loadAt(const QString &prefix, Heatmap
             if (value != "true" && value != "false") continue;
             decoded = value == "true";
         }
-        if (it.key() == "tradeMinNotional" && decoded.toDouble() == 0 &&
-            !settings_->contains(prefix + "tradeMinNotionalModeVersion")) decoded = -1;
         auto check = defaults;
         if (applySettingsPatch(check, {{it.key(), decoded}}).isEmpty()) patch[it.key()] = decoded;
     }
@@ -241,7 +239,6 @@ HeatmapChartSettings HeatmapSettingsStore::loadAt(const QString &prefix, Heatmap
 void HeatmapSettingsStore::saveAt(const QString &prefix, HeatmapChartSettings value) {
     clampSettings(value);
     const auto json = settingsJson(value);
-    settings_->setValue(prefix + "tradeMinNotionalModeVersion", 1);
     for (auto it = json.begin(); it != json.end(); ++it) {
         if (it.key() == "sensitivityMin" || it.key() == "sensitivityMax") {
             settings_->remove(prefix + it.key());

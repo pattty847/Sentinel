@@ -74,7 +74,7 @@ TEST(TradeBubbles, PlacementUsesExchangeTimeAndPriceWithoutRingOffset) {
     Layout layout;
     auto m = mapping(); m.timeOffset = .75f;
     const Sample trades[] = {{1250,175,2,AggressorSide::Buy}};
-    const chart::bubbles::Options opts{chart::bubbles::Mode::Individual,{0,350},-1};
+    const chart::bubbles::Options opts{chart::bubbles::Mode::Individual,{0,350},0};
     const auto b = layout.build({trades,{}},m,opts);
     ASSERT_EQ(b.size(),1);
     EXPECT_FLOAT_EQ(b[0].x,170);
@@ -91,7 +91,7 @@ TEST(TradeBubbles, OverflowStartsWithFineBinsAndPreservesCentroids) {
     for (int i = 0; i < 5000; ++i)
         ASSERT_TRUE(tape->append({1500,m.screenYToPrice(22+(i%2)*7),1,AggressorSide::Buy}));
     Layout layout;
-    const chart::bubbles::Options opts{chart::bubbles::Mode::Individual,{0,150},-1};
+    const chart::bubbles::Options opts{chart::bubbles::Mode::Individual,{0,150},0};
     auto b = layout.build(tape->samples(),m,opts);
     ASSERT_EQ(b.size(),2);
     EXPECT_GE(layout.binSizePx(),6);
@@ -112,7 +112,7 @@ TEST(TradeBubbles, SpatialOverflowCoarsensAndPreservesNotional) {
     for (int x=0; x<128; ++x) for (int y=0; y<64; ++y)
         tape->append({1000+x*7+3,199.0-y*1.5,0.001,AggressorSide::Buy});
     Layout layout;
-    const auto b = layout.build(tape->samples(),m,{chart::bubbles::Mode::Individual,{0,1},-1});
+    const auto b = layout.build(tape->samples(),m,{chart::bubbles::Mode::Individual,{0,1},0});
     EXPECT_LE(b.size(),Layout::MaxBubbles);
     EXPECT_GT(b.size(),1000);
     EXPECT_GT(layout.binSizePx(),8);
@@ -122,15 +122,18 @@ TEST(TradeBubbles, SpatialOverflowCoarsensAndPreservesNotional) {
     for (const auto& circle:b) actual+=circle.notional;
     EXPECT_NEAR(actual,expected,0.001);
 }
-TEST(TradeBubbles, SlotAggregateUsesAggregateReferenceWhileNotablesUseTradeReference) {
+TEST(TradeBubbles, SlotAggregateAndNotablesUseAggregateReferenceAndRadiusCap) {
     Layout layout;
     auto m = mapping(); m.appendMs = 1000; m.srcRect.setWidth(1);
     const Sample rows[] = {{1200,150,1,AggressorSide::Buy}, {1300,150,1,AggressorSide::Buy}};
-    const auto bubbles = layout.build({rows,{}},m,{chart::bubbles::Mode::Slot,{0,150,1200},-1});
+    const auto bubbles = layout.build({rows,{}},m,{chart::bubbles::Mode::Slot,{0,150,1200},0});
     ASSERT_EQ(bubbles.size(),3);
     for (const auto& bubble : bubbles) {
         if (bubble.notional == 300) EXPECT_FLOAT_EQ(bubble.radius,4.5f);
-        else EXPECT_FLOAT_EQ(bubble.radius,9.f);
+        else {
+            EXPECT_NEAR(bubble.radius,9*std::sqrt(150.0/1200),1e-5);
+            EXPECT_LE(bubble.radius,4.5f);
+        }
     }
 }
 TEST(TradeBubbles, SpatialOverflowRemainsBoundedAndReusesScratch) {
@@ -246,16 +249,16 @@ TEST(TradeBubbles, PartialSlotsUseWholeBarAndTimeframeChangesInvalidateGeometry)
 TEST(TradeBubbles, CapsulesKeepMinimumWidthAndPassiveFlowUsesReducedOpacity) {
     auto tape = std::make_unique<Tape>();
     tape->append({1500,150,1,AggressorSide::Buy,"1"});
-    tape->append({1500,175,1,AggressorSide::Buy,"2"});
-    tape->append({1600,175,1,AggressorSide::Buy,"3"});
+    tape->append({1500,181.25,1,AggressorSide::Buy,"2"});
+    tape->append({1600,181.25,1,AggressorSide::Buy,"3"});
     TradeBubbleNode node;
-    node.sync(*tape,mapping(),true,{chart::bubbles::Mode::Individual,{0,325},1},Qt::cyan,Qt::yellow);
+    node.sync(*tape,mapping(),true,{chart::bubbles::Mode::Individual,{0,100000},1},Qt::cyan,Qt::yellow);
     ASSERT_EQ(node.usedVertexCount(),12);
     const auto* v = static_cast<const float*>(node.geometry()->vertexData());
     const double radius = (v[9]-v[0])/2;
     constexpr double pi = 3.14159265358979323846;
     EXPECT_GE(radius,1.5);
-    EXPECT_GT(pi*radius*radius+2*80*radius,pi*81);
+    EXPECT_GT(pi*radius*radius+2*100*radius,pi*4);
     EXPECT_FLOAT_EQ(v[7],.6f);
     EXPECT_NEAR(v[6*9+7],.21f,1e-6);
 }
@@ -263,7 +266,7 @@ TEST(TradeBubbles, LargerCirclesDrawFirstAcrossSidesAndNeighbouringCells) {
     Layout layout;
     const Sample rows[]={{1500,150,1,AggressorSide::Buy}, {1500,150,4,AggressorSide::Sell},
                          {1501,150,2,AggressorSide::Buy}};
-    const chart::bubbles::Options options{chart::bubbles::Mode::Individual,{0,600},-1};
+    const chart::bubbles::Options options{chart::bubbles::Mode::Individual,{0,600},0};
     auto b=layout.build({rows,{}},mapping(),options);
     ASSERT_EQ(b.size(),3);
     EXPECT_EQ(b[0].side,AggressorSide::Sell);
@@ -417,17 +420,18 @@ TEST(TradeBubbles, UnchangedFramesAndEmptyMeshesLeaveTheSceneGraphAlone) {
     node.clear();                                     // nothing drawn: no mark
     EXPECT_EQ(node.dirtyMarks(),2u);
 }
-TEST(TradeBubbles, LegacyZeroMinimumLoadsAsAllButNewZeroPersistsAuto) {
+TEST(TradeBubbles, ZeroMinimumLoadsAndPersistsAsAll) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
     QSettings ini(dir.filePath("legacy.ini"),QSettings::IniFormat);
     ini.setValue("heatmap/old/tradeMinNotional",0);
     heatmap::HeatmapSettingsStore store(ini);
-    EXPECT_EQ(store.load("old",{}).tradeMinNotional,-1);
-    auto current = store.load("old",{});
-    ASSERT_TRUE(store.applyChartPatch("old",current,{{"tradeMinNotional",0}},true,{},"BTC-USD",60000).isEmpty());
-    ini.sync();
     EXPECT_EQ(store.load("old",{}).tradeMinNotional,0);
+    auto current = store.load("old",{});
+    ASSERT_TRUE(store.applyChartPatch("old",current,{{"tradeMinNotional",-1}},true,{},"BTC-USD",60000).isEmpty());
+    ini.sync();
+    EXPECT_EQ(store.load("old",{}).tradeMinNotional,-1);
+    EXPECT_FALSE(ini.contains("heatmap/old/tradeMinNotionalModeVersion"));
 }
 TEST(TradeBubbles, SettingsRoundTripPerChartAndTransientPatchesStayTransient) {
     QTemporaryDir dir;
@@ -437,7 +441,7 @@ TEST(TradeBubbles, SettingsRoundTripPerChartAndTransientPatchesStayTransient) {
         QSettings ini(path,QSettings::IniFormat);
         heatmap::HeatmapSettingsStore store(ini);
         auto s=store.load("one",{});
-        EXPECT_FALSE(s.showTrades); EXPECT_EQ(s.tradeMinNotional,-1);
+        EXPECT_FALSE(s.showTrades); EXPECT_EQ(s.tradeMinNotional,0);
         EXPECT_EQ(s.bubblePlacement,"individual");
         ASSERT_TRUE(store.applyChartPatch("one",s,{{"showTrades",true},{"tradeMinNotional",1000},{"bubblePlacement","slot"}},true,{},"BTC-USD",60000).isEmpty());
         ASSERT_TRUE(store.applyChartPatch("one",s,{{"tradeMinNotional",100000},{"bubblePlacement","auto"}},false,{},"BTC-USD",60000).isEmpty());

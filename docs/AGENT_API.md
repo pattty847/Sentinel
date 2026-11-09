@@ -108,15 +108,14 @@ The Chart settings tab exposes **Bubble placement** and All / Auto / Custom mini
 The same per-chart/named-layout settings are exposed in `heatmap/state` and accept:
 
 ```json
-{"showTrades":true,"bubblePlacement":"auto","tradeMinNotional":-1,"persist":false}
+{"showTrades":true,"bubblePlacement":"auto","tradeMinNotional":0,"persist":false}
 ```
 
 POST this to `/api/v1/heatmap/settings`; `persist` defaults to true, and the normal
 operation/render acknowledgement applies. `showTrades` is boolean;
-`tradeMinNotional` accepts finite numbers clamped to -1..1e12: -1 (default)
-shows all trades, 0 hides marks below the visible median, and a positive value
-sets a fixed minimum in quote currency. Persisted zero values written before
-this three-mode setting are read as All; a newly saved zero means Auto. `bubblePlacement` accepts exactly:
+`tradeMinNotional` accepts finite numbers clamped to -1..1e12: 0 (default)
+shows all trades, -1 hides marks below the visible median, and a positive value
+sets a fixed minimum in quote currency. `bubblePlacement` accepts exactly:
 
 - `individual` (default): exchange time and execution price, with sweep merging.
 - `slot`: one aggregate per epoch-aligned (bar, side), at the bar centre and side
@@ -144,14 +143,16 @@ bubble opacity. The first execution without a predecessor is passive; same-price
 with any price change uses full bubble opacity.
 
 Sizing uses `radius = clamp(2, 18, 9 * sqrt(notional / ref))` in logical pixels.
-Individual and notable marks use the p95 of individual trade notionals in the
-visible half-open **time** window. Side aggregates use the p95 of the side-bar
-aggregate notionals drawn in Slot mode. Auto minimum uses the visible lower median
+Individual marks use the p95 of individual trade notionals in the visible
+half-open **time** window. Side aggregates and their notable marks use the p95
+of the side-bar aggregate notionals drawn in Slot mode. Each notable's radius
+is capped at its side aggregate's radius. Auto minimum uses the visible lower median
 of individual trades. The p95 and median are quantised to quarter-octave steps;
 the active value changes only after a move of more than one step. The policy uses
 linear-time selection and recomputes at most every 250 ms as window contents
-change, or immediately when the visible time window shifts by more than 10%,
-placement mode, timeframe or minimum changes. Capsule half-width preserves circle area
+change, including during panning and ordinary zooming. A placement mode,
+timeframe or minimum change, or a window-width change of at least 2x, can
+recompute sooner but respects a 100 ms minimum interval. Capsule half-width preserves circle area
 when possible, but is floored at 2 logical pixels for long sweeps, adding area
 when needed for visibility. The size clamps limit scaling at the extremes.
 
