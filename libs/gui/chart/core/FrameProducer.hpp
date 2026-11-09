@@ -8,6 +8,7 @@ namespace chart {
 // Render thread during sync. Inputs are captured values; no GUI-owned references.
 class FrameProducer {
 public:
+    static constexpr float kCoverageGamma = 2.2f;
     const ChartFrame& produce(const FrameInputs& inputs, ITickAuthority& ticks, PublishedFrame& published);
     ChartFrame& frame() { return frame_; }
 

@@ -128,6 +128,20 @@ CodeWindow codeWindow(double sensitivityMin, double sensitivityMax, double sizeF
     return {lo, std::max(hi - lo, 1.0f)};
 }
 
+recording::SizeScale displaySizeScale(double recordingFloor) {
+    recording::SizeScale scale;
+    if (!std::isfinite(recordingFloor) || recordingFloor <= scale.floor) return scale;
+    // Round twice the base increment upward in powers of 1024. Keep the
+    // default for BTC-sized books and synthetic grids at that floor.
+    const double target = recordingFloor * 2.0;
+    while (scale.floor < target) {
+        const double next = scale.floor * 1024.0;
+        if (!std::isfinite(next)) break;
+        scale.floor = next;
+    }
+    return scale;
+}
+
 std::array<float, 4> legacyRecordingColor(uint16_t cell, CodeWindow window, const HeatmapPalette &palette,
                                           float opacity) {
     const int code = cell & 0x7fff;

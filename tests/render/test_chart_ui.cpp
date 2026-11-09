@@ -83,6 +83,11 @@ struct TempStore {
         QSettings again(path, QSettings::IniFormat);
         return HeatmapSettingsStore(again).load("main", config);
     }
+    std::optional<HeatmapSettingsStore::SensitivityRange> reloadSensitivity(const std::string &symbol) {
+        settings.sync();
+        QSettings again(path, QSettings::IniFormat);
+        return HeatmapSettingsStore(again).loadSensitivity(symbol);
+    }
 };
 
 QAction *menuAction(QMenu *menu, const QString &name, int nth = 0) {
@@ -1361,6 +1366,7 @@ protected:
     std::unique_ptr<HeatmapChartControls> controls = std::make_unique<HeatmapChartControls>(model.get());
     std::unique_ptr<TopToolbar> toolbar = std::make_unique<TopToolbar>();
     void SetUp() override {
+        model->selectSymbol("BTC-USD");
         controls->setToolbar(toolbar.get());
         toolbar->resize(2400, 40);
         toolbar->show();
@@ -1380,11 +1386,14 @@ TEST_F(ChartControls, RangeSliderDragAppliesLiveAndPersistsOnRelease) {
                      Qt::NoButton, Qt::LeftButton, {});
     QApplication::sendEvent(slider, &move);
     EXPECT_GT(model->settings().sensitivityMin, before) << "applied while dragging";
-    EXPECT_EQ(t.reload().sensitivityMin, before) << "not persisted while dragging";
+    EXPECT_FALSE(t.reloadSensitivity("BTC-USD")) << "not persisted while dragging";
     QTest::mouseRelease(slider, Qt::LeftButton, {}, low + QPoint(30, 0));
     const double after = model->settings().sensitivityMin;
     EXPECT_GT(after, before);
-    EXPECT_EQ(t.reload().sensitivityMin, after) << "persisted on release";
+    ASSERT_TRUE(t.reloadSensitivity("BTC-USD"));
+    EXPECT_EQ(t.reloadSensitivity("BTC-USD")->min, after) << "persisted on release";
+    EXPECT_FALSE(t.settings.contains("heatmap/main/sensitivityMin"));
+    EXPECT_FALSE(t.settings.contains("heatmap/main/sensitivityMax"));
     EXPECT_LT(model->settings().sensitivityMin, model->settings().sensitivityMax);
     // The model (API, dialog) moves the handles.
     ASSERT_TRUE(model->apply({{"sensitivityMin", 0.2}, {"sensitivityMax", 20.0}}).isEmpty());
@@ -1421,7 +1430,8 @@ TEST_F(ChartControls, RangeSliderKeyboardEditsBaseAssetValuesAndPersists) {
     ASSERT_EQ(edits.size(), 1);
     EXPECT_GT(slider->low(), before);
     EXPECT_TRUE(edits.at(0).at(2).toBool());
-    EXPECT_EQ(t.reload().sensitivityMin, slider->low());
+    ASSERT_TRUE(t.reloadSensitivity("BTC-USD"));
+    EXPECT_EQ(t.reloadSensitivity("BTC-USD")->min, slider->low());
     const double highBefore = slider->high();
     QTest::keyClick(slider, Qt::Key_End);
     QTest::keyClick(slider, Qt::Key_Left);
@@ -1506,7 +1516,7 @@ TEST_F(ChartControls, OverflowSlidersDragAndShareInlineAndChartState) {
         EXPECT_DOUBLE_EQ(slider->high(), toolbar->rangeSlider()->high());
         EXPECT_DOUBLE_EQ(slider->endLo(), toolbar->rangeSlider()->endLo());
         EXPECT_DOUBLE_EQ(slider->endHi(), toolbar->rangeSlider()->endHi());
-        const double persisted = t.reload().sensitivityMin;
+        const auto previous = t.reloadSensitivity("BTC-USD");
         const QPoint start(int(slider->xOf(slider->low())), slider->height() / 2);
         const QPoint target = start + QPoint(30, 0);
         QTest::mousePress(slider, Qt::LeftButton, {}, start);
@@ -1517,8 +1527,8 @@ TEST_F(ChartControls, OverflowSlidersDragAndShareInlineAndChartState) {
         QTest::qWait(20);
         ASSERT_TRUE(slider) << "fit updates during a live drag must keep the editor";
         EXPECT_TRUE(menu->isVisible()) << "the QWidgetAction must allow mouse dragging";
-        EXPECT_GT(model->settings().sensitivityMin, persisted);
-        EXPECT_DOUBLE_EQ(t.reload().sensitivityMin, persisted) << "drag is process-only until release";
+        EXPECT_GT(model->settings().sensitivityMin, previous ? previous->min : 0.05);
+        EXPECT_EQ(bool(t.reloadSensitivity("BTC-USD")), bool(previous)) << "drag is process-only until release";
         EXPECT_DOUBLE_EQ(toolbar->rangeSlider()->low(), slider->low());
         EXPECT_EQ(label->text(), toolbar->rangeLabel()->text());
         QTest::mouseRelease(slider, Qt::LeftButton, {}, target);
@@ -1526,7 +1536,8 @@ TEST_F(ChartControls, OverflowSlidersDragAndShareInlineAndChartState) {
         EXPECT_TRUE(menu->isVisible());
         ASSERT_FALSE(ranges.isEmpty());
         EXPECT_TRUE(ranges.last()[2].toBool());
-        EXPECT_DOUBLE_EQ(t.reload().sensitivityMin, slider->low());
+        ASSERT_TRUE(t.reloadSensitivity("BTC-USD"));
+        EXPECT_DOUBLE_EQ(t.reloadSensitivity("BTC-USD")->min, slider->low());
         const int edits = ranges.size();
         ASSERT_TRUE(model->apply({{"sensitivityMin", 0.3}, {"sensitivityMax", 30.0}}).isEmpty());
         EXPECT_DOUBLE_EQ(slider->low(), 0.3);
@@ -1538,7 +1549,8 @@ TEST_F(ChartControls, OverflowSlidersDragAndShareInlineAndChartState) {
         EXPECT_DOUBLE_EQ(slider->low(), 0.4);
         EXPECT_DOUBLE_EQ(slider->high(), 40);
         EXPECT_DOUBLE_EQ(model->settings().sensitivityMin, 0.4);
-        EXPECT_DOUBLE_EQ(t.reload().sensitivityMax, 40);
+        ASSERT_TRUE(t.reloadSensitivity("BTC-USD"));
+        EXPECT_DOUBLE_EQ(t.reloadSensitivity("BTC-USD")->max, 40);
         toolbar->setBaseAssetSymbol("ETH-USD");
         EXPECT_EQ(label->text(), toolbar->rangeLabel()->text());
         EXPECT_TRUE(label->text().endsWith(" ETH"));
@@ -1850,6 +1862,7 @@ protected:
         ugr->setActiveSymbol("BTC-USD");
         ugr->view()->setTimeframe(int(minute));
         model = std::make_unique<HeatmapSettingsModel>(t.store, "main", t.config);
+        ASSERT_TRUE(t.store.saveManualTick("BTC-USD", minute, 100));
         // Bright fixture colours (sizes 0.01..0.53), Manual $1, no crossfade unless a case asks.
         ASSERT_TRUE(model->apply({{"palettePreset", "Fire"}, {"sensitivityMin", 0.001},
                                   {"sensitivityMax", 1.0}, {"tickMode", "manual"}, {"manualTick", 100},
@@ -1859,6 +1872,8 @@ protected:
         toolbar = std::make_unique<TopToolbar>();
         controls->setToolbar(toolbar.get());
         controls->setRenderer(ugr);
+        ASSERT_TRUE(layer().manualTickLocked());
+        ASSERT_EQ(layer().manualTickUnits(), 100);
     }
     void TearDown() override {
         controls.reset();

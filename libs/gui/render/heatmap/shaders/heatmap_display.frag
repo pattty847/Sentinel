@@ -48,7 +48,7 @@ vec4 cellColor(uint cell) {
     if (state != 3u) return hatchColor(state);
     return paintMagnitude(float(cell & 0x7fffu), (cell & 0x8000u) != 0u);
 }
-// Coverage in LINEAR light (whole-pixel smooth zoom, slice A2): the palette RGB and
+// Coverage in linear light: the palette RGB and
 // the scene-graph target are encoded UNORM, so encoded RGB*f would show a half-covered
 // pixel at ~21% of its light. RGB scales by f^(1/tone.w) (tone.w = 2.2), alpha by the
 // covered area f.
@@ -72,6 +72,32 @@ vec4 centreCell(float fx, float fy, bool clampCells) {
     }
     return cellColor(cells[uint(fy) * dims.x + uint(fx)]);
 }
+vec4 sampledFootprint(float fc, float fr, float cpp, float rpp, bool clampCells) {
+    float bidCodes = 0.0, askCodes = 0.0, data = 0.0, loading = 0.0, veil = 0.0;
+    // Fixed 8x8 stratified samples bound fragment work for arbitrarily small
+    // cells. A single straight state boundary has <= 1/8 coverage error per
+    // axis; alternating cells finer than this lattice can alias by a full pixel.
+    for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) {
+        float col = floor(fc + (float(x) + 0.5) * cpp / 8.0 - 0.5 * cpp);
+        float row = floor(fr + (float(y) + 0.5) * rpp / 8.0 - 0.5 * rpp);
+        if (clampCells) {
+            col = clamp(col, 0.0, float(dims.x) - 1.0);
+            row = clamp(row, 0.0, float(dims.y) - 1.0);
+        } else if (col < 0.0 || row < 0.0 || col >= float(dims.x) || row >= float(dims.y)) continue;
+        uint cell = cells[uint(row) * dims.x + uint(col)];
+        uint state = (cell >> 16u) & 3u;
+        float code = float(cell & 0x7fffu);
+        if (state == 3u && code > 0.0) {
+            if ((cell & 0x8000u) != 0u) askCodes += code;
+            else bidCodes += code;
+            data += 1.0;
+        } else if (state == 1u) loading += 1.0;
+        else if (state == 2u) veil += 1.0;
+    }
+    vec4 color = data > 0.0 ? paintMagnitude((bidCodes + askCodes) / data, askCodes > bidCodes) : vec4(0.0);
+    return cover(color, data / 64.0) + cover(hatchColor(1u), loading / 64.0)
+         + cover(hatchColor(2u), veil / 64.0);
+}
 vec4 shade() {
     // Bins are anchored to absolute time/price; panning inside the grid only
     // changes this mapping, so the picture translates by sub-bin amounts.
@@ -83,8 +109,11 @@ vec4 shade() {
     float fx = floor(fc);
     float fy = floor(fr);
     bool clampCells = (dims.z & 1u) != 0u;
+    if ((dims.z & 2u) != 0u && (cpp > 1.0 || rpp > 1.0))
+        return sampledFootprint(fc, fr, cpp, rpp, clampCells);
+    if ((dims.z & 2u) != 0u && (dims.z & 4u) == 0u) return centreCell(fx, fy, clampCells);
     // At rest (whole device pixels per row and column, edges on pixel edges): the
-    // single cell under the pixel centre, the slice A bytes.
+    // single cell under the pixel centre.
     if (tone.w == 0.0) return centreCell(fx, fy, clampCells);
     // A zoom transition (fractional pixels per row and column): every cell under the
     // pixel's footprint contributes its covered area.

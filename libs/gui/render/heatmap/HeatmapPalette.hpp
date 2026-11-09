@@ -5,6 +5,7 @@
 // section 4, owner decision 4). The 512-texel palette image is sampled with
 // linear filtering: bids in the left half, asks in the right.
 #include "heatmap/HeatmapChartSettings.hpp"
+#include "servermodel/RecordingCodec.hpp"
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -51,6 +52,9 @@ struct CodeWindow {
 };
 CodeWindow codeWindow(double sensitivityMin, double sensitivityMax, double sizeFloor = 1e-6,
                       double codesPerOctave = 819.0);
+// Quantized display scale from the advertised product size floor. The recording
+// code count is a format limit, not an estimate of actual book sizes.
+recording::SizeScale displaySizeScale(double recordingFloor);
 
 // CPU reference of heatmap_display.frag in recording mode (a nonzero code
 // without the unknown marker), sampling the palette with linear filtering:

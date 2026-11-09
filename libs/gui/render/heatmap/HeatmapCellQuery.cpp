@@ -174,7 +174,7 @@ std::shared_ptr<const LabelCells> LabelWindowBuilder::build(const LabelRequest& 
                     if (state == BucketState::Present) {
                         const auto it = std::lower_bound(columns->columns.begin(), columns->columns.end(), bucket,
                             [](const auto& c, int64_t t) { return c.bucketStartMs < t; });
-                        cells = binColumn(*it, price.lo, price.end, tick);
+                        cells = binColumn(*it, price.lo, price.end, tick, request.outputScale);
                     }
                 }
                 for (uint32_t y = 0; y < request.rows; ++y) {

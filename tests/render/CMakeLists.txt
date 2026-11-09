@@ -218,6 +218,8 @@ add_test(NAME ChartGoldenTests COMMAND test_chart_golden)
 set_tests_properties(ChartGoldenTests PROPERTIES LABELS "render;heatmap" TIMEOUT 600 SKIP_RETURN_CODE 77)
 add_test(NAME CandleOverlayCpuTests COMMAND test_ugr_gpu "--gtest_filter=UgrCandleCpu.*")
 set_tests_properties(CandleOverlayCpuTests PROPERTIES LABELS "render;fast" TIMEOUT 30)
+add_test(NAME UgrTickCpuTests COMMAND test_ugr_gpu "--gtest_filter=UgrTickCpu.*")
+set_tests_properties(UgrTickCpuTests PROPERTIES LABELS "render;heatmap;fast" TIMEOUT 60)
 
 add_test(NAME UgrGpuTests COMMAND test_ugr_gpu "--gtest_filter=-UgrCandleCpu.*")
 set_tests_properties(UgrGpuTests PROPERTIES LABELS "render;heatmap" TIMEOUT 300)

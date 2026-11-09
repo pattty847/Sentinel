@@ -10,6 +10,7 @@
 #include <QTimeZone>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace heatmap::gpu {
 namespace {
@@ -157,32 +158,58 @@ void HeatmapGpuLayer::destroyController() {
 
 void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     if (symbol_ == symbol) return;
+    const bool hadTick = manualMode_ && tickUnits_ > 0;
     if (!startupTickReady_) startupTickTimer_->stop();
     symbol_ = symbol;
+    priceKnown_ = false;
+    displayScale_ = {};
+    displayScaleKnown_ = false;
     autoPriceTick_.reset();
     invalidateTickProposal();
     lastLiveEndMs_ = 0;
     resetLabels(true); // the old symbol's labels never draw on the new picture
+    refreshStyle();
     autoUnits_ = 0; // Auto evaluates fresh on the new symbol's data
+    if (manualMode_) {
+        tickUnits_ = 0;
+        postedTickUnits_ = -1;
+        tickKey_ = {};
+        invalidateTickProposal();
+    }
+    offered_.clear();
+    emit presetsChanged();
     restoreTick();
+    if (hadTick) emit tickChanged();
     noteLimits();
     viewChanged(); // the controller serial switches; the node holds the old picture
+    emit symbolChanged();
 }
 
 void HeatmapGpuLayer::setTimeframeMs(int64_t tfMs) {
     if (tfMs <= 0 || tfMs_ == tfMs) return;
+    const bool hadTick = manualMode_ && tickUnits_ > 0;
     if (!startupTickReady_) startupTickTimer_->stop();
     tfMs_ = tfMs;
     autoPriceTick_.reset();
     invalidateTickProposal();
     autoUnits_ = 0;
-    restoreTick(); // Manual: this timeframe's remembered tick
+    if (manualMode_) {
+        tickUnits_ = 0;
+        postedTickUnits_ = -1;
+        tickKey_ = {};
+        invalidateTickProposal();
+    }
+    offered_.clear();
+    emit presetsChanged();
+    restoreTick();
+    if (hadTick) emit tickChanged();
     noteLimits();
     viewChanged(); // the old picture keeps drawing until the new timeframe's spans are ready
 }
 
 void HeatmapGpuLayer::setView(const ViewWindow &view, bool priceKnown) {
     if (hasView_ && view == view_ && priceKnown == priceKnown_) return;
+    const bool becameKnown = priceKnown && !priceKnown_;
     // The controller's request carries only symbol, timeframe and time bounds: a
     // price-only move (lock to mid, a price zoom) invalidates the view, posts nothing.
     const bool timeChanged = !hasView_ || view.timeLoMs != view_.timeLoMs || view.timeHiMs != view_.timeHiMs;
@@ -191,6 +218,7 @@ void HeatmapGpuLayer::setView(const ViewWindow &view, bool priceKnown) {
     priceKnown_ = priceKnown;
     ++viewSerial_;
     if (timeChanged) postView();
+    if (becameKnown) emit priceViewKnown();
 }
 
 void HeatmapGpuLayer::setSurface(double widthPx, double heightPx, double dpr) {
@@ -207,15 +235,25 @@ void HeatmapGpuLayer::setSettings(const HeatmapChartSettings &settings, bool exp
     const bool wasManual = manualMode_;
     const int64_t wasUnits = manualUnits_;
     manualMode_ = settings.tickMode == TickMode::Manual;
+    if (!manualMode_) manualFallback_ = manualFallbackResolved_ = false;
     if (manualMode_) startupTickTimer_->stop();
     else armStartupTick();
     if (manualMode_) {
         if (explicitManualTick && isPresetUnits(settings.manualTick)) {
             manualUnits_ = settings.manualTick;
             tickMemory_.set(symbol_, tfMs_, manualUnits_);
+            manualFallback_ = false;
+            manualFallbackResolved_ = false;
         } else if (!wasManual) {
             const auto remembered = tickMemory_.get(symbol_, tfMs_);
-            manualUnits_ = remembered ? *remembered : settings.manualTick;
+            const bool currentTick = snapshot_ && snapshot_->symbol == symbol_ && snapshot_->tfMs == tfMs_;
+            if (!currentTick) {
+                tickUnits_ = 0;
+                postedTickUnits_ = -1;
+            }
+            manualFallback_ = !remembered;
+            manualFallbackResolved_ = !remembered && currentTick && tickUnits_ > 0;
+            manualUnits_ = remembered.value_or(tickUnits_);
         }
     }
     if (wasManual != manualMode_) autoUnits_ = 0; // back to Auto: the rule resumes from the current zoom
@@ -243,19 +281,39 @@ void HeatmapGpuLayer::setTickMemory(const ManualTickMemory &memory) {
 }
 
 void HeatmapGpuLayer::refreshStyle() {
-    const recording::SizeScale scale; // the binner's output codes (Frame::outputScale)
-    const auto window = codeWindow(settings_.sensitivityMin, settings_.sensitivityMax, scale.floor, scale.codesPerOctave);
+    const double fallbackScale = settings_.sensitivityReady ? 1.0 : displayScale_.floor / recording::SizeScale{}.floor;
+    const auto window = codeWindow(settings_.sensitivityMin * fallbackScale, settings_.sensitivityMax * fallbackScale,
+                                   displayScale_.floor, displayScale_.codesPerOctave);
     style_.codeFloor = window.floor;
     style_.codeRange = window.range;
     style_.opacity = float(std::clamp(settings_.opacity, 0.0, 1.0));
 }
 
-// Manual: the tick remembered for (symbol, timeframe) wins; with none, the locked
-// tick stays (nothing is written: only an explicit choice is remembered).
+void HeatmapGpuLayer::adoptDisplayScale(const SpanSet &snapshot) {
+    if (displayScaleKnown_ || snapshot.symbol != symbol_ || !snapshot.recordingScaleKnown) return;
+    const auto next = displaySizeScale(snapshot.recordingScale.floor);
+    const bool changed = next.floor != displayScale_.floor || next.codesPerOctave != displayScale_.codesPerOctave;
+    displayScale_ = next;
+    displayScaleKnown_ = true;
+    refreshStyle();
+    if (changed) {
+        labelsPosted_ = false;
+        labelResultSeen_ = labelDropNoticed_ = false;
+        labelEpoch_ = labelSerial_ + 1;
+        labelCounters_.epoch = labelEpoch_;
+        notifiedLabels_.reset();
+        emit frameRequested();
+    }
+}
+
 void HeatmapGpuLayer::restoreTick() {
     if (!manualMode_) return;
-    if (const auto units = tickMemory_.get(symbol_, tfMs_); units && *units != manualUnits_) {
-        manualUnits_ = *units;
+    const auto units = tickMemory_.get(symbol_, tfMs_);
+    const int64_t next = units.value_or(tickUnits_);
+    manualFallback_ = !units;
+    manualFallbackResolved_ = false;
+    if (next != manualUnits_) {
+        manualUnits_ = next;
         emit tickChanged();
     }
 }
@@ -272,7 +330,7 @@ bool HeatmapGpuLayer::priceScaleCurrent() const {
 }
 
 double HeatmapGpuLayer::maxPriceSpan() const {
-    if (!active_ || !manualMode_ || !isPresetUnits(manualUnits_) || !priceScaleCurrent()) return 0.0;
+    if (!active_ || !manualTickLocked() || !isPresetUnits(manualUnits_) || !priceScaleCurrent()) return 0.0;
     return maxManualPriceSpan(heightPx_ * dpr_, fromUnits(manualUnits_, priceScale()));
 }
 
@@ -280,7 +338,8 @@ double HeatmapGpuLayer::minTimeSpanMs() const { return active_ && tfMs_ > 0 ? do
 
 double HeatmapGpuLayer::minPriceSpan() const {
     if (!active_ || !priceScaleCurrent()) return 0.0;
-    const int64_t units = manualMode_ && isPresetUnits(manualUnits_) ? manualUnits_ : (offered_.empty() ? 0 : offered_.front());
+    const int64_t units = manualTickLocked() && isPresetUnits(manualUnits_)
+                              ? manualUnits_ : (offered_.empty() ? 0 : offered_.front());
     return units > 0 ? kMinZoomRows * fromUnits(units, priceScale()) : 0.0;
 }
 
@@ -324,6 +383,7 @@ void HeatmapGpuLayer::onSnapshot() {
     snapshot_ = controller_->latestSnapshot();
     resolution_ = controller_->latestResolution();
     if (!snapshot_) return;
+    adoptDisplayScale(*snapshot_);
     armStartupTick();
     refreshPresets();
     noteLimits(); // the price scale may have changed
@@ -371,7 +431,7 @@ int64_t HeatmapGpuLayer::oldestAvailableMs() const {
 }
 
 void HeatmapGpuLayer::refreshPresets() {
-    if (!snapshot_ || snapshot_->tfMs != tfMs_) return;
+    if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_) return;
     int64_t finest = 0;
     for (const auto &column : snapshot_->resolution.columns)
         for (const auto &source : column.sources)
@@ -387,8 +447,11 @@ void HeatmapGpuLayer::refreshPresets() {
 // ------------------------------------------------------------------ frame
 int64_t HeatmapGpuLayer::chooseTick(const ViewWindow &view) {
     if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_) return tickUnits_; // nothing built yet
-    if (manualMode_) return isPresetUnits(manualUnits_) ? manualUnits_ : tickUnits_;
-    if (autoPriceTick_) return autoUnits_ = *autoPriceTick_;
+    if (manualTickLocked()) return isPresetUnits(manualUnits_) ? manualUnits_ : 0;
+    if (autoPriceTick_) {
+        autoUnits_ = *autoPriceTick_;
+        return autoUnits_;
+    }
 
     // Auto: the history summary merged with the live window's columns (S5L-b
     // latestResolution(); a live revision never replaces the SpanSet).
@@ -409,6 +472,7 @@ void HeatmapGpuLayer::chooseTickForView(const ViewWindow &view) {
     // GUI thread blocked: take the freshest snapshot, pick the tick; prepareFrame
     // hands both to the node in this frame (no thread hop on a tick change).
     if (auto latest = controller_->latestSnapshot(); latest && latest != snapshot_) snapshot_ = std::move(latest);
+    if (snapshot_) adoptDisplayScale(*snapshot_);
     live_ = controller_->latestLive(); // pointer reads; the node uploads only a new version
     resolution_ = controller_->latestResolution();
     const int64_t tick = priceKnown_ ? chooseTick(view) : 0; // nothing to draw before the price view exists
@@ -447,12 +511,17 @@ void HeatmapGpuLayer::commitProposedTick() {
     // GUI thread (the render thread only reads tickUnits_ while the GUI thread is blocked).
     if (!manualMode_ && !startupTickReady_) return;
     const int64_t tick = proposedTickUnits_.load(std::memory_order_relaxed);
-    if (tick == tickUnits_) return; // superseded (the proposal went back to the drawn tick)
+    if (tick == tickUnits_ && !(manualFallback_ && !manualFallbackResolved_ && tick > 0)) return; // superseded
     if (proposedPolicy_.load(std::memory_order_relaxed) != tickPolicy_.load(std::memory_order_relaxed)) {
         sLog_Probe("heatmap.gpu.tick", "stale proposal dropped tf=" << tfMs_ << " units=" << tick);
         return; // chosen under another symbol, timeframe or tick setting: the next frame proposes again
     }
     tickUnits_ = tick;
+    if (manualFallback_ && !manualFallbackResolved_ && tick > 0) {
+        manualUnits_ = tick;
+        manualFallbackResolved_ = true;
+        noteLimits();
+    }
     ++tickChanges_;
     sLog_Probe("heatmap.gpu.tick", "tf=" << tfMs_ << " units=" << tick << " mode=" << (manualMode_ ? "manual" : "auto"));
     emit tickChanged();
@@ -460,7 +529,7 @@ void HeatmapGpuLayer::commitProposedTick() {
 
 int64_t HeatmapGpuLayer::predictTickUnits(const ViewWindow &view) const {
     if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_ || !priceKnown_) return tickUnits_;
-    if (manualMode_) return isPresetUnits(manualUnits_) ? manualUnits_ : tickUnits_;
+    if (manualTickLocked()) return isPresetUnits(manualUnits_) ? manualUnits_ : 0;
     if (autoPriceTick_) return *autoPriceTick_;
 
     const ResolutionSummary &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;
@@ -497,7 +566,8 @@ bool HeatmapGpuLayer::setAutoPriceTick(std::optional<int64_t> units) {
 
 bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &view,
                                    float coverageGamma, std::optional<ViewWindow> binView) {
-    if (!controller_) return false;
+    if (!controller_ ||
+        (!settings_.sensitivitySymbol.empty() && settings_.sensitivitySymbol != symbol_)) return false;
     frame.spans = snapshot_;
     frame.capacity = capacity_;
     frame.tfMs = tfMs_;
@@ -505,6 +575,8 @@ bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &
     frame.view = view;
     frame.rect = rect;
     frame.coverageGamma = coverageGamma;
+    frame.smoothZoomOut = settings_.smoothZoomOut;
+    frame.outputScale = displayScale_;
     frame.binView = binView;
     frame.uploadBudgetBytes = settings_.uploadBudgetBytes;
     frame.gpuCapBytes = settings_.gpuCapBytes;
@@ -583,6 +655,7 @@ void HeatmapGpuLayer::postLabels(const ViewWindow &view) {
     while (uint64_t(request.columns) * request.rows > kMaxLabelCells && request.rows > uint32_t(rows)) --request.rows;
     while (uint64_t(request.columns) * request.rows > kMaxLabelCells && request.columns > uint32_t(cols)) --request.columns;
     request.asset = symbol_.substr(0, symbol_.find('-'));
+    request.outputScale = displayScale_;
     request.formatText = true;
     postedLabels_ = request;
     labelsPosted_ = true;
@@ -658,20 +731,8 @@ void HeatmapGpuLayer::onLabels() {
         labelResultSeen_ = true;
         labelDropNoticed_ = false;
     }
-    // The slider's ends: the window's largest cell, and its 5th percentile at the
-    // low end (dust far below anything visible would waste most of the track).
-    LiquidityRange range;
-    liquidityScratch_.clear();
-    for (const auto &cell : labels->cells)
-        if (tiles::cellState(cell.word) == tiles::kCellValid && cell.value > 0 && std::isfinite(cell.value))
-            liquidityScratch_.push_back(cell.value);
-    if (liquidityScratch_.size() >= 2) {
-        auto lo = liquidityScratch_.begin() + ptrdiff_t(liquidityScratch_.size() / 20);
-        std::nth_element(liquidityScratch_.begin(), lo, liquidityScratch_.end());
-        range.lo = *lo;
-        range.hi = *std::max_element(liquidityScratch_.begin(), liquidityScratch_.end());
-        range.valid = range.hi > range.lo;
-    }
+    const LiquidityRange range = visibleLiquidityRange();
+    if (range.valid) emit visibleLiquiditySampled(range.lo, range.hi);
     // Ends move only by more than ~10% (live revisions nudge them every second).
     const auto moved = [](double a, double b) { return std::abs(std::log(a / b)) > 0.1; };
     if (range.valid && (!liquidityRange_.valid || moved(range.lo, liquidityRange_.lo) || moved(range.hi, liquidityRange_.hi))) {
@@ -691,6 +752,37 @@ void HeatmapGpuLayer::onLabels() {
     if (notifiedLabels_ && sameCells(*notifiedLabels_, *labels)) return;
     notifiedLabels_ = labels;
     emit labelsChanged();
+}
+
+HeatmapGpuLayer::LiquidityRange HeatmapGpuLayer::visibleLiquidityRange() const {
+    LiquidityRange range;
+    if (!controller_ || !controller_->cellQuery() || !snapshot_ || snapshot_->symbol != symbol_ ||
+        !labelsPosted_ || !priceKnown_ || !hasView_) return range;
+    const auto labels = controller_->cellQuery()->latestLabels();
+    if (!labels || labels->key.serial < labelEpoch_ || labels->key.serial != postedLabels_.serial ||
+        labels->key.spanVersion != snapshot_->version || labels->key.tfMs != tfMs_ ||
+        labels->key.tickUnits != tickUnits_) return range;
+    const auto &key = labels->key;
+    const double tick = fromUnits(key.tickUnits, key.priceScale);
+    if (!(tick > 0) || !std::isfinite(view_.timeLoMs) || !std::isfinite(view_.timeHiMs) ||
+        !std::isfinite(view_.priceLo) || !std::isfinite(view_.priceHi)) return range;
+    range.lo = std::numeric_limits<double>::infinity();
+    for (uint32_t y = 0; y < key.rows; ++y) {
+        const double bin = double(key.firstBin) + double(key.rows - 1 - y);
+        if ((bin + 1) * tick <= view_.priceLo || bin * tick >= view_.priceHi) continue;
+        for (uint32_t x = 0; x < key.columns; ++x) {
+            const double bucket = double(key.firstBucket) + double(x);
+            if ((bucket + 1) * double(tfMs_) <= view_.timeLoMs || bucket * double(tfMs_) >= view_.timeHiMs) continue;
+            const auto &cell = labels->cells[size_t(y) * key.columns + x];
+            if (tiles::cellState(cell.word) != tiles::kCellValid || !(cell.value > 0) || !std::isfinite(cell.value))
+                continue;
+            range.lo = std::min(range.lo, cell.value);
+            range.hi = std::max(range.hi, cell.value);
+        }
+    }
+    range.valid = std::isfinite(range.lo) && range.hi > range.lo;
+    if (!range.valid) range = {};
+    return range;
 }
 
 // No result for the posted request: forget it so the next frame posts again, and

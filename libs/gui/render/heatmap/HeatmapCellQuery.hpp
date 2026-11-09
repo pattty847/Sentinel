@@ -19,7 +19,14 @@ struct LabelRequest {
     uint32_t columns = 0, rows = 0;
     std::string asset;
     bool formatText = true;
-    bool operator==(const LabelRequest &) const = default;
+    recording::SizeScale outputScale{};
+    bool operator==(const LabelRequest &o) const {
+        return serial == o.serial && spanVersion == o.spanVersion && liveVersion == o.liveVersion &&
+            tfMs == o.tfMs && tickUnits == o.tickUnits && priceScale == o.priceScale &&
+            firstBucket == o.firstBucket && firstBin == o.firstBin && columns == o.columns &&
+            rows == o.rows && asset == o.asset && formatText == o.formatText &&
+            outputScale.floor == o.outputScale.floor && outputScale.codesPerOctave == o.outputScale.codesPerOctave;
+    }
 };
 // Label text: at most three significant digits with k/M/B/T, trailing zeros
 // dropped, "$" for USD; the asset amount is the number only ("$11k", "$1.24M",

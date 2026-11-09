@@ -145,6 +145,23 @@ TEST(HeatmapCellQuery, LabelsEqualTheFillOracleAndExactValuesAfterUploadImagesAr
     }
 }
 
+TEST(HeatmapCellQuery, LabelCodesUseTheDisplayScale) {
+    Fixture f;
+    auto spans = f.spans(kMinuteMs);
+    LabelWindowBuilder builder;
+    LabelRequest request{1, spans.version, 0, kMinuteMs, 500, 100, start / kMinuteMs,
+                         99980 * 100 / 500, 10, 12, "BTC"};
+    request.outputScale = {1e-3, 500};
+    const auto labels = builder.build(request, spans, nullptr, f.store);
+    size_t checked = 0;
+    for (const auto &cell : labels->cells) {
+        if (tiles::cellState(cell.word) != tiles::kCellValid || cell.value <= 0) continue;
+        EXPECT_EQ(cell.word & 0x7fffu, recording::encodeSize(cell.value, request.outputScale));
+        ++checked;
+    }
+    EXPECT_GT(checked, 0u);
+}
+
 TEST(HeatmapCellQuery, CoarseValidCellsStopFineCompositionAndGenerationMismatchCannotLabelANewerPicture) {
     Fixture f;
     auto spans = f.spans(5 * kMinuteMs);

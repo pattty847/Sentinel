@@ -6,6 +6,7 @@
 #include "render/heatmap/HeatmapDataService.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapSettingsStore.hpp"
+#include "render/heatmap/HeatmapSettingsModel.hpp"
 #include <QCoreApplication>
 #include <QDir>
 #include <QEvent>
@@ -14,6 +15,7 @@
 #include <QPointer>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 
@@ -28,6 +30,12 @@ protected:
     void drain(HeatmapDataService &service) {
         // Cross-thread barriers plus explicit MetaCall drains, no timed waits.
         for (int i = 0; i < 4; ++i) service.onData([] { QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall); });
+    }
+    void drainGui(HeatmapDataService &service) {
+        for (int i = 0; i < 12; ++i) {
+            service.onData([] { QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall); });
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        }
     }
     protocol::chunkwire::Availability availability() {
         protocol::chunkwire::Availability a;
@@ -58,6 +66,224 @@ TEST_F(HeatmapPlumbing, ServiceShutdownForgetsPendingAutoPriceTick) {
     service = std::make_unique<HeatmapDataService>([](QObject *) { return new FakeChunkTransport; });
     layer.setService(service.get());
     EXPECT_TRUE(layer.setAutoPriceTick(500)) << "a service swap clears a decision even without a controller";
+}
+
+TEST_F(HeatmapPlumbing, ZoomOutSmoothingPersistsAndReachesTheFrame) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    QSettings ini(dir.filePath("settings.ini"), QSettings::IniFormat);
+    HeatmapSettingsStore store(ini);
+    HeatmapSettingsModel model(store, "main", {});
+    EXPECT_FALSE(model.settings().smoothZoomOut);
+    ASSERT_TRUE(model.apply({{"smoothZoomOut", true}}).isEmpty());
+    ini.sync();
+    QSettings reopened(dir.filePath("settings.ini"), QSettings::IniFormat);
+    EXPECT_TRUE(HeatmapSettingsStore(reopened).load("main", {}).smoothZoomOut);
+    gpu::HeatmapGpuLayer layer;
+    auto service = std::make_unique<HeatmapDataService>([](QObject *) { return new FakeChunkTransport; });
+    layer.setService(service.get());
+    layer.setActive(true);
+    auto directSettings = model.settings();
+    directSettings.sensitivityReady = true;
+    layer.setSettings(directSettings);
+    gpu::HeatmapTileNode::Frame frame;
+    ASSERT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_TRUE(frame.smoothZoomOut);
+    ASSERT_TRUE(model.apply({{"smoothZoomOut", false}}).isEmpty());
+    directSettings = model.settings();
+    directSettings.sensitivityReady = true;
+    layer.setSettings(directSettings);
+    ASSERT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_FALSE(frame.smoothZoomOut);
+}
+
+TEST_F(HeatmapPlumbing, PendingSymbolRangeDrawsTemporarilyUntilItsVisibleFit) {
+    QTemporaryDir dir;
+    QSettings ini(dir.filePath("settings.ini"), QSettings::IniFormat);
+    HeatmapSettingsStore store(ini);
+    HeatmapSettingsModel model(store, "main", {});
+    gpu::HeatmapGpuLayer layer;
+    auto service = std::make_unique<HeatmapDataService>([](QObject *) { return new FakeChunkTransport; });
+    layer.setService(service.get());
+    layer.setActive(true);
+    layer.setSymbol("BTC-USD");
+    model.selectSymbol("BTC-USD");
+    layer.setSettings(model.settings());
+    gpu::HeatmapTileNode::Frame frame;
+    ASSERT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_FALSE(store.loadSensitivity("BTC-USD"));
+    EXPECT_FALSE(model.settings().sensitivityReady);
+    model.notePrice("BTC-USD", 100'000);
+    layer.setSettings(model.settings());
+    EXPECT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_FALSE(store.loadSensitivity("BTC-USD"));
+    model.noteVisibleLiquidity("BTC-USD", 0.01, 25);
+    layer.setSettings(model.settings());
+    ASSERT_TRUE(store.loadSensitivity("BTC-USD"));
+    EXPECT_DOUBLE_EQ(store.loadSensitivity("BTC-USD")->min, 0.01);
+    EXPECT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    layer.setSymbol("ETH-USD");
+    EXPECT_FALSE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    model.selectSymbol("ETH-USD");
+    layer.setSettings(model.settings());
+    EXPECT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_FALSE(store.loadSensitivity("ETH-USD"));
+    model.notePrice("ETH-USD", 3'000);
+    layer.setSettings(model.settings());
+    EXPECT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_FALSE(store.loadSensitivity("ETH-USD"));
+    model.noteVisibleLiquidity("ETH-USD", 0.1, 10);
+    ASSERT_TRUE(store.loadSensitivity("ETH-USD"));
+}
+
+TEST_F(HeatmapPlumbing, AdvertisedGridFixesLayerScaleAndWindowAcrossPansAndLabels) {
+    struct Probe {
+        recording::SizeScale scale;
+        gpu::DrawStyle style;
+        LabelRequest labels;
+    };
+    auto probe = [&](const std::string &symbol, double recordingFloor, double sensitivityMax,
+                     bool reversePans, double sensitivityMin = 0.05,
+                     double recordingCodesPerOctave = 819) -> std::optional<Probe> {
+        FakeChunkTransport *transport = nullptr;
+        HeatmapDataService service([&](QObject *) { return transport = new FakeChunkTransport; });
+        gpu::HeatmapGpuLayer layer;
+        layer.setService(&service);
+        layer.setActive(true);
+        layer.setSymbol(symbol);
+        HeatmapChartSettings settings;
+        settings.sensitivityMin = sensitivityMin;
+        settings.sensitivityMax = sensitivityMax;
+        layer.setSettings(settings);
+        layer.setSurface(640, 320, 1);
+        auto a = availability();
+        a.symbol = symbol;
+        a.sources.front().latestGrid->sizeFloor = recordingFloor;
+        a.sources.front().latestGrid->codesPerOctave = recordingCodesPerOctave;
+        const double start = double(a.sources.front().levels.front().oldestMs);
+        const gpu::ViewWindow first{start, start + 10 * kMinuteMs, 100, 102};
+        const gpu::ViewWindow second{start + kHourMs, start + kHourMs + 10 * kMinuteMs, 100, 102};
+        layer.setView(reversePans ? second : first, true);
+        service.onData([&] { transport->goOnline(); transport->push(ChunkAvailability{a}); });
+        drainGui(service);
+        const auto snapshot = layer.controller()->latestSnapshot();
+        if (!snapshot || !snapshot->recordingScaleKnown) return std::nullopt;
+        EXPECT_EQ(snapshot->recordingScale.floor, recordingFloor);
+        EXPECT_EQ(snapshot->symbol, symbol);
+        for (const gpu::ViewWindow view : {reversePans ? second : first, reversePans ? first : second}) {
+            layer.setView(view, true);
+            drainGui(service);
+            layer.chooseTickForView(view);
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+            gpu::HeatmapTileNode::Frame frame;
+            if (!layer.prepareFrame(frame, QRectF(0, 0, 640, 320), view)) return std::nullopt;
+            drainGui(service);
+        }
+        settings.tickMode = TickMode::Manual;
+        settings.manualTick = 100;
+        layer.setSettings(settings, true);
+        const gpu::ViewWindow final = reversePans ? first : second;
+        layer.chooseTickForView(final);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        gpu::HeatmapTileNode::Frame frame;
+        if (!layer.prepareFrame(frame, QRectF(0, 0, 640, 320), final)) return std::nullopt;
+        const auto labels = layer.postedLabelRequest();
+        return Probe{frame.outputScale, frame.style, labels};
+    };
+    const auto pepe = probe("PEPE-USD", 1.0, 5e11, false, 5e8);
+    const auto pepePanned = probe("PEPE-USD", 1.0, 5e11, true, 5e8);
+    const auto pepeManual = probe("PEPE-USD", 1.0, 2e11, false, 5e8);
+    const auto btc = probe("BTC-USD", 1e-8, 50, false);
+    const auto fixtureBtc = probe("BTC-USD", recording::SizeScale{}.floor, 1, false, 0.001);
+    const auto narrowGridBtc = probe("BTC-USD", recording::SizeScale{}.floor, 1, false, 0.001, 500);
+    ASSERT_TRUE(pepe && pepePanned && pepeManual && btc && fixtureBtc && narrowGridBtc);
+    EXPECT_EQ(pepe->scale.floor, gpu::displaySizeScale(1.0).floor);
+    EXPECT_DOUBLE_EQ(pepe->scale.floor, 1e-6 * 1024.0 * 1024.0 * 1024.0);
+    EXPECT_EQ(pepe->scale.floor, pepePanned->scale.floor);
+    EXPECT_FLOAT_EQ(pepe->style.codeFloor, pepePanned->style.codeFloor);
+    EXPECT_FLOAT_EQ(pepe->style.codeRange, pepePanned->style.codeRange);
+    EXPECT_EQ(btc->scale.floor, 1e-6);
+    const auto btcWindow = gpu::codeWindow(0.05, 50, 1e-6, 819);
+    EXPECT_FLOAT_EQ(btc->style.codeFloor, btcWindow.floor);
+    EXPECT_FLOAT_EQ(btc->style.codeRange, btcWindow.range);
+    EXPECT_EQ(fixtureBtc->scale.floor, recording::SizeScale{}.floor);
+    EXPECT_EQ(fixtureBtc->labels.outputScale.floor, recording::SizeScale{}.floor);
+    EXPECT_EQ(narrowGridBtc->scale.floor, recording::SizeScale{}.floor);
+    const auto fixtureWindow = gpu::codeWindow(0.001, 1, 1e-6, 819);
+    EXPECT_FLOAT_EQ(fixtureBtc->style.codeFloor, fixtureWindow.floor);
+    EXPECT_FLOAT_EQ(fixtureBtc->style.codeRange, fixtureWindow.range);
+    const auto fixtureMagnitude = [&](double size) {
+        const auto code = recording::encodeSize(size, fixtureBtc->scale);
+        return std::clamp((float(code) - fixtureBtc->style.codeFloor) / fixtureBtc->style.codeRange, 0.0f, 1.0f);
+    };
+    EXPECT_GT(fixtureMagnitude(0.01), 0.0f);
+    EXPECT_GT(fixtureMagnitude(0.53), fixtureMagnitude(0.01));
+    for (double high : {5e11, 2e11}) {
+        const auto &result = high == 5e11 ? *pepe : *pepeManual;
+        EXPECT_EQ(result.labels.outputScale.floor, result.scale.floor);
+        EXPECT_EQ(result.labels.outputScale.codesPerOctave, result.scale.codesPerOctave);
+        EXPECT_GT(result.labels.serial, 0u);
+        const auto window = gpu::codeWindow(5e8, high,
+                                            result.scale.floor, result.scale.codesPerOctave);
+        EXPECT_FLOAT_EQ(result.style.codeFloor, window.floor);
+        EXPECT_FLOAT_EQ(result.style.codeRange, window.range);
+        float previous = -1;
+        for (double size : {1e9, 1e10, 1e11}) {
+            const auto cellCode = recording::encodeSize(size, result.scale);
+            const auto labelCode = recording::encodeSize(size, result.labels.outputScale);
+            EXPECT_EQ(cellCode, labelCode);
+            const float code = float(cellCode);
+            const float magnitude = std::clamp((code - result.style.codeFloor) / result.style.codeRange, 0.0f, 1.0f);
+            EXPECT_GT(magnitude, previous);
+            previous = magnitude;
+        }
+    }
+}
+
+TEST_F(HeatmapPlumbing, LateDisplayScaleAdoptionInvalidatesDefaultScaleLabels) {
+    FakeChunkTransport *transport = nullptr;
+    HeatmapDataService service([&](QObject *) { return transport = new FakeChunkTransport; });
+    gpu::HeatmapGpuLayer layer;
+    layer.setService(&service);
+    layer.setActive(true);
+    layer.setSymbol("PEPE-USD");
+    layer.setSurface(640, 320, 1);
+    HeatmapChartSettings settings;
+    settings.tickMode = TickMode::Manual;
+    settings.manualTick = 100;
+    layer.setSettings(settings, true);
+    auto a = availability();
+    a.symbol = "PEPE-USD";
+    a.sources.front().latestGrid->sizeFloor = 0;
+    a.sources.front().latestGrid->codesPerOctave = 819;
+    const double start = double(a.sources.front().levels.front().oldestMs);
+    const gpu::ViewWindow view{start, start + 10 * kMinuteMs, 100, 102};
+    layer.setView(view, true);
+    service.onData([&] { transport->goOnline(); transport->push(ChunkAvailability{a}); });
+    drainGui(service);
+    layer.chooseTickForView(view);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+    gpu::HeatmapTileNode::Frame frame;
+    ASSERT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 640, 320), view));
+    ASSERT_GT(layer.postedLabelRequest().serial, 0u);
+    const auto previousSerial = layer.postedLabelRequest().serial;
+    EXPECT_EQ(frame.outputScale.floor, recording::SizeScale{}.floor);
+
+    int frameRequests = 0;
+    QObject::connect(&layer, &gpu::HeatmapGpuLayer::frameRequested, &layer, [&] { ++frameRequests; });
+    a.sources.front().latestGrid->sizeFloor = 1.0;
+    a.sources.front().levels.front().committedThroughMs += kMinuteMs;
+    service.onData([&] { transport->push(ChunkAvailability{a}); });
+    drainGui(service);
+    layer.chooseTickForView(view);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+    EXPECT_EQ(layer.displayScale().floor, 1e-6 * 1024.0 * 1024.0 * 1024.0);
+    EXPECT_EQ(layer.postedLabelRequest().serial, 0u);
+    EXPECT_EQ(layer.labelCounters().epoch, previousSerial + 1);
+    EXPECT_GT(frameRequests, 0);
+    ASSERT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 640, 320), view));
+    EXPECT_GT(layer.postedLabelRequest().serial, previousSerial);
+    EXPECT_EQ(layer.postedLabelRequest().outputScale.floor, frame.outputScale.floor);
 }
 
 TEST_F(HeatmapPlumbing, AttachBeforeConnectSeesConnectionAndAvailabilityWithNoCharts) {
@@ -149,6 +375,8 @@ TEST_F(HeatmapPlumbing, SettingsRoundTripWorkspaceAndSharedTickMemory) {
         {"gpuCapBytes", 64 * 1048576}, {"uploadBudgetBytes", 2 * 1048576}, {"prefetchTiles", 3},
         {"liveMinIntervalMs", 750}, {"showTelemetry", true}}).isEmpty());
     store.save("main", s);
+    s.sensitivityMin = 0.05;
+    s.sensitivityMax = 50;
     store.saveLayout("work", "main", {});
     store.save("main", {});
     EXPECT_EQ(store.restoreLayout("work", "main", {}), s);

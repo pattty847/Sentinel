@@ -302,6 +302,8 @@ struct SpanSet {
     // priceScale is this symbol's (its availability advertised a grid); false after a
     // symbol switch until then (priceScale is still the previous symbol's).
     bool priceScaleKnown = false;
+    recording::SizeScale recordingScale;
+    bool recordingScaleKnown = false;
     std::vector<SpanSnapshot> spans; // by rank
     ResolutionSummary resolution;    // built spans of tfMs, ascending columns
     // Visible spans refused by the process-wide CPU ceiling (farthest from the
@@ -460,6 +462,8 @@ private:
     int64_t tickUnits_ = 0;
     double priceScale_ = 100;
     bool priceScaleKnown_ = false; // priceScale_ came from symbol_'s availability
+    recording::SizeScale recordingScale_;
+    bool recordingScaleKnown_ = false;
     int64_t availableStartMs_ = 0, availableEndMs_ = 0; // SpanSet availability
     uint64_t serial_ = 0, version_ = 0, epoch_ = 0;
     size_t reportedFree_ = 0;

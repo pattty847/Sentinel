@@ -113,6 +113,7 @@ public:
     int64_t tfMs() const { return tfMs_; }
     const std::string &symbol() const { return symbol_; }
     bool manualMode() const { return manualMode_; }
+    bool manualTickLocked() const { return manualMode_ && (!manualFallback_ || manualFallbackResolved_); }
     int64_t manualTickUnits() const { return manualUnits_; }
     int64_t tickUnits() const { return tickUnits_; } // chosen for the last frame
     double priceScale() const;
@@ -181,17 +182,18 @@ public:
     static uint64_t labelSignature(const LabelCells *labels, const std::vector<uint8_t> &columns, size_t matched);
     int labelRetryMs() const { return retry_.delayMs(); }
     const DrawStyle &drawStyle() const { return style_; }
+    recording::SizeScale displayScale() const { return displayScale_; }
     std::shared_ptr<const HeatmapPalette> palette() const { return palette_; }
-    // The liquidity (base-asset quantity, as sensitivityMin/Max) of the valid cells
-    // in the last label window of this symbol (5th percentile to maximum): the
-    // range slider's ends. valid false until one arrived; kept while the label
-    // gate is closed (zoomed out past kMaxLabelCells).
+    // The liquidity (base-asset quantity, as sensitivityMin/Max) of valid cells
+    // in the visible view from the latest current label result: the range slider's
+    // ends. valid false until one arrived; kept while the label gate is closed.
     struct LiquidityRange {
         double lo = 0, hi = 0;
         bool valid = false;
         bool operator==(const LiquidityRange &) const = default;
     };
     LiquidityRange liquidityRange() const { return liquidityRange_; }
+    LiquidityRange visibleLiquidityRange() const;
     struct LabelCounters {
         uint64_t posted = 0, results = 0, retries = 0, failures = 0;
         uint64_t lastPostedSerial = 0, epoch = 0;
@@ -203,6 +205,8 @@ public:
     void setCaptureForTest(std::shared_ptr<HeatmapCellCapture> capture) { capture_ = std::move(capture); }
 
 signals:
+    void symbolChanged();
+    void priceViewKnown();
     void snapshotChanged();
     void liveChanged();
     void frameRequested(); // startup tick needs a fresh render-thread proposal
@@ -212,6 +216,7 @@ signals:
     void buildFailed(QString message);
     void labelsChanged();         // a new label result (or a retry): the chart redraws
     void liquidityRangeChanged(); // liquidityRange() changed
+    void visibleLiquiditySampled(double lo, double hi);
 
 private:
     HeatmapDataService *service_ = nullptr;
@@ -229,6 +234,8 @@ private:
     PaletteTone tone_;
     std::shared_ptr<const HeatmapPalette> palette_;
     DrawStyle style_;
+    recording::SizeScale displayScale_;
+    bool displayScaleKnown_ = false;
     std::shared_ptr<const SpanSet> snapshot_;
     std::shared_ptr<const LiveSnapshot> live_;
     std::shared_ptr<const ResolutionSummary> resolution_;
@@ -237,6 +244,8 @@ private:
     int64_t liveReceivedAtMs_ = 0;
     std::shared_ptr<HeatmapTileStats> tileStats_ = std::make_shared<HeatmapTileStats>();
     bool manualMode_ = false;
+    bool manualFallback_ = false;
+    bool manualFallbackResolved_ = false;
     int64_t manualUnits_ = 100;
     ManualTickMemory tickMemory_;
     std::vector<int64_t> offered_;
@@ -274,7 +283,6 @@ private:
     mutable std::vector<HeatmapTileStats::Segment> segmentScratch_; // reused (matchLabelColumns)
     mutable std::vector<uint8_t> signatureColumns_;                 // reused (labelSignature)
     LiquidityRange liquidityRange_;
-    std::vector<double> liquidityScratch_;
     LabelCounters labelCounters_;
     std::shared_ptr<HeatmapCellCapture> capture_;
     std::atomic<int> rowPxDrawn_{0}, colPxDrawn_{0};
@@ -304,6 +312,7 @@ private:
     void restoreTick();
     void refreshPresets();
     void refreshStyle();
+    void adoptDisplayScale(const SpanSet &snapshot);
     void viewChanged();
     void noteLimits();
 };

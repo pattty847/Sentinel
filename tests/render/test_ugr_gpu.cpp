@@ -27,6 +27,7 @@
 #include "render/PaperTradeOverlayModel.hpp"
 #include "render/PaperTradeOverlayRenderer.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
+#include "render/heatmap/HeatmapCellQuery.hpp"
 #include "render/heatmap/HeatmapPalette.hpp"
 #include "servermodel/Hmc2Store.hpp"
 #include "heatmap/LocalChunkTransport.hpp"
@@ -55,6 +56,7 @@
 #include <climits>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <iostream>
 #include <numeric>
 #include <optional>
@@ -2386,6 +2388,9 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     ugr->view()->setViewport(t0, t1, 99'500, 101'500); // auto off; the book a quarter up
     ugr->setLiveBook(bookWithTop(99'999, 100'001));
     // BTC -> TINY (price scale 1e10, recorded).
+    auto tinyMemory = layer().tickMemory();
+    ASSERT_TRUE(tinyMemory.set("TINY-USD", 60000, 1000));
+    ugr->setHeatmapTickMemory(tinyMemory);
     ugr->setActiveSymbol("TINY-USD");
     EXPECT_FALSE(layer().priceScaleCurrent());
     EXPECT_EQ(view->maxPriceSpan(), 0.0) << "TINY's limits are unknown, not BTC's";
@@ -2475,6 +2480,9 @@ TEST_F(UgrGpu, CarryWaitsForTheScaleWhenNoSnapshotExistsYet) {
     const int64_t t0 = view->getVisibleTimeStart(), t1 = view->getVisibleTimeEnd();
     ugr->view()->setViewport(t0, t1, 99'500, 101'500);
     ugr->setLiveBook(bookWithTop(99'999, 100'001));
+    auto tinyMemory = layer().tickMemory();
+    ASSERT_TRUE(tinyMemory.set("TINY-USD", 60000, 1000));
+    ugr->setHeatmapTickMemory(tinyMemory);
     ugr->setActiveSymbol("TINY-USD");
     ugr->setLiveBook(bookWithTop(0.0000099, 0.0000101));
     auto expectCarried = [&](double mid, const char *what) {
@@ -3960,6 +3968,205 @@ TEST(UgrTickCpu, ManualTickBypassesStartupHold) {
     ASSERT_TRUE(scripted);
     ASSERT_EQ(committed.size(), 1u);
     EXPECT_EQ(committed.front(), 500);
+    layer.setService(nullptr);
+}
+
+TEST(UgrTickCpu, ManualTickNeverCarriesAcrossSymbolOrTimeframe) {
+    heatmap::gpu::HeatmapGpuLayer layer;
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 3 * kHourMs),
+                                        100120, 100180};
+    layer.setSymbol("ETH-USD");
+    layer.setTimeframeMs(minute);
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    auto settings = layer.settings();
+    settings.tickMode = heatmap::TickMode::Manual;
+    settings.manualTick = 2000;
+    layer.setSettings(settings);
+    heatmap::ManualTickMemory memory;
+    ASSERT_TRUE(memory.set("ETH-USD", minute, 500));
+    layer.setTickMemory(memory);
+    std::vector<int64_t> announced;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::tickChanged, &layer,
+                     [&] { announced.push_back(layer.tickUnits()); });
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    const auto pump = [&](int64_t wantedTf) {
+        QElapsedTimer elapsed;
+        elapsed.start();
+        while (!layer.hasCurrentResolution() && elapsed.elapsed() < 10'000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        if (!layer.hasCurrentResolution()) return false;
+        EXPECT_EQ(layer.tfMs(), wantedTf);
+        layer.chooseTickForView(view);
+        QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+        return true;
+    };
+    layer.setSymbol("BTC-USD");
+    layer.setView(view, true);
+    EXPECT_EQ(layer.manualTickUnits(), 0);
+    EXPECT_EQ(layer.tickUnits(), 0);
+    EXPECT_FALSE(layer.manualTickLocked());
+    heatmap::gpu::HeatmapTileNode::Frame firstFallbackFrame;
+    ASSERT_TRUE(layer.prepareFrame(firstFallbackFrame, QRectF(0, 0, 640, 320), view));
+    EXPECT_EQ(firstFallbackFrame.tickUnits, 0);
+    ASSERT_TRUE(pump(minute));
+    const auto firstSnapshot = layer.snapshot();
+    ASSERT_TRUE(firstSnapshot);
+    const int64_t firstAutomatic = heatmap::autoTickUnits(firstSnapshot->resolution, 0, view.timeLoMs,
+                                                          view.timeHiMs, view.priceLo, view.priceHi, 320,
+                                                          {settings.minRowPx, settings.hysteresis});
+    ASSERT_GT(firstAutomatic, 0);
+    EXPECT_EQ(layer.tickUnits(), firstAutomatic);
+    EXPECT_FALSE(layer.tickMemory().get("BTC-USD", minute));
+    EXPECT_TRUE(layer.manualTickLocked());
+    EXPECT_GT(layer.maxPriceSpan(), 0);
+    const heatmap::gpu::ViewWindow zoomed{view.timeLoMs + minute, view.timeLoMs + 2 * minute, 100140, 100145};
+    layer.chooseTickForView(zoomed);
+    QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+    EXPECT_EQ(layer.tickUnits(), firstAutomatic);
+    EXPECT_EQ(layer.predictTickUnits(zoomed), firstAutomatic);
+    EXPECT_FALSE(layer.tickMemory().get("BTC-USD", minute));
+    layer.setSettings(settings, true);
+    layer.chooseTickForView(view);
+    QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+    ASSERT_EQ(layer.tickUnits(), 2000);
+    EXPECT_TRUE(layer.manualTickLocked());
+
+    layer.setSymbol("ETH-USD");
+    EXPECT_EQ(layer.manualTickUnits(), 500);
+    EXPECT_EQ(layer.tickUnits(), 0);
+    EXPECT_EQ(layer.predictTickUnits(view), 0);
+    layer.chooseTickForView(view);
+    EXPECT_EQ(layer.tickUnits(), 0);
+    heatmap::gpu::HeatmapTileNode::Frame firstSymbolFrame;
+    ASSERT_TRUE(layer.prepareFrame(firstSymbolFrame, QRectF(0, 0, 640, 320), view));
+    EXPECT_EQ(firstSymbolFrame.tickUnits, 0);
+    ASSERT_FALSE(announced.empty());
+    EXPECT_EQ(announced.back(), 0);
+
+    layer.setSymbol("BTC-USD");
+    EXPECT_EQ(layer.manualTickUnits(), 2000);
+    EXPECT_EQ(layer.tickUnits(), 0);
+    layer.setView(view, true);
+    ASSERT_TRUE(pump(minute));
+    EXPECT_EQ(layer.tickUnits(), 2000);
+
+    layer.setTimeframeMs(5 * minute);
+    EXPECT_EQ(layer.manualTickUnits(), 0);
+    EXPECT_EQ(layer.tickUnits(), 0);
+    EXPECT_FALSE(layer.manualTickLocked());
+    EXPECT_EQ(layer.predictTickUnits(view), 0);
+    heatmap::gpu::HeatmapTileNode::Frame firstTimeframeFrame;
+    ASSERT_TRUE(layer.prepareFrame(firstTimeframeFrame, QRectF(0, 0, 640, 320), view));
+    EXPECT_EQ(firstTimeframeFrame.tickUnits, 0);
+    ASSERT_TRUE(pump(5 * minute));
+    const auto snapshot = layer.snapshot();
+    ASSERT_TRUE(snapshot);
+    const int64_t automatic = heatmap::autoTickUnits(snapshot->resolution, 0, view.timeLoMs, view.timeHiMs,
+                                                     view.priceLo, view.priceHi, 320,
+                                                     {settings.minRowPx, settings.hysteresis});
+    ASSERT_GT(automatic, 0);
+    EXPECT_EQ(layer.tickUnits(), automatic);
+    EXPECT_EQ(layer.manualTickUnits(), automatic);
+    EXPECT_TRUE(layer.manualTickLocked());
+    EXPECT_GT(layer.maxPriceSpan(), 0);
+    EXPECT_FALSE(layer.tickMemory().get("BTC-USD", 5 * minute));
+
+    layer.setTimeframeMs(minute);
+    EXPECT_EQ(layer.manualTickUnits(), 2000);
+    EXPECT_EQ(layer.tickUnits(), 0);
+    ASSERT_TRUE(pump(minute));
+    EXPECT_EQ(layer.tickUnits(), 2000);
+    layer.setService(nullptr);
+}
+
+TEST(UgrTickCpu, TinyWithoutMemoryHoldsItsFirstAutoTick) {
+    heatmap::gpu::HeatmapGpuLayer layer;
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 3 * kHourMs),
+                                        0.000009, 0.000011};
+    layer.setSymbol("TINY-USD");
+    layer.setTimeframeMs(minute);
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    auto settings = layer.settings();
+    settings.tickMode = heatmap::TickMode::Manual;
+    layer.setSettings(settings);
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (!layer.hasCurrentResolution() && elapsed.elapsed() < 10'000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    ASSERT_TRUE(layer.hasCurrentResolution());
+    layer.chooseTickForView(view);
+    QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+    const int64_t held = layer.tickUnits();
+    ASSERT_GT(held, 0);
+    EXPECT_TRUE(layer.manualTickLocked());
+    EXPECT_GT(layer.maxPriceSpan(), 0);
+    EXPECT_FALSE(layer.tickMemory().get("TINY-USD", minute));
+    const heatmap::gpu::ViewWindow zoomed{view.timeLoMs, view.timeLoMs + minute, 0.0000099, 0.0000101};
+    layer.chooseTickForView(zoomed);
+    QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+    EXPECT_EQ(layer.tickUnits(), held);
+    EXPECT_EQ(layer.predictTickUnits(zoomed), held);
+    layer.setService(nullptr);
+}
+
+TEST(UgrTickCpu, VisibleLiquidityUsesCurrentCellsOutsideTheColourWindow) {
+    heatmap::gpu::HeatmapGpuLayer layer;
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 2 * kHourMs + 10 * minute),
+                                        100'000, 100'180};
+    layer.setSymbol("BTC-USD");
+    layer.setTimeframeMs(minute);
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    auto settings = layer.settings();
+    settings.tickMode = heatmap::TickMode::Manual;
+    settings.manualTick = 100;
+    settings.sensitivityMin = 0.4;
+    settings.sensitivityMax = 0.5;
+    layer.setSettings(settings, true);
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (!layer.visibleLiquidityRange().valid && elapsed.elapsed() < 10'000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        if (!layer.hasCurrentResolution()) continue;
+        layer.chooseTickForView(view);
+        QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+        if (layer.tickUnits() == 100) {
+            heatmap::gpu::HeatmapTileNode::Frame frame;
+            layer.prepareFrame(frame, QRectF(0, 0, 640, 320), view);
+        }
+    }
+    const auto range = layer.visibleLiquidityRange();
+    ASSERT_TRUE(range.valid);
+    const auto labels = layer.controller()->cellQuery()->latestLabels();
+    ASSERT_TRUE(labels);
+    double expectedLo = std::numeric_limits<double>::infinity(), expectedHi = 0;
+    const auto &key = labels->key;
+    const double tick = heatmap::fromUnits(key.tickUnits, key.priceScale);
+    for (uint32_t y = 0; y < key.rows; ++y) {
+        const double bin = double(key.firstBin) + double(key.rows - 1 - y);
+        if ((bin + 1) * tick <= view.priceLo || bin * tick >= view.priceHi) continue;
+        for (uint32_t x = 0; x < key.columns; ++x) {
+            const double bucket = double(key.firstBucket) + double(x);
+            if ((bucket + 1) * minute <= view.timeLoMs || bucket * minute >= view.timeHiMs) continue;
+            const auto &cell = labels->cells[size_t(y) * key.columns + x];
+            if (heatmap::tiles::cellState(cell.word) != heatmap::tiles::kCellValid || cell.value <= 0) continue;
+            expectedLo = std::min(expectedLo, cell.value);
+            expectedHi = std::max(expectedHi, cell.value);
+        }
+    }
+    EXPECT_DOUBLE_EQ(range.lo, expectedLo);
+    EXPECT_DOUBLE_EQ(range.hi, expectedHi);
+    EXPECT_LT(range.lo, settings.sensitivityMin);
+    EXPECT_GT(range.hi, settings.sensitivityMax);
+    layer.setSymbol("TINY-USD");
+    EXPECT_FALSE(layer.visibleLiquidityRange().valid);
     layer.setService(nullptr);
 }
 
