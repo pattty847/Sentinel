@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends. Keep under 8 KB.
 
-- **Updated:** 2026-11-08, wave 3 PAUSED by the owner (needs the Mac for a VM). Nothing running. **main** pushed (see `git log -1`). Work order: `docs/TODO.md` Waves.
+- **Updated:** 2026-11-09, wave 3 RESUMED (S3a writer resumed, saturation Fable review re-run, S2 dispatched). **main** pushed (see `git log -1`). Work order: `docs/TODO.md` Waves.
 - **Conductor:** Claude Opus 5.5, wave 3 (started 2026-11-08).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high risk. Owner 2026-11-05: spend all Codex, including reset credits before they expire.
 
@@ -28,8 +28,10 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 ## In flight
 
-- `lt-astra/heatmap-saturation` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-heatmap-saturation`): READY `5a544096` (adaptive per-product display scale from observed sizes, largest kept; smoothing setting default off, 8x8 samples). Native Metal by conductor: 20/20 heatmap+chart tests pass, no GPU skips. Fable review was STOPPED by the pause before a verdict: re-run it on resume (focus: is the adaptive scale deterministic, or should it come from the recording header/product units). Writer thread `01a1be15-f436-7d21-8eaa-b2a3cfe59f36`. HIGH.
-- `lt-astra/flow-live-model` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-flow-live-model`): plan S3a. Writer gpt-6-astra thread `01a1be55-f2c7-7100-a7f5-134765c768f4` STOPPED mid-work by the pause; UNCOMMITTED edits in ServerDataModel, SentinelStreamServer/Protocol, MARKETDATA. On resume: `codex-exec.sh --worktree <wt> --role writer --resume 01a1be55-f2c7-7100-a7f5-134765c768f4` with "continue; you were interrupted". Reviewer Claude Opus. MEDIUM.
+- `lt-astra/heatmap-saturation` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-heatmap-saturation`): READY `5a544096` (adaptive per-product display scale from observed sizes, largest kept; smoothing setting default off, 8x8 samples). Native Metal by conductor: 20/20 heatmap+chart tests pass, no GPU skips. Fable review re-run 2026-11-09, in progress (focus: is the adaptive scale deterministic, or should it come from the recording header/product units). Writer thread `01a1be15-f436-7d21-8eaa-b2a3cfe59f36`. HIGH.
+- `lt-astra/flow-live-model` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-flow-live-model`): plan S3a. Writer gpt-6-astra thread `01a1be55-f2c7-7100-a7f5-134765c768f4` resumed 2026-11-09, writing. Reviewer Claude Opus. MEDIUM.
+
+- `lt-astra/flow-store` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-flow-store`): plan S2, from `a8d1edc2`. Writer gpt-6-astra (high), dispatched 2026-11-09, writing; thread id in the wrapper log. Reviewer Claude Fable. HIGH. Shares only a test-registration append in `tests/servermodel/CMakeLists.txt` with S3a.
 
 Lab branches that never land: `lt-astra/hmc2-rollup-lab`, `lt-claude/hmc2-layout-lab` (results in `/Volumes/T7/sentinel-datalab/hmc2-*`).
 
