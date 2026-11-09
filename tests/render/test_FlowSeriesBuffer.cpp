@@ -4,6 +4,7 @@
 #include "datasources/RemoteGridDataSource.hpp"
 #include <QCoreApplication>
 #include <QEvent>
+#include <QEventLoop>
 
 namespace {
 using Client = SentinelStreamClient;
@@ -116,12 +117,12 @@ TEST(FlowBackfillState, EmptyPagesProgressByOldestAndStopAtZero) {
 TEST(FlowBackfillState, RefusalStopsAndBusyRetriesWithExponentialBackoff) {
     FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
     const auto first = state.next(0); ASSERT_TRUE(first);
-    EXPECT_TRUE(state.fail(first->id, true, 10));
+    EXPECT_TRUE(state.fail(first->id, Client::FlowFailure::Retryable, 10));
     EXPECT_FALSE(state.next(1009));
     const auto retry = state.next(1010); ASSERT_TRUE(retry);
     EXPECT_NE(retry->id, first->id); EXPECT_EQ(retry->endMs, first->endMs);
     EXPECT_FALSE(state.next(5000));
-    EXPECT_TRUE(state.fail(retry->id, true, 1011));
+    EXPECT_TRUE(state.fail(retry->id, Client::FlowFailure::Retryable, 1011));
     EXPECT_FALSE(state.next(3010));
     const auto again = state.next(3011); ASSERT_TRUE(again);
     EXPECT_TRUE(state.accept(reply(*again, 88'000, Status::Refused), 3012));
@@ -248,9 +249,9 @@ TEST(FlowSeriesBuffer, WindowEvictionAllowsOlderPagesInsteadOfKeepingOnlyNewestB
     buffer.apply(batch(bar(1, true)), 0);
     EXPECT_EQ(buffer.series(60'000)->bars.size(), 1u);
     buffer.retainWindow(60'000, 0, 60'000);
-    EXPECT_TRUE(buffer.series(60'000)->bars.empty());
+    EXPECT_TRUE(buffer.series(60'000)->bars.contains(60'000)); // bounded live tail
     buffer.apply(batch(bar(1, true, Source::Live, 0)), 0);
-    EXPECT_EQ(buffer.series(60'000)->bars.size(), 1u);
+    EXPECT_EQ(buffer.series(60'000)->bars.size(), 2u);
     buffer.apply(batch(bar(2, true)), 1);
     EXPECT_EQ(buffer.series(60'000)->bars.begin()->first, 0);
 }
@@ -289,7 +290,7 @@ TEST(FlowBackfillState, FutureRefreshDoesNotDelayPagingThrottleOrBusyRetry) {
     EXPECT_FALSE(state.next(1));
     EXPECT_EQ(state.wakeAtMs(1), 101);
     const auto second = state.next(101); ASSERT_TRUE(second);
-    EXPECT_TRUE(state.fail(second->id, true, 102));
+    EXPECT_TRUE(state.fail(second->id, Client::FlowFailure::Retryable, 102));
     EXPECT_EQ(state.wakeAtMs(102), 1102);
     EXPECT_TRUE(state.next(1102));
 }
@@ -300,4 +301,180 @@ TEST_F(FlowDataSourceTest, QueuedProvisionalPageArmsShortPagingTimerBeforeFuture
     client().flowBarsReceived(std::make_shared<const Client::FlowBatch>(b)); deliver();
     EXPECT_GE(flowDelay(), 0);
     EXPECT_LE(flowDelay(), 150); // QTimer may round a coarse 100 ms deadline.
+}
+
+TEST(FlowBackfillState, SlidingWindowRequestsOnlyOneUncoveredBucket) {
+    FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
+    const auto first = state.next(0); ASSERT_TRUE(first); ASSERT_EQ(first->limit, 512);
+    EXPECT_TRUE(state.accept(reply(*first, 88'000), 1));
+    state.setWindow(0, 601'000);
+    const auto edge = state.next(101); ASSERT_TRUE(edge);
+    EXPECT_EQ(edge->endMs, 600'000);
+    EXPECT_EQ(edge->limit, 1);
+}
+TEST(FlowBackfillState, LiveCoveredEdgeDoesNotPageHistory) {
+    FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
+    state.observeLive(0, 0);
+    EXPECT_FALSE(state.next(0));
+    state.setWindow(0, 601'000);
+    EXPECT_FALSE(state.next(100));
+    const auto probe = state.next(30'000); ASSERT_TRUE(probe);
+    EXPECT_TRUE(probe->probe);
+    EXPECT_EQ(probe->limit, 1);
+}
+TEST(FlowBackfillState, LongLiveSessionUsesOneSealProbePerInterval) {
+    FlowBackfillState state; state.select("BTC-USD", 60'000); state.setWindow(0, 600'000);
+    const auto first = state.next(0); ASSERT_TRUE(first);
+    auto initial = reply(*first, 0);
+    for (int i = 0; i < 10; ++i) initial.bars.push_back(bar(1, false, Source::Live, int64_t(i) * 60'000));
+    EXPECT_TRUE(state.accept(initial, 1));
+    int requests = 0;
+    for (int i = 0; i < 10; ++i) {
+        const int64_t now = (i + 1) * 30'001;
+        state.observeLive((10 + i) * 60'000, now);
+        state.setWindow(0, (11 + i) * 60'000);
+        const auto probe = state.next(now); ASSERT_TRUE(probe);
+        EXPECT_TRUE(probe->probe);
+        EXPECT_EQ(probe->limit, 1);
+        EXPECT_EQ(probe->endMs, (10 + i) * 60'000);
+        auto b = reply(*probe, probe->endMs);
+        b.bars = {bar(1, false, Source::Live, probe->endMs)};
+        EXPECT_TRUE(state.accept(b, now + 1));
+        ++requests;
+    }
+    EXPECT_EQ(requests, 10);
+}
+TEST(FlowSeriesBuffer, EqualRevisionHistoryLiveCannotOverwriteNewerStreamContent) {
+    FlowSeriesBuffer buffer;
+    auto stream = batch(bar(7, true));
+    stream.bars[0].bar.quoteVolume = 10;
+    buffer.apply(stream, 0);
+    auto page = batch(bar(7, true), true);
+    page.bars[0].bar.quoteVolume = 20;
+    buffer.apply(page, 1);
+    EXPECT_EQ(buffer.series(60'000)->bars.at(60'000).bar.quoteVolume, 10);
+    buffer.clear();
+    stream.bars[0].complete = false;
+    buffer.apply(stream, 0);
+    buffer.apply(page, 1);
+    EXPECT_EQ(buffer.series(60'000)->bars.at(60'000).bar.quoteVolume, 20);
+    EXPECT_TRUE(buffer.series(60'000)->bars.at(60'000).complete);
+    page.history = false;
+    page.bars[0].bar.quoteVolume = 30;
+    buffer.apply(page, 2);
+    EXPECT_EQ(buffer.series(60'000)->bars.at(60'000).bar.quoteVolume, 30);
+}
+TEST(FlowBackfillState, OversizedPageHalvesToOneThenMarksOnlyThatBucketRefused) {
+    FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
+    auto request = state.next(0); ASSERT_TRUE(request);
+    int64_t now = 0;
+    for (int expected = 256; expected >= 1; expected /= 2) {
+        EXPECT_TRUE(state.fail(request->id, Client::FlowFailure::Oversized, now));
+        EXPECT_FALSE(state.next(now));
+        now += 100;
+        request = state.next(now); ASSERT_TRUE(request);
+        EXPECT_EQ(request->limit, expected);
+    }
+    EXPECT_TRUE(state.fail(request->id, Client::FlowFailure::Oversized, now));
+    EXPECT_EQ(state.takeRefusedBucket(), std::optional<int64_t>(599'000));
+    now += 100;
+    const auto older = state.next(now); ASSERT_TRUE(older);
+    EXPECT_EQ(older->endMs, 598'000);
+    EXPECT_EQ(older->limit, 1);
+}
+TEST(FlowBackfillState, PagingStopStillAllowsBuildingAndLossRefresh) {
+    FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 10'000);
+    const auto first = state.next(0); ASSERT_TRUE(first);
+    state.refresh(2000, 1); // a pending loss re-fetch
+    EXPECT_TRUE(state.fail(first->id, Client::FlowFailure::Fatal, 0));
+    const auto loss = state.next(1); ASSERT_TRUE(loss);
+    EXPECT_EQ(loss->endMs, 2000);
+    EXPECT_TRUE(state.accept(reply(*loss, 2000, Status::Refused), 2));
+    state.refresh(3000, 3); // a building range remains eligible after refusal
+    const auto building = state.next(103); ASSERT_TRUE(building);
+    EXPECT_EQ(building->endMs, 3000);
+    EXPECT_FALSE(state.next(103));
+}
+TEST(FlowBackfillState, MissingReplyTimesOutAndLateReplyCannotCorrelate) {
+    FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 10'000);
+    const auto first = state.next(0); ASSERT_TRUE(first);
+    EXPECT_EQ(state.wakeAtMs(0), 5000);
+    EXPECT_FALSE(state.timeout(4999));
+    EXPECT_TRUE(state.timeout(5000));
+    EXPECT_FALSE(state.next(5999));
+    const auto retry = state.next(6000); ASSERT_TRUE(retry);
+    EXPECT_NE(first->id, retry->id);
+    EXPECT_FALSE(state.accept(reply(*first, 0), 6001));
+    EXPECT_TRUE(state.inFlight());
+    EXPECT_TRUE(state.accept(reply(*retry, 0), 6002));
+}
+TEST(FlowSeriesBuffer, KeepsOnlyNewestThreeLiveBucketsBeyondViewport) {
+    FlowSeriesBuffer buffer;
+    buffer.retainWindow(60'000, 0, 120'000);
+    for (int i = 2; i <= 5; ++i) buffer.apply(batch(bar(1, false, Source::Live, i * 60'000)), i);
+    const auto* held = buffer.series(60'000); ASSERT_NE(held, nullptr);
+    ASSERT_EQ(held->bars.size(), 3u);
+    EXPECT_EQ(held->bars.begin()->first, 180'000);
+    buffer.retainWindow(60'000, 0, 360'000);
+    EXPECT_EQ(held->bars.size(), 3u);
+    EXPECT_TRUE(held->bars.contains(300'000));
+}
+
+TEST_F(FlowDataSourceTest, DroppedLiveFrameMarksPartialAndSchedulesOneBucketRefetch) {
+    ready(); select(); const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
+    const auto sub = sent[0]["sub"].get<quint64>();
+    client().flowLiveDropped(sub, "BTC-USD", 60'000, 60'000); deliver();
+    ASSERT_NE(source.flowBuffer().series(60'000), nullptr);
+    EXPECT_EQ(source.flowBuffer().series(60'000)->coverage.at(60'000).status, Status::Partial);
+    emitPage(sent[1]);
+    QEventLoop loop;
+    QTimer::singleShot(250, &loop, &QEventLoop::quit);
+    loop.exec(); // the pager's 100 ms send throttle must expire
+    const auto refetch = requests(); ASSERT_EQ(refetch.size(), 1u);
+    EXPECT_EQ(refetch[0]["end_time_ms"], 60'000);
+    EXPECT_EQ(refetch[0]["limit"], 1);
+}
+
+TEST_F(FlowDataSourceTest, HistoryFlightArmsFiveSecondTimeout) {
+    ready(); select();
+    const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
+    EXPECT_GE(flowDelay(), 4700);
+    EXPECT_LE(flowDelay(), 5300);
+}
+TEST_F(FlowDataSourceTest, OversizedOneBucketReplyExposesRefusedCoverage) {
+    ready();
+    source.subscribeFlowLive("BTC-USD", 60'000);
+    source.requestFlowHistory("BTC-USD", 60'000, 0, 120'000);
+    const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
+    ASSERT_EQ(sent[1]["limit"], 2);
+    client().flowHistoryFailed(sent[1]["req"].get<quint64>(),
+        "flow history frame exceeds 15 MiB cap; reduce limit", Client::FlowFailure::Oversized);
+    deliver();
+    QEventLoop loop;
+    QTimer::singleShot(250, &loop, &QEventLoop::quit);
+    loop.exec();
+    const auto retry = requests(); ASSERT_EQ(retry.size(), 1u);
+    EXPECT_EQ(retry[0]["end_time_ms"], 60'000);
+    EXPECT_EQ(retry[0]["limit"], 1);
+    client().flowHistoryFailed(retry[0]["req"].get<quint64>(),
+        "flow history frame exceeds 15 MiB cap; reduce limit", Client::FlowFailure::Oversized);
+    deliver();
+    const auto* held = source.flowBuffer().series(60'000); ASSERT_NE(held, nullptr);
+    EXPECT_EQ(held->coverage.at(60'000).status, Status::Refused);
+}
+
+TEST(FlowSeriesBuffer, RefusedHistoryDoesNotRetreatSealWatermark) {
+    FlowSeriesBuffer buffer;
+    auto sealed = batch(bar(3, true, Source::Store), true);
+    sealed.sealedThroughMs = 120'000;
+    buffer.apply(sealed, 0);
+    auto refused = sealed;
+    refused.status = Status::Refused;
+    refused.sealedThroughMs = 0;
+    refused.bars.clear();
+    refused.ranges = {{0, 60'000, Status::Refused}};
+    buffer.apply(refused, 1);
+    EXPECT_EQ(buffer.sealedThroughMs(), 120'000);
+    EXPECT_EQ(buffer.series(60'000)->bars.at(60'000).source, Source::Store);
+    EXPECT_EQ(buffer.series(60'000)->coverage.at(0).status, Status::Refused);
 }

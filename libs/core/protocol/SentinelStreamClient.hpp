@@ -63,6 +63,7 @@ public:
 
     enum class FlowSource { Live, Store };
     enum class FlowStatus { Complete, Partial, Building, Refused };
+    enum class FlowFailure { Retryable, Oversized, Fatal };
     struct FlowRecord {
         sentinel::flow::FlowBar bar;
         uint32_t revision = 0;
@@ -174,7 +175,8 @@ signals:
                           uint64_t bookVersion = 0);
     // Other signals as needed for aggregated slices
     void flowBarsReceived(SentinelStreamClient::FlowBatchPtr batch);
-    void flowHistoryFailed(quint64 req, const QString& message, bool retryable);
+    void flowHistoryFailed(quint64 req, const QString& message, SentinelStreamClient::FlowFailure failure);
+    void flowLiveDropped(quint64 sub, const QString& symbol, int64_t timeframeMs, int64_t bucketStartMs);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
     // After the in-flight tpo_history_chunk's slices were emitted (requestId always set).
@@ -211,6 +213,11 @@ signals:
     void coinbaseLatencyReceived(int milliseconds);
 
 private:
+    struct FlowDropInfo {
+        quint64 sub = 0;
+        QString symbol;
+        int64_t timeframeMs = 0, bucketStartMs = 0;
+    };
     void run();
     void failConnection(const QString& reason);
     static int reconnectDelayMs(unsigned attempt, unsigned jitter);
@@ -224,7 +231,8 @@ private:
     void onWrite(boost::beast::error_code ec, std::size_t bytes_transferred);
     
     void handleMessage(const std::string& msg);
-    void handleBinaryMessage(std::shared_ptr<std::vector<uint8_t>> frame, bool flowLive = false);
+    void handleBinaryMessage(std::shared_ptr<std::vector<uint8_t>> frame, bool flowLive = false,
+                             std::optional<FlowDropInfo> flowDrop = {});
     void decodeBinaryMessage(const std::vector<uint8_t>& frame, quint64 epoch, bool flowLive = false, quint64 flowRequest = 0);
     bool acceptChunkOrder(const heatmap::ChunkFrame& frame);
     void handleServerConfigMessage(const nlohmann::json& msg);
@@ -286,6 +294,7 @@ private:
 
     std::atomic<quint64> m_nextChunkRequestId{0};
     std::atomic<quint64> m_flowHistoryRequest{0};
+    std::map<std::pair<quint64, int64_t>, std::chrono::steady_clock::time_point> m_flowDropNotified;
     // Replies from an older connection are dropped after reconnect.
     std::atomic<quint64> m_connectionEpoch{0};
     std::atomic<size_t> m_decodeBacklogBytes{0};
@@ -312,3 +321,4 @@ Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapChunkError)
 Q_DECLARE_METATYPE(protocol::chunkwire::Availability)
 
 Q_DECLARE_METATYPE(SentinelStreamClient::FlowBatchPtr)
+Q_DECLARE_METATYPE(SentinelStreamClient::FlowFailure)

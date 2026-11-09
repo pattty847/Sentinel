@@ -18,6 +18,10 @@ std::vector<int64_t> FlowSeriesBuffer::apply(const Batch& batch, int64_t nowMs) 
     m_symbol = batch.symbol;
     auto& s = m_series[batch.timeframeMs];
     std::vector<int64_t> refetch;
+    if (batch.history && batch.status == Status::Refused) {
+        for (const auto& range : batch.ranges) s.coverage[range.fromMs] = range;
+        return refetch;
+    }
     if (batch.history) {
         // This is a replacement, not max(old, new): store rebuilds can retreat.
         m_sealedThroughMs = batch.sealedThroughMs;
@@ -63,6 +67,11 @@ std::vector<int64_t> FlowSeriesBuffer::apply(const Batch& batch, int64_t nowMs) 
             s.losses.erase(lost);
             held = s.bars.end();
         }
+        // A history snapshot may precede a stream close with the same live
+        // revision. Only a completeness gain may replace at equal revision.
+        if (batch.history && in.source == Source::Live && held != s.bars.end() &&
+            held->second.source == Source::Live && in.revision == held->second.revision &&
+            !(in.complete && !held->second.complete)) continue;
         if (merge(held == s.bars.end() ? nullptr : &held->second, in, m_sealedThroughMs) == Merge::Replace)
             s.bars[start] = in;
     }
@@ -95,6 +104,15 @@ const FlowSeriesBuffer::Series* FlowSeriesBuffer::series(int64_t tf) const {
     const auto it = m_series.find(tf);
     return it == m_series.end() ? nullptr : &it->second;
 }
+void FlowSeriesBuffer::setCoverage(const QString& symbol, int64_t tf, const Range& range) {
+    if (!m_symbol.isEmpty() && symbol != m_symbol) clear();
+    m_symbol = symbol;
+    auto& coverage = m_series[tf].coverage;
+    coverage[range.fromMs] = range;
+    if (const auto window = m_windows.find(tf); window != m_windows.end())
+        retainWindow(tf, window->second.first, window->second.second);
+    while (coverage.size() > kMaxBuckets) coverage.erase(coverage.begin());
+}
 void FlowSeriesBuffer::clear() {
     m_symbol.clear();
     m_series.clear();
@@ -108,7 +126,13 @@ void FlowSeriesBuffer::retainWindow(int64_t tf, int64_t fromMs, int64_t toMs) {
     if (series == m_series.end()) return;
     const auto trim = [=](auto& map) {
         map.erase(map.begin(), map.lower_bound(fromMs));
-        map.erase(map.lower_bound(toMs), map.end());
+        auto beyond = map.lower_bound(toMs);
+        // Keep the three newest live buckets that arrived ahead of the view.
+        // They are ready when the viewport catches up without retaining an
+        // unbounded future tail.
+        auto keep = map.end();
+        for (int i = 0; i < 3 && keep != beyond; ++i) --keep;
+        map.erase(beyond, keep);
     };
     trim(series->second.bars);
     trim(series->second.coverage);

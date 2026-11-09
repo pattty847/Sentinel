@@ -178,7 +178,9 @@ TEST_F(FlowWireClientTest, RequestsAndBusyErrorsAreCorrelated) {
     EXPECT_EQ(sent[2]["type"], "flow_live_unsubscribe");
     bool busy = false;
     QObject::connect(&client, &Client::flowHistoryFailed, &client,
-                     [&](quint64 req, const QString&, bool retry) { busy = req == 42 && retry; });
+                     [&](quint64 req, const QString&, Client::FlowFailure failure) {
+                         busy = req == 42 && failure == Client::FlowFailure::Retryable;
+                     });
     receive(Json{{"type", "error"}, {"context", "flow_history_request"}, {"req", 42}, {"message", "1s journal replay busy"}});
     EXPECT_TRUE(busy);
 }
@@ -186,8 +188,45 @@ TEST_F(FlowWireClientTest, RequestsAndBusyErrorsAreCorrelated) {
 TEST_F(FlowWireClientTest, FlowBacklogRefusalReleasesCorrelatedFlightAfterHeatmapRefusal) {
     quint64 failed = 0;
     QObject::connect(&client, &Client::flowHistoryFailed, &client,
-                     [&](quint64 req, const QString&, bool retry) { if (retry) failed = req; }, Qt::QueuedConnection);
+                     [&](quint64 req, const QString&, Client::FlowFailure failure) {
+                         if (failure == Client::FlowFailure::Retryable) failed = req;
+                     }, Qt::QueuedConnection);
     saturateDecoder(123);
     receive(envelope()); drain();
     EXPECT_EQ(failed, 123u);
+}
+
+TEST_F(FlowWireClientTest, ClassifiesEveryCurrentServerHistoryError) {
+    using Failure = Client::FlowFailure;
+    std::vector<Failure> seen;
+    QObject::connect(&client, &Client::flowHistoryFailed, &client,
+                     [&](quint64 req, const QString&, Failure failure) {
+                         if (req == 42) seen.push_back(failure);
+                     });
+    const std::pair<const char*, Failure> cases[] = {
+        {"1s journal replay busy", Failure::Retryable},
+        {"history worker queue is full", Failure::Retryable},
+        {"one flow history job is already in flight", Failure::Retryable},
+        {"flow history frame exceeds 15 MiB cap; reduce limit", Failure::Oversized},
+        {"unsupported timeframe", Failure::Fatal},
+    };
+    for (const auto& [message, expected] : cases) {
+        receive(Json{{"type", "error"}, {"context", "flow_history_request"},
+                     {"req", 42}, {"message", message}});
+        ASSERT_FALSE(seen.empty());
+        EXPECT_EQ(seen.back(), expected);
+    }
+}
+TEST_F(FlowWireClientTest, DroppedLiveFrameReportsBucketOnlyOncePerThrottleInterval) {
+    std::vector<int64_t> dropped;
+    QObject::connect(&client, &Client::flowLiveDropped, &client,
+                     [&](quint64 sub, const QString& symbol, int64_t tf, int64_t bucket) {
+                         if (sub == 17 && symbol == "BTC-USD" && tf == 60'000)
+                             dropped.push_back(bucket);
+                     }, Qt::QueuedConnection);
+    saturateDecoder(0);
+    receive(live()); receive(live());
+    QCoreApplication::sendPostedEvents(&client, QEvent::MetaCall);
+    ASSERT_EQ(dropped.size(), 1u);
+    EXPECT_EQ(dropped.front(), 60'000);
 }

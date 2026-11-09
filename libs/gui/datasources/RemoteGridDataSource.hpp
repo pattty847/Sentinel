@@ -72,6 +72,7 @@ private:
     friend struct FlowDataSourceTest;
     void requestNextFlowPage();
     void onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr batch);
+    void publishFlowCoverage(int64_t bucket, SentinelStreamClient::FlowStatus status);
     FlowSeriesBuffer m_flowBuffer;
     FlowBackfillState m_flowBackfill;
     QTimer m_flowTimer;

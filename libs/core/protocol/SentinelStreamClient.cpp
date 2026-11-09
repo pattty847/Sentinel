@@ -186,6 +186,7 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<OrderBookLevel>("OrderBookLevel");
     qRegisterMetaType<std::vector<OrderBookLevel>>("OrderBookLevelVector");
     qRegisterMetaType<FlowBatchPtr>("SentinelStreamClient::FlowBatchPtr");
+    qRegisterMetaType<FlowFailure>("SentinelStreamClient::FlowFailure");
     qRegisterMetaType<FootprintSlice>("FootprintSlice");
     qRegisterMetaType<TpoSlice>("TpoSlice");
     qRegisterMetaType<CandleBar>("CandleBar");
@@ -448,9 +449,20 @@ quint64 peekEnvelopeRequestId(const std::vector<uint8_t>& frame) {
     for (int i = 0; i < 8; ++i) id |= quint64(frame[6 + i]) << (8 * i);
     return id;
 }
+SentinelStreamClient::FlowFailure classifyFlowHistoryError(const QString& message) {
+    using Failure = SentinelStreamClient::FlowFailure;
+    if (message.contains(QStringLiteral("flow history frame exceeds 15 MiB cap; reduce limit")))
+        return Failure::Oversized;
+    if (message.contains(QStringLiteral("1s journal replay busy")) ||
+        message.contains(QStringLiteral("history worker queue is full")) ||
+        message.contains(QStringLiteral("one flow history job is already in flight")))
+        return Failure::Retryable;
+    return Failure::Fatal;
+}
 } // namespace
 
-void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8_t>> frame, bool flowLive) {
+void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8_t>> frame, bool flowLive,
+                                               std::optional<FlowDropInfo> flowDrop) {
     std::lock_guard lock(m_chunkOrderMutex);
     if (!m_acceptChunkFrames) return;
     const size_t bytes = frame->size();
@@ -462,7 +474,21 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
     const auto refuse = [&](unsigned reason, const char* code, const char* message) {
         // Only one flow page is in flight. Always release that flight even if
         // heatmap/live refusals were already coalesced during this backlog.
-        if (flowFrame && !flowLive) emit flowHistoryFailed(flowRequest, QString::fromLatin1(message), true);
+        if (flowFrame && !flowLive)
+            emit flowHistoryFailed(flowRequest, QString::fromLatin1(message), FlowFailure::Retryable);
+        if (flowLive && reason == 2 && flowDrop && flowDrop->sub && !flowDrop->symbol.isEmpty() &&
+            protocol::clientparse::validFlowTimeframe(flowDrop->timeframeMs) &&
+            flowDrop->bucketStartMs >= 0 && flowDrop->bucketStartMs % flowDrop->timeframeMs == 0) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto key = std::pair{flowDrop->sub, flowDrop->bucketStartMs};
+            const auto it = m_flowDropNotified.find(key);
+            if (it == m_flowDropNotified.end() || now - it->second >= std::chrono::seconds(30)) {
+                if (m_flowDropNotified.size() >= 8192) m_flowDropNotified.clear();
+                m_flowDropNotified[key] = now;
+                emit flowLiveDropped(flowDrop->sub, flowDrop->symbol, flowDrop->timeframeMs,
+                                     flowDrop->bucketStartMs);
+            }
+        }
         const auto mask = flowFrame ? reason << 2 : reason;
         if (m_decodeRefusals & mask) return;
         m_decodeRefusals |= mask;
@@ -504,7 +530,7 @@ void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame
             std::lock_guard lock(m_chunkOrderMutex);
             if (epoch != m_connectionEpoch.load()) return;
             sLog_Warning("Flow frame rejected: bytes=" << frame.size() << " error=" << e.what());
-            if (!flowLive) emit flowHistoryFailed(flowRequest, QString::fromUtf8(e.what()), false);
+            if (!flowLive) emit flowHistoryFailed(flowRequest, QString::fromUtf8(e.what()), FlowFailure::Fatal);
         }
         return;
     }
@@ -573,7 +599,7 @@ void SentinelStreamClient::requestFlowHistory(quint64 req, const std::string& sy
                                              int64_t endTimeMs, int limit) {
     if (symbol.empty() || !protocol::clientparse::validFlowTimeframe(timeframeMs) || endTimeMs < 0 ||
         endTimeMs > INT64_MAX - timeframeMs || limit < 1 || limit > 512) {
-        emit flowHistoryFailed(req, QStringLiteral("invalid flow history arguments"), false);
+        emit flowHistoryFailed(req, QStringLiteral("invalid flow history arguments"), FlowFailure::Fatal);
         return;
     }
     m_flowHistoryRequest.store(req);
@@ -862,7 +888,9 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
 
         switch (type) {
             case protocol::MessageType::FlowBar:
-                handleBinaryMessage(std::make_shared<std::vector<uint8_t>>(msgStr.begin(), msgStr.end()), true);
+                handleBinaryMessage(std::make_shared<std::vector<uint8_t>>(msgStr.begin(), msgStr.end()), true,
+                    FlowDropInfo{msg.value("sub", uint64_t(0)), QString::fromStdString(msg.value("symbol", "")),
+                                 msg.value("timeframe_ms", int64_t(0)), msg.value("bucket_start_ms", int64_t(0))});
                 return;
             case protocol::MessageType::ServerConfig:
                 handleServerConfigMessage(msg);
@@ -932,8 +960,7 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 if (msg.value("context", "") == "flow_history_request") {
                     const auto message = QString::fromStdString(msg.value("message", ""));
                     emit flowHistoryFailed(msg.value("req", uint64_t(0)), message,
-                                           message.contains("busy", Qt::CaseInsensitive) ||
-                                           message.contains("queue is full") || message.contains("already in flight"));
+                                           classifyFlowHistoryError(message));
                 }
                 if (msg.value("context", "") == "screener_request") {
                     emit screenerRequestError(QString::fromStdString(msg.value("message", "")));

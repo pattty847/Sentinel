@@ -21,6 +21,7 @@ public:
     };
     // Returns buckets requiring an authoritative re-fetch after live coverage loss.
     std::vector<int64_t> apply(const Batch& batch, int64_t nowMs);
+    void setCoverage(const QString& symbol, int64_t tf, const Range& range);
     const Series* series(int64_t tf) const;
     int64_t sealedThroughMs() const { return m_sealedThroughMs; }
     void clear();

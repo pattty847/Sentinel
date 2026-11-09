@@ -80,11 +80,21 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     connect(&m_client, &SentinelStreamClient::flowBarsReceived, this,
             &RemoteGridDataSource::onFlowBarsReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::flowHistoryFailed, this,
-            [this](quint64 id, const QString& message, bool retryable) {
-                if (m_flowBackfill.fail(id, retryable, m_flowClock.elapsed())) {
+            [this](quint64 id, const QString& message, SentinelStreamClient::FlowFailure failure) {
+                if (m_flowBackfill.fail(id, failure, m_flowClock.elapsed())) {
                     emit errorOccurred(QStringLiteral("Flow history: ") + message);
+                    if (const auto bucket = m_flowBackfill.takeRefusedBucket())
+                        publishFlowCoverage(*bucket, SentinelStreamClient::FlowStatus::Refused);
                     requestNextFlowPage();
                 }
+            }, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::flowLiveDropped, this,
+            [this](quint64 sub, const QString& symbol, int64_t tf, int64_t bucket) {
+                if (!m_flowSubscription || sub != m_flowSubscription || symbol != m_flowSymbol ||
+                    tf != m_flowTimeframeMs) return;
+                publishFlowCoverage(bucket, SentinelStreamClient::FlowStatus::Partial);
+                m_flowBackfill.refresh(bucket, m_flowClock.elapsed());
+                requestNextFlowPage();
             }, Qt::QueuedConnection);
     m_candleBuffer = std::make_unique<CandleSeriesBuffer>(this);
     m_candleBackfillTimer.setSingleShot(true);
@@ -705,12 +715,15 @@ void RemoteGridDataSource::requestFlowHistory(const QString& symbol, int64_t tf,
 void RemoteGridDataSource::requestNextFlowPage() {
     if (!m_connectionActive || !m_flowConfigReady || !m_flowSubscription) return;
     const auto now = m_flowClock.elapsed();
+    if (m_flowBackfill.timeout(now))
+        sLog_Warning("Flow history page timed out: symbol=" << m_flowSymbol << " tfMs=" << m_flowTimeframeMs);
     const auto request = m_flowBackfill.next(now);
     m_flowTimer.stop();
     if (request) {
         m_client.requestFlowHistory(request->id, request->symbol.toStdString(), request->timeframeMs,
                                     request->endMs, request->limit);
-    } else if (const auto at = m_flowBackfill.wakeAtMs(now); at > now) {
+    }
+    if (const auto at = m_flowBackfill.wakeAtMs(now); at > now) {
         m_flowTimer.start(int(std::min<int64_t>(at - now, INT_MAX)));
     }
 }
@@ -722,7 +735,22 @@ void RemoteGridDataSource::onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr
         if (!m_flowBackfill.accept(*batch, now)) { requestNextFlowPage(); return; }
     } else if (!m_flowSubscription || batch->id != m_flowSubscription || batch->symbol != m_flowSymbol ||
                batch->timeframeMs != m_flowTimeframeMs) return;
+    if (!batch->history && !batch->bars.empty())
+        m_flowBackfill.observeLive(batch->bars.front().bar.startMs, now);
     for (const auto bucket : m_flowBuffer.apply(*batch, now)) m_flowBackfill.refresh(bucket, now);
     emit flowBarsReceived(std::move(batch));
     requestNextFlowPage();
+}
+
+void RemoteGridDataSource::publishFlowCoverage(int64_t bucket, SentinelStreamClient::FlowStatus status) {
+    if (m_flowSymbol.isEmpty() || m_flowTimeframeMs < 1000) return;
+    SentinelStreamClient::FlowRange range{bucket, bucket + m_flowTimeframeMs, status};
+    m_flowBuffer.setCoverage(m_flowSymbol, m_flowTimeframeMs, range);
+    SentinelStreamClient::FlowBatch batch;
+    batch.id = m_flowSubscription;
+    batch.symbol = m_flowSymbol;
+    batch.timeframeMs = m_flowTimeframeMs;
+    batch.status = status;
+    batch.ranges.push_back(range);
+    emit flowBarsReceived(std::make_shared<const SentinelStreamClient::FlowBatch>(std::move(batch)));
 }
