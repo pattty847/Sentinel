@@ -71,8 +71,10 @@ public:
     static constexpr size_t Capacity = 100000;
     ReferenceStatistics() : scratch_(std::make_unique<double[]>(Capacity)),
                             aggregates_(std::make_unique<double[]>(Capacity)) {}
-    void reset() { initialized_ = false; active_ = {}; updates_ = 0; }
+    void reset() { initialized_ = pending_ = false; active_ = {}; updates_ = 0; retryAfterMs_ = 0; }
     uint64_t updates() const { return updates_; }
+    bool pending() const { return pending_; }
+    int retryAfterMs() const { return retryAfterMs_; }
     static constexpr size_t storageBytes() { return 2 * Capacity * sizeof(double); }
     template<class Rows, class SlotRows>
     Reference update(const Rows& rows, const SlotRows& slotRows, WindowStamp stamp,
@@ -85,7 +87,7 @@ public:
                                      view.minimum != lastView_.minimum;
         const bool urgent = widthJump || settingsChanged;
         const bool changed = stamp != lastStamp_ || urgent;
-        if (initialized_ && (!changed || nowMs-lastUpdateMs_ < interval(mode, active_.aggregateP95, urgent))) return active_;
+        if (defer(changed, mode, urgent, nowMs)) return active_;
         const Reference raw = reference(rows);
         if (!initialized_) active_ = {0, 0, 0};
         settle(active_.median, raw.median, true);
@@ -108,6 +110,12 @@ public:
                 select(scratch_.get(), count, size_t(std::ceil(.95*double(count)))-1), 1};
     }
 private:
+    bool defer(bool changed, Mode mode, bool urgent, int64_t nowMs) {
+        const int64_t remaining = interval(mode, active_.aggregateP95, urgent) - (nowMs-lastUpdateMs_);
+        pending_ = initialized_ && changed && remaining > 0;
+        retryAfterMs_ = pending_ ? int(std::min<int64_t>(remaining, 250)) : 0;
+        return initialized_ && (!changed || pending_);
+    }
     static int64_t interval(Mode mode, double aggregateP95, bool urgent) {
         if (mode == Mode::Slot && aggregateP95 <= 0) return 0;
         return urgent ? 100 : 250;
@@ -156,7 +164,8 @@ private:
     Mode lastMode_ = Mode::Individual;
     int64_t lastUpdateMs_ = 0;
     uint64_t updates_ = 0;
-    bool initialized_ = false;
+    int retryAfterMs_ = 0;
+    bool initialized_ = false, pending_ = false;
 };
 // Scratch and output are allocated at construction, never while publishing or drawing.
 class BubblePlacement {

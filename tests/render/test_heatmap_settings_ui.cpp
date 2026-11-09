@@ -1871,8 +1871,10 @@ TEST(TradeBubbleControls, GuiIngestionKeepsHiddenSessionTradesAndIsolatesSymbols
     mapping.viewStartMs += 1000; mapping.viewEndMs += 1000;
     TradeBubbleRendererTest::publish(renderer, mapping);
     EXPECT_EQ(TradeBubbleRendererTest::referenceUpdates(renderer), updates);
+    EXPECT_TRUE(frame->referencePending.load());
     QTest::qWait(260);
     TradeBubbleRendererTest::publish(renderer, mapping);
+    EXPECT_FALSE(frame->referencePending.load());
     EXPECT_NEAR(frame->options.reference.p95, 430.539, .01);
     EXPECT_EQ(TradeBubbleRendererTest::referenceUpdates(renderer), updates + 1);
     renderer.view()->setTimeframe(300000);

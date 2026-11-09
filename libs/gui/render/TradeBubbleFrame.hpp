@@ -1,6 +1,7 @@
 #pragma once
 #include "TradeBubbleData.hpp"
 #include <QColor>
+#include <atomic>
 
 namespace trade_bubbles {
 // UGR publishes this value snapshot on the render thread. The sibling bubble
@@ -11,6 +12,8 @@ struct RenderFrame {
     std::shared_ptr<Tape> tape;
     TimeAxisMapping mapping;
     bool enabled = false;
+    std::atomic_bool referencePending = false;
+    int referenceRetryMs = 0;
     chart::bubbles::Options options;
     QColor buy, sell;
 };

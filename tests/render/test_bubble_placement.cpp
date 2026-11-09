@@ -249,6 +249,39 @@ TEST(BubblePlacement, FirstSlotFrameComputesAggregateReferenceInsideUrgentFloor)
     stats.update(rows,rows,stamp,view,Mode::Slot,1060);
     EXPECT_EQ(stats.updates(),2);
 }
+TEST(BubblePlacement, SettledMarksIgnoreWallClockSchedule) {
+    const std::array initial{Execution{1000,100,1,0}};
+    const std::array final{Execution{1000,100,1,0}, Execution{1100,100,2,0},
+                           Execution{1200,100,4,1}, Execution{1300,100,8,0},
+                           Execution{1400,100,16,1}, Execution{1500,100,32,0}};
+    const VisibleView view{1000,2000,60000,-1};
+    const auto picture = [&](std::span<const int64_t> schedule) {
+        ReferenceStatistics stats;
+        BubblePlacement placement;
+        stats.update(initial,initial,{1,1,1,1,1,1},view,Mode::Individual,1000);
+        Reference ref;
+        for (const int64_t now : schedule)
+            ref = stats.update(final,final,{1,6,1,6,6,6},view,Mode::Individual,now);
+        if (stats.pending()) {
+            EXPECT_GT(stats.retryAfterMs(),0);
+            ref = stats.update(final,final,{1,6,1,6,6,6},view,Mode::Individual,
+                               schedule.back()+stats.retryAfterMs());
+        }
+        EXPECT_FALSE(stats.pending());
+        std::vector<std::array<double,7>> projected;
+        for (const auto& mark : placement.build(final,{Mode::Individual,ref,-1},60000))
+            projected.push_back({mark.timeMs,mark.price,mark.notional,mark.minPrice,
+                                 mark.maxPrice,double(mark.moving),radius(mark.notional,ref.p95)});
+        return std::pair{ref,projected};
+    };
+    const std::array fast{int64_t(1020),int64_t(1100)};
+    const std::array slow{int64_t(1300)};
+    const std::array stalled{int64_t(1010),int64_t(5000)};
+    const auto expected = picture(fast);
+    EXPECT_FALSE(expected.second.empty());
+    EXPECT_EQ(picture(slow),expected);
+    EXPECT_EQ(picture(stalled),expected);
+}
 TEST(BubblePlacement, CapsuleRetainsAtLeastMinimumHalfWidth) {
     EXPECT_GE(capsuleHalfWidth(2,100),1.5);
     EXPECT_DOUBLE_EQ(capsuleHalfWidth(9,0),9);

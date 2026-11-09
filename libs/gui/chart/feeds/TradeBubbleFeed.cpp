@@ -25,6 +25,8 @@ void TradeBubbleFeed::setSettings(const heatmap::HeatmapChartSettings& settings,
 void TradeBubbleFeed::publish(const TimeAxisMapping& mapping) {
     frame_->mapping = mapping;
     frame_->enabled = show_;
+    frame_->referencePending = false;
+    frame_->referenceRetryMs = 0;
     frame_->options.minimum = minimum_;
     const double columnPx = mapping.srcRect.width() > 0 ? mapping.drawRect.width() / mapping.srcRect.width() : 0;
     frame_->options.mode = placement_.select(requested_, columnPx, mapping.appendMs);
@@ -40,6 +42,8 @@ void TradeBubbleFeed::publish(const TimeAxisMapping& mapping) {
         frame_->options.reference = statistics_.update(trade_bubbles::PolicyRows{window.rows},
             trade_bubbles::PolicyRows{expanded.rows}, {key.first, key.last, slotKey.first, slotKey.last, key.count, slotKey.count},
             {mapping.viewStartMs, mapping.viewEndMs, mapping.appendMs, minimum_}, frame_->options.mode, nowMs);
+        frame_->referencePending = statistics_.pending();
+        frame_->referenceRetryMs = statistics_.retryAfterMs();
     }
     frame_->buy = buy_;
     frame_->sell = sell_;

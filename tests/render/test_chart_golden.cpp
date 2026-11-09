@@ -221,6 +221,7 @@ struct Harness {
                 const auto& st = layer().tileStats();
                 ok = layer().settled() && !st.crossfading.load() && !st.holding.load();
             }
+            if (ugr->tradeBubbleRenderFrame()->referencePending) ok = false;
             if (labels && (ugr->gpuLabelGlyphs().empty() || ugr->gpuLabelLayout().stats().labels == 0)) ok = false;
             if (!glide && ugr->zoomGliding()) { clock += 20; ok = false; }
             const QByteArray now = pixels(image);
