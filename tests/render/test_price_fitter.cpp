@@ -278,3 +278,41 @@ TEST_F(PriceFitterTest, NonWholeSecondIntervalsRemainMilliseconds) {
     }
 }
 } // namespace
+
+// Candles one tick tall (PEPE at its 1e-8 tick) fitted to rows of 89 px in a 100 px
+// chart. The auto price scale caps rows at kMaxAutoRowPx and widens the window instead.
+TEST_F(PriceFitterTest, AutoFitCapsRowHeight) {
+    bar(4000, 100, 101);
+    const auto fit = fitter.gpuFitPriceWindow(1000, 11000, true);
+    ASSERT_TRUE(fit);
+    const double rowPx = env.size.heightLogical * env.tick / (fit->second - fit->first);
+    EXPECT_LE(rowPx, chart::PriceFitter::kMaxAutoRowPx + 1e-9);
+    EXPECT_NEAR(rowPx, std::round(rowPx), 1e-9); // still whole pixels per row
+    EXPECT_LE(fit->first, 100);
+    EXPECT_GE(fit->second, 101);
+    // Twice the device pixels: the cap is in logical px.
+    env.size.dpr = 2;
+    const auto hiDpi = fitter.gpuFitPriceWindow(1000, 11000, true);
+    ASSERT_TRUE(hiDpi);
+    EXPECT_LE(env.size.heightLogical * env.tick / (hiDpi->second - hiDpi->first),
+              chart::PriceFitter::kMaxAutoRowPx + 1e-9);
+}
+
+// A window many rows tall is not touched by the cap.
+TEST_F(PriceFitterTest, AutoFitCapLeavesTallWindows) {
+    bar(4000, 80, 120);
+    expectFit(75, 125);
+}
+
+// All visible candles at one price keep the current span: a span from a taller zoom
+// (2 rows of 50 px here) must still widen to the row cap.
+TEST_F(PriceFitterTest, OnePriceFitCapsRowHeight) {
+    view.setViewport(1000, 11000, 99, 101); // 2 rows of tick 1 in 100 px
+    bar(4000, 100, 100, 100, 1);
+    bar(5000, 100, 100, 100, 1);
+    const auto fit = fitter.gpuFitPriceWindow(1000, 11000, true);
+    ASSERT_TRUE(fit);
+    EXPECT_LE(100.0 * env.tick / (fit->second - fit->first), chart::PriceFitter::kMaxAutoRowPx + 1e-9);
+    EXPECT_LE(fit->first, 100);
+    EXPECT_GE(fit->second, 100);
+}

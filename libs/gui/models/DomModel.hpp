@@ -122,6 +122,10 @@ public:
     QString executionSummary() const;
     QString aggregation(bool compact = false) const;
     static QString priceText(double price, double tick);
+    // priceText in this symbol's display unit (PriceUnits: PEPE 5.04 for 0.00000504).
+    QString shownPrice(double price, double tick) const;
+    // The quote currency, with the display unit's tag when scaled: "USD x1M".
+    QString quoteUnit() const;
     // Three significant digits, leading zero dropped, k/m/b suffixes: .634, 5.87, 13.6, 1.36k.
     // Positive dust below 1e-4 shows "<.0001".
     static QString sizeText(double value);

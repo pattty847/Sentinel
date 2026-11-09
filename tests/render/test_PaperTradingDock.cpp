@@ -1,5 +1,6 @@
 #include "widgets/PaperTradingDock.hpp"
 #include "datasources/IGridDataSource.hpp"
+#include "models/PriceUnits.hpp"
 #include <QApplication>
 #include <QDoubleSpinBox>
 #include <QFocusEvent>
@@ -366,4 +367,33 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
+}
+
+// A trade, order and position can arrive before the book snapshot decides the symbol's
+// display unit: the dock reformats them when the unit arrives.
+TEST(PaperTicket, PricesFollowALaterDisplayUnit) {
+    PriceUnits::instance().clearForTest();
+    PaperTradingDock dock;
+    dock.setSymbol("PEPE-USD");
+    dock.onTradeReceived(tick("PEPE-USD", 0.00000504));
+    trading::OrderUpdate order;
+    order.symbol = "PEPE-USD";
+    order.orderId = "a";
+    order.limitPrice = 0.00000497;
+    dock.onOrderUpdated(order);
+    trading::PositionUpdate position;
+    position.symbol = "PEPE-USD";
+    position.avgPrice = 0.000005;
+    dock.onPositionUpdated(position);
+    auto* last = dock.findChild<QLabel*>("paperLastPrice");
+    auto* avg = dock.findChild<QLabel*>("paperAvgPrice");
+    auto* log = dock.findChild<QTableWidget*>("paperOrderLog");
+    ASSERT_TRUE(last && avg && log);
+    ASSERT_EQ(log->rowCount(), 1);
+    EXPECT_TRUE(last->text().startsWith('$'));
+    PriceUnits::instance().observe("PEPE-USD", 0.00000504);
+    EXPECT_EQ(last->text(), QStringLiteral("5.04 x1M"));
+    EXPECT_EQ(avg->text(), QStringLiteral("5.00 x1M"));
+    EXPECT_EQ(log->item(0, 4)->text(), QStringLiteral("4.97 x1M"));
+    PriceUnits::instance().clearForTest();
 }

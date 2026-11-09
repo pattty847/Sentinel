@@ -242,6 +242,8 @@ add_library(sentinel_gui_lib ${GUI_SOURCES})
 # GPU heatmap price binning (integration slice S4). Its own target so the lab,
 # tests and (from S6) sentinel_gui_lib link the same code without the whole GUI.
 add_library(sentinel_heatmap_gpu STATIC
+    models/PriceUnits.hpp # display units: the heatmap tooltip and every widget share it
+    models/PriceUnits.cpp
     render/heatmap/HeatmapBinGrid.hpp
     render/heatmap/HeatmapGpuSource.hpp
     render/heatmap/HeatmapGpuSource.cpp

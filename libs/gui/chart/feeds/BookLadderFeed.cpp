@@ -1,4 +1,5 @@
 #include "chart/feeds/BookLadderFeed.hpp"
+#include "models/PriceUnits.hpp"
 #include "chart/layers/LadderGrid.hpp"
 #include "marketdata/model/TradeData.h"
 #include "SentinelLogging.hpp"
@@ -84,6 +85,7 @@ void BookLadderFeed::publish(const LiveOrderBook& book) {
         epoch_ = epoch;
         tracker_.reset();
         baseAsset(book.getProductId(), asset_);
+        priceExponent_ = PriceUnits::instance().unitFor(QString::fromStdString(book.getProductId())).exponent;
     }
     book_ = &book;
     const auto view = book.captureDenseNonZero(top_.bids, top_.asks, 1, kMaxScanWords);
@@ -177,6 +179,7 @@ LadderSnapshot& BookLadderFeed::begin(const MappingFrameContext& frame) {
     s.bidMedian = s.askMedian = 0;
     s.walls = {};
     std::copy(std::begin(asset_), std::end(asset_), s.asset);
+    s.priceExponent = priceExponent_;
     return s;
 }
 

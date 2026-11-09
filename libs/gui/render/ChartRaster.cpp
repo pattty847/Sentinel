@@ -395,14 +395,14 @@ int64_t followShift(int64_t endMs, int64_t targetMs, int64_t tfMs, int colPx) {
     return (targetMs - endMs + tfMs - 1) / tfMs * tfMs;
 }
 
-bool fitPriceToRows(double &lo, double &hi, int heightDev, double tick) {
+bool fitPriceToRows(double &lo, double &hi, int heightDev, double tick, int maxRowPx) {
     const double span = hi - lo;
     if (heightDev <= 0 || !std::isfinite(tick) || !(tick > 0) || !std::isfinite(span) || !(span > 0) ||
         !std::isfinite(lo) || !std::isfinite(hi) || !std::isfinite(double(heightDev) * tick))
         return false;
     const double spanUlp = 4 * std::numeric_limits<double>::epsilon() * std::max(std::abs(lo), std::abs(hi));
     int p = int(std::clamp(std::floor(double(heightDev) * tick / std::max(span - spanUlp, span * .5)),
-                          0.0, double(kMaxCellPx)));
+                          0.0, double(std::clamp(maxRowPx, 1, kMaxCellPx))));
 
     for (; p > 0; --p) {
         const double step = tick / p, span = double(heightDev) * tick / p;
@@ -434,7 +434,7 @@ bool fitPriceToRows(double &lo, double &hi, int heightDev, double tick) {
 
 std::optional<AutoPriceFit> solveAutoPriceFit(double lo, double hi, int heightDev, int64_t currentUnits,
                                              double priceScale, const heatmap::AutoTickParams &params,
-                                             const BuildsPriceWindow &builds) {
+                                             const BuildsPriceWindow &builds, int maxRowPx) {
     const double span = hi - lo;
     if (!std::isfinite(lo) || !std::isfinite(hi) || !std::isfinite(span) || !(span > 0) || heightDev <= 0 ||
         !std::isfinite(priceScale) || !(priceScale > 0) || !builds)
@@ -444,12 +444,12 @@ std::optional<AutoPriceFit> solveAutoPriceFit(double lo, double hi, int heightDe
     const int64_t units = heatmap::autoTickUnitsIf(currentUnits, span * priceScale / heightDev,
         [&](int64_t candidate) {
             double low = lo, high = hi;
-            return fitPriceToRows(low, high, heightDev, heatmap::fromUnits(candidate, priceScale)) &&
+            return fitPriceToRows(low, high, heightDev, heatmap::fromUnits(candidate, priceScale), maxRowPx) &&
                    builds(candidate, low, high);
         }, params);
     if (units <= 0) return std::nullopt;
     const double tick = heatmap::fromUnits(units, priceScale);
-    if (!fitPriceToRows(lo, hi, heightDev, tick)) return std::nullopt;
+    if (!fitPriceToRows(lo, hi, heightDev, tick, maxRowPx)) return std::nullopt;
     return AutoPriceFit{lo, hi, tick, units, int(std::llround(heightDev * tick / (hi - lo)))};
 }
 

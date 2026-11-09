@@ -592,7 +592,7 @@ void OrderBookDock::fillGroupMenu()
     const double native = m_groupNative;
     for (const int64_t g : m_choices.list()) {
         const double tick = double(g) * native;
-        const QString text = DomModel::priceText(tick, tick) + (g == 1 ? QStringLiteral(" (server tick)") : QString());
+        const QString text = m_model->shownPrice(tick, tick) + (g == 1 ? QStringLiteral(" (server tick)") : QString());
         add(text, m_groupMode == Grouping::Fixed && m_model->requestedGroup() == g, [this, tick] { setGrouping(Grouping::Fixed, tick); });
     }
 }
@@ -656,7 +656,7 @@ void OrderBookDock::updateGroupButton()
     m_shownMode = m_groupMode;
     m_shownExact = m_linkExact;
     const double tick = double(group) * m_groupNative;
-    const QString size = m_groupNative > 0 ? DomModel::priceText(tick, tick) : QStringLiteral("—");
+    const QString size = m_groupNative > 0 ? m_model->shownPrice(tick, tick) : QStringLiteral("—");
     // The mode names the button; the aggregation text beside it states the row size.
     m_grouping->setText(m_groupMode == Grouping::Auto ? QStringLiteral("Auto ▾")
                         : m_groupMode == Grouping::Link ? QStringLiteral("Link ▾") : QStringLiteral("Fixed ▾"));

@@ -102,6 +102,10 @@ private:
     QDoubleSpinBox* m_limitPriceSpin = nullptr;
     QPushButton* m_useLastBtn = nullptr;
     double m_lastPrice = 0.0;
+    // Raw prices behind the Last and Avg Price labels (0: none shown), reformatted when
+    // the symbol's display unit (PriceUnits) is decided after they arrived.
+    double m_shownLast = 0.0, m_shownAvg = 0.0;
+    void reformatPrices();
     bool m_limitUserOwned = false;
     QPushButton* m_buyMarketBtn = nullptr;
     QPushButton* m_sellMarketBtn = nullptr;

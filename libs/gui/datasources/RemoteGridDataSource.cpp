@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include "../config/AgentHostMode.hpp"
 #include "../config/GuiConfigStore.hpp"
+#include "../models/PriceUnits.hpp"
 
 namespace {
 std::pair<double, double> computeBandRange(const std::vector<OrderBookLevel>& bids,
@@ -400,6 +401,16 @@ void RemoteGridDataSource::onSnapshotReceived(const QString& productId, const st
         return;
     }
     const bool wasStale = isBookSnapshotStale(productId);
+    {
+        // The symbol's display unit (decided once) from its first two-sided book.
+        // Only a finite, positive best bid and best ask lock the unit.
+        double bestBid = 0, bestAsk = 0;
+        for (const auto& level : bids)
+            if (std::isfinite(level.price) && level.price > 0) bestBid = std::max(bestBid, level.price);
+        for (const auto& level : asks)
+            if (std::isfinite(level.price) && level.price > 0) bestAsk = bestAsk > 0 ? std::min(bestAsk, level.price) : level.price;
+        if (bestBid > 0 && bestAsk > 0) PriceUnits::instance().observe(productId, (bestBid + bestAsk) * 0.5);
+    }
 
     // Create or reset replica
     if (m_replicaBooks.find(symbol) == m_replicaBooks.end()) {

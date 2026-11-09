@@ -10,6 +10,9 @@ class PriceFitter {
 public:
     static constexpr double kAutoScrollPaddingFrac = 0.08;
     static constexpr double kFitPriceMargin = 0.06;
+    // Auto price scale: heatmap rows at most this tall (logical px). A window only a few
+    // ticks tall (PEPE at its 1e-8 tick) widens to more rows instead.
+    static constexpr double kMaxAutoRowPx = 32;
     struct PriceCarry { double spanRatio = 0.0, heightFrac = 0.0; };
 
     PriceFitter(ChartViewController& controller, IChartEnvironment& environment, ITickOracle& ticks);
@@ -44,6 +47,7 @@ private:
     void applySpanLimits(PriceRange& range, size_t used, double newestClose) const;
     std::pair<double, double> snapToRows(PriceRange& range, const FitContext& context);
     std::pair<double, double> onePriceRows(double centre, double current) const;
+    int maxRowPx() const; // kMaxAutoRowPx in device px
     void solveAutoRows(PriceRange& range, const FitContext& context, int H, double tick);
 
     uint64_t autoPriceFitRevision_ = 0;

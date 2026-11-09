@@ -53,3 +53,10 @@ target_link_libraries(test_metrics_registry PRIVATE
 )
 add_test(NAME MetricsRegistryTests COMMAND test_metrics_registry)
 set_tests_properties(MetricsRegistryTests PROPERTIES LABELS "core")
+
+# Test Target: test_price_display_unit (scaled display unit for tiny-priced products)
+add_executable(test_price_display_unit test_price_display_unit.cpp)
+target_include_directories(test_price_display_unit PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_price_display_unit PRIVATE GTest::gtest_main)
+add_test(NAME PriceDisplayUnitTests COMMAND test_price_display_unit)
+set_tests_properties(PriceDisplayUnitTests PROPERTIES LABELS "core")

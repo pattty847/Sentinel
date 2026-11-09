@@ -3,6 +3,7 @@
 // local configurator; the real recording is never touched). GPU cases use the
 // selected QRhi backend (lab::OffscreenQuick) and skip with the reason when it
 // cannot create one: a skipped case is no result.
+#include "chart/core/PriceFitter.hpp"
 #include "UnifiedGridRenderer.h"
 #include "BookTopFixture.hpp"
 #include "chart/shell/HeatmapChartPort.hpp"
@@ -4347,7 +4348,7 @@ TEST_F(UgrZoomCpu, SurfaceAndAutoModeChangesRefreshTheTickDecision) {
         layer->autoTickState(), layer->priceScale(), {settings.minRowPx, settings.hysteresis},
         [&](int64_t units, double lo, double hi) {
             return layer->buildsTick(units, {double(v->getVisibleTimeStart()), double(v->getVisibleTimeEnd()), lo, hi});
-        });
+        }, int(chart::PriceFitter::kMaxAutoRowPx)); // dpr 1
     ASSERT_TRUE(fit);
     EXPECT_EQ(v->getMinPrice(), fit->lo);
     EXPECT_EQ(v->getMaxPrice(), fit->hi);

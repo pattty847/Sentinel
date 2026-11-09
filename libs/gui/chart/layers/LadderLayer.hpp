@@ -59,6 +59,7 @@ struct LadderSnapshot {
     double wallMultiple = 0;
     float bidMedian = 0, askMedian = 0; // the wall reference (BookLadderFeed: near the touch)
     char asset[8] = {};                 // the base asset ("BTC" for BTC-USD)
+    int priceExponent = 0;              // the symbol's display unit (PriceDisplayUnit: 6 = x1M)
     std::array<std::array<WallCandidate, 2>, 2> walls{}; // [kBid|kAsk][kAbove|kBelow]
     std::array<LadderRow, kMaxRows> rows{};
     double binPrice() const { return double(group) * serverTick; }

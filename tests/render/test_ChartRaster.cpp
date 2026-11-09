@@ -771,3 +771,18 @@ int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
+
+// A window one tick tall: rows of up to H px uncapped; at most maxRowPx with the cap,
+// still whole px per row and containing the window.
+TEST(ChartRasterAutoFit, CapsRowHeight) {
+    const auto builds = [](int64_t, double, double) { return true; };
+    const auto free = chart_raster::solveAutoPriceFit(100.0, 101.0, 900, 1, 1.0, {1, .1}, builds);
+    ASSERT_TRUE(free);
+    EXPECT_GT(free->rowPx, 32);
+    const auto capped = chart_raster::solveAutoPriceFit(100.0, 101.0, 900, 1, 1.0, {1, .1}, builds, 32);
+    ASSERT_TRUE(capped);
+    EXPECT_LE(capped->rowPx, 32);
+    EXPECT_DOUBLE_EQ(capped->hi - capped->lo, 900.0 / capped->rowPx);
+    EXPECT_LE(capped->lo, 100.0);
+    EXPECT_GE(capped->hi, 101.0);
+}

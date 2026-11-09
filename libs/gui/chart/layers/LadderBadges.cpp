@@ -3,6 +3,7 @@
 #include "chart/layers/LadderLayer.hpp"
 #include "render/ChartTextAtlas.hpp"
 #include "render/FrameContext.hpp"
+#include "PriceDisplayUnit.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -198,15 +199,27 @@ EdgeSlots edgeSlots(const LadderSnapshot& s, const chart_raster::RasterCamera& c
     return slot;
 }
 
-// Notional, then the distance from the drawn edge to the wall: $1.07M  +$61.0.
-BadgePill edgePill(const WallCandidate& c, int side, bool top, const chart_raster::RasterCamera& cam) {
+// Notional, then the distance from the drawn edge to the wall: $1.07M  +$61.0. A scaled
+// display unit (PEPE x1M) shows the distance in that unit: $1.07M  +0.03 x1M.
+BadgePill edgePill(const WallCandidate& c, int side, bool top, const chart_raster::RasterCamera& cam,
+                   sentinel::PriceDisplayUnit unit) {
     BadgePill p;
     p.colour = side == LadderSnapshot::kAsk ? BadgePill::Ask : BadgePill::Bid;
     p.arrow = top ? 1 : -1;
     p.hollow = c.capped;
     p.length = formatMoney(double(c.size) * c.price, p.text);
     p.length += append(p.text + p.length, top ? "  +" : "  -");
-    p.length += formatMoney(top ? c.price - cam.drawnMaxPrice : cam.drawnMinPrice - c.price, p.text + p.length);
+    const double distance = top ? c.price - cam.drawnMaxPrice : cam.drawnMinPrice - c.price;
+    if (!unit.scaled()) {
+        p.length += formatMoney(distance, p.text + p.length);
+        return p;
+    }
+    char money[kBadgeChars];
+    const int n = formatMoney(unit.toDisplay(distance), money); // drop its '$'
+    std::memcpy(p.text + p.length, money + 1, size_t(n - 1));
+    p.length += n - 1;
+    p.length += append(p.text + p.length, " ");
+    p.length += append(p.text + p.length, unit.tag());
     return p;
 }
 
@@ -238,7 +251,7 @@ void LadderBadges::placeEdges(const LadderSnapshot& s, const FrameContext& f) {
         for (const int side : {LadderSnapshot::kAsk, LadderSnapshot::kBid}) {
             const WallCandidate* c = slot[size_t(edge)][size_t(side)];
             if (!c) continue;
-            BadgePill p = edgePill(*c, side, edge == 0, cam);
+            BadgePill p = edgePill(*c, side, edge == 0, cam, {s.priceExponent});
             const double offset = kEdgeInsetPx + stacked * (kPillH + kPillGapPx);
             const double y = edge == 0 ? f.surfaceBounds.top() + offset : f.surfaceBounds.bottom() - offset - kPillH;
             finishPill(p, right, snap(y, cam.dpr), cam.dpr);

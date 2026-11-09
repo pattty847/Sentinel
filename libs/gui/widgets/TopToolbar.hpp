@@ -1,4 +1,5 @@
 #pragma once
+#include "PriceDisplayUnit.hpp"
 #include <QToolBar>
 #include <QToolButton>
 #include <QLineEdit>
@@ -38,6 +39,7 @@ public:
         std::vector<int64_t> offeredUnits; // presets some loaded data can build
         double priceScale = 100;           // price units per price
         QString indicator;                 // veiled availability (empty: none)
+        sentinel::PriceDisplayUnit unit;   // the symbol's display unit (PEPE: x1M)
         bool operator==(const TickSelectorState &) const = default;
     };
     void setTickSelectorState(const TickSelectorState& state);
@@ -45,7 +47,8 @@ public:
     QComboBox* tickModeCombo() const { return m_tickModeCombo; }
     QComboBox* tickPresetCombo() const { return m_tickPresetCombo; }
     QLabel* tickVeilLabel() const { return m_tickVeilLabel; }
-    static QString tickText(int64_t units, double priceScale);
+    // "$0.5"; in a scaled unit "0.01 x1M" (PEPE's 1e-8 tick).
+    static QString tickText(int64_t units, double priceScale, sentinel::PriceDisplayUnit unit = {});
     // Fills a preset combo (the toolbar's or the settings dialog's): only offered
     // presets are selectable; a shown value no loaded data builds (a locked Manual
     // tick) is listed as the current item, marked unavailable and disabled; with

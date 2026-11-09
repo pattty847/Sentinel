@@ -179,7 +179,15 @@ std::pair<double, double> PriceFitter::onePriceRows(double centre, double curren
     low += shift;
     high += shift;
   }
+  // The row cap holds here too: a span kept from a taller zoom widens (whole rows).
+  const int H = chart_raster::devicePixels(environment_.surface().heightLogical, environment_.surface().dpr);
+  if (std::isfinite(row) && row > 0 && H > 0 && double(H) * row / (high - low) > maxRowPx() + 1e-9)
+    chart_raster::fitPriceToRows(low, high, H, row, maxRowPx());
   return std::make_pair(low, high);
+}
+
+int PriceFitter::maxRowPx() const {
+  return std::max(1, int(std::floor(kMaxAutoRowPx * environment_.surface().dpr)));
 }
 
 void PriceFitter::solveAutoRows(PriceRange& range, const FitContext& context, int H, double tick) {
@@ -188,11 +196,12 @@ void PriceFitter::solveAutoRows(PriceRange& range, const FitContext& context, in
   // Solve from the raw candle bounds and check coverage for each candidate's
   // fitted window; publish its tick before setViewport notifies the renderer.
   const auto &settings = ticks_.autoTickParams();
+  const int maxRowPx = this->maxRowPx();
   ++autoPriceSolveCount_;
   const auto fit = chart_raster::solveAutoPriceFit(lo, hi, H, ticks_.autoTickState(), environment_.priceScale(),
       {settings.minRowPx, settings.hysteresis}, [&](int64_t units, double low, double high) {
         return ticks_.buildsTick(units, {drawnStart, drawnEnd, low, high});
-      });
+      }, maxRowPx);
   if (ticks_.setAutoPriceTick(fit ? std::optional(fit->tickUnits) : std::nullopt)) requestUpdate_();
   if (fit) {
     sLog_Probe("zoom.fit", "raw=[" << lo << ".." << hi << "] fit=[" << fit->lo << ".." << fit->hi
@@ -202,7 +211,7 @@ void PriceFitter::solveAutoRows(PriceRange& range, const FitContext& context, in
   } else {
     sLog_Warning("auto price fit unavailable; publishing plain fit time=[" << start << ".." << end
                  << "] raw=[" << lo << ".." << hi << "]");
-    chart_raster::fitPriceToRows(lo, hi, H, tick);
+    chart_raster::fitPriceToRows(lo, hi, H, tick, maxRowPx);
   }
 }
 
