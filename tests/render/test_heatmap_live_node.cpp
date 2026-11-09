@@ -353,6 +353,124 @@ TEST_F(LiveNode, DrawClipCoversEachBucketOnceAndMatchesTheComposedOracle) {
     }
 }
 
+// The live edge seam during a zoom transition (owner 2026-11-08: a bright one-pixel
+// line left of the now column). In coverage mode a pixel blends every cell under
+// its footprint from the grid of the quad that owns its centre; the span bin's
+// grid holds the incomplete bucket at its complete end E, so a span quad owning
+// the pixel that straddles E blended that bucket in. Across zoom levels and
+// sub-pixel offsets, the picture with history complete through E (live from E)
+// equals the picture with history one bucket further (live from E + tf), whose
+// pixel at E is an ordinary blend of two complete buckets. With the live window
+// starting at E (no complete bucket in the live grid before the seam) the pixel
+// straddling E shows the live bucket, never a blend with the span's incomplete one.
+TEST_F(LiveNode, ZoomTransitionLeavesNoSeamAtTheLiveEdge) {
+    struct Case {
+        int64_t tf, tileOffset, cutoffBack, liveBack, openAhead;
+        const char *what;
+    };
+    // T: a tile boundary. E = T - cutoffBack, L = T - liveBack, open minute at T + openAhead.
+    const std::vector<Case> cases{{minute, 2, 3 * minute, 6 * minute, minute, "1m, L < E"},
+                                  {5 * minute, 1, 10 * minute, 15 * minute, 3 * minute, "5m, L < E"},
+                                  {minute, 2, 3 * minute, 3 * minute, minute, "1m, L = E"}};
+    auto picture = [&](int64_t tf, int64_t cutoff, int64_t L, int64_t open, double lo, double hi, float gamma) {
+        frame().view = {lo, hi, 99'801.3, 100'201.3}; // no row edge on a pixel centre
+        frame().coverageGamma = gamma;
+        const int64_t tile = tiles::tileOfBucket(recording::floorDiv(cutoff, tf));
+        show(tf, {tile, tile + 1}, cutoff, L, open, 25'000, 1); // the open tile too
+        for (int i = 0; i < 8 && (i < 3 || stats().wantsFrame.load()); ++i) EXPECT_TRUE(render());
+        EXPECT_FALSE(stats().wantsFrame.load());
+        EXPECT_FALSE(stats().holding.load());
+        EXPECT_EQ(stats().fallbackSlots.load() + stats().partialSlots.load(), 0u);
+        EXPECT_EQ(stats().liveDrawFromMs.load(), std::max(cutoff, L));
+        return scene->image.convertToFormat(QImage::Format_RGBA8888);
+    };
+    for (const auto &c : cases) {
+        const int64_t tf = c.tf, T = kEpoch + c.tileOffset * tiles::kTileColumns * tf;
+        const int64_t E = T - c.cutoffBack, L = T - c.liveBack, open = T + c.openAhead;
+        for (const double columns : {20.3, 32.4, 47.7, 75.1})
+            for (const double offset : {0.0, 0.37, 0.61, 0.93})
+                for (const float gamma : {0.0f, 2.2f}) {
+                    SCOPED_TRACE(std::string(c.what) + " columns=" + std::to_string(columns) + " offset=" +
+                                 std::to_string(offset) + " gamma=" + std::to_string(gamma));
+                    const double lo = double(E) - (columns * 0.7 + offset) * double(tf);
+                    const double hi = lo + columns * double(tf);
+                    const QImage seam = picture(tf, E, L, open, lo, hi, gamma);
+                    const int xs = int(std::floor((double(E) - lo) / (hi - lo) * seam.width()));
+                    int worst = 0, worstX = -1, worstY = -1;
+                    if (L < E) {
+                        const QImage ref = picture(tf, E + tf, L, open, lo, hi, gamma);
+                        for (int y = 0; y < seam.height(); ++y)
+                            for (int x = 0; x < seam.width(); ++x) {
+                                const QColor a = seam.pixelColor(x, y), b = ref.pixelColor(x, y);
+                                const int d = std::max({std::abs(a.red() - b.red()), std::abs(a.green() - b.green()),
+                                                        std::abs(a.blue() - b.blue()), std::abs(a.alpha() - b.alpha())});
+                                if (d > worst) { worst = d; worstX = x; worstY = y; }
+                            }
+                    } else if (gamma != 0.0f) { // at rest the pixel shows the bucket under its centre
+                        for (int y = 0; y < seam.height(); ++y) {
+                            const QColor a = seam.pixelColor(xs, y), b = seam.pixelColor(xs + 1, y);
+                            const int d = std::max({std::abs(a.red() - b.red()), std::abs(a.green() - b.green()),
+                                                    std::abs(a.blue() - b.blue())});
+                            if (d > worst) { worst = d; worstX = xs; worstY = y; }
+                        }
+                    }
+                    EXPECT_LE(worst, 2) << "pixel (" << worstX << ", " << worstY << "), seam pixel x=" << xs;
+                    EXPECT_EQ(stats().errors.load(), 0u);
+                }
+    }
+}
+
+// The same seam with sub-pixel columns (a glide that keeps a 2x scale on a 1x
+// screen): E one bucket after a tile start, so the open tile's span piece is
+// narrower than the pixel that straddles E and the snap cannot stop inside it.
+// Above the book every complete bucket draws the outside-the-book veil (a
+// screen-space pattern, identical in both pictures) and only the incomplete
+// bucket differs, so the picture with history complete through E equals the one
+// with history one bucket further at every pixel, for columns of 0.45 to 1.7 px
+// at eight sub-pixel phases.
+TEST_F(LiveNode, SubPixelColumnsLeaveNoSeamAtTheLiveEdge) {
+    // A tile start that is also an hour start: the tile before E is complete (sealed hours).
+    const int64_t lcm = std::lcm(tiles::kTileColumns * minute, kHourMs);
+    const int64_t tf = minute, T = (kEpoch + 2 * tiles::kTileColumns * tf + lcm - 1) / lcm * lcm;
+    const int64_t E = T + tf, L = T - 4 * tf, open = E + minute;
+    const int64_t tile = tiles::tileOfBucket(T / tf);
+    auto picture = [&](int64_t cutoff, double lo, double hi) {
+        frame().view = {lo, hi, 105'200.7, 105'600.7}; // above the book
+        frame().coverageGamma = 2.2f;
+        show(tf, {tile - 2, tile - 1, tile}, cutoff, L, open, 25'000, 1);
+        for (int i = 0; i < 12 && (i < 3 || stats().wantsFrame.load() || stats().segments().empty()); ++i)
+            EXPECT_TRUE(render()); // the first frames of the fixture draw nothing yet
+        EXPECT_FALSE(stats().holding.load());
+        EXPECT_EQ(stats().liveDrawFromMs.load(), cutoff) << " slots=" << stats().slotCount.load();
+        return scene->image.convertToFormat(QImage::Format_RGBA8888);
+    };
+    {
+        frame().view = {double(E - 20 * tf), double(E + 5 * tf), 105'200.7, 105'600.7};
+        show(tf, {tile - 1, tile}, E, L, open, 25'000, 1);
+        ASSERT_TRUE(render(4)); // the fixture's first frames
+    }
+    for (const double pxPerColumn : {0.45, 0.6, 0.85, 1.2, 1.7})
+        for (int phase = 0; phase < 8; ++phase) {
+            SCOPED_TRACE("px/column=" + std::to_string(pxPerColumn) + " phase=" + std::to_string(phase));
+            const double columns = double(scene->image.width()) / pxPerColumn;
+            const double lo = double(E) - (std::floor(columns * 0.8) + phase / 8.0 + 0.03) * double(tf);
+            const double hi = lo + columns * double(tf);
+            const QImage seam = picture(E, lo, hi);
+            const QImage ref = picture(E + tf, lo, hi);
+            int worst = 0, worstX = -1, worstY = -1;
+            for (int y = 0; y < seam.height(); ++y)
+                for (int x = 0; x < seam.width(); ++x) {
+                    const QColor a = seam.pixelColor(x, y), b = ref.pixelColor(x, y);
+                    const int d = std::max({std::abs(a.red() - b.red()), std::abs(a.green() - b.green()),
+                                            std::abs(a.blue() - b.blue()), std::abs(a.alpha() - b.alpha())});
+                    if (d > worst) { worst = d; worstX = x; worstY = y; }
+                }
+            EXPECT_LE(worst, 2) << "pixel (" << worstX << ", " << worstY << "), E at x="
+                                << (double(E) - lo) / (hi - lo) * seam.width();
+            EXPECT_EQ(stats().errors.load(), 0u);
+        }
+}
+
 // The label words (HeatmapCellQuery's oracle on the
 // drawn picture: the same SpanSet, live snapshot, timeframe and tick) equal the
 // cells the node draws, read back from the GPU, for every bucket of the current

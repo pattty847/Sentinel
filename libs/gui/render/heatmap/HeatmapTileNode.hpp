@@ -237,6 +237,7 @@ private:
         int64_t loMs = 0, hiMs = 0;
         bool live = false;
         uint64_t content = 0;
+        double drawLoMs = 0, drawHiMs = 0; // the quad's time edges (a span/live seam on a device pixel edge)
     };
     struct Layer {
         std::vector<Draw> draws;
@@ -345,6 +346,8 @@ private:
     Bin *liveBinFor(int64_t tickUnits, QRhiCommandBuffer *cb); // the live window at the tick (target)
     void trimLiveSets();
     void layout(const std::vector<Draw> &draws); // pieces_ of one picture (draw clip)
+    void snapLiveSeams();                        // coverage mode: span/live seams on device pixel edges
+    double floorToDevicePixelMs(double ms) const;
     void noteLiveDrawn(const Bin &bin);
     bool binRows(Bin &bin, QRhiCommandBuffer *cb);
     bool rowsCover(const Bin &bin) const;
@@ -358,10 +361,10 @@ private:
     bool ensurePipeline(QRhiRenderPassDescriptor *pass, int samples);
     bool ensurePalette(QRhiCommandBuffer *cb);
     const HeatmapPalette &palette() const;
-    bool addBinDraw(QRhiResourceUpdateBatch *updates, Bin &bin, float opacity, int64_t loMs, int64_t hiMs);
+    bool addBinDraw(QRhiResourceUpdateBatch *updates, Bin &bin, float opacity, double loMs, double hiMs);
     bool addLoadingDraw(QRhiResourceUpdateBatch *updates, int64_t loMs, int64_t hiMs);
     bool addLoadingSlot();
-    bool subRect(int64_t firstBucket, int64_t endBucket, int64_t tfMs, QRectF *rect, ViewWindow *sub) const;
+    bool subRect(double loMs, double hiMs, QRectF *rect, ViewWindow *sub) const; // [loMs, hiMs) in view
     std::unique_ptr<QRhiBuffer> cellBuffer(uint64_t bytes, bool live);
 };
 } // namespace heatmap::gpu

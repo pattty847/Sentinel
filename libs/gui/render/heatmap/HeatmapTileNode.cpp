@@ -714,12 +714,11 @@ void HeatmapTileNode::report() {
 }
 
 // ------------------------------------------------------------------ drawing
-bool HeatmapTileNode::subRect(int64_t firstBucket, int64_t endBucket, int64_t tfMs, QRectF *rect,
-                              ViewWindow *sub) const {
+bool HeatmapTileNode::subRect(double loMs, double hiMs, QRectF *rect, ViewWindow *sub) const {
     const auto &view = frame_.view;
     const double span = view.timeHiMs - view.timeLoMs;
-    const double a = std::max(double(firstBucket) * double(tfMs), view.timeLoMs);
-    const double b = std::min(double(endBucket) * double(tfMs), view.timeHiMs);
+    const double a = std::max(loMs, view.timeLoMs);
+    const double b = std::min(hiMs, view.timeHiMs);
     if (!(b > a) || !(span > 0)) return false;
     const QRectF &r = frame_.rect;
     const double x0 = r.x() + (a - view.timeLoMs) / span * r.width();
@@ -789,12 +788,12 @@ bool HeatmapTileNode::ensurePipeline(QRhiRenderPassDescriptor *pass, int samples
     return true;
 }
 
-bool HeatmapTileNode::addBinDraw(QRhiResourceUpdateBatch *updates, Bin &bin, float opacity, int64_t loMs,
-                                 int64_t hiMs) {
+bool HeatmapTileNode::addBinDraw(QRhiResourceUpdateBatch *updates, Bin &bin, float opacity, double loMs,
+                                 double hiMs) {
     if (bin.drawnFrame == frameNo_) return false; // one uniform block per bin and frame
     QRectF r;
     ViewWindow sub;
-    if (!subRect(loMs, hiMs, 1, &r, &sub)) return false; // [loMs, hiMs): the draw clip (E, L)
+    if (!subRect(loMs, hiMs, &r, &sub)) return false; // [loMs, hiMs): the draw clip (E, L)
     const auto &view = frame_.view;
     const double priceSpan = view.priceHi - view.priceLo;
     if (!(priceSpan > 0)) return false;
@@ -850,7 +849,7 @@ bool HeatmapTileNode::addLoadingSlot() {
 bool HeatmapTileNode::addLoadingDraw(QRhiResourceUpdateBatch *updates, int64_t loMs, int64_t hiMs) {
     QRectF r;
     ViewWindow sub;
-    if (!subRect(loMs, hiMs, 1, &r, &sub)) return false;
+    if (!subRect(double(loMs), double(hiMs), &r, &sub)) return false;
     if (loadingUsed_ == loadingDraws_.size() && !addLoadingSlot()) return false;
     DrawParams p{};
     const QMatrix4x4 mvp = *projectionMatrix() * *matrix();
@@ -1120,8 +1119,61 @@ void HeatmapTileNode::layout(const std::vector<Draw> &draws) {
     }
     drawPieces(clipSpans_, clipLive_, 0, [&](DrawPiece p) {
         const auto &d = draws[size_t(p.token)];
-        pieces_.push_back({findBin(d.bin), p.loMs, p.hiMs, p.live, d.content});
+        pieces_.push_back({findBin(d.bin), p.loMs, p.hiMs, p.live, d.content, double(p.loMs), double(p.hiMs)});
     });
+    snapLiveSeams();
+}
+
+// A zoom transition (coverage mode) blends every cell under a pixel's footprint,
+// read from the grid of the quad that owns the pixel centre. A span bin's grid
+// past its complete end E holds the incomplete bucket (loading or partial cells),
+// so a span quad owning the pixel that straddles the seam with the live bin
+// blends that bucket in: a bright one-pixel seam left of the live edge. The seam
+// moves down to the device pixel edge at or left of it, so the straddling pixel
+// belongs to the live quad, whose grid holds the complete buckets before the
+// seam (or repeats its first column before L). Span pieces that lie wholly inside
+// that pixel (sub-pixel columns) draw nothing and the live quad starts where the
+// first of them starts, walking back through contiguous span pieces only, so no
+// piece gains or loses time outside the pixel. At rest every pixel shows the one
+// cell under its centre and nothing moves.
+void HeatmapTileNode::snapLiveSeams() {
+    if (frame_.coverageGamma == 0.0f) return;
+    for (auto &live : pieces_) {
+        if (!live.live || !(live.hiMs > live.loMs)) continue;
+        const double seam = floorToDevicePixelMs(live.drawLoMs);
+        if (!(seam < live.drawLoMs)) continue;
+        int64_t cursor = live.loMs;
+        for (size_t step = 0; step < pieces_.size(); ++step) {
+            auto span = std::find_if(pieces_.begin(), pieces_.end(), [&](const Piece &p) {
+                return !p.live && p.hiMs == cursor && p.hiMs > p.loMs && p.bin->span.tfMs == live.bin->span.tfMs;
+            });
+            if (span == pieces_.end()) break;
+            if (span->drawLoMs < seam) { // the span keeps its pixels left of the seam
+                span->drawHiMs = live.drawLoMs = seam;
+                break;
+            }
+            live.drawLoMs = span->drawLoMs; // wholly inside the straddling pixel: the live quad draws it
+            span->drawHiMs = span->drawLoMs;
+            cursor = span->loMs;
+        }
+    }
+}
+
+// The time of the device pixel edge at or left of `ms` (x is affine in the item:
+// the node draws unrotated). Within 1/1000 px of an edge counts as on it.
+double HeatmapTileNode::floorToDevicePixelMs(double ms) const {
+    const auto &view = frame_.view;
+    const double span = view.timeHiMs - view.timeLoMs;
+    const QRectF &r = frame_.rect;
+    QRhiRenderTarget *rt = renderTarget();
+    if (!rt || !(span > 0) || !(r.width() > 0)) return ms;
+    const QMatrix4x4 mvp = *projectionMatrix() * *matrix();
+    const double half = 0.5 * double(rt->pixelSize().width());
+    const double scale = double(mvp(0, 0)) * half, offset = (double(mvp(0, 3)) + 1.0) * half; // item x -> device x
+    if (!(scale > 0) || !std::isfinite(scale) || !std::isfinite(offset)) return ms;
+    const double x = r.x() + (ms - view.timeLoMs) / span * r.width();
+    const double edge = (std::floor(scale * x + offset + 1e-3) - offset) / scale;
+    return view.timeLoMs + (edge - r.x()) / r.width() * span;
 }
 
 // The first frame that draws a live version: latency telemetry (heatmap.live).
@@ -1303,7 +1355,7 @@ void HeatmapTileNode::prepare() {
             }
             if (!(piece.hiMs > piece.loMs)) continue;
             if (!rowsCover(bin) && binRows(bin, cb)) stats_->rebins.fetch_add(1);
-            if (addBinDraw(updates, bin, opacity, piece.loMs, piece.hiMs))
+            if (addBinDraw(updates, bin, opacity, piece.drawLoMs, piece.drawHiMs))
                 segments.push_back({piece.loMs, piece.hiMs, bin.id,
                                     piece.live ? HeatmapTileStats::Segment::Live : HeatmapTileStats::Segment::Span,
                                     layer, opacity, piece.live ? bin.liveVersion : 0, piece.live ? 0 : piece.content});
