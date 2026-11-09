@@ -1,4 +1,5 @@
 #include "chart/layers/LadderLayer.hpp"
+#include "chart/feeds/CvdFeed.hpp"
 #include "chart/layers/LadderGrid.hpp"
 #include "chart/core/ChartFrame.hpp"
 #include "render/ChartTextRenderer.hpp"
@@ -95,7 +96,7 @@ bool LadderMailbox::take(std::unique_ptr<LadderSnapshot>& current, uint64_t minG
     return true;
 }
 
-LadderLayer::LadderLayer() : current_(std::make_unique<LadderSnapshot>()) {}
+LadderLayer::LadderLayer(const CvdPresentation* cvd) : cvd_(cvd), current_(std::make_unique<LadderSnapshot>()) {}
 LadderLayer::~LadderLayer() = default;
 
 void LadderLayer::onRootRebuilt() {
@@ -138,6 +139,8 @@ bool LadderLayer::drawable(const ChartFrame& frame) const {
 }
 
 void LadderLayer::sync(const ChartFrame& frame) {
+    const double inset = cvd_ ? std::clamp(double(cvd_->stripPx), 0.0, std::max(0.0, frame.context.surfaceBounds.height())) : 0;
+    if (inset != bottomInset_) { bottomInset_ = inset; badgesBuilt_ = false; }
     if (mailbox_.take(current_, generation_)) generation_ = current_->generation;
     drawing_ = drawable(frame);
     const auto& cam = frame.context.raster;
@@ -209,7 +212,7 @@ void LadderLayer::rebuild(const ChartFrame& frame) {
 void LadderLayer::rebuildBadges(const ChartFrame& frame) {
     QElapsedTimer timer;
     timer.start();
-    badgeLayout_.layout(*current_, frame.context, key_.atlas);
+    badgeLayout_.layout(*current_, frame.context, key_.atlas, bottomInset_);
     commitVertices(badges_, badgeLayout_.writeGeometry(badges_->geometry()->vertexDataAsColoredPoint2D()),
                    badgeVertices_);
     ++dirtyMarks_;

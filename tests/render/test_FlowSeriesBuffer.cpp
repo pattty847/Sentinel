@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include "datasources/FlowSeriesBuffer.hpp"
 #include "datasources/FlowBackfillState.hpp"
+#include "chart/feeds/CvdFeed.hpp"
+#include "chart/core/CvdHistory.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
 #include <QCoreApplication>
 #include <QEvent>
@@ -182,6 +184,8 @@ struct FlowDataSourceTest : testing::Test {
         client().m_writeQueue.clear(); return out;
     }
     void deliver() { QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall); }
+    int64_t flowStart() const { return source.m_flowBackfill.windowStartMs(); }
+    void load(const Client::FlowBatch& batch) { source.m_flowBuffer.apply(batch, 0); }
     int flowDelay() const { return source.m_flowTimer.remainingTime(); }
     void ready() {
         client().connected(); deliver();
@@ -580,4 +584,64 @@ TEST(FlowSeriesBuffer, RefusedHistoryDoesNotRetreatSealWatermark) {
     EXPECT_EQ(buffer.sealedThroughMs(), 120'000);
     EXPECT_EQ(buffer.series(60'000)->bars.at(60'000).source, Source::Store);
     EXPECT_EQ(buffer.series(60'000)->coverage.at(0).status, Status::Refused);
+}
+
+namespace {
+Client::FlowBatch cvdHistory(int64_t tf, int64_t end) {
+    Client::FlowBatch b; b.symbol = "BTC-USD"; b.timeframeMs = tf;
+    for (int64_t time = 0; time < end; time += tf) {
+        auto record = bar(1, true, Source::Store, time, tf);
+        record.bar.baseScale = 1; record.bar.delta = 1;
+        b.bars.push_back(record);
+    }
+    return b;
+}
+MappingFrameContext cvdFrame(int64_t tf, int64_t start, int64_t end) {
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = tf; frame.raster.valid = true;
+    frame.raster.drawnStartMs = double(start); frame.raster.drawnEndMs = double(end);
+    return frame;
+}
+}
+TEST_F(FlowDataSourceTest, CvdResetAnchorRequestsAndRetainsMidnightAcrossPans) {
+    constexpr int64_t hour = 3600000, tf = 60000;
+    ready(); source.subscribeFlowLive("BTC-USD", tf);
+    const auto anchor = chart::cvdHistoryAnchor(12 * hour, tf, 96, chart::CvdReset::UtcDay, 4);
+    source.requestFlowHistory("BTC-USD", tf, 12 * hour, 15 * hour, anchor);
+    EXPECT_EQ(flowStart(), 0);
+    load(cvdHistory(tf, 15 * hour));
+    chart::CvdSnapshot snapshot;
+    chart::CvdFeed::build(snapshot, *source.flowBuffer().series(tf), cvdFrame(tf, 12 * hour, 15 * hour), chart::CvdReset::UtcDay, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since UTC day");
+    ASSERT_EQ(snapshot.series.count, 180); EXPECT_EQ(snapshot.series.points[60].value, 781);
+    source.requestFlowHistory("BTC-USD", tf, 13 * hour, 16 * hour, anchor);
+    EXPECT_EQ(source.flowBuffer().series(tf)->bars.begin()->first, 0);
+    chart::CvdFeed::build(snapshot, *source.flowBuffer().series(tf), cvdFrame(tf, 13 * hour, 16 * hour), chart::CvdReset::UtcDay, 4);
+    EXPECT_EQ(snapshot.series.points[0].value, 781); EXPECT_STREQ(snapshot.label.data(), "CVD since UTC day");
+    // Off has exactly the original one-span margin and retires the extra history.
+    source.requestFlowHistory("BTC-USD", tf, 12 * hour, 15 * hour,
+        chart::cvdHistoryAnchor(12 * hour, tf, 0, chart::CvdReset::UtcDay, 4));
+    EXPECT_EQ(flowStart(), 9 * hour); EXPECT_EQ(source.flowBuffer().series(tf)->bars.begin()->first, 9 * hour);
+}
+TEST_F(FlowDataSourceTest, CvdSecondBarsRespectCapAndLabelActualLoadedTime) {
+    constexpr int64_t hour = 3600000, tf = 1000;
+    ready(); source.subscribeFlowLive("BTC-USD", tf);
+    source.requestFlowHistory("BTC-USD", tf, 12 * hour, 15 * hour, 0);
+    const auto expected = 15 * hour - int64_t(FlowSeriesBuffer::kMaxBuckets) * tf;
+    EXPECT_EQ(flowStart(), expected);
+    load(cvdHistory(tf, 15 * hour));
+    const auto* series = source.flowBuffer().series(tf);
+    ASSERT_EQ(series->bars.size(), 8192u); EXPECT_EQ(series->bars.begin()->first, expected);
+    chart::CvdSnapshot snapshot;
+    chart::CvdFeed::build(snapshot, *series, cvdFrame(tf, 12 * hour, 15 * hour), chart::CvdReset::UtcDay, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since 12:43 loaded");
+}
+TEST(FlowSeriesBuffer, RetentionKeepsCoverageCrossingAnAnchor) {
+    FlowSeriesBuffer buffer;
+    buffer.setCoverage("BTC-USD", 60000, {0, 3600000, Status::Complete});
+    buffer.retainWindow(60000, 1800000, 7200000);
+    const auto* series = buffer.series(60000);
+    ASSERT_NE(series, nullptr); ASSERT_EQ(series->coverage.size(), 1u);
+    EXPECT_EQ(series->coverage.begin()->second.fromMs, 1800000);
+    EXPECT_EQ(series->coverage.begin()->second.toMs, 3600000);
 }

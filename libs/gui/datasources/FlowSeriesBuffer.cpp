@@ -141,7 +141,17 @@ void FlowSeriesBuffer::retainWindow(int64_t tf, int64_t fromMs, int64_t toMs) {
         map.erase(beyond, keep);
     };
     trim(series->second.bars);
-    trim(series->second.coverage);
+    // Preserve proof of empty/history coverage across a retained reset anchor.
+    auto& coverage = series->second.coverage;
+    auto before = coverage.lower_bound(fromMs);
+    if (before != coverage.begin()) {
+        auto range = std::prev(before)->second;
+        if (range.toMs > fromMs && !coverage.contains(fromMs)) {
+            range.fromMs = fromMs;
+            coverage.emplace(fromMs, range);
+        }
+    }
+    trim(coverage);
     trim(series->second.losses);
     trim(series->second.lossRefetchAt);
 }

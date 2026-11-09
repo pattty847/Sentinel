@@ -5,8 +5,35 @@
 #include "chart/shell/ChartTpoQml.hpp"
 #include "datasources/IGridDataSource.hpp"
 #include "render/GridViewState.hpp"
-#include "servermodel/SessionManager.hpp"
+#include "chart/core/CvdHistory.hpp"
+#include <QDateTime>
+#include <cstdio>
 namespace chart {
+namespace {
+int64_t loadedStart(const FlowSeriesBuffer::Series& source, int64_t firstBar, int64_t boundary) {
+    auto reached = firstBar;
+    auto it = source.coverage.upper_bound(firstBar);
+    while (it != source.coverage.begin() && reached > boundary) {
+        const auto& range = (--it)->second;
+        if (range.toMs < reached || (range.status != SentinelStreamClient::FlowStatus::Complete &&
+                                   range.status != SentinelStreamClient::FlowStatus::Live)) break;
+        reached = std::min(reached, range.fromMs);
+    }
+    return std::max(boundary, reached);
+}
+void baselineLabel(CvdSnapshot& out) {
+    const char* label = out.reset == CvdReset::None ? "CVD since loaded start" :
+        out.reset == CvdReset::UtcDay ? "CVD since UTC day" : "CVD since TPO session";
+    std::snprintf(out.label.data(), out.label.size(), "%s", label);
+    const auto loaded = out.series.incompleteStart();
+    if (out.reset == CvdReset::None || loaded < 0 || !out.series.count) return;
+    const auto at = QDateTime::fromMSecsSinceEpoch(loaded, Qt::UTC);
+    const auto last = QDateTime::fromMSecsSinceEpoch(out.series.points[size_t(out.series.count - 1)].timeMs, Qt::UTC);
+    const auto text = at.toString(at.date() == last.date() ? QStringLiteral("HH:mm") : QStringLiteral("yyyy-MM-dd HH:mm")).toLatin1();
+    // The shared atlas has no parentheses; keep its default texture unchanged.
+    std::snprintf(out.label.data(), out.label.size(), "CVD since %s loaded", text.constData());
+}
+} // namespace
 CvdMailbox::CvdMailbox() : back_(std::make_unique<CvdSnapshot>()), pending_(std::make_unique<CvdSnapshot>()) {}
 void CvdMailbox::post() {
     std::lock_guard lock(mutex_);
@@ -33,7 +60,10 @@ void CvdFeed::bind(ChartViewController& view, const PublishedFrame& published,
         onFrameChanged();
     };
     connect(&visibility, &LayerVisibility::layerVisibilityChanged, this, apply);
-    connect(&tpo, &ChartTpoQml::tpoConfigChanged, this, &CvdFeed::onFrameChanged);
+    connect(&tpo, &ChartTpoQml::tpoConfigChanged, this, [this, &visibility] {
+        onFrameChanged();
+        if (presentation_.stripPx > 0 && presentation_.reset == CvdReset::TpoSession) emit visibility.cvdHistoryChanged();
+    });
     connect(view.viewPtr(), &GridViewState::viewportChanged, this, &CvdFeed::onFrameChanged);
     connect(view.viewPtr(), &GridViewState::panVisualOffsetChanged, this, &CvdFeed::onFrameChanged);
     apply();
@@ -56,25 +86,30 @@ void CvdFeed::onFrameChanged() {
     if (!timer_.isActive()) timer_.start(67);
 }
 void CvdFeed::receive(SentinelStreamClient::FlowBatchPtr batch) {
-    if (!presentation_.stripPx) return;
     selectSymbol();
     if (!batch || batch->symbol != symbol_) return;
     buffer_.receive(*batch);
     onFrameChanged();
+}
+int64_t CvdFeed::historyAnchor(int64_t start, int64_t timeframe) const {
+    return cvdHistoryAnchor(start, timeframe, presentation_.stripPx, presentation_.reset,
+                            ports_.sessionType ? ports_.sessionType() : 4);
 }
 void CvdFeed::build(CvdSnapshot& out, const FlowSeriesBuffer::Series& source,
                     const MappingFrameContext& frame, CvdReset reset, int sessionType) {
     out.series.clear(); out.timeframeMs = frame.activeTimeframeMs > 0 ? std::max<int64_t>(1000, frame.activeTimeframeMs) : 0; out.reset = reset;
     const auto& cam = frame.raster;
     if (!cam.valid || out.timeframeMs <= 0) return;
+    int64_t period = std::numeric_limits<int64_t>::min(), from = 0;
     for (const auto& [time, record] : source.bars) {
         const auto& bar = record.bar;
         if (bar.baseScale <= 0 || bar.timeframeMs != out.timeframeMs) continue;
-        const auto session = SessionManager::sessionContaining(time, static_cast<SessionManager::SessionType>(std::clamp(sessionType, 0, 6)));
-        const auto boundary = CvdSeries::resetStart(time, reset, session.startMs);
+        const auto boundary = cvdResetBoundary(time, reset, sessionType);
+        if (boundary != period) { period = boundary; from = loadedStart(source, time, boundary); }
         const bool visible = double(time) < cam.drawnEndMs && double(time) + out.timeframeMs > cam.drawnStartMs;
-        out.series.push(time, double(bar.delta) / bar.baseScale, boundary, visible);
+        out.series.push(time, double(bar.delta) / bar.baseScale, boundary, visible, from);
     }
+    baselineLabel(out);
 }
 void CvdFeed::publish() {
     selectSymbol();

@@ -2,6 +2,7 @@
 #include "chart/core/ChartViewController.hpp"
 #include "chart/core/PublishedFrame.hpp"
 #include "chart/core/FrameAck.hpp"
+#include <algorithm>
 #include <cmath>
 #include "chart/feeds/FlowFeed.hpp"
 #include "chart/feeds/CvdFeed.hpp"
@@ -75,6 +76,9 @@ void ChartAgentPort::setControlRevision(quint64 revision, quint64 selectionEpoch
     update_();
 }
 
+int64_t ChartAgentPort::cvdHistoryAnchor(int64_t start, int64_t timeframe) const {
+    return cvd_ ? cvd_->historyAnchor(start, timeframe) : -1;
+}
 void ChartAgentPort::bindFlowSource(IGridDataSource& source) const {
     if (flow_) flow_->bindSource(source);
     if (cvd_) cvd_->bindSource(source);
@@ -87,7 +91,7 @@ QJsonObject ChartAgentPort::footprintSettings() const {
 }
 void ChartAgentPort::applyFootprintSettings(const QJsonObject& patch) const {
     if (!layers_) return;
-    if (patch.contains("cvdStripPx")) layers_->setCvdStripPx(patch["cvdStripPx"].toInt());
+    if (patch.contains("cvdStripPx")) layers_->setCvdStripPx(int(std::clamp(patch["cvdStripPx"].toDouble(), 0.0, 400.0)));
     if (patch.contains("cvdReset")) layers_->setCvdReset(patch["cvdReset"].toString());
     if (patch.contains("cvdStyle")) layers_->setCvdStyle(patch["cvdStyle"].toString());
     if (patch.contains("footprintSource")) layers_->setFootprintSource(patch["footprintSource"].toString());

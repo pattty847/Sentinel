@@ -10,6 +10,7 @@ enum class CvdReset { None, UtcDay, TpoSession };
 struct CvdPoint {
     int64_t timeMs = 0, resetMs = 0;
     double value = 0;
+    int64_t loadedFromMs = 0;
 };
 struct CvdScale {
     double min = 0, max = 0;
@@ -30,19 +31,30 @@ public:
         return time - remainder - (remainder < 0 ? day : 0);
     }
     void clear() { count = 0; started_ = false; total_ = prefix_ = 0; }
-    bool push(int64_t time, double delta, int64_t reset, bool visible) {
+    bool push(int64_t time, double delta, int64_t reset, bool visible, int64_t loadedFrom = -1) {
         if (!std::isfinite(delta) || (started_ && time < lastTime_)) return false;
         const bool replace = started_ && time == lastTime_;
-        if (!replace) prefix_ = !started_ || reset != lastReset_ ? 0 : total_;
+        if (!replace) {
+            prefix_ = total_;
+            if (!started_ || reset != lastReset_) {
+                prefix_ = 0;
+                periodLoadedFrom_ = loadedFrom < 0 ? time : loadedFrom;
+            }
+        }
         const double next = prefix_ + delta;
         if (!std::isfinite(next)) return false;
         total_ = next; lastTime_ = time; lastReset_ = reset; started_ = true;
         if (count && points[size_t(count - 1)].timeMs == time) --count;
         if (visible) {
             if (count == kCapacity) return false;
-            points[size_t(count++)] = {time, reset, total_};
+            points[size_t(count++)] = {time, reset, total_, periodLoadedFrom_};
         }
         return true;
+    }
+    int64_t incompleteStart() const {
+        for (int i = 0; i < count; ++i)
+            if (points[size_t(i)].loadedFromMs > points[size_t(i)].resetMs) return points[size_t(i)].loadedFromMs;
+        return -1;
     }
     CvdScale scale(double from = -std::numeric_limits<double>::infinity(),
                    double to = std::numeric_limits<double>::infinity(), int64_t duration = 0) const {
@@ -58,7 +70,7 @@ public:
     }
 private:
     bool started_ = false;
-    int64_t lastTime_ = 0, lastReset_ = 0;
+    int64_t lastTime_ = 0, lastReset_ = 0, periodLoadedFrom_ = 0;
     double total_ = 0, prefix_ = 0;
 };
 } // namespace chart

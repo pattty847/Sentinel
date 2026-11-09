@@ -100,7 +100,8 @@ double sizeTextWidth(const BadgePill& p) {
 }
 
 struct BadgeRig {
-    chart::LadderLayer layer;
+    chart::CvdPresentation cvd;
+    chart::LadderLayer layer{&cvd};
     QSGNode root;
     ChartTextRenderer text;
     chart_raster::RasterCamera cam;
@@ -1022,4 +1023,23 @@ int main(int argc, char** argv) {
     QGuiApplication app(argc, argv);
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
+}
+
+TEST(LadderBadges, CvdInsetMovesBottomPillsAndExcludesBottomRowTextWithoutNewData) {
+    BadgeRig rig(camera(100, 180));
+    rig.snapshot();
+    rig.candidate(S::kBid, S::kBelow, 90, 10);
+    rig.candidate(S::kAsk, S::kBelow, 95, 20);
+    rig.wall(103, S::kBid, 10); // inside the future CVD strip
+    rig.wall(150, S::kAsk, 20);
+    rig.post();
+    ASSERT_EQ(rig.layer.badges().stats().edgePills, 2);
+    const auto original = rig.pills()[0].rect;
+    rig.cvd.stripPx = 96; rig.draw();
+    const double stripTop = rig.frame().context.surfaceBounds.bottom() - 96;
+    ASSERT_EQ(rig.layer.badges().stats().edgePills, 2);
+    EXPECT_EQ(rig.pills()[0].rect.bottom(), original.bottom() - 96);
+    for (const auto& pill : rig.pills()) EXPECT_LE(pill.rect.bottom(), stripTop);
+    rig.cvd.stripPx = 0; rig.draw();
+    EXPECT_EQ(rig.pills()[0].rect, original);
 }

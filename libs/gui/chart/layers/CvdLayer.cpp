@@ -119,8 +119,8 @@ void CvdLayer::updateNodes(const ChartFrame& frame, LayerNodeContext&) {
     geometry(frame);
 }
 void CvdLayer::addLabel(const char* text, const QRectF& box, const ChartTextAtlas& atlas) {
-    if (box.height() < 12 || box.width() <= 0) return;
-    const double scale = 12 / double(atlas.fontPx());
+    if (box.height() < 13 || box.width() <= 0) return;
+    const double scale = 13 / double(atlas.fontPx());
     double pen = box.left();
     for (const char* c = text; *c && glyphs_.size() < 128; ++c) {
         const auto& g = atlas.glyph(QChar(*c));
@@ -136,8 +136,7 @@ void CvdLayer::submitLabels(const ChartFrame&, LayerNodeContext& context) {
     if (!drawing_ || !context.atlasReady || context.atlas.fontPx() <= 0) return;
     if (!reserved_) reserved_ = context.text.reserve(ChartLookSettings::footprintText(), 128);
     glyphs_.clear();
-    const char* label = captured_.reset == CvdReset::None ? "CVD since loaded start" :
-        captured_.reset == CvdReset::UtcDay ? "CVD since UTC day" : "CVD since TPO session";
+    const char* label = current_->label.data();
     addLabel(label, {strip_.left() + 4, strip_.top() + 2, std::max(0.0, strip_.width() - 110), strip_.height() - 4}, context.atlas);
     char value[32];
     const double width = std::min(100.0, strip_.width() - 8);
@@ -145,7 +144,7 @@ void CvdLayer::submitLabels(const ChartFrame&, LayerNodeContext& context) {
     std::snprintf(value, sizeof(value), "%.6g", scale_.max);
     addLabel(value, {left, strip_.top() + 2, width, strip_.height() - 4}, context.atlas);
     std::snprintf(value, sizeof(value), "%.6g", scale_.min);
-    if (strip_.height() >= 30) addLabel(value, {left, strip_.bottom() - 14, width, 12}, context.atlas);
+    if (strip_.height() >= 32) addLabel(value, {left, strip_.bottom() - 15, width, 13}, context.atlas);
     context.text.submitGlyphs(glyphs_, ChartTextRenderer::Priority::High);
 }
 } // namespace chart

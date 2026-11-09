@@ -15,6 +15,7 @@ public:
                    chart::FlowFeed* flow = nullptr, chart::LayerVisibility* layers = nullptr, chart::CvdFeed* cvd = nullptr)
         : view_(&view), published_(&published), ack_(&ack), update_(std::move(update)), flow_(flow), layers_(layers), cvd_(cvd) {}
     void bindFlowSource(IGridDataSource&) const;
+    int64_t cvdHistoryAnchor(int64_t start, int64_t timeframe) const;
     QJsonObject footprintSettings() const;
     static QJsonObject footprintPatch(const QJsonObject&);
     void applyFootprintSettings(const QJsonObject&) const;

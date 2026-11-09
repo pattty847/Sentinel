@@ -621,3 +621,30 @@ TEST(CvdFeed, SubsecondChartUsesOneSecondFlow) {
     EXPECT_EQ(snapshot.timeframeMs, 1000); ASSERT_EQ(snapshot.series.count, 1);
     EXPECT_EQ(snapshot.series.points[0].value, 3);
 }
+
+TEST(CvdFeed, CoverageAndEachResetPeriodDetermineTheBaselineLabel) {
+    auto series = footprintSeries();
+    auto frame = footprintFrame();
+    constexpr int64_t hour = 3600000;
+    auto record = series.bars[0]; series.bars.clear();
+    record.bar.startMs = 9 * hour; series.bars[9 * hour] = record;
+    frame.raster.drawnStartMs = 9 * hour; frame.raster.drawnEndMs = 9 * hour + 1000;
+    chart::CvdSnapshot snapshot;
+    chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::UtcDay, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since 09:00 loaded");
+    series.coverage[0] = {0, 9 * hour, SentinelStreamClient::FlowStatus::Complete};
+    chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::UtcDay, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since UTC day");
+    series.coverage[0].status = SentinelStreamClient::FlowStatus::Building;
+    chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::UtcDay, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since 09:00 loaded");
+    record.bar.startMs = 86400000; series.bars[record.bar.startMs] = record;
+    frame.raster.drawnEndMs = 86401000;
+    chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::UtcDay, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since 1970-01-01 09:00 loaded");
+    chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::None, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since loaded start");
+    frame.raster.drawnStartMs = 86400000;
+    chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::UtcDay, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since UTC day");
+}

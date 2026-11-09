@@ -19,6 +19,7 @@ struct CvdSnapshot {
     CvdSeries series;
     int64_t timeframeMs = 0;
     CvdReset reset = CvdReset::UtcDay;
+    std::array<char, 80> label{};
 };
 class CvdMailbox {
 public:
@@ -46,6 +47,7 @@ public:
     void onFrameChanged();
     void receive(SentinelStreamClient::FlowBatchPtr);
     void publish();
+    int64_t historyAnchor(int64_t start, int64_t timeframe) const;
     static void build(CvdSnapshot&, const FlowSeriesBuffer::Series&, const MappingFrameContext&, CvdReset, int sessionType);
 private:
     void selectSymbol();

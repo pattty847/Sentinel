@@ -42,14 +42,18 @@ public:
     }
     QString cvdStyle() const { return cvdArea_ ? QStringLiteral("area") : QStringLiteral("line"); }
     void setCvdStripPx(int px) {
-        if (px < 0 || cvdStrip_ == px) return;
+        px = std::clamp(px, 0, 400);
+        if (cvdStrip_ == px) return;
+        const bool gateChanged = (cvdStrip_ == 0) != (px == 0);
         cvdStrip_ = px; changed("cvdStripPx", px > 0);
+        if (gateChanged) emit cvdHistoryChanged();
     }
     void setCvdReset(const QString& value) {
         if (value != "none" && value != "utcDay" && value != "tpoSession") return;
         const auto reset = value == "none" ? CvdReset::None : value == "utcDay" ? CvdReset::UtcDay : CvdReset::TpoSession;
         if (cvdReset_ == reset) return;
         cvdReset_ = reset; changed("cvdReset", true);
+        if (cvdStrip_ > 0) emit cvdHistoryChanged();
     }
     void setCvdStyle(const QString& value) {
         if (value != "line" && value != "area") return;
@@ -57,7 +61,7 @@ public:
     }
     void writeCvdStripPx(int px) {
         setCvdStripPx(px);
-        if (cvdStrip_ == px) emit footprintSettingsRequested({{"cvdStripPx", px}});
+        emit footprintSettingsRequested({{"cvdStripPx", cvdStrip_}});
     }
     void writeCvdReset(const QString& value) {
         setCvdReset(value);
@@ -238,6 +242,7 @@ public:
         changed("tpo", enabled);
     }
 signals:
+    void cvdHistoryChanged();
     void footprintSettingsRequested(const QJsonObject& patch);
     void primaryFieldChanged();
     void layerVisibilityChanged();

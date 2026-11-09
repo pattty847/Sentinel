@@ -2789,3 +2789,44 @@ TEST(CvdKnobs, BothApiRoutesPersistAllThreeFields) {
         }
     }
 }
+
+TEST(CvdFeed, FallbackAccumulatesWhileOffAndCanEnableWithoutAnotherBatch) {
+    chart::CvdLayer layer;
+    chart::CvdFeed feed(layer.mailbox(), layer.presentation());
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000; frame.raster.valid = true;
+    frame.raster.drawnStartMs = 1000; frame.raster.drawnEndMs = 2000;
+    feed.setPorts({[&] { return frame; }, [] { return QStringLiteral("BTC-USD"); }, [] { return 4; }, [] {}});
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = "BTC-USD"; batch->timeframeMs = 1000;
+    for (int i = 0; i < 2; ++i) {
+        auto& bar = batch->bars.emplace_back().bar;
+        bar.startMs = 1000 * i; bar.timeframeMs = 1000; bar.baseScale = 1; bar.delta = 5;
+    }
+    feed.receive(batch);
+    layer.presentation().stripPx = 96; feed.publish();
+    auto current = std::make_unique<chart::CvdSnapshot>();
+    ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_EQ(current->series.count, 1);
+    EXPECT_EQ(current->series.points[0].value, 10);
+}
+TEST(CvdKnobs, HeightClampsAndPersistsOnQmlAndBothApiRoutes) {
+    TempStore store;
+    HeatmapSettingsModel model(store.store, "main", store.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
+    for (const int input : {-100, 0, 96, 400, 401, INT_MAX}) {
+        const int expected = std::clamp(input, 0, 400);
+        ASSERT_TRUE(QQmlProperty::write(renderer.layers(), "cvdStripPx", input)); controls.syncNow();
+        EXPECT_EQ(renderer.layers()->cvdStripPx(), expected); EXPECT_EQ(store.reload().cvdStripPx, expected);
+        for (const char* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
+            const auto body = QByteArray("{\"cvdStripPx\":") + QByteArray::number(input) + "}";
+            const auto validated = AgentApi::validateControl({"POST", path, {}, body}, std::nullopt);
+            ASSERT_EQ(validated.status, 200);
+            const auto patch = validated.body.layers.isEmpty() ? validated.body.heatmapSettings : ChartAgentPort::footprintPatch(validated.body.layers);
+            ASSERT_TRUE(model.apply(patch).isEmpty()); controls.syncNow();
+            EXPECT_EQ(renderer.layers()->cvdStripPx(), expected); EXPECT_EQ(store.reload().cvdStripPx, expected);
+        }
+    }
+    heatmap::HeatmapChartSettings direct;
+    direct.cvdStripPx = INT_MAX; heatmap::clampSettings(direct); EXPECT_EQ(direct.cvdStripPx, 400);
+}

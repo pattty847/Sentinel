@@ -108,6 +108,11 @@ class CandleViewportSource final : public IGridDataSource {
 public:
     struct Request { QString symbol; int64_t timeframeMs; qint64 startMs; qint64 endMs; };
     std::vector<Request> requests;
+    struct FlowRequest { int64_t start, end, anchor; };
+    std::vector<FlowRequest> flowRequests;
+    void requestFlowHistory(const QString&, int64_t, int64_t start, int64_t end, int64_t anchor = -1) override {
+        flowRequests.push_back({start, end, anchor});
+    }
     void subscribe(const QString&) override {}
     void unsubscribe(const QString&) override {}
     void requestFootprintHistory(const QString&, int64_t, int64_t, int) override {}
@@ -1139,4 +1144,36 @@ TEST(MainWindowLayers, FootprintVariantsApplyThroughChartPort) {
     const auto reset = AgentApi::validateControl({"POST", "/api/v1/layers", {},
         R"({"footprintSource":"q16","footprintIntensity":"bar","footprintHollowCandles":true,"footprintNumbers":true})"}, std::nullopt);
     ASSERT_EQ(MainWindowSymbolLifecyclePeer::applyLayers(window, reset.body).status, 200);
+}
+
+TEST(MainWindowCandleViewport, CvdEnableResetAndSessionChangesRefreshTheFlowAnchor) {
+    MainWindowGPU window;
+    auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
+    ASSERT_TRUE(renderer);
+    auto source = std::make_unique<CandleViewportSource>();
+    auto* captured = source.get();
+    auto original = MainWindowSymbolLifecyclePeer::replaceSource(window, std::move(source));
+    const auto restore = qScopeGuard([&] { MainWindowSymbolLifecyclePeer::replaceSource(window, std::move(original)); });
+    MainWindowSymbolLifecyclePeer::historyReady(window);
+    renderer->parentItem()->setSize({1000, 600});
+    renderer->view()->setAutoPriceScale(false); renderer->view()->enableAutoScroll(false);
+    renderer->view()->setTimeframe(60000);
+    constexpr int64_t hour = 3600000, day = 1800000000000LL / 86400000 * 86400000;
+    renderer->view()->setViewport(day + 14 * hour, day + 17 * hour, 100, 200);
+    ASSERT_FALSE(captured->flowRequests.empty());
+    EXPECT_EQ(captured->flowRequests.back().anchor, -1);
+    const auto originalWindow = captured->flowRequests.back();
+    captured->flowRequests.clear();
+    renderer->layers()->setCvdStripPx(96); QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
+    ASSERT_FALSE(captured->flowRequests.empty()); EXPECT_EQ(captured->flowRequests.back().anchor, day);
+    renderer->layers()->setCvdReset("tpoSession"); renderer->tpo()->setTpoSessionType(0);
+    QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
+    EXPECT_EQ(captured->flowRequests.back().anchor, day + 13 * hour);
+    captured->flowRequests.clear(); renderer->tpo()->setTpoSessionType(1);
+    QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
+    ASSERT_FALSE(captured->flowRequests.empty()); EXPECT_EQ(captured->flowRequests.back().anchor, day + 8 * hour);
+    renderer->layers()->setCvdStripPx(0); QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
+    EXPECT_EQ(captured->flowRequests.back().anchor, -1);
+    EXPECT_EQ(captured->flowRequests.back().start, originalWindow.start);
+    EXPECT_EQ(captured->flowRequests.back().end, originalWindow.end);
 }

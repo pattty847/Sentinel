@@ -134,13 +134,17 @@ bool LadderBadges::prepareAtlas(const ChartTextAtlas* atlas) {
     return true;
 }
 
-void LadderBadges::layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas) {
+void LadderBadges::layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas,
+                          double bottomInset) {
     pills_.clear();
     glyphs_.clear();
     stats_ = {};
     if (!s.radar || !(f.raster.dpr > 0) || !prepareAtlas(atlas)) return;
-    placeEdges(s, f);
-    placeRows(s, f);
+    auto bounds = f;
+    if (bottomInset > 0) bounds.surfaceBounds.setHeight(std::max(0.0, f.surfaceBounds.height() - bottomInset));
+    if (bottomInset > 0 && bounds.surfaceBounds.height() < kPillH + 2 * kEdgeInsetPx) return;
+    placeEdges(s, bounds);
+    placeRows(s, bounds);
     for (const BadgePill& p : pills_) compose(p);
     stats_.glyphs = int(glyphs_.size());
 }

@@ -16,6 +16,7 @@ class ChartTextAtlas;
 class ChartTextRenderer;
 
 namespace chart {
+struct CvdPresentation;
 // One display bin of the book on the chart's absolute row grid: price [k, k+1) * binPrice.
 // With the wall radar on, also its tracker state: how long the level has been a wall
 // (LevelTracker's large age) and its flicker count, both saturating.
@@ -93,7 +94,7 @@ private:
 class LadderLayer final : public IChartLayer {
 public:
     static constexpr float kInsetPx = 2.0f;
-    LadderLayer();
+    explicit LadderLayer(const CvdPresentation* cvd = nullptr);
     ~LadderLayer() override;
     std::string_view name() const override { return "ladder"; }
     void onRootRebuilt() override;
@@ -129,6 +130,8 @@ private:
     void rebuild(const ChartFrame&);
     void rebuildBadges(const ChartFrame&);
     bool reserveText(ChartTextRenderer& text) const;
+    const CvdPresentation* cvd_ = nullptr;
+    double bottomInset_ = 0;
     LadderMailbox mailbox_;
     std::unique_ptr<LadderSnapshot> current_;
     std::function<void()> republish_;

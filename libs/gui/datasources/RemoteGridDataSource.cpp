@@ -706,10 +706,10 @@ void RemoteGridDataSource::unsubscribeFlowLive() {
     m_flowBackfill.select({}, 0);
 }
 
-void RemoteGridDataSource::requestFlowHistory(const QString& symbol, int64_t tf, int64_t start, int64_t end) {
+void RemoteGridDataSource::requestFlowHistory(const QString& symbol, int64_t tf, int64_t start, int64_t end, int64_t resetAnchor) {
     if (!m_flowSubscription || symbol != m_flowSymbol || tf != m_flowTimeframeMs || end <= start) return;
     const auto marginStart = std::max<int64_t>(0, start - (end - start));
-    m_flowBackfill.setWindow(marginStart, end);
+    m_flowBackfill.setWindow(resetAnchor >= 0 ? std::min(marginStart, resetAnchor) : marginStart, end);
     m_flowBuffer.retainWindow(tf, m_flowBackfill.windowStartMs(), m_flowBackfill.windowEndMs());
     requestNextFlowPage();
 }

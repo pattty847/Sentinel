@@ -54,6 +54,7 @@ QString symbolFromSegment(QString value) {
 
 void clampSettings(HeatmapChartSettings &s) {
     const HeatmapChartSettings d;
+    s.cvdStripPx = std::clamp(s.cvdStripPx, 0, 400);
     if (s.tickMode != TickMode::Auto && s.tickMode != TickMode::Manual) s.tickMode = TickMode::Auto;
     s.manualTick = presetAtLeast(double(std::clamp<int64_t>(s.manualTick, 1, 1'000'000'000'000LL)), 1);
     s.minRowPx = finiteClamp(s.minRowPx, 0.5, 32, d.minRowPx);
@@ -164,8 +165,8 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         if (integers.contains(key) && std::floor(v.toDouble()) != v.toDouble()) return "Expected an integer: " + key;
         if (key == "bubblePlacement" && v != "individual" && v != "auto" && v != "slot")
             return "bubblePlacement must be individual, auto or slot";
-        if (key == "cvdStripPx" && (v.toDouble() < 0 || v.toDouble() > 2147483647 || std::floor(v.toDouble()) != v.toDouble()))
-            return "cvdStripPx must be a nonnegative integer <= 2147483647";
+        if (key == "cvdStripPx" && std::floor(v.toDouble()) != v.toDouble())
+            return "cvdStripPx must be an integer";
         if (key == "cvdReset" && v != "none" && v != "utcDay" && v != "tpoSession") return "cvdReset must be none, utcDay or tpoSession";
         if (key == "cvdStyle" && v != "line" && v != "area") return "cvdStyle must be line or area";
         if (key == "footprintSource" && v != "q16" && v != "cells") return "footprintSource must be q16 or cells";
@@ -209,7 +210,7 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.candleWickColor = merged["candleWickColor"].toString().toStdString();
     out.candleBodyOpacity = merged["candleBodyOpacity"].toDouble();
     out.candleWickWidth = merged["candleWickWidth"].toInt();
-    out.cvdStripPx = merged["cvdStripPx"].toInt();
+    out.cvdStripPx = int(std::clamp(merged["cvdStripPx"].toDouble(), 0.0, 400.0));
     out.cvdReset = merged["cvdReset"].toString().toStdString();
     out.cvdStyle = merged["cvdStyle"].toString().toStdString();
     out.footprintSource = merged["footprintSource"].toString().toStdString();

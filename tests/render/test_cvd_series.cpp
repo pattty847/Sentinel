@@ -54,3 +54,23 @@ TEST(CvdSeries, AutoscaleExcludesPointsOutsideTheCurrentCamera) {
     const auto scale = series.scale(1000, 2000, 1000);
     EXPECT_EQ(scale.min, 0); EXPECT_EQ(scale.max, 5);
 }
+
+#include "chart/core/CvdHistory.hpp"
+TEST(CvdHistory, ResetAnchorsUseEarliestVisibleBarAndOffLeavesWindowAlone) {
+    constexpr int64_t hour = 3600000;
+    EXPECT_EQ(cvdHistoryAnchor(12 * hour, 60000, 96, CvdReset::UtcDay, 4), 0);
+    EXPECT_EQ(cvdHistoryAnchor(14 * hour, 60000, 96, CvdReset::TpoSession, 0), 13 * hour);
+    EXPECT_EQ(cvdHistoryAnchor(12 * hour, 60000, 0, CvdReset::UtcDay, 4), -1);
+    EXPECT_EQ(cvdHistoryAnchor(12 * hour, 60000, 96, CvdReset::None, 4), -1);
+    EXPECT_EQ(cvdHistoryAnchor(86400000 + 5, 100, 96, CvdReset::UtcDay, 4), 86400000);
+}
+TEST(CvdSeries, EveryVisibleResetPeriodTracksItsOwnLoadedStart) {
+    CvdSeries series;
+    series.push(9 * 3600000, 4, 0, true);
+    series.push(86400000, 2, 86400000, true);
+    EXPECT_EQ(series.incompleteStart(), 9 * 3600000);
+    EXPECT_EQ(series.points[1].loadedFromMs, 86400000);
+    series.clear();
+    series.push(9 * 3600000, 4, 0, true, 0); // complete coverage proves earlier empty bars
+    EXPECT_EQ(series.incompleteStart(), -1);
+}

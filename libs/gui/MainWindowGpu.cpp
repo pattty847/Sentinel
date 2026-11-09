@@ -261,6 +261,9 @@ MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
                 m_footprintReceivedAtMs.reset(); // footprint columns follow the chart timeframe
                 requestCandleHistoryForSymbol(m_currentSymbol);
             });
+            connect(renderer->layers(), &chart::LayerVisibility::cvdHistoryChanged, this, [this]() {
+                requestCandleHistoryForSymbol(m_currentSymbol);
+            }, Qt::QueuedConnection);
             connect(renderer->view(), &chart::ChartViewQml::viewportChanged, this, [this]() {
                 requestCandleHistoryForSymbol(m_currentSymbol);
             });
@@ -1062,7 +1065,8 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
     const int64_t flowTf = std::max<int64_t>(1000, tfMs);
     m_dataSource->subscribeFlowLive(ready ? symbol : QString{}, flowTf);
     if (ready) m_dataSource->requestFlowHistory(symbol, flowTf,
-        renderer->view()->getVisibleTimeStart(), renderer->view()->getVisibleTimeEnd());
+        renderer->view()->getVisibleTimeStart(), renderer->view()->getVisibleTimeEnd(),
+        renderer->agentPort().cvdHistoryAnchor(renderer->view()->getVisibleTimeStart(), flowTf));
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {
