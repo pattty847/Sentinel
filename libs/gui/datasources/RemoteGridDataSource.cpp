@@ -690,6 +690,8 @@ void RemoteGridDataSource::subscribeFlowLive(const QString& symbol, int64_t tf) 
     m_flowTimeframeMs = tf;
     m_flowBackfill.select(symbol, tf);
     m_flowSubscription = m_client.subscribeFlowLive(symbol.toStdString(), tf);
+    if (m_flowSubscription)
+        m_flowBackfill.beginLive(QDateTime::currentMSecsSinceEpoch() / tf * tf);
 }
 
 void RemoteGridDataSource::unsubscribeFlowLive() {
@@ -715,6 +717,7 @@ void RemoteGridDataSource::requestFlowHistory(const QString& symbol, int64_t tf,
 void RemoteGridDataSource::requestNextFlowPage() {
     if (!m_connectionActive || !m_flowConfigReady || !m_flowSubscription) return;
     const auto now = m_flowClock.elapsed();
+    m_flowBackfill.markLiveEdge(QDateTime::currentMSecsSinceEpoch() / m_flowTimeframeMs * m_flowTimeframeMs);
     if (m_flowBackfill.timeout(now))
         sLog_Warning("Flow history page timed out: symbol=" << m_flowSymbol << " tfMs=" << m_flowTimeframeMs);
     const auto request = m_flowBackfill.next(now);

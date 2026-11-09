@@ -11,8 +11,10 @@ void FlowBackfillState::select(const QString& symbol, int64_t tf) {
     m_pageLimit = 512;
     m_pagingStopped = false;
     m_window = false;
-    m_liveFrom = m_probeBucket = -1;
-    m_probeDue = m_sentAt = 0;
+    m_liveCurrentBucket = m_lastLiveBucket = m_probeBucket = -1;
+    m_probeDue = m_sentAt = m_nextEdgePageMs = 0;
+    m_liveArmed = m_liveTracking = false;
+    m_timedOut.reset();
     m_refusedBucket.reset();
     m_covered.clear();
     m_refresh.clear();
@@ -24,15 +26,26 @@ void FlowBackfillState::setWindow(int64_t start, int64_t end) {
     // Keep work and storage bounded even at extreme zoom. Newest buckets first.
     m_start = std::max(start, end - int64_t(FlowSeriesBuffer::kMaxBuckets) * m_tf) / m_tf * m_tf;
     m_end = (end - 1) / m_tf * m_tf;
-    // Coverage must not outlive buffer eviction when panning away and back.
-    auto it = m_covered.begin();
-    while (it != m_covered.end()) {
-        const auto lo = std::max(m_start, it->first), hi = std::min(m_end + m_tf, it->second);
-        if (lo >= hi) it = m_covered.erase(it);
-        else if (lo != it->first) {
-            it = m_covered.erase(it);
-            m_covered[lo] = hi;
-        } else { it->second = hi; ++it; }
+    trimCoverage();
+    if (m_liveCurrentBucket < m_start || m_liveCurrentBucket > m_end)
+        m_liveTracking = false;
+}
+void FlowBackfillState::trimCoverage() {
+    if (!m_window) return;
+    auto old = std::move(m_covered);
+    m_covered.clear();
+    const int64_t hi = m_end + m_tf;
+    for (const auto& [from, to] : old) {
+        const auto clippedFrom = std::max(from, m_start), clippedTo = std::min(to, hi);
+        if (clippedFrom < clippedTo) cover(clippedFrom, clippedTo);
+    }
+    // Mirror the series buffer's three-bucket tail beyond the window.
+    int tail = 3;
+    for (auto it = old.rbegin(); it != old.rend() && tail > 0; ++it) {
+        const auto lo = std::max(it->first, hi);
+        if (lo >= it->second) continue;
+        const int take = int(std::min<int64_t>(tail, (it->second - lo) / m_tf));
+        if (take > 0) { cover(it->second - take * m_tf, it->second); tail -= take; }
     }
 }
 void FlowBackfillState::refresh(int64_t bucket, int64_t dueMs) {
@@ -41,9 +54,32 @@ void FlowBackfillState::refresh(int64_t bucket, int64_t dueMs) {
     if (!added) it->second = std::min(it->second, dueMs);
     while (m_refresh.size() > FlowSeriesBuffer::kMaxBuckets) m_refresh.erase(m_refresh.begin());
 }
+void FlowBackfillState::beginLive(int64_t bucket) {
+    if (m_tf < 1000 || bucket < 0 || m_symbol.isEmpty()) return;
+    m_liveArmed = true;
+    m_liveCurrentBucket = bucket;
+}
+void FlowBackfillState::markLiveEdge(int64_t bucket) {
+    if (!m_liveArmed || m_tf < 1000 || bucket < 0 || m_symbol.isEmpty()) return;
+    m_liveCurrentBucket = bucket;
+    if (!m_window || bucket < m_start || bucket > m_end) { m_liveTracking = false; return; }
+    if (m_liveTracking && m_lastLiveBucket >= 0 && bucket >= m_lastLiveBucket)
+        cover(std::max(m_start, m_lastLiveBucket), bucket + m_tf);
+    else cover(bucket, bucket + m_tf);
+    m_lastLiveBucket = bucket;
+    m_liveTracking = true;
+}
 void FlowBackfillState::observeLive(int64_t bucket, int64_t nowMs) {
     if (m_tf < 1000 || bucket < 0 || m_symbol.isEmpty()) return;
-    if (m_liveFrom < 0) m_liveFrom = bucket;
+    if (!m_liveArmed) beginLive(bucket);
+    if (m_window && bucket >= m_start) {
+        cover(bucket, bucket + m_tf);
+        if (bucket > m_end) trimCoverage();
+    }
+    if (m_window && bucket >= m_start && bucket <= m_end && !m_liveTracking) {
+        m_lastLiveBucket = bucket;
+        m_liveTracking = true;
+    }
     m_probeBucket = std::max(m_probeBucket, bucket);
     if (!m_probeDue) m_probeDue = nowMs + FlowSeriesBuffer::kRefetchIntervalMs;
 }
@@ -86,7 +122,7 @@ std::optional<FlowBackfillState::Request> FlowBackfillState::next(int64_t nowMs)
         return m_pending;
     }
     if (m_pagingStopped || !m_window || m_end < m_start) return {};
-    int64_t end = m_liveFrom < 0 ? m_end : std::min(m_end, m_liveFrom - m_tf);
+    int64_t end = m_end;
     // Skip proven runs above the next gap, including an edge that has moved.
     while (end >= m_start) {
         auto above = m_covered.upper_bound(end);
@@ -96,6 +132,9 @@ std::optional<FlowBackfillState::Request> FlowBackfillState::next(int64_t nowMs)
         end = covered->first - m_tf;
     }
     if (end < m_start) return {};
+    const bool nearLiveEdge = m_liveCurrentBucket >= 0 &&
+        end >= m_liveCurrentBucket - std::max<int64_t>(5000, m_tf);
+    if (nearLiveEdge && nowMs < m_nextEdgePageMs) return {};
     int64_t gapStart = m_start;
     if (auto above = m_covered.upper_bound(end); above != m_covered.begin())
         gapStart = std::max(gapStart, std::prev(above)->second);
@@ -104,6 +143,7 @@ std::optional<FlowBackfillState::Request> FlowBackfillState::next(int64_t nowMs)
     request.id = ++m_nextId;
     m_pending = request;
     m_sentAt = nowMs;
+    if (nearLiveEdge) m_nextEdgePageMs = nowMs + 5000;
     return m_pending;
 }
 void FlowBackfillState::cover(int64_t from, int64_t to) {
@@ -120,10 +160,17 @@ void FlowBackfillState::cover(int64_t from, int64_t to) {
     m_covered[from] = to;
 }
 bool FlowBackfillState::accept(const SentinelStreamClient::FlowBatch& b, int64_t nowMs) {
-    if (!m_pending || m_pending->held || b.id != m_pending->id || b.symbol != m_pending->symbol ||
-        b.timeframeMs != m_pending->timeframeMs) return false;
-    const auto request = *m_pending;
+    if (!m_pending || b.symbol != m_pending->symbol || b.timeframeMs != m_pending->timeframeMs)
+        return false;
+    const bool late = m_timedOut && b.id == m_timedOut->id &&
+        m_timedOut->generation == m_pending->generation &&
+        m_timedOut->symbol == m_pending->symbol &&
+        m_timedOut->timeframeMs == m_pending->timeframeMs &&
+        m_timedOut->endMs == m_pending->endMs && m_timedOut->limit == m_pending->limit;
+    if (!late && (m_pending->held || b.id != m_pending->id)) return false;
+    const auto request = late ? *m_timedOut : *m_pending;
     m_pending.reset();
+    m_timedOut.reset();
     if (request.generation != m_generation) return false;
     m_retryAt = nowMs + 100;
     m_backoff = 1000;
@@ -156,14 +203,19 @@ bool FlowBackfillState::accept(const SentinelStreamClient::FlowBatch& b, int64_t
 }
 bool FlowBackfillState::fail(quint64 id, SentinelStreamClient::FlowFailure failure, int64_t nowMs) {
     if (!m_pending || m_pending->held || id != m_pending->id) return false;
-    if (m_pending->generation != m_generation) { m_pending.reset(); return true; }
+    if (m_pending->generation != m_generation) { m_pending.reset(); m_timedOut.reset(); return true; }
     if (failure == SentinelStreamClient::FlowFailure::Oversized) {
+        m_timedOut.reset();
         if (m_pending->limit == 1) {
             m_refusedBucket = m_pending->endMs;
             cover(*m_refusedBucket, *m_refusedBucket + m_tf);
             m_pending.reset();
         } else {
-            m_pageLimit = std::min(m_pageLimit, std::max(1, m_pending->limit / 2));
+            const int oldLimit = m_pending->limit;
+            m_pageLimit = std::min(m_pageLimit, std::max(1, oldLimit / 2));
+            if (m_pending->refresh && !m_pending->probe)
+                for (int i = m_pageLimit; i < oldLimit; ++i)
+                    refresh(m_pending->endMs - int64_t(i) * m_tf, nowMs + 100);
             m_pending->limit = m_pageLimit;
             m_pending->held = true;
         }
@@ -172,6 +224,7 @@ bool FlowBackfillState::fail(quint64 id, SentinelStreamClient::FlowFailure failu
     }
     if (failure == SentinelStreamClient::FlowFailure::Fatal) {
         m_pending.reset();
+        m_timedOut.reset();
         m_pagingStopped = true;
         return true;
     }
@@ -181,8 +234,15 @@ bool FlowBackfillState::fail(quint64 id, SentinelStreamClient::FlowFailure failu
     return true;
 }
 bool FlowBackfillState::timeout(int64_t nowMs) {
-    if (!inFlight() || nowMs - m_sentAt < 5000) return false;
+    if (!inFlight() || nowMs - m_sentAt < flightTimeoutMs()) return false;
+    m_timedOut = m_pending;
     return fail(m_pending->id, SentinelStreamClient::FlowFailure::Retryable, nowMs);
+}
+int64_t FlowBackfillState::flightTimeoutMs() const {
+    if (m_pending && m_pending->timeframeMs == 1000 && m_liveCurrentBucket >= 0 &&
+        m_pending->endMs < m_liveCurrentBucket - 30 * 60 * 1000)
+        return 30'000;
+    return 5000;
 }
 std::optional<int64_t> FlowBackfillState::takeRefusedBucket() {
     auto bucket = m_refusedBucket;
@@ -195,10 +255,14 @@ void FlowBackfillState::disconnect() {
 }
 
 int64_t FlowBackfillState::wakeAtMs(int64_t nowMs) const {
-    if (inFlight()) return m_sentAt + 5000;
+    if (inFlight()) return m_sentAt + flightTimeoutMs();
     if (nowMs < m_retryAt) return m_retryAt;
     int64_t at = 0;
     for (const auto& [bucket, due] : m_refresh) at = at == 0 ? due : std::min(at, due);
     if (m_probeDue) at = at == 0 ? m_probeDue : std::min(at, m_probeDue);
+    if (m_liveArmed && m_window && m_liveTracking) {
+        const int64_t edgeAt = nowMs + 5000;
+        at = at == 0 ? edgeAt : std::min(at, edgeAt);
+    }
     return at;
 }

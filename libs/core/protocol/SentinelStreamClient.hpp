@@ -62,7 +62,7 @@ public:
     };
 
     enum class FlowSource { Live, Store };
-    enum class FlowStatus { Complete, Partial, Building, Refused };
+    enum class FlowStatus { Complete, Partial, Building, Refused, Live }; // Live is client coverage only.
     enum class FlowFailure { Retryable, Oversized, Fatal };
     struct FlowRecord {
         sentinel::flow::FlowBar bar;

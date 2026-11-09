@@ -102,6 +102,21 @@ TEST(FlowSeriesBuffer, CoverageMaskIsIndependentOfBarsAndExposesRefused) {
     buffer.apply(batch(bar(3, true)), 0);
     EXPECT_EQ(mask.at(60'000).status, Status::Partial);
 }
+TEST(FlowSeriesBuffer, LiveOnlyBucketHasLocalCoverage) {
+    FlowSeriesBuffer buffer;
+    buffer.apply(batch(bar()), 0);
+    ASSERT_NE(buffer.series(60'000), nullptr);
+    EXPECT_EQ(buffer.series(60'000)->coverage.at(60'000).status, Status::Live);
+    auto page = batch(bar(1, false, Source::Store), true);
+    page.ranges = {{60'000, 120'000, Status::Partial}};
+    buffer.apply(page, 1);
+    EXPECT_EQ(buffer.series(60'000)->coverage.at(60'000).status, Status::Partial);
+    buffer.clear();
+    page.ranges = {{0, 120'000, Status::Partial}};
+    buffer.apply(page, 2);
+    buffer.apply(batch(bar(2, false)), 3);
+    EXPECT_EQ(buffer.series(60'000)->coverage.size(), 1u);
+}
 TEST(FlowBackfillState, EmptyPagesProgressByOldestAndStopAtZero) {
     FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
     const auto first = state.next(0); ASSERT_TRUE(first);
@@ -314,13 +329,51 @@ TEST(FlowBackfillState, SlidingWindowRequestsOnlyOneUncoveredBucket) {
 }
 TEST(FlowBackfillState, LiveCoveredEdgeDoesNotPageHistory) {
     FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
-    state.observeLive(0, 0);
+    state.beginLive(0);
+    state.markLiveEdge(0);
+    state.markLiveEdge(599'000);
+    state.observeLive(599'000, 0);
     EXPECT_FALSE(state.next(0));
     state.setWindow(0, 601'000);
+    state.markLiveEdge(600'000);
     EXPECT_FALSE(state.next(100));
     const auto probe = state.next(30'000); ASSERT_TRUE(probe);
     EXPECT_TRUE(probe->probe);
     EXPECT_EQ(probe->limit, 1);
+}
+TEST(FlowBackfillState, ReturningToTrimmedLiveIntervalPagesTheGap) {
+    FlowBackfillState state; state.select("BTC-USD", 60'000);
+    state.setWindow(9 * 3'600'000 + 40 * 60'000, 10 * 3'600'000 + 31 * 60'000);
+    state.beginLive(10 * 3'600'000);
+    for (int minute = 0; minute <= 30; ++minute)
+        state.markLiveEdge(10 * 3'600'000 + minute * 60'000);
+    state.setWindow(7 * 3'600'000, 9 * 3'600'000);
+    state.markLiveEdge(10 * 3'600'000 + 40 * 60'000);
+    state.setWindow(9 * 3'600'000 + 40 * 60'000, 10 * 3'600'000 + 41 * 60'000);
+    state.markLiveEdge(10 * 3'600'000 + 40 * 60'000);
+    auto first = state.next(0); ASSERT_TRUE(first);
+    EXPECT_EQ(first->endMs, 10 * 3'600'000 + 39 * 60'000);
+    EXPECT_EQ(first->limit, 9); // gap above the retained three-bucket tail
+    EXPECT_TRUE(state.accept(reply(*first, 10 * 3'600'000 + 31 * 60'000), 1));
+    auto older = state.next(101); ASSERT_TRUE(older);
+    EXPECT_EQ(older->endMs, 10 * 3'600'000 + 27 * 60'000);
+    EXPECT_LE(older->endMs - older->limit * 60'000, 10 * 3'600'000);
+}
+TEST(FlowBackfillState, SilentSubscriptionCoversAdvancingEdge) {
+    FlowBackfillState state; state.select("BTC-USD", 1000);
+    state.setWindow(60'000, 61'000);
+    state.beginLive(60'000);
+    int requests = 0;
+    for (int second = 0; second < 60; ++second) {
+        state.setWindow(60'000, 61'000 + second * 1000);
+        if (second % 5 == 0) state.markLiveEdge(60'000 + second * 1000);
+        if (second == 0) EXPECT_EQ(state.wakeAtMs(0), 5000);
+        if (auto req = state.next(second * 1000)) {
+            ++requests;
+            EXPECT_TRUE(state.accept(reply(*req, req->endMs), second * 1000 + 1));
+        }
+    }
+    EXPECT_LE(requests, 13);
 }
 TEST(FlowBackfillState, LongLiveSessionUsesOneSealProbePerInterval) {
     FlowBackfillState state; state.select("BTC-USD", 60'000); state.setWindow(0, 600'000);
@@ -395,7 +448,7 @@ TEST(FlowBackfillState, PagingStopStillAllowsBuildingAndLossRefresh) {
     EXPECT_EQ(building->endMs, 3000);
     EXPECT_FALSE(state.next(103));
 }
-TEST(FlowBackfillState, MissingReplyTimesOutAndLateReplyCannotCorrelate) {
+TEST(FlowBackfillState, MissingReplyTimesOutAndMatchingLateReplyIsAppliedOnce) {
     FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 10'000);
     const auto first = state.next(0); ASSERT_TRUE(first);
     EXPECT_EQ(state.wakeAtMs(0), 5000);
@@ -404,9 +457,36 @@ TEST(FlowBackfillState, MissingReplyTimesOutAndLateReplyCannotCorrelate) {
     EXPECT_FALSE(state.next(5999));
     const auto retry = state.next(6000); ASSERT_TRUE(retry);
     EXPECT_NE(first->id, retry->id);
-    EXPECT_FALSE(state.accept(reply(*first, 0), 6001));
-    EXPECT_TRUE(state.inFlight());
-    EXPECT_TRUE(state.accept(reply(*retry, 0), 6002));
+    EXPECT_TRUE(state.accept(reply(*first, 0), 6001));
+    EXPECT_FALSE(state.inFlight());
+    EXPECT_FALSE(state.accept(reply(*retry, 0), 6002));
+}
+TEST(FlowBackfillState, ColdSecondReplayHasLongTimeoutAndAcceptsLateReplyOnce) {
+    FlowBackfillState state; state.select("BTC-USD", 1000);
+    state.setWindow(0, 10'000);
+    state.beginLive(40 * 60'000);
+    auto first = state.next(0); ASSERT_TRUE(first);
+    EXPECT_EQ(state.wakeAtMs(0), 30'000);
+    EXPECT_FALSE(state.timeout(5'000));
+    EXPECT_TRUE(state.timeout(30'000));
+    EXPECT_TRUE(state.accept(reply(*first, 0), 30'001));
+    EXPECT_FALSE(state.accept(reply(*first, 0), 30'002));
+    EXPECT_FALSE(state.next(31'101));
+}
+TEST(FlowBackfillState, OversizedCoalescedRefreshPreservesOlderBuckets) {
+    FlowBackfillState state; state.select("BTC-USD", 1000);
+    for (int i = 0; i < 8; ++i) state.refresh(i * 1000, 0);
+    auto first = state.next(0); ASSERT_TRUE(first);
+    ASSERT_EQ(first->limit, 8);
+    EXPECT_EQ(first->endMs, 7000);
+    EXPECT_TRUE(state.fail(first->id, Client::FlowFailure::Oversized, 0));
+    auto smaller = state.next(100); ASSERT_TRUE(smaller);
+    EXPECT_EQ(smaller->limit, 4);
+    EXPECT_EQ(smaller->endMs, 7000);
+    EXPECT_TRUE(state.accept(reply(*smaller, 4000), 101));
+    auto older = state.next(201); ASSERT_TRUE(older);
+    EXPECT_EQ(older->endMs, 3000);
+    EXPECT_EQ(older->limit, 4);
 }
 TEST(FlowSeriesBuffer, KeepsOnlyNewestThreeLiveBucketsBeyondViewport) {
     FlowSeriesBuffer buffer;

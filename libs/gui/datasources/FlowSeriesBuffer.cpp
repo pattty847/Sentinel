@@ -72,8 +72,14 @@ std::vector<int64_t> FlowSeriesBuffer::apply(const Batch& batch, int64_t nowMs) 
         if (batch.history && in.source == Source::Live && held != s.bars.end() &&
             held->second.source == Source::Live && in.revision == held->second.revision &&
             !(in.complete && !held->second.complete)) continue;
-        if (merge(held == s.bars.end() ? nullptr : &held->second, in, m_sealedThroughMs) == Merge::Replace)
+        if (merge(held == s.bars.end() ? nullptr : &held->second, in, m_sealedThroughMs) == Merge::Replace) {
             s.bars[start] = in;
+            if (!batch.history && in.source == Source::Live) {
+                const auto above = s.coverage.upper_bound(start);
+                const bool alreadyCovered = above != s.coverage.begin() && std::prev(above)->second.toMs > start;
+                if (!alreadyCovered) s.coverage[start] = {start, start + batch.timeframeMs, Status::Live};
+            }
+        }
     }
     // A re-fetch can prove an empty bucket. Retire the invalidated value only
     // when no newer live revision arrived while that page was in flight.
