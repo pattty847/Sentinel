@@ -7,6 +7,8 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
 
 - **Wave 3 (now):** footprint/why-it-moved plan (Fable: footprint, CVD, eaten/pulled, bubbles), aesthetics, heatmap seam, trade bubbles rethink.
   - **Heatmap aesthetic pass** (owner 2026-11-09, after the heatmap-saturation branch lands): new palette (owner's colour variants) and the auto range rule (today: one-time fit to the visible cells' lo/hi, saved per asset with origin auto|user, fittedAt time/price) judged together on 1080p and the ~2500px screen; 3 models + the owner judge variants side by side in the lab. Also decide when a saved AUTO range should refit (price moved a lot, palette or scale changed); USER ranges never move.
+  - **Wall radar disappears at some zooms** (owner 2026-11-09, priority bug): the ladder wall badges (wall radar) do not show at certain zoom levels. Find the zoom/tick condition that hides them (`LadderLayer` badge layout, its cellLabels/heatmap-label coupling) and make them show at every zoom where the chart shows a heatmap.
+  - **Heatmap cell label rule** (owner 2026-11-09, design): today a label shows wherever its own text fits, so a `$1M` cell is labelled before neighbouring `$45k` cells and labels pop in patchily. Want uniform behaviour: when every visible cell's text fits at that zoom, show all; plus a rule for how text size scales with zoom so it reads well (MSDF, 1080p and ~2500px screens). Part of the heatmap aesthetic pass.
 - **Wave 4:** Security, land follow-ups (land rebuilds main's build dir), Gemini 3.1 Pro reviewer trial on past diffs, Feature ideas check. Then the Queue.
 
 ## Queue (ordered)
