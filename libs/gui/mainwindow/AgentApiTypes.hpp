@@ -103,6 +103,7 @@ struct StateSnapshot {
     std::optional<bool> heatmapLayer;
     std::optional<bool> candlesLayer;
     std::optional<bool> footprintLayer;
+    QJsonObject footprintSettings;
     std::optional<bool> tpoLayer;
     std::optional<bool> volumeProfileLayer;
     std::optional<bool> ladderLayer;

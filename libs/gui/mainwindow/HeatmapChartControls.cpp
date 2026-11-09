@@ -1,4 +1,5 @@
 #include "HeatmapChartControls.hpp"
+#include "ChartAgentPort.hpp"
 #include "PerformanceMonitor.hpp"
 #include "SentinelLogging.hpp"
 #include "UnifiedGridRenderer.h"
@@ -48,7 +49,10 @@ HeatmapChartControls::HeatmapChartControls(heatmap::HeatmapSettingsModel *model,
 
 void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
     if (m_renderer == renderer) return;
-    if (m_renderer) disconnect(m_renderer, nullptr, this, nullptr);
+    if (m_renderer) {
+        disconnect(m_renderer, nullptr, this, nullptr);
+        disconnect(m_renderer->layers(), nullptr, this, nullptr);
+    }
     m_renderer = renderer;
     if (!renderer) {
         syncNow();
@@ -64,6 +68,9 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
     });
     connect(&renderer->view()->controller().livePlacement(), &chart::LivePlacement::priceSourceChanged,
             this, [this] { if (!m_model->settings().sensitivityReady) updateSensitivityContext(); });
+    connect(renderer->layers(), &chart::LayerVisibility::footprintSettingsRequested, this, [this](const QJsonObject& patch) {
+        if (const auto error = m_model->apply(patch); !error.isEmpty()) sLog_Warning("Footprint settings rejected: " << error);
+    });
     connect(renderer->layers(), &chart::LayerVisibility::layerVisibilityChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer->tpo(), &chart::ChartTpoQml::tpoConfigChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer->tpo(), &chart::ChartTpoQml::tpoStyleChanged, this, &HeatmapChartControls::scheduleSync);
@@ -134,6 +141,10 @@ double HeatmapChartControls::currentSymbolPrice() const {
 void HeatmapChartControls::applyLadderSettings() {
     if (!m_renderer) return;
     const auto &s = m_model->settings();
+    m_renderer->agentPort().applyFootprintSettings({
+        {"footprintSource", QString::fromStdString(s.footprintSource)},
+        {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
+        {"footprintHollowCandles", s.footprintHollowCandles}, {"footprintNumbers", s.footprintNumbers}});
     const AppliedLadder want{s.showLadder, s.ladderWidthPx, s.showWallRadar, s.wallMultiple};
     if (m_appliedLadder == want) return;
     m_appliedLadder = want;

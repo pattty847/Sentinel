@@ -1,6 +1,7 @@
 #include "chart/layers/ChartTextLayer.hpp"
 #include "chart/layers/HeatmapLayer.hpp"
 #include "chart/layers/LadderLayer.hpp"
+#include "chart/layers/FootprintCellsLayer.hpp"
 #include "chart/layers/RenderSequence.hpp"
 #include "chart/core/ChartFrame.hpp"
 #include "render/FrameProfiler.hpp"
@@ -45,6 +46,7 @@ void ChartTextLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& cont
                                             frame.context.itemBounds.height(), frame.context.rightGutterPx); },
         [&] {
             heatmap_.submitLabels(frame, context);
+            footprint_.submitLabels(frame, context);
             ladder_.submitLabels(frame, context, !heatmap_.labelGlyphs().empty());
         },
         [&](int stage) {

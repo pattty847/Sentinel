@@ -563,3 +563,24 @@ TEST(AgentApiSnapshots, HundredMillisecondsQueryReadsItsOwnSeries) {
     ASSERT_TRUE(snapshot);
     ASSERT_EQ(snapshot->bars.size(), 1);
 }
+
+TEST(AgentApiControls, FootprintVariantsHaveStrictTypes) {
+    const auto check = [](const char* body) { return validateControl({"POST", "/api/v1/layers", {}, body}, std::nullopt); };
+    const auto valid = check(R"({"footprintIntensity":"window","footprintHollowCandles":false,"footprintNumbers":false})");
+    ASSERT_EQ(valid.status, 200);
+    EXPECT_EQ(valid.body.layers.size(), 3);
+    EXPECT_EQ(check(R"({"footprintIntensity":"bar"})").status, 200);
+    EXPECT_EQ(check(R"({"footprintIntensity":"global"})").status, 422);
+    EXPECT_EQ(check(R"({"footprintIntensity":true})").status, 422);
+    EXPECT_EQ(check(R"({"footprintHollowCandles":"false"})").status, 422);
+    EXPECT_EQ(check(R"({"footprintNumbers":1})").status, 422);
+}
+
+TEST(AgentApiControls, FootprintSourceHasStrictTypesOnBothRoutes) {
+    for (const auto* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
+        for (const auto* body : {R"({"footprintSource":"q16"})", R"({"footprintSource":"cells"})"})
+            EXPECT_EQ(validateControl({"POST", path, {}, body}, std::nullopt).status, 200);
+        for (const auto* body : {R"({"footprintSource":"other"})", R"({"footprintSource":true})"})
+            EXPECT_EQ(validateControl({"POST", path, {}, body}, std::nullopt).status, 422);
+    }
+}

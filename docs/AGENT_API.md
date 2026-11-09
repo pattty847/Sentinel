@@ -99,6 +99,40 @@ curl -s -H 'Content-Type: application/json' -d '{"kind":"wheel","target":"chart"
 curl -s 'http://127.0.0.1:17100/api/v1/screenshot?name=wheel&target=heatmap&afterOperation=o3&waitMs=5000'
 ```
 
+## Footprint source and cells
+
+`POST /api/v1/layers` accepts `footprintSource` (`"q16"` default, or `"cells"`),
+`footprintIntensity` (`"bar"` default, or `"window"`),
+`footprintHollowCandles` (boolean, default true), and `footprintNumbers` (boolean,
+default true). These variants persist through the chart settings model; the response
+and `GET /api/v1/state` report them in `layers`. The same four keys work in
+`POST /api/v1/heatmap/settings`, including its `persist:false` process-only option.
+QML paths are `unifiedGridRenderer.layers.footprintSource`, `.footprintIntensity`,
+`.footprintHollowCandles`, and `.footprintNumbers` (writes persist through the same chart settings model).
+
+`footprint:true` shows the selected source. `q16` retains the existing footprint
+and candle appearance. `cells` selects flow-backed bid-left/ask-right cells;
+the GUI flow feed is inactive unless both cells and footprint are selected. The cell stage enters
+at 24 logical pixels per column and 6 per drawn row; numbers enter at 56/12, with
+a 2 px retention band on zoom-out. Labels use a 12 px font, abbreviate thousands
+and millions, and omit a value when it cannot fit. `footprintNumbers:false` caps
+the stage at Cells. `footprintHollowCandles:true` outlines both up/down bodies
+and uses 1 device px wicks in Cells/Numbers only with source `cells` and flow bars covering the visible window; missing/partial history keeps the chosen candle look. False also restores that look.
+`bar` divides row volume by that bar's maximum binned row volume; `window` divides
+by the maximum visible row volume. Native bins wider than the drawn tick span
+those rows without inventing a distribution. Snapshots include one viewport of overscan on each side and retained cells continue drawing during camera motion. Incompatible bars are skipped; capacity keeps the nearest bars, with a throttled warning and `footprint.feed` probe. No data or sub-second chart timeframes draw no cells. Hidden LOD performs no feed binning.
+
+On an isolated lab instance at port 17115:
+
+```sh
+curl -s -H 'Content-Type: application/json' -d '{"footprint":true,"footprintSource":"cells","footprintIntensity":"bar","footprintHollowCandles":true,"footprintNumbers":true}' http://127.0.0.1:17115/api/v1/layers
+curl -s -H 'Content-Type: application/json' -d '{"footprintIntensity":"window"}' http://127.0.0.1:17115/api/v1/layers
+curl -s -H 'Content-Type: application/json' -d '{"footprintHollowCandles":false,"footprintNumbers":false}' http://127.0.0.1:17115/api/v1/layers
+```
+
+To return to the default source, post `{"footprintSource":"q16"}` to the same route.
+The cells look knobs remain stored while q16 is selected.
+
 ## Trade bubbles (GPU chart)
 
 The toolbar gear menu has **Trades** (off by default) and **Minimum trade notional

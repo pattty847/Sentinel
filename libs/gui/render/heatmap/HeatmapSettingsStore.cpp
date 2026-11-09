@@ -137,6 +137,9 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"candleWickColor", QString::fromStdString(s.candleWickColor)},
         {"candleBodyOpacity", s.candleBodyOpacity},
         {"candleWickWidth", s.candleWickWidth},
+        {"footprintSource", QString::fromStdString(s.footprintSource)},
+        {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
+        {"footprintHollowCandles", s.footprintHollowCandles}, {"footprintNumbers", s.footprintNumbers},
         {"showLadder", s.showLadder},
         {"ladderWidthPx", s.ladderWidthPx},
         {"showWallRadar", s.showWallRadar},
@@ -159,6 +162,8 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         if (integers.contains(key) && std::floor(v.toDouble()) != v.toDouble()) return "Expected an integer: " + key;
         if (key == "bubblePlacement" && v != "individual" && v != "auto" && v != "slot")
             return "bubblePlacement must be individual, auto or slot";
+        if (key == "footprintSource" && v != "q16" && v != "cells") return "footprintSource must be q16 or cells";
+        if (key == "footprintIntensity" && v != "bar" && v != "window") return "footprintIntensity must be bar or window";
         if (key == "tickMode" && v != "auto" && v != "manual") return "tickMode must be auto or manual";
         if (key == "palettePreset" && !palettes.contains(v.toString())) return "Unknown palettePreset";
         if (key == "labelCurrency" && v != "usd" && v != "asset") return "labelCurrency must be usd or asset";
@@ -198,6 +203,10 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.candleWickColor = merged["candleWickColor"].toString().toStdString();
     out.candleBodyOpacity = merged["candleBodyOpacity"].toDouble();
     out.candleWickWidth = merged["candleWickWidth"].toInt();
+    out.footprintSource = merged["footprintSource"].toString().toStdString();
+    out.footprintIntensity = merged["footprintIntensity"].toString().toStdString();
+    out.footprintHollowCandles = merged["footprintHollowCandles"].toBool();
+    out.footprintNumbers = merged["footprintNumbers"].toBool();
     out.showLadder = merged["showLadder"].toBool();
     out.ladderWidthPx = int(std::clamp(merged["ladderWidthPx"].toDouble(), -2147483647.0, 2147483647.0));
     out.showWallRadar = merged["showWallRadar"].toBool();

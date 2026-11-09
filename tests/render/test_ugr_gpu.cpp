@@ -1549,6 +1549,18 @@ template <class Node> bool hasNode(QSGNode* node) {
     return false;
 }
 
+std::string tradeLayerNodeName(QSGNode* node, QSGNode* textRoot) {
+    if (node == textRoot) return "text";
+    if (hasNode<FootprintIntensityNode>(node)) return "footprint";
+    if (node->type() == QSGNode::OpacityNodeType) {
+        if (node->childCount() == 1 && node->firstChild()->type() == QSGNode::GeometryNodeType)
+            return "footprintCells";
+        return hasNode<QSGClipNode>(node) ? "ladder" : "unknown";
+    }
+    if (hasNode<QSGClipNode>(node)) return "TPO";
+    return hasNode<QSGGeometryNode>(node) ? "VP" : "unknown";
+}
+
 TEST_F(UgrGpu, LateEnableKeepsRegistryOrderAndTextLast) {
     gpuOn();
     auto* axis = new PriceAxisModel(ugr);
@@ -1580,20 +1592,14 @@ TEST_F(UgrGpu, LateEnableKeepsRegistryOrderAndTextLast) {
     std::cout << "late-enable final: "; dump();
     std::vector<std::string> order;
     for (auto* node = root->firstChild()->nextSibling(); node; node = node->nextSibling()) {
-        std::string name;
-        if (node == text) name = "text";
-        else if (hasNode<FootprintIntensityNode>(node)) name = "footprint";
-        else if (node->type() == QSGNode::OpacityNodeType) name = "ladder"; // its gate
-        else if (hasNode<QSGClipNode>(node)) name = "TPO";
-        else if (hasNode<QSGGeometryNode>(node)) name = "VP";
-        else name = "unknown";
+        const auto name = tradeLayerNodeName(node, text);
         // VP has three siblings before containers are introduced.
         if (order.empty() || order.back() != name) order.push_back(name);
     }
     std::cout << "late-enable order:";
     for (const auto& name : order) std::cout << " " << name;
     std::cout << std::endl;
-    EXPECT_EQ(order, (std::vector<std::string>{"footprint", "VP", "TPO", "ladder", "text"}));
+    EXPECT_EQ(order, (std::vector<std::string>{"footprint", "footprintCells", "VP", "TPO", "ladder", "text"}));
 }
 
 // Node construction itself needs a window but no initialized RHI or GPU draw.
@@ -1633,15 +1639,13 @@ TEST(TradeLayerNodes, LateEnableKeepsRegistryOrderAndTextLast) {
         for (auto* child = node->firstChild(); child; child = child->nextSibling())
             std::cout << typeid(*child).name() << ",";
         std::cout << "] ";
-        const std::string name = node == root.firstChild() ? "heatmap" : node == textRoot ? "text" : hasNode<FootprintIntensityNode>(node) ? "footprint" :
-            node->type() == QSGNode::OpacityNodeType ? "ladder" :
-            hasNode<QSGClipNode>(node) ? "TPO" : hasNode<QSGGeometryNode>(node) ? "VP" : "unknown";
+        const auto name = node == root.firstChild() ? "heatmap" : tradeLayerNodeName(node, textRoot);
         if (order.empty() || order.back() != name) order.push_back(name);
     }
     std::cout << "\nnode-only late-enable order:";
     for (const auto& name : order) std::cout << " " << name;
     std::cout << std::endl;
-    EXPECT_EQ(order, (std::vector<std::string>{"heatmap", "footprint", "VP", "TPO", "ladder", "text"}));
+    EXPECT_EQ(order, (std::vector<std::string>{"heatmap", "footprint", "footprintCells", "VP", "TPO", "ladder", "text"}));
 }
 
 TEST(TradeLayerNodes, FixedHeatmapVpLabelsStructure) {
@@ -1671,7 +1675,8 @@ TEST(TradeLayerNodes, FixedHeatmapVpLabelsStructure) {
         std::cout << "] ";
     }
     std::cout << std::endl;
-    EXPECT_EQ(root.childCount(), 6);
+    ASSERT_EQ(root.childCount(), 7);
+    EXPECT_EQ(tradeLayerNodeName(root.childAtIndex(2), root.lastChild()), "footprintCells");
     EXPECT_EQ(root.firstChild()->type(), QSGNode::OpacityNodeType);
     EXPECT_TRUE(hasNode<ChartTextNode>(root.lastChild()));
 }

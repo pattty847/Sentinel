@@ -17,6 +17,8 @@
 #include "lab/OffscreenQuick.hpp"
 #include "lab/RhiBackend.hpp"
 #include "mainwindow/HeatmapChartControls.hpp"
+#include "mainwindow/ChartAgentPort.hpp"
+#include "mainwindow/AgentApiCodec.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapSettingsModel.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
@@ -2296,3 +2298,414 @@ int main(int argc, char **argv) {
     lab::LabData::configure(fixtureDir->path().toStdString(), epoch + 4 * kHourMs);
     return RUN_ALL_TESTS();
 }
+
+TEST(FootprintFlowFeed, CoalescesRearmsAndWithdrawsOnSymbolSwitch) {
+    chart::FootprintCellsLayer layer;
+    chart::FlowFeed feed(layer.mailbox());
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000;
+    frame.raster.valid = true; frame.raster.tick = 1;
+    frame.raster.dpr = 1; frame.raster.tfMs = 1000; frame.raster.colPxF = 56; frame.raster.rowPxF = 12;
+    frame.raster.drawnStartMs = 0; frame.raster.drawnEndMs = 1000;
+    frame.raster.drawnMinPrice = 95; frame.raster.drawnMaxPrice = 105;
+    QString symbol = "BTC-USD";
+    int updates = 0;
+    feed.setPorts({[&] { return frame; }, [&] { return symbol; }, [&] { ++updates; }});
+    feed.setEnabled(true);
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = symbol; batch->timeframeMs = 1000;
+    auto& record = batch->bars.emplace_back();
+    record.bar.startMs = 0; record.bar.timeframeMs = 1000;
+    record.bar.nativeTick = 1; record.bar.baseScale = 100; record.bar.lowRow = 100;
+    record.bar.rows = {{0, 100, 200}};
+    record.bar.sellVol = 100; record.bar.buyVol = 200; record.bar.delta = 100;
+    for (int i = 0; i < 10; ++i) feed.receive(batch);
+    EXPECT_TRUE(feed.pending());
+    EXPECT_EQ(updates, 0);
+    QTest::qWait(100);
+    EXPECT_EQ(updates, 1);
+    auto current = std::make_unique<chart::FlowSnapshot>();
+    ASSERT_TRUE(layer.mailbox().take(current));
+    ASSERT_TRUE(current->valid); EXPECT_EQ(current->cellCount, 1);
+    frame.raster.tick = 2;
+    feed.onFrameChanged(); EXPECT_TRUE(feed.pending());
+    QTest::qWait(100);
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->tick, 2);
+    symbol = "ETH-USD";
+    feed.onFrameChanged();
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
+    feed.receive(batch); // stale symbol may not restore the withdrawn data
+    QTest::qWait(100);
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
+    feed.setEnabled(false); EXPECT_FALSE(feed.pending());
+}
+
+#include "render/CandlestickOverlayItem.hpp"
+#include <QSGGeometryNode>
+class FootprintMappingFixture final : public QObject, public ITimeAxisMappingProvider {
+    Q_OBJECT
+    Q_INTERFACES(ITimeAxisMappingProvider)
+public:
+    MappingFrameContext frame;
+    chart::FootprintPresentation* look = nullptr;
+    QObject* viewNotifications() override { return this; }
+    MappingFrameContext currentFrameContext() const override { return frame; }
+    TimeAxisMapping currentTimeAxisMapping() const override { return frame.mapping; }
+    chart::FootprintPresentation* footprintPresentation() override { return look; }
+signals:
+    void viewportChanged();
+    void panVisualOffsetChanged();
+    void timeframeChanged();
+};
+class FootprintCandleFixture : public CandlestickOverlayItem {
+public:
+    QSGNode* paint(QSGNode* old) { return updatePaintNode(old, nullptr); }
+};
+TEST(FootprintCandles, BothDirectionsUseSharedStageAndOnePixelWicks) {
+    chart::FootprintCellsLayer layer;
+    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    FootprintMappingFixture provider;
+    provider.look = &layer.presentation();
+    auto& f = provider.frame;
+    f.activeTimeframeMs = 1000; f.viewportValid = true;
+    f.viewportTimeStart = 1000; f.viewportTimeEnd = 3000;
+    f.surfaceBounds = {0, 0, 112, 120};
+    f.raster = chart_raster::computeRaster({1000, 3000, 95, 105, {}, 1000, 1, 112, 120, 1}, {});
+    f.mapping = chart_raster::toMapping(f.raster);
+    FlowSeriesBuffer::Series flow;
+    for (int start : {1000, 2000}) {
+        auto& bar = flow.bars[start].bar;
+        bar.startMs = start; bar.timeframeMs = 1000; bar.nativeTick = 1; bar.baseScale = 1;
+        bar.lowRow = 100; bar.rows = {{0, 10, 20}};
+    }
+    ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), flow, f));
+    layer.mailbox().post();
+    CandleSeriesBuffer buffer;
+    buffer.applyHistory("BTC-USD", 1000, {{1000, 2000, 99, 103, 98, 102, 1}, {2000, 3000, 102, 103, 98, 99, 1}});
+    FootprintCandleFixture candle;
+    candle.setSize({112, 120}); candle.setSymbol("BTC-USD"); candle.setTimeframeMs(1000);
+    candle.setCandleBuffer(&buffer); candle.setMappingProvider(&provider); candle.setWickWidth(3);
+    std::unique_ptr<QSGNode> root(candle.paint(nullptr));
+    auto* body = static_cast<QSGGeometryNode*>(root->childAtIndex(1))->geometry();
+    auto* wick = static_cast<QSGGeometryNode*>(root->childAtIndex(0))->geometry();
+    ASSERT_EQ(body->vertexCount(), 48);
+    const auto* b = body->vertexDataAsColoredPoint2D();
+    EXPECT_GT(b[26].x - b[24].x, 0) << "bearish border also draws";
+    EXPECT_FLOAT_EQ(b[25].y - b[24].y, 1) << "bearish body is an outline, not a filled quad";
+    const auto* w = wick->vertexDataAsColoredPoint2D();
+    EXPECT_FLOAT_EQ(w[2].x - w[0].x, 1);
+    chart::ChartFrame layerFrame;
+    layerFrame.context.raster = f.raster;
+    layer.sync(layerFrame);
+    EXPECT_EQ(layer.stage(), chart::FootprintStage::Numbers);
+    provider.look->numbers = false;
+    layer.sync(layerFrame);
+    EXPECT_EQ(layer.stage(), chart::FootprintStage::Cells);
+    EXPECT_EQ(candle.paint(root.get()), root.get());
+    EXPECT_EQ(body->vertexCount(), 48);
+    provider.look->hollowCandles = false;
+    EXPECT_EQ(candle.paint(root.get()), root.get());
+    EXPECT_EQ(body->vertexCount(), 12);
+    EXPECT_FLOAT_EQ(wick->vertexDataAsColoredPoint2D()[2].x - wick->vertexDataAsColoredPoint2D()[0].x, 3);
+    provider.look->hollowCandles = true;
+    candle.setCandleStyle(2);
+    candle.paint(root.get());
+    EXPECT_EQ(body->vertexCount(), 48) << "footprint look overrides line mode too";
+    candle.setMappingProvider(nullptr);
+}
+
+TEST(FootprintKnobs, ChartAgentPortUpdatesSharedRenderLook) {
+    UnifiedGridRenderer renderer;
+    renderer.layers()->setFootprintEnabled(true);
+    auto port = renderer.agentPort();
+    EXPECT_EQ(port.footprintSettings()["footprintSource"], "q16");
+    EXPECT_FALSE(renderer.footprintPresentation()->cellsSource);
+    port.applyFootprintSettings({{"footprintSource", "cells"}, {"footprintIntensity", "window"}, {"footprintHollowCandles", false}, {"footprintNumbers", false}});
+    const auto state = port.footprintSettings();
+    EXPECT_EQ(state["footprintSource"], "cells");
+    EXPECT_TRUE(renderer.footprintPresentation()->cellsSource);
+    EXPECT_EQ(state["footprintIntensity"], "window");
+    EXPECT_EQ(state["footprintHollowCandles"], false);
+    EXPECT_EQ(state["footprintNumbers"], false);
+    const auto* look = renderer.footprintPresentation();
+    ASSERT_TRUE(look); EXPECT_TRUE(look->enabled); EXPECT_TRUE(look->windowIntensity);
+    EXPECT_FALSE(look->hollowCandles); EXPECT_FALSE(look->numbers);
+    port.applyFootprintSettings({{"footprintIntensity", "bar"}, {"footprintHollowCandles", true}, {"footprintNumbers", true}});
+    EXPECT_FALSE(look->windowIntensity); EXPECT_TRUE(look->hollowCandles); EXPECT_TRUE(look->numbers);
+}
+
+
+TEST(FootprintFlowFeed, SourceAndVisibilityGateAllFeedWork) {
+    UnifiedGridRenderer renderer;
+    chart::PublishedFrame published;
+    chart::FootprintCellsLayer layer;
+    chart::FlowFeed feed(layer.mailbox());
+    feed.bind(renderer.view()->controller(), published, *renderer.layers(), layer.presentation());
+    int reads = 0, updates = 0;
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000;
+    frame.raster.valid = true; frame.raster.dpr = 1; frame.raster.colPxF = 56; frame.raster.rowPxF = 12;
+    feed.setPorts({[&] { ++reads; return frame; },
+                   [&] { ++reads; return QString("BTC-USD"); }, [&] { ++updates; }});
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = "BTC-USD";
+    const auto expectIdle = [&] {
+        const int before = reads;
+        feed.receive(batch); feed.onFrameChanged(); feed.publishRows();
+        EXPECT_FALSE(feed.pending()); EXPECT_EQ(reads, before);
+    };
+    renderer.layers()->setFootprintEnabled(true);
+    expectIdle(); // q16 is the default even with footprint on
+    renderer.agentPort().applyFootprintSettings({{"footprintSource", "cells"}});
+    EXPECT_TRUE(feed.pending());
+    renderer.layers()->setFootprintEnabled(false);
+    expectIdle(); // selecting cells alone does not activate the feed
+    renderer.layers()->setFootprintEnabled(true);
+    EXPECT_TRUE(feed.pending());
+    renderer.agentPort().applyFootprintSettings({{"footprintSource", "q16"}});
+    expectIdle();
+    QTest::qWait(100);
+    EXPECT_EQ(updates, 0) << "source switch cancels the pending publish";
+}
+
+TEST(FootprintCandles, Q16MatchesOriginalGeometryAcrossStylesAndAfterCells) {
+    FootprintMappingFixture original, selected;
+    auto& f = original.frame;
+    f.activeTimeframeMs = 1000; f.viewportValid = true;
+    f.viewportTimeStart = 1000; f.viewportTimeEnd = 3000;
+    f.surfaceBounds = {0, 0, 112, 120};
+    f.raster = chart_raster::computeRaster({1000, 3000, 95, 105, {}, 1000, 1, 112, 120, 1}, {});
+    f.mapping = chart_raster::toMapping(f.raster);
+    selected.frame = f;
+    chart::FootprintPresentation look;
+    look.enabled = true;
+    look.coverage.tick = 1; look.coverage.timeframeMs = 1000;
+    look.coverage.low = 85; look.coverage.high = 115; look.coverage.add(1000, 3000);
+    selected.look = &look; // original provider has no footprint presentation
+    CandleSeriesBuffer buffer;
+    buffer.applyHistory("BTC-USD", 1000, {{1000, 2000, 99, 103, 98, 102, 1}, {2000, 3000, 102, 103, 98, 99, 1}});
+    FootprintCandleFixture baseline, candidate;
+    for (auto* candle : {&baseline, &candidate}) {
+        candle->setSize({112, 120}); candle->setSymbol("BTC-USD"); candle->setTimeframeMs(1000);
+        candle->setCandleBuffer(&buffer); candle->setWickWidth(3);
+    }
+    baseline.setMappingProvider(&original); candidate.setMappingProvider(&selected);
+    std::unique_ptr<QSGNode> expected(baseline.paint(nullptr)), actual(candidate.paint(nullptr));
+    const auto bytes = [](QSGNode* root, int index) {
+        const auto* geometry = static_cast<QSGGeometryNode*>(root->childAtIndex(index))->geometry();
+        return QByteArray(static_cast<const char*>(geometry->vertexData()),
+                          geometry->vertexCount() * geometry->sizeOfVertex());
+    };
+    for (int style : {0, 1, 2}) {
+        baseline.setCandleStyle(style); candidate.setCandleStyle(style);
+        baseline.paint(expected.get()); candidate.paint(actual.get());
+        for (int node : {0, 1}) EXPECT_EQ(bytes(expected.get(), node), bytes(actual.get(), node));
+        look.cellsSource = true;
+        candidate.paint(actual.get());
+        EXPECT_NE(bytes(expected.get(), 1), bytes(actual.get(), 1));
+        look.cellsSource = false;
+        candidate.paint(actual.get());
+        for (int node : {0, 1}) EXPECT_EQ(bytes(expected.get(), node), bytes(actual.get(), node));
+    }
+    look.cellsSource = true; look.coverage.count = 0;
+    candidate.paint(actual.get());
+    for (int node : {0, 1}) EXPECT_EQ(bytes(expected.get(), node), bytes(actual.get(), node)) << "no flow keeps the original look";
+    look.coverage.add(1000, 2000);
+    candidate.paint(actual.get());
+    for (int node : {0, 1}) EXPECT_EQ(bytes(expected.get(), node), bytes(actual.get(), node)) << "partial history keeps the original look";
+    baseline.setMappingProvider(nullptr); candidate.setMappingProvider(nullptr);
+}
+
+
+TEST(FootprintKnobs, ApiSourcePersistsThroughSettingsModelAndChartControls) {
+    TempStore store;
+    HeatmapSettingsModel model(store.store, "main", store.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model);
+    controls.setRenderer(&renderer);
+    for (const char* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
+        for (const char* source : {"cells", "q16"}) {
+            const QByteArray body = QByteArray("{\"footprintSource\":\"") + source + "\"}";
+            const auto validated = AgentApi::validateControl({"POST", path, {}, body}, std::nullopt);
+            ASSERT_EQ(validated.status, 200);
+            const auto patch = validated.body.layers.isEmpty() ? validated.body.heatmapSettings
+                : ChartAgentPort::footprintPatch(validated.body.layers);
+            ASSERT_TRUE(model.apply(patch).isEmpty());
+            controls.syncNow();
+            EXPECT_EQ(renderer.agentPort().footprintSettings()["footprintSource"], source);
+            EXPECT_EQ(store.reload().footprintSource, source);
+        }
+    }
+}
+
+
+#include "render/ChartTextRenderer.hpp"
+TEST(FootprintSource, Q16GeometryDrawsByDefaultAndOnlySelectedSourceHasArea) {
+    QQuickWindow window;
+    chart::ChartLayers layers;
+    chart::ChartFrame frame;
+    auto& f = frame.context;
+    f.overlays.footprint = true;
+    f.time.activeTimeframeMs = 1000;
+    f.surfaceBounds = {0, 0, 112, 120};
+    f.raster = chart_raster::computeRaster({1000, 3000, 95, 105, {}, 1000, 1, 112, 120, 1}, {});
+    f.mapping = chart_raster::toMapping(f.raster);
+    ChartTextRenderer text;
+    ChartTextAtlas atlas;
+    QSGNode root;
+    layers.registry.onRootRebuilt(&root);
+    layers.footprintCells.presentation().enabled = true;
+    layers.footprint.renderer.enqueue({0, 2, 10, QByteArray(20, '\x40'), {1000, 3000, 105, 1, 1}});
+    MappingFrameContext binFrame;
+    binFrame.activeTimeframeMs = 1000; binFrame.raster = f.raster;
+    FlowSeriesBuffer::Series series;
+    auto& bar = series.bars[1000].bar;
+    bar.startMs = 1000; bar.timeframeMs = 1000; bar.baseScale = 1;
+    bar.nativeTick = 1; bar.lowRow = 100; bar.rows = {{0, 10, 20}};
+    ASSERT_TRUE(chart::FlowFeed::bin(layers.footprintCells.mailbox().back(), series, binFrame));
+    layers.footprintCells.mailbox().post();
+    const auto update = [&] {
+        layers.registry.sync(frame);
+        layers.registry.updateNodes(frame, {&window, &root, text, atlas, false});
+    };
+    update();
+    ASSERT_EQ(root.childAtIndex(1)->childCount(), 1);
+    auto* q16 = static_cast<QSGGeometryNode*>(root.childAtIndex(1)->firstChild())->geometry();
+    const auto area = [&] {
+        const auto* v = q16->vertexDataAsTexturedPoint2D();
+        return (v[2].x - v[0].x) * (v[1].y - v[0].y);
+    };
+    EXPECT_GT(area(), 0);
+    EXPECT_FALSE(layers.footprintCells.drawing());
+    const QByteArray original(static_cast<const char*>(q16->vertexData()), q16->vertexCount() * q16->sizeOfVertex());
+    layers.footprintCells.presentation().cellsSource = true;
+    update();
+    EXPECT_EQ(area(), 0);
+    EXPECT_TRUE(layers.footprintCells.drawing());
+    layers.footprintCells.presentation().cellsSource = false;
+    update();
+    EXPECT_EQ(QByteArray(static_cast<const char*>(q16->vertexData()), q16->vertexCount() * q16->sizeOfVertex()), original);
+    EXPECT_FALSE(layers.footprintCells.drawing());
+}
+
+
+TEST(FootprintFlowFeed, HiddenLodDoesNotArmOrPublishAndResumesFromSourceBuffer) {
+    chart::FootprintCellsLayer layer;
+    chart::FlowFeed feed(layer.mailbox());
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000;
+    frame.raster.valid = true; frame.raster.dpr = 1; frame.raster.tick = 1; frame.raster.tfMs = 1000;
+    frame.raster.colPxF = 10; frame.raster.rowPxF = 3;
+    int updates = 0;
+    feed.setPorts({[&] { return frame; }, [] { return QString("BTC-USD"); }, [&] { ++updates; }});
+    feed.setEnabled(true);
+    EXPECT_FALSE(feed.pending());
+    feed.receive(std::make_shared<SentinelStreamClient::FlowBatch>());
+    feed.publishRows(); EXPECT_EQ(updates, 0);
+    frame.raster.colPxF = 24; frame.raster.rowPxF = 6;
+    feed.onFrameChanged(); EXPECT_TRUE(feed.pending());
+    frame.raster.colPxF = 21; frame.raster.rowPxF = 3;
+    feed.onFrameChanged(); EXPECT_FALSE(feed.pending());
+    QTest::qWait(100); EXPECT_EQ(updates, 0);
+}
+
+// Exercise the same remote cache that stores a batch before emitting its GUI signal.
+struct FlowDataSourceTest {
+    static void deliver(RemoteGridDataSource& source, SentinelStreamClient::FlowBatchPtr batch) {
+        source.m_flowBuffer.apply(*batch, 0);
+        emit source.flowBarsReceived(batch);
+    }
+};
+TEST(FootprintFlowFeed, EarlyNewSymbolHistorySurvivesSelectionAndHiddenLod) {
+    RemoteGridDataSource source("127.0.0.1", "1");
+    chart::FootprintCellsLayer layer;
+    chart::FlowFeed feed(layer.mailbox());
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000;
+    frame.raster = chart_raster::computeRaster({1000, 2000, 95, 105, {}, 1000, 1, 56, 120, 1}, {});
+    QString symbol = "BTC-USD";
+    feed.setPorts({[&] { return frame; }, [&] { return symbol; }, [] {}});
+    feed.bindSource(source); feed.setEnabled(true);
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = "ETH-USD"; batch->timeframeMs = 1000;
+    auto& bar = batch->bars.emplace_back().bar;
+    bar.startMs = 1000; bar.timeframeMs = 1000; bar.nativeTick = 1; bar.baseScale = 1;
+    bar.lowRow = 100; bar.rows = {{0, 10, 20}};
+    FlowDataSourceTest::deliver(source, batch); // reply beats the chart session change
+    feed.publishRows();
+    auto current = std::make_unique<chart::FlowSnapshot>();
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
+    symbol = "ETH-USD"; feed.onFrameChanged(); feed.publishRows();
+    ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_TRUE(current->valid);
+    EXPECT_EQ(current->cellCount, 1); EXPECT_TRUE(layer.presentation().coverage.covers(frame.raster));
+    // Hidden/source-off callbacks do no merging; authoritative remote history remains available.
+    frame.raster.colPxF = 10; feed.onFrameChanged();
+    bar.rows[0].bidVol = 40; FlowDataSourceTest::deliver(source, batch);
+    frame.raster.colPxF = 56; feed.onFrameChanged(); feed.publishRows();
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->cells[0].bidVol, 40);
+    feed.setEnabled(false); bar.rows[0].bidVol = 50; FlowDataSourceTest::deliver(source, batch);
+    feed.setEnabled(true); feed.publishRows();
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->cells[0].bidVol, 50);
+    symbol = "SOL-USD"; feed.onFrameChanged();
+    EXPECT_EQ(layer.presentation().coverage.count, 0);
+    feed.publishRows(); ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
+}
+
+#include <QQmlProperty>
+TEST(FootprintKnobs, QmlWritesPersistAndProcessOnlyModelApplicationDoesNot) {
+    TempStore store;
+    HeatmapSettingsModel model(store.store, "main", store.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
+    auto* layers = renderer.layers();
+    ASSERT_TRUE(QQmlProperty::write(layers, "footprintSource", "cells"));
+    ASSERT_TRUE(QQmlProperty::write(layers, "footprintIntensity", "window"));
+    ASSERT_TRUE(QQmlProperty::write(layers, "footprintNumbers", false));
+    ASSERT_TRUE(QQmlProperty::write(layers, "footprintHollowCandles", false));
+    controls.syncNow();
+    const auto saved = store.reload();
+    EXPECT_EQ(saved.footprintSource, "cells"); EXPECT_EQ(saved.footprintIntensity, "window");
+    EXPECT_FALSE(saved.footprintNumbers); EXPECT_FALSE(saved.footprintHollowCandles);
+    HeatmapSettingsModel restarted(store.store, "main", store.config);
+    UnifiedGridRenderer second;
+    HeatmapChartControls restored(&restarted); restored.setRenderer(&second);
+    EXPECT_EQ(second.agentPort().footprintSettings(), renderer.agentPort().footprintSettings());
+    ASSERT_TRUE(model.apply({{"footprintSource", "q16"}}, false).isEmpty());
+    controls.syncNow();
+    EXPECT_EQ(layers->footprintSource(), "q16"); EXPECT_EQ(store.reload().footprintSource, "cells");
+    ASSERT_TRUE(QQmlProperty::write(layers, "footprintSource", "q16"));
+    EXPECT_EQ(store.reload().footprintSource, "q16") << "an explicit QML write persists even the process-only current value";
+}
+
+
+TEST(FootprintFlowFeed, PublicationWakesCandlesOnCoverageTransitionsIncludingReenable) {
+    UnifiedGridRenderer renderer;
+    renderer.view()->controller().session().setSymbol("BTC-USD");
+    chart::PublishedFrame published;
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000;
+    frame.raster = chart_raster::computeRaster({1000, 2000, 95, 105, {}, 1000, 1, 56, 120, 1}, {});
+    published.publish(frame);
+    chart::FootprintCellsLayer layer;
+    chart::FlowFeed feed(layer.mailbox());
+    feed.bind(renderer.view()->controller(), published, *renderer.layers(), layer.presentation());
+    renderer.layers()->setFootprintEnabled(true); renderer.layers()->setFootprintSource("cells");
+    QSignalSpy notifications(renderer.layers(), &chart::LayerVisibility::layerVisibilityChanged);
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = "BTC-USD"; batch->timeframeMs = 1000;
+    auto& bar = batch->bars.emplace_back().bar;
+    bar.startMs = 1000; bar.timeframeMs = 1000; bar.nativeTick = 1; bar.baseScale = 1;
+    bar.lowRow = 100; bar.rows = {{0, 10, 20}};
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        notifications.clear();
+        feed.receive(batch); feed.publishRows();
+        EXPECT_EQ(notifications.count(), 1);
+        EXPECT_TRUE(layer.presentation().hollow(frame.raster));
+        feed.publishRows(); EXPECT_EQ(notifications.count(), 1) << "no repeated readiness notification";
+        renderer.layers()->setFootprintSource("q16");
+        EXPECT_FALSE(layer.presentation().hollow(frame.raster));
+        renderer.layers()->setFootprintSource("cells");
+    }
+}
+
+#include "test_chart_ui.moc"

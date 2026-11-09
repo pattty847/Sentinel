@@ -18,7 +18,6 @@
 #include "../core/config/ConfigTypes.hpp"
 #include "../core/marketdata/model/TradeData.h"
 #include "datasources/CandleSeriesBuffer.hpp"
-// ── Core rendering types (needed by inline members) ──────────────────────────
 #include "render/GridViewState.hpp"
 #include "render/AxisLayout.hpp"
 #include "render/ChartTextAtlas.hpp"
@@ -26,7 +25,6 @@
 #include "render/heatmap/HeatmapLabelLayout.hpp"
 #include "render/TimeAxisMapping.hpp"
 #include "render/ITimeAxisMappingProvider.hpp"
-// ── Extracted services ───────────────────────────────────────────────────────
 #include "render/AxisTextService.hpp"
 #include "render/FrameProfiler.hpp"
 #include "chart/core/FrameProducer.hpp"
@@ -97,6 +95,8 @@ public:
     chart::ChartDebugQml* debug() { return &m_qml.debug; }
     const chart::ChartDebugQml* debug() const { return &m_qml.debug; }
     ChartAgentPort agentPort();
+    chart::FootprintPresentation* footprintPresentation() override { return &m_layers.footprintCells.presentation(); }
+    QObject* footprintNotifications() override { return &m_visibility; }
     explicit UnifiedGridRenderer(QQuickItem* parent = nullptr);
     ~UnifiedGridRenderer();
     GridViewState* getViewState() const override { return m_view ? m_view->viewPtr() : nullptr; }

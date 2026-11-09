@@ -3,6 +3,8 @@
 #include "chart/core/PublishedFrame.hpp"
 #include "chart/core/FrameAck.hpp"
 #include <cmath>
+#include "chart/feeds/FlowFeed.hpp"
+#include "chart/shell/LayerVisibility.hpp"
 
 AgentApi::ViewportSnapshot ChartAgentPort::snapshot(AgentApi::Metadata meta) const {
     AgentApi::ViewportSnapshot s;
@@ -70,4 +72,27 @@ void ChartAgentPort::setControlRevision(quint64 revision, quint64 selectionEpoch
     if (!ack_) return;
     ack_->setAgentControlRevision(revision, selectionEpoch, snapshot().viewportVersion.value_or(0));
     update_();
+}
+
+void ChartAgentPort::bindFlowSource(IGridDataSource& source) const {
+    if (flow_) flow_->bindSource(source);
+}
+QJsonObject ChartAgentPort::footprintSettings() const {
+    if (!layers_) return {};
+    return {{"footprintSource", layers_->footprintSource()}, {"footprintIntensity", layers_->footprintIntensity()},
+            {"footprintHollowCandles", layers_->footprintHollowCandles()}, {"footprintNumbers", layers_->footprintNumbers()}};
+}
+void ChartAgentPort::applyFootprintSettings(const QJsonObject& patch) const {
+    if (!layers_) return;
+    if (patch.contains("footprintSource")) layers_->setFootprintSource(patch["footprintSource"].toString());
+    if (patch.contains("footprintIntensity")) layers_->setFootprintIntensity(patch["footprintIntensity"].toString());
+    if (patch.contains("footprintHollowCandles")) layers_->setFootprintHollowCandles(patch["footprintHollowCandles"].toBool());
+    if (patch.contains("footprintNumbers")) layers_->setFootprintNumbers(patch["footprintNumbers"].toBool());
+}
+
+QJsonObject ChartAgentPort::footprintPatch(const QJsonObject& patch) {
+    QJsonObject out;
+    for (const auto& key : {"footprintSource", "footprintIntensity", "footprintHollowCandles", "footprintNumbers"})
+        if (patch.contains(key)) out[key] = patch[key];
+    return out;
 }

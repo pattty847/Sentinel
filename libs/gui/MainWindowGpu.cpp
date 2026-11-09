@@ -1155,6 +1155,7 @@ void MainWindowGPU::connectMarketDataSignals() {
         return;
     }
 
+    unifiedGridRenderer->agentPort().bindFlowSource(*m_dataSource);
     const auto& configStore = GuiConfigStore::instance();
     m_serverConfigReady = configStore.hasServerConfig();
     if (m_heatmapDock && m_heatmapDock->toolbar()) {
@@ -1562,6 +1563,7 @@ AgentApi::StateSnapshot MainWindowGPU::agentApiStateSnapshot() const {
         if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
             s.heatmapLayer = renderer->layers()->heatmapEnabled();
             s.footprintLayer = renderer->layers()->footprintEnabled();
+            s.footprintSettings = chartAgentPort().footprintSettings();
             s.tpoLayer = renderer->layers()->tpoEnabled();
             s.tpoLayout = renderer->tpo()->tpoLayout();
             s.tpoTheme = renderer->tpo()->tpoTheme();
@@ -1654,6 +1656,11 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
         out = chartAgentPort().applyViewport(body);
         if (out.status != 200) return out;
     } else if (kind == "layers") {
+        const auto patch = ChartAgentPort::footprintPatch(body.layers);
+        if (!patch.isEmpty()) {
+            const auto error = m_heatmapSettings->apply(patch);
+            if (!error.isEmpty()) { out.status = 422; out.code = "invalid_settings"; out.message = error; return out; }
+        }
         auto* toolbar = m_heatmapDock ? m_heatmapDock->toolbar() : nullptr;
         for (auto it = body.layers.begin(); it != body.layers.end(); ++it) {
             const bool enabled = it.value().toBool();
@@ -1670,7 +1677,8 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
         if (toolbar) toolbar->setLayerToggleStates(renderer->layers()->heatmapEnabled(), renderer->layers()->footprintEnabled(),
                                                    renderer->layers()->tpoEnabled(), renderer->layers()->volumeProfileEnabled());
         const auto state = agentApiStateSnapshot();
-        out.data["layers"] = QJsonObject{{"heatmap", state.heatmapLayer.value_or(false)},
+        auto layerState = chartAgentPort().footprintSettings();
+        const QJsonObject toggles{{"heatmap", state.heatmapLayer.value_or(false)},
                                           {"candles", state.candlesLayer.value_or(false)},
                                           {"footprint", state.footprintLayer.value_or(false)},
                                           {"tpo", state.tpoLayer.value_or(false)},
@@ -1679,6 +1687,8 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
                                           {"wallRadar", state.wallRadarLayer.value_or(false)},
                                           {"tpoLayout", state.tpoLayout.value_or(QString())},
                                           {"tpoTheme", state.tpoTheme.value_or(QString())}};
+        for (auto it = toggles.begin(); it != toggles.end(); ++it) layerState[it.key()] = it.value();
+        out.data["layers"] = layerState;
     }
     if (!out.viewportVersion) out.viewportVersion = chartAgentPort().snapshot(agentApiMetadata()).viewportVersion.value_or(0);
     return out;
