@@ -10,6 +10,7 @@ struct DayFile {
     int64_t dayStartMs = 0;
     int64_t timeframeMs = 0;
     double nativeTick = 0;
+    int64_t priceScale = 0, baseScale = 0, quoteScale = 0;
     std::array<uint8_t, 32> sourceFingerprint{};
     std::vector<FlowBar> bars;
     bool operator==(const DayFile&) const = default;
