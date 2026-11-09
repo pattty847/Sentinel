@@ -1130,20 +1130,31 @@ void HeatmapTileNode::layout(const std::vector<Draw> &draws) {
 // so a span quad owning the pixel that straddles the seam with the live bin
 // blends that bucket in: a bright one-pixel seam left of the live edge. The seam
 // moves down to the device pixel edge at or left of it, so the straddling pixel
-// belongs to the live quad, whose grid holds the complete bucket before the seam
-// (or repeats its first column when the window starts there). At rest every
-// pixel shows the one cell under its centre and nothing moves.
+// belongs to the live quad, whose grid holds the complete buckets before the
+// seam (or repeats its first column before L). Span pieces that lie wholly inside
+// that pixel (sub-pixel columns) draw nothing and the live quad starts where the
+// first of them starts, walking back through contiguous span pieces only, so no
+// piece gains or loses time outside the pixel. At rest every pixel shows the one
+// cell under its centre and nothing moves.
 void HeatmapTileNode::snapLiveSeams() {
     if (frame_.coverageGamma == 0.0f) return;
     for (auto &live : pieces_) {
         if (!live.live || !(live.hiMs > live.loMs)) continue;
-        for (auto &span : pieces_) {
-            if (span.live || span.hiMs != live.loMs || !(span.hiMs > span.loMs) ||
-                span.bin->span.tfMs != live.bin->span.tfMs)
-                continue;
-            const double seam = floorToDevicePixelMs(live.drawLoMs);
-            if (seam < live.drawLoMs && seam > span.drawLoMs) span.drawHiMs = live.drawLoMs = seam;
-            break;
+        const double seam = floorToDevicePixelMs(live.drawLoMs);
+        if (!(seam < live.drawLoMs)) continue;
+        int64_t cursor = live.loMs;
+        for (size_t step = 0; step < pieces_.size(); ++step) {
+            auto span = std::find_if(pieces_.begin(), pieces_.end(), [&](const Piece &p) {
+                return !p.live && p.hiMs == cursor && p.hiMs > p.loMs && p.bin->span.tfMs == live.bin->span.tfMs;
+            });
+            if (span == pieces_.end()) break;
+            if (span->drawLoMs < seam) { // the span keeps its pixels left of the seam
+                span->drawHiMs = live.drawLoMs = seam;
+                break;
+            }
+            live.drawLoMs = span->drawLoMs; // wholly inside the straddling pixel: the live quad draws it
+            span->drawHiMs = span->drawLoMs;
+            cursor = span->loMs;
         }
     }
 }

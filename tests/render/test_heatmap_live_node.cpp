@@ -420,6 +420,57 @@ TEST_F(LiveNode, ZoomTransitionLeavesNoSeamAtTheLiveEdge) {
     }
 }
 
+// The same seam with sub-pixel columns (a glide that keeps a 2x scale on a 1x
+// screen): E one bucket after a tile start, so the open tile's span piece is
+// narrower than the pixel that straddles E and the snap cannot stop inside it.
+// Above the book every complete bucket draws the outside-the-book veil (a
+// screen-space pattern, identical in both pictures) and only the incomplete
+// bucket differs, so the picture with history complete through E equals the one
+// with history one bucket further at every pixel, for columns of 0.45 to 1.7 px
+// at eight sub-pixel phases.
+TEST_F(LiveNode, SubPixelColumnsLeaveNoSeamAtTheLiveEdge) {
+    // A tile start that is also an hour start: the tile before E is complete (sealed hours).
+    const int64_t lcm = std::lcm(tiles::kTileColumns * minute, kHourMs);
+    const int64_t tf = minute, T = (kEpoch + 2 * tiles::kTileColumns * tf + lcm - 1) / lcm * lcm;
+    const int64_t E = T + tf, L = T - 4 * tf, open = E + minute;
+    const int64_t tile = tiles::tileOfBucket(T / tf);
+    auto picture = [&](int64_t cutoff, double lo, double hi) {
+        frame().view = {lo, hi, 105'200.7, 105'600.7}; // above the book
+        frame().coverageGamma = 2.2f;
+        show(tf, {tile - 2, tile - 1, tile}, cutoff, L, open, 25'000, 1);
+        for (int i = 0; i < 12 && (i < 3 || stats().wantsFrame.load() || stats().segments().empty()); ++i)
+            EXPECT_TRUE(render()); // the first frames of the fixture draw nothing yet
+        EXPECT_FALSE(stats().holding.load());
+        EXPECT_EQ(stats().liveDrawFromMs.load(), cutoff) << " slots=" << stats().slotCount.load();
+        return scene->image.convertToFormat(QImage::Format_RGBA8888);
+    };
+    {
+        frame().view = {double(E - 20 * tf), double(E + 5 * tf), 105'200.7, 105'600.7};
+        show(tf, {tile - 1, tile}, E, L, open, 25'000, 1);
+        ASSERT_TRUE(render(4)); // the fixture's first frames
+    }
+    for (const double pxPerColumn : {0.45, 0.6, 0.85, 1.2, 1.7})
+        for (int phase = 0; phase < 8; ++phase) {
+            SCOPED_TRACE("px/column=" + std::to_string(pxPerColumn) + " phase=" + std::to_string(phase));
+            const double columns = double(scene->image.width()) / pxPerColumn;
+            const double lo = double(E) - (std::floor(columns * 0.8) + phase / 8.0 + 0.03) * double(tf);
+            const double hi = lo + columns * double(tf);
+            const QImage seam = picture(E, lo, hi);
+            const QImage ref = picture(E + tf, lo, hi);
+            int worst = 0, worstX = -1, worstY = -1;
+            for (int y = 0; y < seam.height(); ++y)
+                for (int x = 0; x < seam.width(); ++x) {
+                    const QColor a = seam.pixelColor(x, y), b = ref.pixelColor(x, y);
+                    const int d = std::max({std::abs(a.red() - b.red()), std::abs(a.green() - b.green()),
+                                            std::abs(a.blue() - b.blue()), std::abs(a.alpha() - b.alpha())});
+                    if (d > worst) { worst = d; worstX = x; worstY = y; }
+                }
+            EXPECT_LE(worst, 2) << "pixel (" << worstX << ", " << worstY << "), E at x="
+                                << (double(E) - lo) / (hi - lo) * seam.width();
+            EXPECT_EQ(stats().errors.load(), 0u);
+        }
+}
+
 // The label words (HeatmapCellQuery's oracle on the
 // drawn picture: the same SpanSet, live snapshot, timeframe and tick) equal the
 // cells the node draws, read back from the GPU, for every bucket of the current
