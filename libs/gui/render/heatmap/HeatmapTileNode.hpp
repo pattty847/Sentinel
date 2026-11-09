@@ -92,7 +92,7 @@ struct HeatmapTileStats {
     // self-test readback. Hosts schedule a frame while it is set (S6b review 3).
     std::atomic<bool> wantsFrame{false};
     std::atomic<int64_t> drawnTickUnits{0}, drawnTfMs{0};
-    // The last frame drew with coverage (a zoom transition, slice A2); false at rest.
+    // The last frame drew with coverage during a zoom transition; false at rest.
     std::atomic<bool> coverageBlend{false};
     std::atomic<double> prepareMs{0}, lastBinMs{0}, gpuFrameMs{0};
     std::atomic<bool> preciseKernel{true};
@@ -181,7 +181,7 @@ public:
         int64_t tickUnits = 0; // display tick in price units of spans->priceScale (0: none yet)
         ViewWindow view;
         QRectF rect;
-        // Whole-pixel smooth zoom (slice A2). A zoom transition draws fractional pixels
+        // During a zoom transition, draw fractional pixels
         // per row/column with exact coverage in linear light: the coverage gamma (2.2);
         // 0 at rest (the single cell under each pixel centre). binView: the extent the
         // transition will reach (its start and target), binned once at its start so the

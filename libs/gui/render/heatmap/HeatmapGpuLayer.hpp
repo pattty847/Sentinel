@@ -181,6 +181,7 @@ public:
     static uint64_t labelSignature(const LabelCells *labels, const std::vector<uint8_t> &columns, size_t matched);
     int labelRetryMs() const { return retry_.delayMs(); }
     const DrawStyle &drawStyle() const { return style_; }
+    double sensitivityUnitScale() const { return displayScale_.floor / recording::SizeScale{}.floor; }
     std::shared_ptr<const HeatmapPalette> palette() const { return palette_; }
     // The liquidity (base-asset quantity, as sensitivityMin/Max) of the valid cells
     // in the last label window of this symbol (5th percentile to maximum): the
@@ -230,6 +231,7 @@ private:
     std::shared_ptr<const HeatmapPalette> palette_;
     DrawStyle style_;
     recording::SizeScale displayScale_;
+    bool displayScaleKnown_ = false;
     std::shared_ptr<const SpanSet> snapshot_;
     std::shared_ptr<const LiveSnapshot> live_;
     std::shared_ptr<const ResolutionSummary> resolution_;
@@ -305,6 +307,7 @@ private:
     void restoreTick();
     void refreshPresets();
     void refreshStyle();
+    void adoptDisplayScale(const SpanSet &snapshot);
     void viewChanged();
     void noteLimits();
 };

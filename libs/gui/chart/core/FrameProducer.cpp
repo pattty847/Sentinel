@@ -38,7 +38,7 @@ void FrameProducer::computeGpuFrameMapping(const FrameInputs& inputs, ITickAutho
     frame_.rest = cameras.rest;
     frame.raster = cameras.drawn;
     frame.mapping = chart_raster::toMapping(frame.raster);
-    frame_.coverageGamma = cameras.drawn.valid && cameras.drawn.free ? 2.2f : 0.0f;
+    frame_.coverageGamma = cameras.drawn.valid && cameras.drawn.free ? kCoverageGamma : 0.0f;
     frame_.binView = cameras.binView;
     const auto& cam = cameras.rest;
     if (!cam.valid) return;

@@ -15,6 +15,7 @@
 #include <QPointer>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 
@@ -29,6 +30,12 @@ protected:
     void drain(HeatmapDataService &service) {
         // Cross-thread barriers plus explicit MetaCall drains, no timed waits.
         for (int i = 0; i < 4; ++i) service.onData([] { QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall); });
+    }
+    void drainGui(HeatmapDataService &service) {
+        for (int i = 0; i < 12; ++i) {
+            service.onData([] { QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall); });
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        }
     }
     protocol::chunkwire::Availability availability() {
         protocol::chunkwire::Availability a;
@@ -84,6 +91,96 @@ TEST_F(HeatmapPlumbing, ZoomOutSmoothingPersistsAndReachesTheFrame) {
     layer.setSettings(model.settings());
     ASSERT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
     EXPECT_FALSE(frame.smoothZoomOut);
+}
+
+TEST_F(HeatmapPlumbing, AdvertisedGridFixesLayerScaleAndWindowAcrossPansAndLabels) {
+    struct Probe {
+        recording::SizeScale scale;
+        gpu::DrawStyle style;
+        LabelRequest labels;
+        double relative = 0;
+    };
+    auto probe = [&](const std::string &symbol, double recordingFloor, double sensitivityMax,
+                     bool reversePans) -> std::optional<Probe> {
+        FakeChunkTransport *transport = nullptr;
+        HeatmapDataService service([&](QObject *) { return transport = new FakeChunkTransport; });
+        gpu::HeatmapGpuLayer layer;
+        layer.setService(&service);
+        layer.setActive(true);
+        layer.setSymbol(symbol);
+        HeatmapChartSettings settings;
+        settings.sensitivityMax = sensitivityMax;
+        layer.setSettings(settings);
+        layer.setSurface(640, 320, 1);
+        auto a = availability();
+        a.symbol = symbol;
+        a.sources.front().latestGrid->sizeFloor = recordingFloor;
+        a.sources.front().latestGrid->codesPerOctave = 819;
+        const double start = double(a.sources.front().levels.front().oldestMs);
+        const gpu::ViewWindow first{start, start + 10 * kMinuteMs, 100, 102};
+        const gpu::ViewWindow second{start + kHourMs, start + kHourMs + 10 * kMinuteMs, 100, 102};
+        layer.setView(reversePans ? second : first, true);
+        service.onData([&] { transport->goOnline(); transport->push(ChunkAvailability{a}); });
+        drainGui(service);
+        const auto snapshot = layer.controller()->latestSnapshot();
+        if (!snapshot || !snapshot->recordingScaleKnown) return std::nullopt;
+        EXPECT_EQ(snapshot->recordingScale.floor, recordingFloor);
+        EXPECT_EQ(snapshot->symbol, symbol);
+        for (const gpu::ViewWindow view : {reversePans ? second : first, reversePans ? first : second}) {
+            layer.setView(view, true);
+            drainGui(service);
+            layer.chooseTickForView(view);
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+            gpu::HeatmapTileNode::Frame frame;
+            if (!layer.prepareFrame(frame, QRectF(0, 0, 640, 320), view)) return std::nullopt;
+            drainGui(service);
+        }
+        settings.tickMode = TickMode::Manual;
+        settings.manualTick = 100;
+        layer.setSettings(settings, true);
+        const gpu::ViewWindow final = reversePans ? first : second;
+        layer.chooseTickForView(final);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+        gpu::HeatmapTileNode::Frame frame;
+        if (!layer.prepareFrame(frame, QRectF(0, 0, 640, 320), final)) return std::nullopt;
+        const auto labels = layer.postedLabelRequest();
+        return Probe{frame.outputScale, frame.style, labels, layer.sensitivityUnitScale()};
+    };
+    const auto pepe = probe("PEPE-USD", 1.0, 50, false);
+    const auto pepePanned = probe("PEPE-USD", 1.0, 50, true);
+    const auto pepeManual = probe("PEPE-USD", 1.0, 20, false);
+    const auto btc = probe("BTC-USD", 1e-8, 50, false);
+    ASSERT_TRUE(pepe && pepePanned && pepeManual && btc);
+    const auto recordingMaximum = recording::decodeSize(recording::kMaxCode, {1.0, 819.0});
+    EXPECT_EQ(pepe->scale.floor, gpu::displaySizeScale(recordingMaximum).floor);
+    EXPECT_DOUBLE_EQ(pepe->scale.floor, 1e-6 * 1024.0 * 1024.0 * 1024.0);
+    EXPECT_EQ(pepe->scale.floor, pepePanned->scale.floor);
+    EXPECT_FLOAT_EQ(pepe->style.codeFloor, pepePanned->style.codeFloor);
+    EXPECT_FLOAT_EQ(pepe->style.codeRange, pepePanned->style.codeRange);
+    EXPECT_EQ(btc->scale.floor, 1e-6);
+    const auto btcWindow = gpu::codeWindow(0.05, 50, 1e-6, 819);
+    EXPECT_FLOAT_EQ(btc->style.codeFloor, btcWindow.floor);
+    EXPECT_FLOAT_EQ(btc->style.codeRange, btcWindow.range);
+    for (double high : {50.0, 20.0}) {
+        const auto &result = high == 50.0 ? *pepe : *pepeManual;
+        EXPECT_EQ(result.labels.outputScale.floor, result.scale.floor);
+        EXPECT_EQ(result.labels.outputScale.codesPerOctave, result.scale.codesPerOctave);
+        EXPECT_GT(result.labels.serial, 0u);
+        const auto window = gpu::codeWindow(0.05 * result.relative, high * result.relative,
+                                            result.scale.floor, result.scale.codesPerOctave);
+        EXPECT_FLOAT_EQ(result.style.codeFloor, window.floor);
+        EXPECT_FLOAT_EQ(result.style.codeRange, window.range);
+        float previous = -1;
+        for (double size : {1e9, 1e10, 1e11}) {
+            const auto cellCode = recording::encodeSize(size, result.scale);
+            const auto labelCode = recording::encodeSize(size, result.labels.outputScale);
+            EXPECT_EQ(cellCode, labelCode);
+            const float code = float(cellCode);
+            const float magnitude = std::clamp((code - result.style.codeFloor) / result.style.codeRange, 0.0f, 1.0f);
+            EXPECT_GT(magnitude, previous);
+            previous = magnitude;
+        }
+    }
 }
 
 TEST_F(HeatmapPlumbing, AttachBeforeConnectSeesConnectionAndAvailabilityWithNoCharts) {

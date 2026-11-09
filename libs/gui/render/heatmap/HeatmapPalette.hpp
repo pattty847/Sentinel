@@ -52,8 +52,8 @@ struct CodeWindow {
 };
 CodeWindow codeWindow(double sensitivityMin, double sensitivityMax, double sizeFloor = 1e-6,
                       double codesPerOctave = 819.0);
-// Quantized display scale from observed base-asset sizes. The recording scale is independent.
-recording::SizeScale displaySizeScale(double observedMax);
+// Quantized display scale covering the advertised recording grid's maximum size.
+recording::SizeScale displaySizeScale(double recordingMax);
 
 // CPU reference of heatmap_display.frag in recording mode (a nonzero code
 // without the unknown marker), sampling the palette with linear filtering:

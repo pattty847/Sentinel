@@ -147,7 +147,10 @@ TopToolbar::ModeState HeatmapChartControls::modeState() const {
 
 void HeatmapChartControls::requestLiquidityRange(double low, double high, bool persist) {
     // Process-only while dragging, persisted on release (one write per edit).
-    if (const auto error = m_model->apply({{"sensitivityMin", low}, {"sensitivityMax", high}}, persist); !error.isEmpty())
+    const auto *layer = m_renderer ? m_renderer->gpuHeatmapLayer() : nullptr;
+    const double relative = layer ? layer->sensitivityUnitScale() : 1.0;
+    if (const auto error = m_model->apply({{"sensitivityMin", low / relative},
+                                           {"sensitivityMax", high / relative}}, persist); !error.isEmpty())
         sLog_Warning("Liquidity range rejected: " << error);
 }
 
@@ -464,8 +467,9 @@ void HeatmapChartControls::syncNow() {
         const auto &s = m_model->settings();
         const auto *layer = m_renderer ? m_renderer->gpuHeatmapLayer() : nullptr;
         const auto range = layer ? layer->liquidityRange() : heatmap::gpu::HeatmapGpuLayer::LiquidityRange{};
-        m_toolbar->setLiquidityRange(range.valid ? range.lo : 0, range.valid ? range.hi : 0, s.sensitivityMin,
-                                     s.sensitivityMax);
+        const double relative = layer ? layer->sensitivityUnitScale() : 1.0;
+        m_toolbar->setLiquidityRange(range.valid ? range.lo : 0, range.valid ? range.hi : 0,
+                                     s.sensitivityMin * relative, s.sensitivityMax * relative);
         m_toolbar->setLabelOptions(s.showLabels, s.labelCurrency == "usd");
         m_toolbar->setColorPreset(QString::fromStdString(s.palettePreset));
         m_toolbar->chartTypeCombo()->setEnabled(bool(m_renderer));

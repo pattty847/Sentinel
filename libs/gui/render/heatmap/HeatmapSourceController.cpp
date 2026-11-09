@@ -6,6 +6,7 @@
 #include <QTimer>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -744,7 +745,10 @@ void HeatmapSourceController::setView(const std::string &symbol, int64_t tfMs, d
     if (symbol != symbol_ || tfMs != tfMs_)
         sLog_Data("Heatmap controller view chart=" << chart_ << " symbol=" << symbol << " tf=" << tfMs
                   << " serial=" << serial_ << " retained=" << retained_.size());
-    if (symbol != symbol_) priceScaleKnown_ = false; // priceScale_ is the previous symbol's until sources()
+    if (symbol != symbol_) {
+        priceScaleKnown_ = false; // the previous symbol's grid is no longer authoritative
+        recordingScaleKnown_ = false;
+    }
     symbol_ = symbol;
     tfMs_ = tfMs;
     timeLoMs_ = timeLoMs;
@@ -1301,6 +1305,12 @@ std::vector<SourceAvailability> HeatmapSourceController::sources() {
         if (source.latestGrid && source.latestGrid->priceScale > 0) {
             priceScale_ = source.latestGrid->priceScale;
             priceScaleKnown_ = true;
+            const auto &grid = *source.latestGrid;
+            if (std::isfinite(grid.sizeFloor) && grid.sizeFloor > 0 &&
+                std::isfinite(grid.codesPerOctave) && grid.codesPerOctave > 0) {
+                recordingScale_ = {grid.sizeFloor, grid.codesPerOctave};
+                recordingScaleKnown_ = true;
+            }
             break;
         }
     // Keep each level's interval: rollup chunks only where the server built them.
@@ -1875,6 +1885,8 @@ void HeatmapSourceController::publish() {
     set->tfMs = tfMs_;
     set->priceScale = priceScale_;
     set->priceScaleKnown = priceScaleKnown_;
+    set->recordingScale = recordingScale_;
+    set->recordingScaleKnown = recordingScaleKnown_;
     set->resolution.tfMs = tfMs_;
     set->resolution.priceScale = priceScale_;
     set->refused = cpuRefused_;

@@ -536,10 +536,10 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     form->addRow("Ask gradient (Custom)", m_askGradient);
     m_sensitivityMin = doubleSpin(page, "sensitivityMin", 0.0001, 1e12, 0.01, 4);
     m_sensitivityMax = doubleSpin(page, "sensitivityMax", 0.0001, 1e15, 1, 4);
-    m_sensitivityMin->setToolTip("Base-asset size per heatmap cell. Below the toolbar's low handle, cells have no colour or label.");
-    m_sensitivityMax->setToolTip("Base-asset size per heatmap cell. Colour saturates at the toolbar's high handle.");
-    form->addRow("Range low (base asset)", m_sensitivityMin);
-    form->addRow("Range high (base asset)", m_sensitivityMax);
+    m_sensitivityMin->setToolTip("Relative sensitivity; the toolbar shows the corresponding base-asset size. Cells below the low handle have no colour or label.");
+    m_sensitivityMax->setToolTip("Relative sensitivity; the toolbar shows the corresponding base-asset size where colour saturates.");
+    form->addRow("Range low (relative)", m_sensitivityMin);
+    form->addRow("Range high (relative)", m_sensitivityMax);
     m_opacity = doubleSpin(page, "opacity", 0, 1, 0.05, 2);
     form->addRow("Opacity (0–1)", m_opacity);
     m_smoothZoomOut = new QCheckBox("Blend cells when zoomed out", page);

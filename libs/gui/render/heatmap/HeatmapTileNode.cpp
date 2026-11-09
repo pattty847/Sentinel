@@ -1,4 +1,5 @@
 #include "HeatmapTileNode.hpp"
+#include "chart/core/FrameProducer.hpp"
 #include "SentinelLogging.hpp"
 #include <QFile>
 #include <rhi/qrhi.h>
@@ -828,7 +829,7 @@ bool HeatmapTileNode::addBinDraw(QRhiResourceUpdateBatch *updates, Bin &bin, flo
         p.style[0] = frame_.style.codeFloor; p.style[1] = frame_.style.codeRange; p.style[2] = opacity * frame_.style.opacity;
         const auto &tone = palette().tone;
         p.tone[0] = tone.gamma; p.tone[1] = tone.contrast; p.tone[2] = tone.floor;
-        p.tone[3] = frame_.smoothZoomOut ? 2.2f : frame_.coverageGamma;
+        p.tone[3] = frame_.smoothZoomOut ? chart::FrameProducer::kCoverageGamma : frame_.coverageGamma;
         updates->updateDynamicBuffer(block.params.get(), 0, sizeof(p), &p);
         tileDraws_.push_back({block.bindings.get(), opacity});
         any = true;
@@ -1144,10 +1145,24 @@ void HeatmapTileNode::layout(const std::vector<Draw> &draws) {
 // seam (or repeats its first column before L). Span pieces that lie wholly inside
 // that pixel (sub-pixel columns) draw nothing and the live quad starts where the
 // first of them starts, walking back through contiguous span pieces only, so no
-// piece gains or loses time outside the pixel. At rest every pixel shows the one
-// cell under its centre and nothing moves.
+// piece gains or loses time outside the pixel. At rest with smoothing off every
+// pixel shows the one cell under its centre and nothing moves.
 void HeatmapTileNode::snapLiveSeams() {
-    if (frame_.coverageGamma == 0.0f && !frame_.smoothZoomOut) return;
+    if (frame_.coverageGamma == 0.0f) {
+        if (!frame_.smoothZoomOut || !renderTarget() || frame_.tfMs <= 0 || frame_.tickUnits <= 0) return;
+        const auto &view = frame_.view;
+        const auto &rect = frame_.rect;
+        const auto size = renderTarget()->pixelSize();
+        const QMatrix4x4 mvp = *projectionMatrix() * *matrix();
+        const double width = std::abs(double(mvp(0, 0))) * size.width() * rect.width() * 0.5;
+        const double height = std::abs(double(mvp(1, 1))) * size.height() * rect.height() * 0.5;
+        const double priceScale = frame_.spans ? frame_.spans->priceScale :
+            (frame_.live ? frame_.live->resolution.priceScale : 0.0);
+        const double cpp = width > 0 ? (view.timeHiMs - view.timeLoMs) / (frame_.tfMs * width) : 0;
+        const double rpp = height > 0 && priceScale > 0 ?
+            (view.priceHi - view.priceLo) * priceScale / (frame_.tickUnits * height) : 0;
+        if (!(cpp > 1.0 || rpp > 1.0)) return;
+    }
     for (auto &live : pieces_) {
         if (!live.live || !(live.hiMs > live.loMs)) continue;
         const double seam = floorToDevicePixelMs(live.drawLoMs);

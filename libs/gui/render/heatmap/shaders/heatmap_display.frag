@@ -48,7 +48,7 @@ vec4 cellColor(uint cell) {
     if (state != 3u) return hatchColor(state);
     return paintMagnitude(float(cell & 0x7fffu), (cell & 0x8000u) != 0u);
 }
-// Coverage in LINEAR light (whole-pixel smooth zoom, slice A2): the palette RGB and
+// Coverage in linear light: the palette RGB and
 // the scene-graph target are encoded UNORM, so encoded RGB*f would show a half-covered
 // pixel at ~21% of its light. RGB scales by f^(1/tone.w) (tone.w = 2.2), alpha by the
 // covered area f.
@@ -113,7 +113,7 @@ vec4 shade() {
         return sampledFootprint(fc, fr, cpp, rpp, clampCells);
     if ((dims.z & 2u) != 0u && (dims.z & 4u) == 0u) return centreCell(fx, fy, clampCells);
     // At rest (whole device pixels per row and column, edges on pixel edges): the
-    // single cell under the pixel centre, the slice A bytes.
+    // single cell under the pixel centre.
     if (tone.w == 0.0) return centreCell(fx, fy, clampCells);
     // A zoom transition (fractional pixels per row and column): every cell under the
     // pixel's footprint contributes its covered area.

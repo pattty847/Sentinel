@@ -11,10 +11,13 @@
 namespace {
 using namespace heatmap::gpu;
 TEST(HeatmapPalette, ProductDisplayScaleKeepsGradientsAcrossPresetsAndTones) {
-    for (const auto &sizes : {std::array<double, 5>{0.01, 0.1, 1, 10, 50},
-                              std::array<double, 5>{1e9, 3e9, 1e10, 3e10, 1e11}}) {
-        const auto scale = displaySizeScale(sizes.back());
-        const auto window = codeWindow(sizes.front() * 0.5, sizes.back(), scale.floor, scale.codesPerOctave);
+    for (const auto &[recordingFloor, sizes] : {
+             std::pair{1e-8, std::array<double, 5>{0.01, 0.1, 1, 10, 50}},
+             std::pair{1.0, std::array<double, 5>{1e9, 3e9, 1e10, 3e10, 1e11}}}) {
+        const auto recordingMax = recording::decodeSize(recording::kMaxCode, {recordingFloor, 819});
+        const auto scale = displaySizeScale(recordingMax);
+        const double relative = scale.floor / recording::SizeScale{}.floor;
+        const auto window = codeWindow(0.05 * relative, 50 * relative, scale.floor, scale.codesPerOctave);
         std::set<uint16_t> codes;
         for (double size : sizes) codes.insert(recording::encodeSize(size, scale));
         EXPECT_EQ(codes.size(), sizes.size());

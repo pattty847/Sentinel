@@ -160,6 +160,7 @@ void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     if (!startupTickReady_) startupTickTimer_->stop();
     symbol_ = symbol;
     displayScale_ = {};
+    displayScaleKnown_ = false;
     autoPriceTick_.reset();
     invalidateTickProposal();
     lastLiveEndMs_ = 0;
@@ -223,13 +224,6 @@ void HeatmapGpuLayer::setSettings(const HeatmapChartSettings &settings, bool exp
     if (wasManual != manualMode_) autoUnits_ = 0; // back to Auto: the rule resumes from the current zoom
     if (previous.gpuCapBytes != settings.gpuCapBytes) postBudget();
     if (previous.liveMinIntervalMs != settings.liveMinIntervalMs) postLiveInterval();
-    const auto nextScale = displaySizeScale(std::max(settings.sensitivityMax,
-                                                      liquidityRange_.valid ? liquidityRange_.hi : 0.0));
-    if (nextScale.floor > displayScale_.floor) {
-        displayScale_ = nextScale;
-        labelsPosted_ = false;
-        labelEpoch_ = labelSerial_ + 1;
-    }
     refreshStyle();
     if (previous.palettePreset != settings.palettePreset || previous.bidGradient != settings.bidGradient ||
         previous.askGradient != settings.askGradient)
@@ -252,14 +246,19 @@ void HeatmapGpuLayer::setTickMemory(const ManualTickMemory &memory) {
 }
 
 void HeatmapGpuLayer::refreshStyle() {
-    const bool automatic = displayScale_.floor > recording::SizeScale{}.floor &&
-        settings_.sensitivityMin == 0.05 && settings_.sensitivityMax == 50 && liquidityRange_.valid;
-    const double lo = automatic ? liquidityRange_.lo : settings_.sensitivityMin;
-    const double hi = automatic ? liquidityRange_.hi : settings_.sensitivityMax;
-    const auto window = codeWindow(lo, hi, displayScale_.floor, displayScale_.codesPerOctave);
+    const double relative = sensitivityUnitScale();
+    const auto window = codeWindow(settings_.sensitivityMin * relative, settings_.sensitivityMax * relative,
+                                   displayScale_.floor, displayScale_.codesPerOctave);
     style_.codeFloor = window.floor;
     style_.codeRange = window.range;
     style_.opacity = float(std::clamp(settings_.opacity, 0.0, 1.0));
+}
+
+void HeatmapGpuLayer::adoptDisplayScale(const SpanSet &snapshot) {
+    if (displayScaleKnown_ || snapshot.symbol != symbol_ || !snapshot.recordingScaleKnown) return;
+    displayScale_ = displaySizeScale(recording::decodeSize(recording::kMaxCode, snapshot.recordingScale));
+    displayScaleKnown_ = true;
+    refreshStyle();
 }
 
 // Manual: the tick remembered for (symbol, timeframe) wins; with none, the locked
@@ -336,6 +335,7 @@ void HeatmapGpuLayer::onSnapshot() {
     snapshot_ = controller_->latestSnapshot();
     resolution_ = controller_->latestResolution();
     if (!snapshot_) return;
+    adoptDisplayScale(*snapshot_);
     armStartupTick();
     refreshPresets();
     noteLimits(); // the price scale may have changed
@@ -421,6 +421,7 @@ void HeatmapGpuLayer::chooseTickForView(const ViewWindow &view) {
     // GUI thread blocked: take the freshest snapshot, pick the tick; prepareFrame
     // hands both to the node in this frame (no thread hop on a tick change).
     if (auto latest = controller_->latestSnapshot(); latest && latest != snapshot_) snapshot_ = std::move(latest);
+    if (snapshot_) adoptDisplayScale(*snapshot_);
     live_ = controller_->latestLive(); // pointer reads; the node uploads only a new version
     resolution_ = controller_->latestResolution();
     const int64_t tick = priceKnown_ ? chooseTick(view) : 0; // nothing to draw before the price view exists
@@ -691,14 +692,6 @@ void HeatmapGpuLayer::onLabels() {
     const auto moved = [](double a, double b) { return std::abs(std::log(a / b)) > 0.1; };
     if (range.valid && (!liquidityRange_.valid || moved(range.lo, liquidityRange_.lo) || moved(range.hi, liquidityRange_.hi))) {
         liquidityRange_ = range;
-        const auto scale = displaySizeScale(std::max(range.hi, settings_.sensitivityMax));
-        if (scale.floor > displayScale_.floor) {
-            displayScale_ = scale;
-            labelsPosted_ = false;
-            labelEpoch_ = labelSerial_ + 1;
-            emit frameRequested();
-        }
-        refreshStyle();
         emit liquidityRangeChanged();
     }
     // A republished picture with the same cells (an upload acknowledgement bumps
