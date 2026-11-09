@@ -32,6 +32,8 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 - `lt-astra/bubble-placement` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-bubble-placement`): plan S8a, from `7d209c3e`. READY `77609f54` (golden 10.trade-bubbles will change: adaptive sizing + median filter also in the default individual mode; owner sees it in the lab before any re-bless). Writer gpt-6-astra thread `01a1bfd4-223a-7362-8b9d-e1d21cdca8c0`; Native: only golden 10.trade-bubbles differs (expected). Opus review FAIL (slot marks all at the cap; per-frame sort on the render thread; size/filter flicker; sweep capsules vanish zoomed in; deleted regression tests). Fix round 1 sent 2026-11-09 (packet `astra-s8a-fix1.txt`; default min notional = show all, -1/0/>0 encoding). Packet `astra-s8a.txt`: setting `bubblePlacement` individual|auto|slot (default individual), sweep capsules, auto size reference, tradeMinNotional auto. Reviewer Claude Opus. MEDIUM.
 
+- `lt-astra/flow-client` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-flow-client`): plan S4, from `582d6160`; owns `MainWindowGpu.cpp`. Writer gpt-6-astra (high) dispatched 2026-11-09 (packet `astra-s4.txt`; includes the S3a-deferred re-fetch rule). Reviewer Claude Opus. MEDIUM.
+
 Lab branches that never land: `lt-astra/hmc2-rollup-lab`, `lt-claude/hmc2-layout-lab` (results in `/Volumes/T7/sentinel-datalab/hmc2-*`).
 
 ## Waiting on the owner
