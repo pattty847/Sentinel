@@ -3,6 +3,13 @@ project(sentinel_core)
 add_subdirectory(marketdata/analytics)
 
 add_library(sentinel_core
+    flow/FlowBar.hpp
+    flow/FlowBarBuilder.hpp
+    flow/FlowBarBuilder.cpp
+    flow/FlowCompose.hpp
+    flow/FlowCompose.cpp
+    flow/FlowCodec.hpp
+    flow/FlowCodec.cpp
     roller/AnchorStore.cpp
     roller/JournalReader.cpp
     roller/JournalFeed.cpp
@@ -193,3 +200,12 @@ endif()
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
+
+enable_testing()
+add_executable(test_flow_bar ${CMAKE_SOURCE_DIR}/tests/core/test_flow_bar.cpp)
+target_link_libraries(test_flow_bar PRIVATE sentinel_core GTest::gtest_main)
+add_test(NAME FlowBarTests COMMAND test_flow_bar)
+set_tests_properties(FlowBarTests PROPERTIES LABELS "core")
+
+add_executable(flow_store_size_bench ${CMAKE_SOURCE_DIR}/tests/core/flow_store_size_bench.cpp)
+target_link_libraries(flow_store_size_bench PRIVATE sentinel_core)
