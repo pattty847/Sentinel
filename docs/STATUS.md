@@ -9,7 +9,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 ## Next
 
-1. Wave 3 plan: `../Sentinel-Private/research/2026-11-08-why-it-moved-plan.md` (12 slices, section 7 order). Slot 1 = S1 (running) + S8a; S8a waits for `lt-astra/heatmap-saturation` (both edit `HeatmapChartSettings.hpp`; the plan missed this). Owner decisions (plan section 6): 1 flow store = derived store like rollups (explained 2026-11-08, owner has not said yes; needed before S2); 2 bubble defaults: owner wants to see both modes in the lab (S8a ships both behind a setting); 3 footprint/CVD look: owner wants a proper visual pass in the lab before goldens. Palette waits for the owner's colour variants.
+1. Wave 3 plan: `../Sentinel-Private/research/2026-11-08-why-it-moved-plan.md` (12 slices, section 7 order). Landed: S1 flow-bar-core `131596b4`, heatmap seam `da486efd`, axis drag `b77e7fb9`. Conductor decision: `revision` is not in FLB1 content; the wire envelope carries `revisionAt`. S8a waits for `lt-astra/heatmap-saturation` (both edit `HeatmapChartSettings.hpp`). Owner decisions (plan section 6): 1 flow store = derived store like rollups, measured 0.51 GB per BTC-year (owner has not said yes; needed before S2); 2 bubble defaults: owner judges both modes in the lab (S8a ships both behind a setting); 3 footprint/CVD look: visual pass with the owner in the lab before goldens. Palette waits for the owner's colour variants. Owner to check the seam fix live: 1h, zoom near the now column.
 2. With the owner present: build main, then `scripts/dev/deploy-runtime.sh server` for the trade-id window `87c9ccbc` (no format change). The script refuses a stale or dirty build.
 3. After landing any GUI change, build main: the owner's GUI loads QML from the source tree, so a stale binary fails to load the chart.
 4. Squash any branch whose history touched `docs/TODO.md` before land (AGENTS section 7).
@@ -28,9 +28,8 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 ## In flight
 
-- `lt-claude/heatmap-seam` (worktree `/Volumes/T7/sentinel-worktrees/lt-claude-heatmap-seam`): seam left of the now column. Writer Claude Opus subagent; reviewer gpt-6-astra. HIGH. Owns HeatmapGpuLayer, HeatmapSourceController. Phase: writing.
-- `lt-astra/heatmap-saturation` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-heatmap-saturation`): PARKED until the seam lands (needs HeatmapGpuLayer.cpp). Root cause: display size encoding clamps at code 32767 (~1.1M units; `RecordingCodec.hpp:30,45`, hard-coded scale at `HeatmapGpuLayer.cpp:246`), so PEPE sizes all read max. Resume thread `01a1be15-f436-7d21-8eaa-b2a3cfe59f36` with HeatmapGpuLayer, the label query and `HeatmapChartSettings.hpp` added to its files; the smoothing shader loop is capped at 4 cells per axis. Recording format must not change. Reviewer Fable; HIGH.
-- `lt-sol/flow-bar-core` (worktree `/Volumes/T7/sentinel-worktrees/lt-sol-flow-bar-core`): plan S1, Qt-free flow bar core + read-only BTC size bench. Writer gpt-6-sol thread `01a1be23-430c-77d1-9fc1-a0b4fa76b23b`; reviewer Claude Opus. LOW. Phase: writing.
+- `lt-astra/heatmap-saturation` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-heatmap-saturation`, recreated from `da486efd`): PEPE size saturation (display encoding clamps at ~1.1M units; `RecordingCodec.hpp:30,45`, `HeatmapGpuLayer.cpp:246`) + zoom-out smoothing setting (default off). Writer gpt-6-astra thread `01a1be15-f436-7d21-8eaa-b2a3cfe59f36`, resumed with HeatmapGpuLayer, label query and `HeatmapChartSettings.hpp`; recording format must not change. Reviewer Fable; HIGH; conductor attaches Metal. Phase: writing.
+- `lt-astra/flow-live-model` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-flow-live-model`): plan S3a, live FlowBarBuilder in ServerDataModel + `flow_live_subscribe`/`flow_bar`. Writer gpt-6-astra thread `01a1be55-f2c7-7100-a7f5-134765c768f4`; reviewer Claude Opus. MEDIUM; server deploy later (owner told). Phase: writing.
 
 Lab branches that never land: `lt-astra/hmc2-rollup-lab`, `lt-claude/hmc2-layout-lab` (results in `/Volumes/T7/sentinel-datalab/hmc2-*`).
 
