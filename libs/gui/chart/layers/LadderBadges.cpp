@@ -267,25 +267,59 @@ void LadderBadges::placeRows(const LadderSnapshot& s, const FrameContext& f, boo
     const auto window = ladderWindow(cam.drawnMinPrice, cam.drawnMaxPrice, s.binPrice());
     const int first = int(std::max<int64_t>(0, window.lo - s.binLo));
     const int last = int(std::min<int64_t>(s.rowCount - 1, window.hi - s.binLo));
+    if (cam.rowPxF / cam.dpr < kPillH) {
+        placeBands(s, f, first, last, cellLabels);
+        return;
+    }
     for (int i = last; i >= first; --i) { // from the top
-        if (!(s.rows[size_t(i)].flags & (LadderRow::kBidLarge | LadderRow::kAskLarge))) continue;
-        if (stats_.rowBadges >= kMaxBadges) {
-            ++stats_.dropped;
-            continue;
-        }
-        stats_.rowBadges += placeRow(s, f, i, cellLabels) ? 1 : 0;
+        if (s.rows[size_t(i)].flags & (LadderRow::kBidLarge | LadderRow::kAskLarge))
+            addRow(s, f, i, cellLabels, false);
     }
 }
 
-// One badge per row: the larger notional's side when both are walls (tie: ask). Only on
-// a row at least kPillH tall, wholly inside the surface and clear of the edge pills.
-bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels) {
+// Row centres partition the surface into pill-height bands. Keep the largest wall
+// notional in each band (ties keep the top row), without moving it to the band centre.
+void LadderBadges::placeBands(const LadderSnapshot& s, const FrameContext& f, int first, int last, bool cellLabels) {
+    const auto& cam = f.raster;
+    int winner = -1;
+    double band = 0, largest = -1;
+    for (int i = last; i >= first; --i) {
+        const auto& row = s.rows[size_t(i)];
+        if (!(row.flags & (LadderRow::kBidLarge | LadderRow::kAskLarge))) continue;
+        const double price = (double(s.binLo + i) + 0.5) * s.binPrice();
+        const double nextBand = std::floor(cam.yDev(price) / (cam.dpr * kPillH));
+        if (winner >= 0 && nextBand != band) {
+            addRow(s, f, winner, cellLabels, true);
+            winner = -1;
+        }
+        const double bid = row.flags & LadderRow::kBidLarge ? double(row.bid) * price : -1;
+        const double ask = row.flags & LadderRow::kAskLarge ? double(row.ask) * price : -1;
+        const double usd = std::max(bid, ask);
+        if (winner < 0 || usd > largest) {
+            winner = i;
+            largest = usd;
+        }
+        band = nextBand;
+    }
+    if (winner >= 0) addRow(s, f, winner, cellLabels, true);
+}
+
+void LadderBadges::addRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels, bool banded) {
+    if (stats_.rowBadges >= kMaxBadges) {
+        ++stats_.dropped;
+        return;
+    }
+    stats_.rowBadges += placeRow(s, f, index, cellLabels, banded) ? 1 : 0;
+}
+
+// The larger notional's side when both are walls (tie: ask). Keep the pill wholly
+// inside the surface and clear of edge pills; thin-band winners also avoid earlier rows.
+bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels, bool banded) {
     const auto& cam = f.raster;
     const LadderRow& row = s.rows[size_t(index)];
     const double bin = s.binPrice(), k = double(s.binLo + index);
     const double yTop = f.surfaceBounds.top() + cam.yDev((k + 1) * bin) / cam.dpr;
     const double yBottom = f.surfaceBounds.top() + cam.yDev(k * bin) / cam.dpr;
-    if (yBottom - yTop < kPillH) return false;
     const double top = snap(0.5 * (yTop + yBottom - kPillH), cam.dpr);
     if (top < f.surfaceBounds.top() || top + kPillH > f.surfaceBounds.bottom()) return false;
     const double mid = (k + 0.5) * bin;
@@ -298,8 +332,9 @@ bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int 
     rowText(p, ask ? askUsd : bidUsd, ask ? row.askWallMs : row.bidWallMs, ask ? row.askFlickers : row.bidFlickers,
             !cellLabels);
     finishPill(p, snap(f.itemBounds.right() - kBadgeInsetPx, cam.dpr), top, cam.dpr);
-    for (int j = 0; j < stats_.edgePills; ++j)
-        if (pills_[size_t(j)].rect.intersects(p.rect)) return false; // edge pills win
+    const int obstacles = banded ? int(pills_.size()) : stats_.edgePills;
+    for (int j = 0; j < obstacles; ++j)
+        if (pills_[size_t(j)].rect.intersects(p.rect)) return false; // already placed pills win
     pills_.push_back(p);
     return true;
 }

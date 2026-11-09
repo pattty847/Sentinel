@@ -1,9 +1,9 @@
 #pragma once
-// Wall radar text on the chart: one badge per wall row (notional, wall age, new or
+// Wall radar text on the chart: one badge per wall row or thin-row band (notional, wall age, new or
 // flicker count; no notional while the heatmap draws its own cell value labels)
 // right-aligned at the ladder strip's left edge, and up to four arrow pills at the
 // drawn window's edges for the nearest wall per side beyond each edge.
-// Render thread (LadderLayer::rebuild). Glyph templates are taken from the atlas once
+// Render thread (LadderLayer::submitLabels). Glyph templates are taken from the atlas once
 // per atlas; a layout composes fixed char buffers, so nothing allocates after the
 // constructor's reservations.
 //
@@ -23,7 +23,7 @@ struct FrameContext;
 namespace chart {
 struct LadderSnapshot;
 
-constexpr int kMaxBadges = 64;      // row badges per frame, first from the top; the rest are counted
+constexpr int kMaxBadges = 64;      // row/band badges per frame, first from the top; the rest are counted
 constexpr int kEdgePills = 4;       // [bid|ask] x [top|bottom edge]
 constexpr int kBadgeChars = 24;     // longest badge text plus room
 constexpr int kMaxBadgeGlyphs = (kMaxBadges + kEdgePills) * kBadgeChars;
@@ -34,7 +34,7 @@ constexpr uint32_t kNewMs = 10'000; // a wall for less than this is "new"
 // Geometry, logical px.
 constexpr double kBadgeFontPx = 12;
 constexpr double kBadgePadX = 5, kBadgePadY = 2;
-constexpr double kPillH = kBadgeFontPx + 2 * kBadgePadY; // a row badge needs a row at least this tall
+constexpr double kPillH = kBadgeFontPx + 2 * kBadgePadY; // thinner rows share bands of this height
 constexpr double kBadgeInsetPx = 4;                       // right edge of every pill, left of the strip
 constexpr double kEdgeInsetPx = 4;                        // edge pills from the surface's top and bottom
 constexpr double kPillGapPx = 2;                          // between stacked edge pills
@@ -97,7 +97,9 @@ private:
     double textWidth(const BadgePill& p) const;
     void placeEdges(const LadderSnapshot& s, const FrameContext& f);
     void placeRows(const LadderSnapshot& s, const FrameContext& f, bool cellLabels);
-    bool placeRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels);
+    void placeBands(const LadderSnapshot& s, const FrameContext& f, int first, int last, bool cellLabels);
+    void addRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels, bool banded);
+    bool placeRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels, bool banded);
     void finishPill(BadgePill& p, double right, double top, double dpr);
     void compose(const BadgePill& p);
     std::array<UnitGlyph, 128> unit_{};
