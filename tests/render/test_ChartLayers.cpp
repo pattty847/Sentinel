@@ -388,7 +388,6 @@ TEST(FootprintCells, SettingsPersistAndRejectInvalidVariantsAtomically) {
 } // namespace
 
 #include "config/AgentHostMode.hpp"
-#include <QFileInfo>
 TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     QTemporaryDir cache;
     QString error;
@@ -396,7 +395,7 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QFileInfo(QString::fromUtf8(__FILE__)).dir().filePath("../../resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64; params.charset = "0123456789.kMe+-";
     ASSERT_TRUE(atlas.build(params));
     chart::FootprintCellsLayer layer;
