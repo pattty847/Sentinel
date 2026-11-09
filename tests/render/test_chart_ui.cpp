@@ -1862,15 +1862,18 @@ protected:
         ugr->setActiveSymbol("BTC-USD");
         ugr->view()->setTimeframe(int(minute));
         model = std::make_unique<HeatmapSettingsModel>(t.store, "main", t.config);
+        ASSERT_TRUE(t.store.saveManualTick("BTC-USD", minute, 100));
         // Bright fixture colours (sizes 0.01..0.53), Manual $1, no crossfade unless a case asks.
-        ASSERT_TRUE(model->apply({{"palettePreset", "Fire"}, {"tickMode", "manual"}, {"manualTick", 100},
+        ASSERT_TRUE(model->apply({{"palettePreset", "Fire"}, {"sensitivityMin", 0.001},
+                                  {"sensitivityMax", 1.0}, {"tickMode", "manual"}, {"manualTick", 100},
                                   {"crossfadeMs", 0}}, false)
                         .isEmpty());
         controls = std::make_unique<HeatmapChartControls>(model.get());
         toolbar = std::make_unique<TopToolbar>();
         controls->setToolbar(toolbar.get());
         controls->setRenderer(ugr);
-        ASSERT_TRUE(model->apply({{"sensitivityMin", 0.001}, {"sensitivityMax", 1.0}}, false).isEmpty());
+        ASSERT_TRUE(layer().manualTickLocked());
+        ASSERT_EQ(layer().manualTickUnits(), 100);
     }
     void TearDown() override {
         controls.reset();

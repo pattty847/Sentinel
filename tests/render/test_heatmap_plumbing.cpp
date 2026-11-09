@@ -97,7 +97,7 @@ TEST_F(HeatmapPlumbing, ZoomOutSmoothingPersistsAndReachesTheFrame) {
     EXPECT_FALSE(frame.smoothZoomOut);
 }
 
-TEST_F(HeatmapPlumbing, PendingSymbolRangeBlocksNewFramesUntilItsPriceArrives) {
+TEST_F(HeatmapPlumbing, PendingSymbolRangeDrawsTemporarilyUntilItsVisibleFit) {
     QTemporaryDir dir;
     QSettings ini(dir.filePath("settings.ini"), QSettings::IniFormat);
     HeatmapSettingsStore store(ini);
@@ -110,18 +110,30 @@ TEST_F(HeatmapPlumbing, PendingSymbolRangeBlocksNewFramesUntilItsPriceArrives) {
     model.selectSymbol("BTC-USD");
     layer.setSettings(model.settings());
     gpu::HeatmapTileNode::Frame frame;
-    EXPECT_FALSE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    ASSERT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_FALSE(store.loadSensitivity("BTC-USD"));
+    EXPECT_FALSE(model.settings().sensitivityReady);
     model.notePrice("BTC-USD", 100'000);
     layer.setSettings(model.settings());
+    EXPECT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_FALSE(store.loadSensitivity("BTC-USD"));
+    model.noteVisibleLiquidity("BTC-USD", 0.01, 25);
+    layer.setSettings(model.settings());
+    ASSERT_TRUE(store.loadSensitivity("BTC-USD"));
+    EXPECT_DOUBLE_EQ(store.loadSensitivity("BTC-USD")->min, 0.01);
     EXPECT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
     layer.setSymbol("ETH-USD");
     EXPECT_FALSE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
     model.selectSymbol("ETH-USD");
     layer.setSettings(model.settings());
-    EXPECT_FALSE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_FALSE(store.loadSensitivity("ETH-USD"));
     model.notePrice("ETH-USD", 3'000);
     layer.setSettings(model.settings());
     EXPECT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_FALSE(store.loadSensitivity("ETH-USD"));
+    model.noteVisibleLiquidity("ETH-USD", 0.1, 10);
+    ASSERT_TRUE(store.loadSensitivity("ETH-USD"));
 }
 
 TEST_F(HeatmapPlumbing, AdvertisedGridFixesLayerScaleAndWindowAcrossPansAndLabels) {

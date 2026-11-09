@@ -383,11 +383,20 @@ TEST(HeatmapSettingsModelTest, SnapshotOnlyViewPostsLabelsAndFitsWithoutBookOrTr
 TEST(HeatmapSettingsModelTest, RangeAppliedBeforeFirstSymbolStaysProcessOnly) {
     TempStore t;
     HeatmapSettingsModel model(t.store, "main", t.config);
-    ASSERT_TRUE(model.apply({{"sensitivityMin", 0.001}, {"sensitivityMax", 1.0}}, false).isEmpty());
-    model.selectSymbol("BTC-USD");
+    ASSERT_TRUE(t.store.saveManualTick("BTC-USD", minute, 100));
+    ASSERT_TRUE(model.apply({{"sensitivityMin", 0.001}, {"sensitivityMax", 1.0},
+                             {"tickMode", "manual"}, {"manualTick", 100}}, false).isEmpty());
+    UnifiedGridRenderer renderer;
+    renderer.setActiveSymbol("BTC-USD");
+    renderer.view()->setTimeframe(int(minute));
+    HeatmapChartControls controls(&model);
+    controls.setRenderer(&renderer);
     EXPECT_TRUE(model.settings().sensitivityReady);
     EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.001);
     EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 1.0);
+    ASSERT_TRUE(renderer.gpuHeatmapLayer());
+    EXPECT_TRUE(renderer.gpuHeatmapLayer()->manualTickLocked());
+    EXPECT_EQ(renderer.gpuHeatmapLayer()->manualTickUnits(), 100);
     EXPECT_FALSE(t.store.loadSensitivity("BTC-USD"));
 }
 
@@ -445,6 +454,39 @@ TEST(HeatmapSettingsModelTest, PendingRangeFrameLetsCellQuerySaveTheFirstFit) {
     EXPECT_TRUE(posted);
     ASSERT_TRUE(t.store.loadSensitivity("BTC-USD"));
     EXPECT_EQ(t.store.loadSensitivity("BTC-USD")->origin, HeatmapSettingsStore::RangeOrigin::Auto);
+    layer.setService(nullptr);
+}
+
+TEST(HeatmapSettingsModelTest, PendingRangeAtWideZoomPostsNoLabelQuery) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    model.selectSymbol("BTC-USD");
+    heatmap::gpu::HeatmapGpuLayer layer;
+    layer.setSymbol("BTC-USD");
+    layer.setTimeframeMs(minute);
+    auto settings = model.settings();
+    settings.tickMode = heatmap::TickMode::Manual;
+    settings.manualTick = 100;
+    layer.setSettings(settings, true);
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 4 * kHourMs),
+                                        99'900, 100'300};
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (!layer.hasCurrentResolution() && elapsed.elapsed() < 10'000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    ASSERT_TRUE(layer.hasCurrentResolution());
+    layer.chooseTickForView(view);
+    QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+    ASSERT_EQ(layer.tickUnits(), 100);
+    heatmap::gpu::HeatmapTileNode::Frame frame;
+    ASSERT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 640, 320), view));
+    EXPECT_EQ(layer.labelCounters().posted, 0u);
+    EXPECT_EQ(layer.postedLabelRequest().serial, 0u);
+    EXPECT_FALSE(t.store.loadSensitivity("BTC-USD"));
     layer.setService(nullptr);
 }
 
