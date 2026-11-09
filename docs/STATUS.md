@@ -33,10 +33,7 @@ Nothing. Lab branches that never land: `lt-astra/hmc2-rollup-lab`, `lt-claude/hm
 ## Waiting on the owner
 
 1. **v3.0.0-alpha macOS release:** branch `lt-claude/mac-release-v3` tip `5082065a`, review PASS (gpt-6-astra thread `01a16c06-c945-7260-89c1-cafa71c6f81b`); waits on the owner's second-account test of the zip in `/Users/Shared/Sentinel-alpha-test/` (`TEST-STEPS.md`). Then land, release notes, tag only on the owner's yes.
-2. **Order book looks (2026-10-28):** lock-to-mid feel A/B (`MidLock::kStiffnessPerSec`); live look of the Wall Radar and the 75 px axis column minimum.
-3. **Stale worktrees from the stopped Architecture C:** `lt-astra/c-e1b2d-seals`, `lt-astra/ledger-l1`, `lt-claude/c-e1b1-exact-state`, `lt-codex/c-e1b1-failure-contract`. Remove with the owner's OK (`agent-worktree.sh remove`).
-4. **Backup cleanup:** `/Volumes/T7/sentinel-backup/pre-one-sided-deploy-20261022T0327Z` can go with the owner present.
-5. Revoke the old Coinbase key; then the conductor deletes `key.json` at the next restart. Decide the config overlay question (Sentinel-Private security notes).
+2. Revoke the old Coinbase key; then the conductor deletes `key.json` at the next restart. Decide the config overlay question (Sentinel-Private security notes).
 
 ## Owner constraints in force
 
