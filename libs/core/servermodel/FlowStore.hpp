@@ -28,7 +28,8 @@ std::filesystem::path flowRootFor(const std::string &configured, const std::file
                                   const std::filesystem::path &rollupRoot = {},
                                   const std::vector<std::filesystem::path> &protectedRoots = {});
 
-// Derived 1m trade bars. All replay runs on a dedicated background thread.
+// Derived 1m trade bars. Persistent builds run on a dedicated background thread;
+// bounded one-shot second windows use the caller's history worker.
 // The owner must stop the store before destroying its watermark provider.
 class FlowStore {
   public:
@@ -52,9 +53,16 @@ class FlowStore {
         uint64_t built = 0, failed = 0;
         bool stopped = false;
     };
+    struct Range {
+        int64_t fromMs = 0, toMs = 0; // half-open, including known empty buckets
+        std::string status; // complete, partial, building
+        sentinel::flow::FlowScales scales;
+    };
     struct Reply {
         std::vector<sentinel::flow::FlowBar> bars;
         std::vector<uint32_t> revisions; // parallel to bars, from the FLD1 index
+        std::vector<Range> ranges;
+        int64_t sealedThroughMs = 0;
         // True if any intersecting hour is unsealed, missing, stale or corrupt.
         bool building = false;
     };
@@ -69,6 +77,10 @@ class FlowStore {
     // Thread-safe disk read, intended for the history worker pool. No journal replay.
     // Minute bucket starts in [fromMs, toMs); requests must be UTC minute aligned.
     Reply window(const std::string &symbol, int64_t fromMs, int64_t toMs);
+    static constexpr int64_t kMaxReplayWindowMs = 3'600'000;
+    // One-shot 1s replay; worker-local readers, no persistent writes or shared catalog.
+    Reply buildWindow(const std::string &symbol, int64_t fromMs, int64_t toMs,
+                      std::stop_token stop = {});
     std::filesystem::path filePath(const std::string &symbol, int64_t dayMs) const;
     const std::filesystem::path &root() const { return options_.root; }
 

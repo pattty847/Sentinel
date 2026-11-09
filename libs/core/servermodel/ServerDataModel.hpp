@@ -1,5 +1,6 @@
 #pragma once
 #include "RecordingLive.hpp"
+#include "FlowStore.hpp"
 #include "flow/FlowBarBuilder.hpp"
 #include "flow/FlowScales.hpp"
 #include "roller/Grid.hpp"
@@ -59,6 +60,15 @@ public:
     ~ServerDataModel();
 
     SymbolHotData& ensureSymbol(const std::string& symbol);
+    struct FlowHistorySnapshot {
+        recording::FlowStore::Reply data;
+        recording::FlowStore* store = nullptr; // app owns it; server workers stop before destruction
+        int64_t observedThroughMs = 0;
+    };
+    // Model-thread only. Attachment occurs before the stream server starts.
+    void attachFlowStore(recording::FlowStore* store) { m_flowStore = store; }
+    FlowHistorySnapshot flowHistorySnapshot(const std::string& symbol, int64_t timeframeMs,
+                                          int64_t fromMs, int64_t toMs) const;
     void subscribeFlow(std::shared_ptr<FlowSubscription> subscription);
     // Recorder-derived daily grid, delivered before that day's live trades.
     void onFlowGrid(const std::string& symbol, int64_t dayStartMs,
@@ -198,6 +208,7 @@ private:
         std::map<int64_t, FlowDay> days;
         sentinel::flow::Trade scratch;
     };
+    recording::FlowStore* m_flowStore = nullptr;
     std::map<std::string, FlowProduct> m_flowProducts;
     std::vector<std::shared_ptr<FlowSubscription>> m_flowSubscriptions;
     QTimer m_flowTimer;

@@ -410,11 +410,19 @@ FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::stri
 }
 std::vector<flow::FlowBar> buildRun(const FlowStore::Options &options, const std::string &symbol,
                                     const flow::FlowScales &scales, int64_t first, int64_t end,
-                                    const roller::JournalPos &start, std::stop_token stop) {
+                                    const roller::JournalPos &start, std::stop_token stop,
+                                    int64_t timeframe = Minute, bool *partial = nullptr) {
     checkStop(stop);
     roller::JournalReader reader(options.journalRoot, symbol, start);
     roller::JournalFeed feed(symbol);
-    flow::FlowBarBuilder builder(Minute, scales.nativeTick, scales.priceScale, scales.baseScale, scales.quoteScale);
+    flow::FlowBarBuilder builder(timeframe, scales.nativeTick, scales.priceScale, scales.baseScale, scales.quoteScale);
+    int64_t firstReceive = INT64_MAX, lastReceive = 0;
+    bool coverageLost = false;
+    if (partial) {
+        feed.onInvalid = [&](int64_t ms, const std::string&) {
+            if (ms > first && ms < end + TradeTail) coverageLost = true;
+        };
+    }
     flow::Trade trade;
     trade.id.reserve(UINT16_MAX);
     feed.onTrade = [&](const ::Trade &value) {
@@ -436,7 +444,10 @@ std::vector<flow::FlowBar> buildRun(const FlowStore::Options &options, const std
     roller::JournalRecord input;
     while (reader.next(input)) {
         checkStop(stop);
-        if (input.record.time.systemNs / 1'000'000 > end + TradeTail)
+        const auto receiveMs = input.record.time.systemNs / 1'000'000;
+        firstReceive = std::min(firstReceive, receiveMs);
+        lastReceive = std::max(lastReceive, receiveMs);
+        if (receiveMs > end + TradeTail)
             break;
         feed.apply(input);
         if (options.afterRecordForTest)
@@ -448,6 +459,8 @@ std::vector<flow::FlowBar> buildRun(const FlowStore::Options &options, const std
     if (builder.rejectedCount())
         sLog_Warning("Flow rejected trades symbol=" << symbol << " start=" << first
                                                     << " count=" << builder.rejectedCount());
+    if (partial) *partial = builder.rejectedCount() != 0 || coverageLost ||
+                            firstReceive > first || lastReceive < end + TradeTail;
     return builder.bars();
 }
 void atomicFile(const fs::path &path, const QByteArray &bytes) {
@@ -913,6 +926,53 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
             break;
     }
 }
+FlowStore::Reply FlowStore::buildWindow(const std::string &symbol, int64_t from, int64_t to,
+                                            std::stop_token stop) {
+    sentinel::capture::validateSymbol(symbol);
+    if (from < 0 || to <= from || from % 1000 || to % 1000 || to > INT64_MAX - Day - TradeTail)
+        throw std::invalid_argument("invalid flow second window");
+    if (to - from > kMaxReplayWindowMs)
+        throw std::invalid_argument("1s journal replay cap is 3600000 ms (1 h)");
+    Reply reply;
+    try {
+        roller::JournalReader catalog(options_.journalRoot, symbol);
+        const auto grids = hmcDayPaths(options_, symbol, stop);
+        for (auto first = from; first < to;) {
+            const auto day = dayFloor(first), end = std::min(to, day + Day);
+            const auto firstJournalMs = catalog.files().front().header.at("opened_system_ns").get<int64_t>() / 1'000'000;
+            if (firstJournalMs >= end) {
+                reply.ranges.push_back({first, end, "partial", {}});
+                first = end;
+                continue;
+            }
+            const auto start = firstDurable(catalog, first - TradeTail, stop);
+            if (!start) {
+                reply.ranges.push_back({first, end, "partial", {}});
+                first = end;
+                continue;
+            }
+            const auto grid = dayScales(options_, symbol, day,
+                grids.contains(day) ? grids.at(day) : fs::path{}, catalog, stop);
+            bool partial = firstJournalMs > first;
+            Sources sources;
+            try {
+                sources = snapshotSources(catalog, end + TradeTail, sourcePath(catalog, *start), stop);
+            } catch (const NotReady &) { partial = true; }
+            bool rejected = false;
+            auto bars = buildRun(options_, symbol, grid.scales, first, end, *start, stop, 1000, &rejected);
+            if (!sources.empty() && !sourcesMatch(sources, catalog, end + TradeTail, stop))
+                throw std::runtime_error("journal changed during flow replay");
+            reply.ranges.push_back({first, end, partial || rejected ? "partial" : "complete", grid.scales});
+            reply.revisions.insert(reply.revisions.end(), bars.size(), 1);
+            reply.bars.insert(reply.bars.end(), std::make_move_iterator(bars.begin()),
+                              std::make_move_iterator(bars.end()));
+            first = end;
+        }
+    } catch (const roller::NoJournalFiles &) {
+        reply.ranges = {{from, to, "partial", {}}};
+    }
+    return reply;
+}
 FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int64_t to) {
     sentinel::capture::validateSymbol(symbol);
     if (from < 0 || to <= from || from % Minute || to % Minute || to > INT64_MAX - Day - TradeTail)
@@ -921,19 +981,26 @@ FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int6
     bool missingSealed = false;
     bool sealedRequested = false;
     try {
-        const auto through = options_.hourThrough(symbol);
+        const auto through = options_.hourThrough(symbol) / Hour * Hour;
+        reply.sealedThroughMs = through;
         for (auto day = dayFloor(from); day < to; day += Day) {
             const auto path = filePath(symbol, day);
             const auto index = indexFor(symbol, day);
+            const bool readable = index.valid && stamp(path) == index.file &&
+                                  stamp(path.string() + ".state") == index.state;
             uint32_t required = 0;
             for (auto hour = std::max(day, from / Hour * Hour); hour < std::min(day + Day, to); hour += Hour) {
+                const bool ready = readable && hour + Hour <= through &&
+                    (index.hours & (1u << ((hour - day) / Hour)));
+                reply.ranges.push_back({std::max(hour, from), std::min(hour + Hour, to),
+                                        ready ? "complete" : "building", index.grid.scales});
                 if (hour + Hour > through)
                     reply.building = true;
                 else
                     required |= 1u << ((hour - day) / Hour);
             }
             sealedRequested |= required != 0;
-            if (!index.valid || stamp(path) != index.file || stamp(path.string() + ".state") != index.state) {
+            if (!readable) {
                 reply.building = true;
                 missingSealed |= required != 0;
                 continue;
@@ -957,6 +1024,7 @@ FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int6
             }
         }
     } catch (const std::exception &e) {
+        reply.ranges = {{from, to, "building", {}}};
         reply.bars.clear();
         reply.revisions.clear();
         reply.building = true;

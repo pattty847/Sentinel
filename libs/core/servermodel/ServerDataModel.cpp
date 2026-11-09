@@ -2,6 +2,7 @@
 #include "SentinelLogging.hpp"
 #include "RecordingDir.hpp"
 #include "flow/FlowCodec.hpp"
+#include <QThread>
 #include "flow/FlowCompose.hpp"
 #include "protocol/SentinelStreamProtocol.hpp"
 #include "metrics/MetricsRegistry.hpp"
@@ -876,6 +877,41 @@ void ServerDataModel::onFlowGrid(const std::string& symbol, int64_t dayStartMs,
         sLog_Warning("Flow grid refused: symbol=" << symbol << " day=" << dayStartMs
             << " error=" << e.what());
     }
+}
+
+ServerDataModel::FlowHistorySnapshot ServerDataModel::flowHistorySnapshot(
+    const std::string& symbol, int64_t tf, int64_t from, int64_t to) const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    FlowHistorySnapshot snapshot;
+    snapshot.store = m_flowStore;
+    const auto found = m_flowProducts.find(symbol);
+    if (found == m_flowProducts.end() || found->second.firstLiveMs < 0) return snapshot;
+    const auto& product = found->second;
+    snapshot.observedThroughMs = product.clock + kFlowCloseDelayMs;
+    const auto sourceTf = tf == 1000 ? 1000 : 60'000;
+    const int64_t retained = sourceTf == 1000 ?
+        product.clock / 1000 * 1000 - kFlowSecondRetentionMs + 1000 :
+        (product.clock - kFlowRolloverGraceMs) / 3'600'000 * 3'600'000;
+    for (const auto& [dayStart, day] : product.days) {
+        const auto begin = std::max({from, dayStart, retained});
+        const auto end = std::min({to, dayStart + 86'400'000, snapshot.observedThroughMs});
+        if (begin >= end) continue;
+        // FlowBarBuilder materializes a cache; use a private copy to keep this accessor read-only.
+        auto builder = day.series.at(sourceTf).builder;
+        for (auto start = begin / sourceTf * sourceTf; start < end; start += sourceTf) {
+            if (start < from) continue;
+            const bool complete = product.firstLiveMs <= start && start >= retained &&
+                !flowLossIn(product.lossyMinutes, start, start + sourceTf);
+            if (start + sourceTf > product.firstLiveMs)
+                snapshot.data.ranges.push_back({start, std::min(start + sourceTf, end),
+                                               complete ? "complete" : "partial", day.scales});
+            if (auto bar = builder.bar(start)) {
+                snapshot.data.bars.push_back(std::move(*bar));
+                snapshot.data.revisions.push_back(*builder.revisionAt(start));
+            }
+        }
+    }
+    return snapshot;
 }
 
 void ServerDataModel::subscribeFlow(std::shared_ptr<FlowSubscription> sub) {

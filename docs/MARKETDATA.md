@@ -188,8 +188,8 @@ Candle schema version 2 carries timeframes and history boundaries in integer mil
 
 `server_config.flow` announces `schema_version: 1`, `live`, `encoding: "FLB1/base64"`,
 `notable_k: 8`, `live_publish_ms`, `close_delay_ms: 1000`, and
-`second_retention_ms: 1800000`. `history: false` means that this server does not yet
-serve flow history. `grid: "per_bar"` means that `row_tick_units` and `price_scale`
+`second_retention_ms: 1800000`. `history: true`, `history_encoding: "FHE1/FLB1"`,
+`history_max_bars: 512`, and `history_second_replay_max_ms: 3600000` announce flow history. `grid: "per_bar"` means that `row_tick_units` and `price_scale`
 come with each bar: the recorder's grid is specific to the product and UTC day,
 so there is no single global grid in the connection handshake.
 
@@ -266,6 +266,85 @@ finish. Disconnect also cancels registrations and publication. The stream I/O
 thread only admits requests and sends prepared messages; model-thread aggregation
 and FLB1/base64/JSON encoding never run there. Flow uses the existing bounded
 16 MiB session write queue and slow-client disconnect policy.
+
+### Flow history
+
+`{"type":"flow_history_request","req":9,"symbol":"BTC-USD","timeframe_ms":60000,
+"end_time_ms":1798765500000,"limit":512}` requests the newest page ending at the
+UTC bucket containing `end_time_ms` (inclusive). All fields are required; `req`
+is an unsigned 64-bit connection-local correlation identifier. Timeframes are
+1 s, 1 m, or configured whole-minute multiples through 1 d that divide a UTC day.
+Sub-second requests, negative/overflowing times and limits outside 1..512 are
+refused. There is one flow history job in flight per connection, including the
+queued model snapshot. A concurrent request or saturated shared history pool
+returns JSON `error` with `context: "flow_history_request"`, `req`, `symbol` and
+`message`; it never returns a successful truncated page.
+
+An accepted request returns one binary WebSocket message:
+
+| Bytes | Meaning |
+| --- | --- |
+| 4 | ASCII `FHE1` envelope magic |
+| 4 | Little-endian uint32 JSON header byte length |
+| header length | UTF-8 JSON header |
+| repeated for each header `bars` entry | Little-endian uint32 FLB1 byte length, then that many FLB1 bytes |
+
+The header contains `type: "flow_history_chunk"`, `schema_version: 1`, `req`,
+`symbol`, `timeframe_ms`, `price_scale`, `row_tick_units`, `status`, `oldest_ms`,
+`ranges` and `bars`. `bars` entries carry `bucket_start_ms`, uint32 `revision`
+and boolean `complete`, in the same ascending order as the binary records.
+Revision and completeness are envelope metadata; FLB1 content is unchanged.
+Each range has half-open `from_ms`, `to_ms`, `status`, `price_scale` and
+`row_tick_units`. There is one range per requested bucket, including buckets
+with no trades. Top-level scales describe the first returned bar (zero without
+bars); each FLB1 and range carries its own grid, which can change across UTC days.
+The whole frame is capped at 15 MiB; excess returns a correlated error asking
+for a smaller limit.
+
+Range statuses are:
+
+- `complete`: coverage is proven, including known empty buckets. A forming
+  bucket is complete through the snapshot's observed journal clock if coverage
+  began at or before its start and no loss is known.
+- `partial`: only part of the requested coverage is available (for example a
+  restart inside a minute, a short journal or rejected trades). Returned bars
+  have `complete: false`.
+- `building`: some required store hours or live coverage are not built or are
+  stale/corrupt. Available constituents may be returned with `complete: false`;
+  no empty complete bars are manufactured. Clients show the range as not built.
+- `refused`: invalid request or cap violation. The binary reply includes `error`
+  naming the reason and no bars; its range has `from_ms`, `to_ms` and `status`.
+
+The page status is `building` if any range is building, otherwise `partial` if
+any range is partial, otherwise `complete`. `oldest_ms` is the oldest requested
+bucket, including empty or building ranges, so paging can always make progress.
+Fetch the next older page with `end_time_ms = oldest_ms - timeframe_ms`, stopping
+at zero. Pages select the newest interval first; bars within each page are
+chronological. Clients should retry building ranges separately after catch-up.
+
+Minute/coarse requests read only the store's sealed-hour index and FLD1 files,
+plus a queued read-only copy of the model's retained minute series for the
+forming hour and times newer than the sealed watermark. They never replay or
+scan journals. Coarse bars use `flow::composeFlowBars`, the same composition and
+scales as live. Missing sealed hours remain building until the background store
+builder catches up. After a restart, missing unsealed minutes remain building;
+live coverage starts with the first observed trade and cannot prove an earlier
+prefix. Empty observed minutes are covered without fabricating trades.
+
+Second bars use the retained live 30-minute series. Older portions use a
+worker-local, one-shot journal replay with no persistent writes. The replay
+window cap is 3,600,000 ms (1 h), enforced independently of the stricter 512-bar
+page cap. A two-hour 1 s request is refused with the one-hour cap named in its
+error. Journal replay uses the same grid resolver, trade builder and receive-time
+tail as the store. A missing/short journal returns partial coverage.
+
+Merge history and live by `(symbol, timeframe_ms, bucket_start_ms)`: a higher
+revision wins; at equal revision a complete bar wins over an incomplete bar.
+For equal revision and completeness, preserve a live update received after the
+history request was issued, since the queued history snapshot may precede it.
+Range status is separate from bar replacement: a building range remains visibly
+not built even when the client has a partial bar for it. No client disk cache is
+required.
 
 ## Heatmap history transport
 

@@ -10,6 +10,11 @@ namespace SentinelProtocol {
 constexpr int kServerConfigSchemaVersion = 2;
 constexpr int kCandleSchemaVersion = 2;
 constexpr int kFlowSchemaVersion = 1;
+constexpr int kFlowHistoryMaxBars = 512;
+constexpr size_t kFlowHistoryMaxFrameBytes = 15 * 1024 * 1024;
+// Binary flow_history_chunk: magic, LE u32 JSON length, JSON, then LE u32
+// length + FLB1 per header bars entry. Revision/completeness live in the JSON.
+constexpr char kFlowHistoryMagic[] = "FHE1";
 constexpr int kFootprintSchemaVersion = 1;
 constexpr int kTpoSchemaVersion = 1;
 constexpr int kVolumeProfileSchemaVersion = 1;
@@ -32,6 +37,8 @@ enum class MessageType {
     FlowLiveSubscribe,
     FlowLiveUnsubscribe,
     FlowBar,
+    FlowHistoryRequest,
+    FlowHistoryChunk,
     FootprintConfig,
     FootprintSlice,
     FootprintHistoryRequest,
@@ -70,6 +77,8 @@ inline std::string toString(MessageType t) {
         case MessageType::CandleBarClosed: return "candle_bar_closed";
         case MessageType::FlowLiveSubscribe: return "flow_live_subscribe";
         case MessageType::FlowLiveUnsubscribe: return "flow_live_unsubscribe";
+        case MessageType::FlowHistoryRequest: return "flow_history_request";
+        case MessageType::FlowHistoryChunk: return "flow_history_chunk";
         case MessageType::FlowBar: return "flow_bar";
         case MessageType::FootprintConfig: return "footprint_config";
         case MessageType::FootprintSlice: return "footprint_slice";
@@ -108,6 +117,8 @@ inline MessageType fromString(const std::string& s) {
     if (s == "candle_bar_closed") return MessageType::CandleBarClosed;
     if (s == "flow_live_subscribe") return MessageType::FlowLiveSubscribe;
     if (s == "flow_live_unsubscribe") return MessageType::FlowLiveUnsubscribe;
+    if (s == "flow_history_request") return MessageType::FlowHistoryRequest;
+    if (s == "flow_history_chunk") return MessageType::FlowHistoryChunk;
     if (s == "flow_bar") return MessageType::FlowBar;
     if (s == "footprint_config") return MessageType::FootprintConfig;
     if (s == "footprint_slice") return MessageType::FootprintSlice;
