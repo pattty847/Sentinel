@@ -575,3 +575,12 @@ TEST(AgentApiControls, FootprintVariantsHaveStrictTypes) {
     EXPECT_EQ(check(R"({"footprintHollowCandles":"false"})").status, 422);
     EXPECT_EQ(check(R"({"footprintNumbers":1})").status, 422);
 }
+
+TEST(AgentApiControls, FootprintSourceHasStrictTypesOnBothRoutes) {
+    for (const auto* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
+        for (const auto* body : {R"({"footprintSource":"q16"})", R"({"footprintSource":"cells"})"})
+            EXPECT_EQ(validateControl({"POST", path, {}, body}, std::nullopt).status, 200);
+        for (const auto* body : {R"({"footprintSource":"other"})", R"({"footprintSource":true})"})
+            EXPECT_EQ(validateControl({"POST", path, {}, body}, std::nullopt).status, 422);
+    }
+}

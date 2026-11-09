@@ -136,6 +136,7 @@ void HeatmapChartControls::applyLadderSettings() {
     if (!m_renderer) return;
     const auto &s = m_model->settings();
     m_renderer->agentPort().applyFootprintSettings({
+        {"footprintSource", QString::fromStdString(s.footprintSource)},
         {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
         {"footprintHollowCandles", s.footprintHollowCandles}, {"footprintNumbers", s.footprintNumbers}});
     const AppliedLadder want{s.showLadder, s.ladderWidthPx, s.showWallRadar, s.wallMultiple};

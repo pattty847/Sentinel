@@ -10,7 +10,7 @@ namespace chart {
 class FootprintCellsLayer final : public IChartLayer {
 public:
     FootprintCellsLayer();
-    std::string_view name() const override { return "footprint"; }
+    std::string_view name() const override { return "footprintCells"; }
     void onRootRebuilt() override;
     QSGNode* createContainer() override;
     void sync(const ChartFrame&) override;

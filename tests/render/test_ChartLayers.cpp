@@ -49,8 +49,8 @@ TEST(ChartLayerSet, RegistersHeatmapFootprintVpTpoLadderText) {
     layers.heatmap.initialize();
     QSGNode root;
     layers.registry.onRootRebuilt(&root);
-    EXPECT_EQ(root.childCount(), 6);
-    EXPECT_EQ(root.childAtIndex(4)->type(), QSGNode::OpacityNodeType) << "the ladder's gate";
+    EXPECT_EQ(root.childCount(), 7);
+    EXPECT_EQ(root.childAtIndex(5)->type(), QSGNode::OpacityNodeType) << "the ladder's gate";
     EXPECT_EQ(root.firstChild()->type(), QSGNode::OpacityNodeType);
     EXPECT_EQ(root.firstChild()->firstChild()->type(), QSGNode::RenderNodeType);
 }
@@ -268,7 +268,7 @@ TEST(FootprintCells, WindowNormalisationAccountsForEachBarsScale) {
     EXPECT_DOUBLE_EQ(chart::FootprintCellsLayer::intensity(out->bars[0], out->cells[0], *out, true), 0.5);
     EXPECT_DOUBLE_EQ(chart::FootprintCellsLayer::intensity(out->bars[1], out->cells[2], *out, true), 1);
     chart::FootprintCellsLayer layer;
-    layer.presentation().enabled = true;
+    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
     layer.mailbox().back() = *out; layer.mailbox().post();
     std::unique_ptr<QSGNode> root(layer.createContainer());
     ChartTextRenderer text; ChartTextAtlas atlas;
@@ -299,8 +299,8 @@ TEST(FootprintCells, RegistrySlotAndNoData) {
     layers.heatmap.initialize();
     QSGNode root;
     layers.registry.onRootRebuilt(&root);
-    EXPECT_EQ(root.childAtIndex(1)->type(), QSGNode::OpacityNodeType);
-    EXPECT_EQ(root.childAtIndex(1)->firstChild()->type(), QSGNode::GeometryNodeType);
+    EXPECT_EQ(root.childAtIndex(2)->type(), QSGNode::OpacityNodeType);
+    EXPECT_EQ(root.childAtIndex(2)->firstChild()->type(), QSGNode::GeometryNodeType);
     auto frame = footprintChartFrame();
     layers.footprintCells.presentation().enabled = true;
     layers.footprintCells.sync(frame);
@@ -309,7 +309,7 @@ TEST(FootprintCells, RegistrySlotAndNoData) {
 }
 TEST(FootprintCells, TwoFramesAfterDataAndChangedSnapshotAllocateNothing) {
     chart::FootprintCellsLayer layer;
-    layer.presentation().enabled = true;
+    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
     auto frame = footprintChartFrame();
     ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), footprintFrame()));
     layer.mailbox().post();
@@ -342,15 +342,23 @@ TEST(FootprintCells, SettingsPersistAndRejectInvalidVariantsAtomically) {
     QSettings settings(dir.filePath("chart.ini"), QSettings::IniFormat);
     heatmap::HeatmapSettingsStore store(settings);
     heatmap::HeatmapChartSettings value;
-    EXPECT_TRUE(heatmap::applySettingsPatch(value, {{"footprintIntensity", "window"},
+    EXPECT_EQ(value.footprintSource, "q16");
+    EXPECT_TRUE(heatmap::applySettingsPatch(value, {{"footprintSource", "cells"}, {"footprintIntensity", "window"},
         {"footprintHollowCandles", false}, {"footprintNumbers", false}}).isEmpty());
     store.save("test", value);
     auto loaded = store.load("test", ClientHeatmapConfig{});
+    EXPECT_EQ(loaded.footprintSource, "cells");
     EXPECT_EQ(loaded.footprintIntensity, "window");
     EXPECT_FALSE(loaded.footprintHollowCandles); EXPECT_FALSE(loaded.footprintNumbers);
     EXPECT_FALSE(heatmap::applySettingsPatch(loaded, {{"footprintIntensity", "bad"}, {"footprintNumbers", true}}).isEmpty());
+    EXPECT_EQ(loaded.footprintSource, "cells");
     EXPECT_EQ(loaded.footprintIntensity, "window"); EXPECT_FALSE(loaded.footprintNumbers);
     chart::LayerVisibility visibility;
+    EXPECT_EQ(visibility.footprintSource(), "q16");
+    EXPECT_TRUE(visibility.setProperty("footprintSource", "cells"));
+    EXPECT_EQ(visibility.footprintSource(), "cells");
+    EXPECT_FALSE(heatmap::applySettingsPatch(loaded, {{"footprintSource", "unknown"}}).isEmpty());
+    EXPECT_EQ(loaded.footprintSource, "cells");
     EXPECT_TRUE(visibility.setProperty("footprintIntensity", "window"));
     EXPECT_TRUE(visibility.setProperty("footprintNumbers", false));
     EXPECT_TRUE(visibility.setProperty("footprintHollowCandles", false));
@@ -372,7 +380,7 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     params.fontPx = 64; params.charset = "0123456789.kMe+-";
     ASSERT_TRUE(atlas.build(params));
     chart::FootprintCellsLayer layer;
-    layer.presentation().enabled = true;
+    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
     auto frame = footprintChartFrame();
     ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), footprintFrame()));
     layer.mailbox().post();
@@ -391,4 +399,28 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     layer.sync(frame); layer.submitLabels(frame, context);
     EXPECT_EQ(layer.glyphCount(), 0u);
     EXPECT_TRUE(layer.drawing());
+}
+
+TEST(FootprintSource, RegistryDefaultsToQ16AndSwitchesExclusively) {
+    chart::ChartLayers layers;
+    EXPECT_TRUE(layers.registry.precedes("footprint", "footprintCells"));
+    EXPECT_TRUE(layers.registry.precedes("footprintCells", "VP"));
+    auto frame = footprintChartFrame();
+    auto& look = layers.footprintCells.presentation();
+    look.enabled = true;
+    ASSERT_TRUE(chart::FlowFeed::bin(layers.footprintCells.mailbox().back(), footprintSeries(), footprintFrame()));
+    layers.footprintCells.mailbox().post();
+    layers.footprintCells.sync(frame);
+    EXPECT_TRUE(layers.footprint.selected(frame));
+    EXPECT_FALSE(layers.footprintCells.drawing()) << "q16 is the default even when cells have data";
+    EXPECT_FALSE(look.hollow(frame.context.raster));
+    look.cellsSource = true;
+    layers.footprintCells.sync(frame);
+    EXPECT_FALSE(layers.footprint.selected(frame));
+    EXPECT_TRUE(layers.footprintCells.drawing());
+    EXPECT_TRUE(look.hollow(frame.context.raster));
+    frame.context.overlays.footprint = false;
+    layers.footprintCells.sync(frame);
+    EXPECT_FALSE(layers.footprint.selected(frame));
+    EXPECT_FALSE(layers.footprintCells.drawing());
 }

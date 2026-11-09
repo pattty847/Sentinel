@@ -4,6 +4,8 @@
 #include "chart/core/PublishedFrame.hpp"
 #include "chart/shell/LayerVisibility.hpp"
 #include "datasources/IGridDataSource.hpp"
+#include "datasources/RemoteGridDataSource.hpp"
+#include <QPointer>
 #include "render/GridViewState.hpp"
 #include <QDateTime>
 #include <algorithm>
@@ -65,45 +67,56 @@ void FlowFeed::bind(ChartViewController& view, const PublishedFrame& published,
     ports_.frame = [&published] { return published.current(); };
     ports_.symbol = [&view] { return view.session().symbol; };
     ports_.update = [&visibility] { if (visibility.requestUpdate) visibility.requestUpdate(); };
-    connect(&visibility, &LayerVisibility::layerVisibilityChanged, this, [this, &visibility, &presentation] {
+    const auto apply = [this, &visibility, &presentation] {
         presentation.enabled = visibility.footprintEnabled();
+        presentation.cellsSource = visibility.footprintSource() == "cells";
         presentation.numbers = visibility.footprintNumbers();
         presentation.hollowCandles = visibility.footprintHollowCandles();
         presentation.windowIntensity = visibility.footprintIntensity() == "window";
-        setEnabled(presentation.enabled);
-    });
+        setEnabled(presentation.enabled && presentation.cellsSource);
+    };
+    connect(&visibility, &LayerVisibility::layerVisibilityChanged, this, apply);
+    apply();
     connect(view.viewPtr(), &GridViewState::viewportChanged, this, &FlowFeed::onFrameChanged);
     connect(view.viewPtr(), &GridViewState::panVisualOffsetChanged, this, &FlowFeed::onFrameChanged);
 }
 void FlowFeed::bindSource(IGridDataSource& source) {
     disconnect(sourceConnection_);
     buffer_.clear();
+    const QPointer<RemoteGridDataSource> remote = qobject_cast<RemoteGridDataSource*>(&source);
+    sourceBuffer_ = [remote]() -> const FlowSeriesBuffer* { return remote ? &remote->flowBuffer() : nullptr; };
     sourceConnection_ = connect(&source, &IGridDataSource::flowBarsReceived, this, &FlowFeed::receive);
-    publishRows();
+    if (enabled_) publishRows();
 }
 void FlowFeed::selectSymbol() {
     const auto symbol = ports_.symbol ? ports_.symbol() : QString{};
     if (symbol == symbol_) return;
     symbol_ = symbol;
     buffer_.clear();
+    withdraw();
+}
+void FlowFeed::withdraw() {
     auto& out = mailbox_.back();
     out.valid = false; out.barCount = 0; out.cellCount = 0; out.serial = ++serial_;
     mailbox_.post();
 }
 void FlowFeed::receive(SentinelStreamClient::FlowBatchPtr batch) {
+    if (!enabled_) return;
     selectSymbol();
     if (!batch || batch->symbol != symbol_) return;
-    buffer_.apply(*batch, QDateTime::currentMSecsSinceEpoch());
+    if (!sourceBuffer_ || !sourceBuffer_()) buffer_.apply(*batch, QDateTime::currentMSecsSinceEpoch());
     onFrameChanged();
 }
 void FlowFeed::setEnabled(bool enabled) {
     if (enabled_ == enabled) return;
     enabled_ = enabled;
-    if (enabled_) onFrameChanged(); else { timer_.stop(); publishRows(); }
+    if (enabled_) onFrameChanged();
+    else { timer_.stop(); buffer_.clear(); withdraw(); }
 }
 void FlowFeed::onFrameChanged() {
+    if (!enabled_) return;
     selectSymbol();
-    if (enabled_ && !timer_.isActive()) timer_.start(kIntervalMs);
+    if (!timer_.isActive()) timer_.start(kIntervalMs);
 }
 bool FlowFeed::bin(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, const MappingFrameContext& frame) {
     const auto& cam = frame.raster;
@@ -122,13 +135,15 @@ bool FlowFeed::bin(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, co
     return true;
 }
 void FlowFeed::publishRows() {
+    if (!enabled_) return;
     selectSymbol();
     auto& out = mailbox_.back();
     out.valid = false; out.barCount = 0; out.cellCount = 0;
     out.serial = ++serial_;
     const auto frame = ports_.frame ? ports_.frame() : MappingFrameContext{};
-    const auto* series = buffer_.series(frame.activeTimeframeMs);
-    if (enabled_ && series) bin(out, *series, frame);
+    const auto* source = sourceBuffer_ ? sourceBuffer_() : nullptr;
+    const auto* series = (source ? *source : buffer_).series(frame.activeTimeframeMs);
+    if (series) bin(out, *series, frame);
     mailbox_.post();
     if (ports_.update) ports_.update();
 }

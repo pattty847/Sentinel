@@ -66,6 +66,8 @@ public:
     static bool bin(FlowSnapshot&, const FlowSeriesBuffer::Series&, const MappingFrameContext&);
 private:
     void selectSymbol();
+    void withdraw();
+    std::function<const FlowSeriesBuffer*()> sourceBuffer_;
     FlowMailbox& mailbox_;
     FlowFeedPorts ports_;
     FlowSeriesBuffer buffer_;

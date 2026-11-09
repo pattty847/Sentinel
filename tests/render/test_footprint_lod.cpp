@@ -31,7 +31,7 @@ TEST(FootprintLod, TwoPixelRetentionBandsDoNotFlap) {
 TEST(FootprintLod, SharedHistoryAndKnobs) {
     struct Raster { bool valid = true; double dpr = 2, colPxF = 112, rowPxF = 24; } raster;
     chart::FootprintPresentation look;
-    look.enabled = true;
+    look.enabled = true; look.cellsSource = true;
     EXPECT_EQ(look.stage(raster), FootprintStage::Numbers);
     EXPECT_TRUE(look.hollow(raster));
     raster.colPxF = 110;

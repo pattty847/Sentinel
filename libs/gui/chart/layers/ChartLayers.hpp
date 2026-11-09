@@ -9,8 +9,8 @@
 namespace chart {
 struct ChartLayers {
     HeatmapLayer heatmap;
-    FootprintLayer footprint;
     FootprintCellsLayer footprintCells;
+    FootprintLayer footprint{&footprintCells.presentation()};
     VolumeProfileLayer vp;
     TpoLayer tpo;
     LadderLayer ladder;

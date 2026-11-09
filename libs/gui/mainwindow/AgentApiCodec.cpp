@@ -462,6 +462,11 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
                 else result.body.priceMax = v.toDouble();
             } else return reject("invalid_field", "Unknown viewport field");
         } else if (kind == "layers") {
+            if (key == "footprintSource") {
+                if (v != "q16" && v != "cells") return reject("invalid_layer", "footprintSource must be q16 or cells");
+                result.body.layers.insert(key, v);
+                continue;
+            }
             if (key == "footprintIntensity") {
                 if (v != "bar" && v != "window") return reject("invalid_layer", "footprintIntensity must be bar or window");
                 result.body.layers.insert(key, v);
@@ -577,6 +582,7 @@ QJsonObject stateJson(const StateSnapshot& s) {
             {"tpo", integer(s.tpoReceivedAtMs)}, {"volumeProfile", integer(s.volumeProfileReceivedAtMs)}}},
         {"layers", QJsonObject{{"heatmap", boolean(s.heatmapLayer)}, {"candles", boolean(s.candlesLayer)},
             {"footprint", boolean(s.footprintLayer)},
+            {"footprintSource", s.footprintSettings.value("footprintSource")},
             {"footprintIntensity", s.footprintSettings.value("footprintIntensity")},
             {"footprintHollowCandles", s.footprintSettings.value("footprintHollowCandles")},
             {"footprintNumbers", s.footprintSettings.value("footprintNumbers")}, {"tpo", boolean(s.tpoLayer)},

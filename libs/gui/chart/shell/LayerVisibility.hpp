@@ -10,6 +10,7 @@ class LayerVisibility : public QObject {
     Q_PROPERTY(int primaryField READ primaryField NOTIFY primaryFieldChanged)
     Q_PROPERTY(bool heatmapLayerEnabled READ heatmapEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool footprintLayerEnabled READ footprintEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(QString footprintSource READ footprintSource WRITE setFootprintSource NOTIFY layerVisibilityChanged)
     Q_PROPERTY(QString footprintIntensity READ footprintIntensity WRITE setFootprintIntensity NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool footprintHollowCandles READ footprintHollowCandles WRITE setFootprintHollowCandles NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool footprintNumbers READ footprintNumbers WRITE setFootprintNumbers NOTIFY layerVisibilityChanged)
@@ -31,6 +32,11 @@ public:
     int primaryField() const { return primaryField_; }
     bool heatmapEnabled() const { return heatmap_; }
     bool footprintEnabled() const { return footprint_; }
+    QString footprintSource() const { return footprintCells_ ? QStringLiteral("cells") : QStringLiteral("q16"); }
+    void setFootprintSource(const QString& value) {
+        if (value != "q16" && value != "cells") return;
+        setFootprintOption(footprintCells_, value == "cells", "footprintSource");
+    }
     QString footprintIntensity() const { return footprintWindowIntensity_ ? QStringLiteral("window") : QStringLiteral("bar"); }
     bool footprintHollowCandles() const { return footprintHollowCandles_; }
     bool footprintNumbers() const { return footprintNumbers_; }
@@ -186,6 +192,7 @@ private:
         option = value;
         changed(name, value);
     }
+    bool footprintCells_ = false;
     bool footprintWindowIntensity_ = false, footprintHollowCandles_ = true, footprintNumbers_ = true;
     void changed(std::string_view field, bool enabled) {
         if (report) report(field, enabled, false);

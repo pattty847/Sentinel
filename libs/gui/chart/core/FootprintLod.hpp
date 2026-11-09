@@ -16,13 +16,14 @@ inline FootprintStage footprintLod(double column, double row, FootprintStage pre
 // A shared render-owned history makes candle and cell decisions independent of
 // item sync order, root recreation, and a temporarily hidden candle item.
 struct FootprintPresentation {
+    bool cellsSource = false;
     bool enabled = false, numbers = true, hollowCandles = true, windowIntensity = false;
     FootprintStage previous = FootprintStage::Hidden;
     template<class Raster> FootprintStage stage(const Raster& raster) {
         previous = raster.valid && raster.dpr > 0
             ? footprintLod(raster.colPxF / raster.dpr, raster.rowPxF / raster.dpr, previous)
             : FootprintStage::Hidden;
-        if (!enabled) return FootprintStage::Hidden;
+        if (!enabled || !cellsSource) return FootprintStage::Hidden;
         return !numbers && previous == FootprintStage::Numbers ? FootprintStage::Cells : previous;
     }
     template<class Raster> bool hollow(const Raster& raster) {

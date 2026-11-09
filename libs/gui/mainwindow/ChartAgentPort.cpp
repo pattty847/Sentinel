@@ -79,11 +79,12 @@ void ChartAgentPort::bindFlowSource(IGridDataSource& source) const {
 }
 QJsonObject ChartAgentPort::footprintSettings() const {
     if (!layers_) return {};
-    return {{"footprintIntensity", layers_->footprintIntensity()},
+    return {{"footprintSource", layers_->footprintSource()}, {"footprintIntensity", layers_->footprintIntensity()},
             {"footprintHollowCandles", layers_->footprintHollowCandles()}, {"footprintNumbers", layers_->footprintNumbers()}};
 }
 void ChartAgentPort::applyFootprintSettings(const QJsonObject& patch) const {
     if (!layers_) return;
+    if (patch.contains("footprintSource")) layers_->setFootprintSource(patch["footprintSource"].toString());
     if (patch.contains("footprintIntensity")) layers_->setFootprintIntensity(patch["footprintIntensity"].toString());
     if (patch.contains("footprintHollowCandles")) layers_->setFootprintHollowCandles(patch["footprintHollowCandles"].toBool());
     if (patch.contains("footprintNumbers")) layers_->setFootprintNumbers(patch["footprintNumbers"].toBool());
@@ -91,7 +92,7 @@ void ChartAgentPort::applyFootprintSettings(const QJsonObject& patch) const {
 
 QJsonObject ChartAgentPort::footprintPatch(const QJsonObject& patch) {
     QJsonObject out;
-    for (const auto& key : {"footprintIntensity", "footprintHollowCandles", "footprintNumbers"})
+    for (const auto& key : {"footprintSource", "footprintIntensity", "footprintHollowCandles", "footprintNumbers"})
         if (patch.contains(key)) out[key] = patch[key];
     return out;
 }
