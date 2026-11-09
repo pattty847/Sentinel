@@ -44,6 +44,7 @@ SentinelServerApp::~SentinelServerApp() {
     if (m_server) {
         m_server->stop();
     }
+    if (m_serverModel) m_serverModel->attachFlowStore(nullptr);
     if (m_flowStore) m_flowStore->stop();
     if (m_serverModel) m_serverModel->setReseedHandler({});
 }
@@ -236,6 +237,7 @@ bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
                 };
                 m_flowStore = std::make_unique<recording::FlowStore>(std::move(options));
                 m_flowStore->start();
+                m_serverModel->attachFlowStore(m_flowStore.get());
             } catch (const std::exception& e) {
                 sLog_Error("Flow store unavailable error=" << e.what());
             }

@@ -90,6 +90,7 @@ protected:
     std::map<uint64_t, Decoded> replies;
     fs::path journal, hmc, root;
     int64_t through = Epoch + Hour;
+    std::atomic<int> replayRecords{0};
     std::vector<Json> published;
     uint64_t nextReq = 1;
     Json metadata = {{"product_id", "BTC-USD"}, {"quote_increment", "0.01"}, {"base_increment", "0.00000001"}};
@@ -103,6 +104,7 @@ protected:
         options.root = root; options.journalRoot = journal; options.hmc2Root = hmc;
         options.symbols = {"BTC-USD"};
         options.hourThrough = [this](const std::string&) { return through; };
+        options.afterRecordForTest = [this](std::stop_token) { replayRecords.fetch_add(1); };
         store = std::make_unique<recording::FlowStore>(std::move(options));
         fixture->model->attachFlowStore(store.get());
         FlowLiveTestAccess::stopTimer(*fixture->model);
@@ -176,6 +178,27 @@ protected:
         return takeReply(id);
     }
 };
+TEST(FlowHistoryMerge, StoreOwnershipBeatsLargerLiveRevision) {
+    using protocol::FlowBarSource;
+    using protocol::FlowBarVersion;
+    const FlowBarVersion live{FlowBarSource::Live, 2, false};
+    const FlowBarVersion store{FlowBarSource::Store, 1, true};
+    EXPECT_TRUE(protocol::flowBarReplaces(live, store));
+    EXPECT_FALSE(protocol::flowBarReplaces(store, live));
+    EXPECT_TRUE(protocol::flowBarReplaces(store, {FlowBarSource::Store, 2, true}));
+    EXPECT_TRUE(protocol::flowBarReplaces(live, {FlowBarSource::Live, 2, true}));
+    EXPECT_FALSE(protocol::flowBarReplaces({FlowBarSource::Live, 2, true}, live));
+    EXPECT_TRUE(protocol::dropLiveFlowBar(Epoch, Epoch + Hour));
+    EXPECT_FALSE(protocol::dropLiveFlowBar(Epoch + Hour, Epoch + Hour));
+}
+TEST_F(FlowHistory, DetachesStoreAfterHistoryWorkersDrain) {
+    connect();
+    ASSERT_EQ(fixture->model->flowHistorySnapshot("BTC-USD", Minute, Epoch, Epoch + Minute).store, store.get());
+    fixture->server->stop();
+    fixture->model->attachFlowStore(nullptr);
+    EXPECT_EQ(fixture->model->flowHistorySnapshot("BTC-USD", Minute, Epoch, Epoch + Minute).store, nullptr);
+    store->stop();
+}
 TEST_F(FlowHistory, StoreAndLiveAreOrderedAndPagingCrossesSeamWithoutJournalReads) {
     seed();
     // Moving only a synthetic fixture proves serving does not open the journal.
@@ -185,6 +208,9 @@ TEST_F(FlowHistory, StoreAndLiveAreOrderedAndPagingCrossesSeamWithoutJournalRead
     ASSERT_EQ(page.header["status"], "complete");
     ASSERT_EQ(page.bars.size(), 8u);
     ASSERT_EQ(page.header["ranges"].size(), 8u);
+    EXPECT_EQ(page.header["sealed_through_ms"], Epoch + Hour);
+    for (size_t i = 0; i < page.header["bars"].size(); ++i)
+        EXPECT_EQ(page.header["bars"][i]["source"], i < 3 ? "store" : "live");
     for (size_t i = 1; i < page.bars.size(); ++i)
         EXPECT_EQ(page.bars[i].startMs - page.bars[i - 1].startMs, Minute);
     EXPECT_EQ(page.bars.front().startMs, Epoch + Hour - 3 * Minute);
@@ -193,18 +219,63 @@ TEST_F(FlowHistory, StoreAndLiveAreOrderedAndPagingCrossesSeamWithoutJournalRead
     ASSERT_EQ(older.bars.size(), 8u);
     EXPECT_EQ(older.bars.back().startMs + Minute, page.bars.front().startMs);
 }
+TEST_F(FlowHistory, SealedStoreRevisionOneOwnsLiveRevisionTwoBucket) {
+    Journal writer(journal);
+    writer.snapshot(0);
+    auto print = [](int64_t rel, const std::string& id) {
+        auto value = trade(rel, id, 100000, "SELL");
+        value["size"] = "1";
+        return value;
+    };
+    writer.trades(59 * Minute + 100, {print(59 * Minute, "first")});
+    writer.trades(Hour + 500, {print(59 * Minute + 1000, "late1"),
+                                print(59 * Minute + 2000, "late2")});
+    writer.heartbeat(Hour + Minute + 1);
+    writer.close();
+    live(59 * Minute, "first");
+    tick(Hour);
+    live(59 * Minute + 1000, "late1");
+    live(59 * Minute + 2000, "late2");
+    ASSERT_EQ(store->runPass().built, 1u);
+    const auto snapshot = fixture->model->flowHistorySnapshot(
+        "BTC-USD", Minute, Epoch + 59 * Minute, Epoch + Hour);
+    ASSERT_EQ(snapshot.data.bars.size(), 1u);
+    ASSERT_EQ(snapshot.data.revisions[0], 2u);
+    connect();
+    const auto page = request(Minute, Epoch + 59 * Minute, 1);
+    ASSERT_EQ(page.bars.size(), 1u);
+    ASSERT_EQ(page.header["bars"][0]["source"], "store");
+    ASSERT_EQ(page.header["bars"][0]["revision"], 1u);
+    EXPECT_EQ(flow::encodeFlowBar(page.bars[0]), flow::encodeFlowBar(snapshot.data.bars[0]));
+    EXPECT_TRUE(protocol::flowBarReplaces(
+        {protocol::FlowBarSource::Live, snapshot.data.revisions[0], true},
+        {protocol::FlowBarSource::Store, 1, true}));
+}
+TEST_F(FlowHistory, SealedSecondsNeverComeFromRetainedLiveSeries) {
+    seed();
+    connect();
+    const auto before = replayRecords.load();
+    const auto page = request(1000, Epoch + Hour - Minute, 2);
+    ASSERT_EQ(page.bars.size(), 1u);
+    EXPECT_EQ(page.header["bars"][0]["source"], "store");
+    EXPECT_GT(replayRecords.load(), before);
+}
 TEST_F(FlowHistory, FiveMinuteHistoryEqualsComposeAndLiveFlb1) {
     seed();
     auto snapshot = fixture->model->flowHistorySnapshot("BTC-USD", 300000, Epoch + Hour, Epoch + Hour + 300000);
     ASSERT_EQ(snapshot.data.bars.size(), 5u);
     const auto expected = flow::encodeFlowBar(flow::composeFlowBars(snapshot.data.bars, 300000));
     ASSERT_FALSE(published.empty());
+    EXPECT_EQ(published.back()["source"], "live");
     auto raw = QByteArray::fromBase64(QByteArray::fromStdString(published.back()["bar"].get<std::string>()));
     EXPECT_EQ(expected, flow::Bytes(raw.begin(), raw.end()));
     fs::rename(journal, journal.string() + "-offline");
     connect();
     auto page = request(300000, Epoch + Hour, 2);
     ASSERT_EQ(page.bars.size(), 2u);
+    EXPECT_EQ(page.header["sealed_through_ms"], Epoch + Hour);
+    EXPECT_EQ(page.header["bars"][0]["source"], "store");
+    EXPECT_EQ(page.header["bars"][1]["source"], "live");
     EXPECT_EQ(flow::encodeFlowBar(page.bars.back()), expected);
     EXPECT_EQ(flow::encodeFlowBar(flow::decodeFlowBar(expected)), expected);
     auto minutes = store->window("BTC-USD", Epoch + Hour - 300000, Epoch + Hour);
@@ -218,6 +289,7 @@ TEST_F(FlowHistory, SecondsBeyondRetentionReplayJournalAndCapsAreExplicit) {
     EXPECT_EQ(page.header["status"], "complete");
     EXPECT_EQ(page.bars.front().startMs, Epoch);
     EXPECT_EQ(page.bars.front().count, 1u);
+    EXPECT_EQ(page.header["bars"][0]["source"], "store");
     auto tooLarge = request(1000, Epoch + 2 * Hour, 7200);
     EXPECT_EQ(tooLarge.header["status"], "refused");
     EXPECT_NE(tooLarge.header["error"].get<std::string>().find("3600000 ms (1 h)"), std::string::npos);
@@ -302,6 +374,8 @@ TEST_F(FlowHistory, DayCompositeAcrossStoreAndLiveMatchesLivePublication) {
     const auto reply = request(86'400'000, Epoch, 1);
     ASSERT_EQ(reply.bars.size(), 1u);
     EXPECT_EQ(reply.header["status"], "complete");
+    EXPECT_EQ(reply.header["sealed_through_ms"], Epoch + Hour);
+    EXPECT_EQ(reply.header["bars"][0]["source"], "live");
     EXPECT_EQ(flow::encodeFlowBar(reply.bars[0]), flow::Bytes(raw.begin(), raw.end()));
     sub->active.store(false);
 }

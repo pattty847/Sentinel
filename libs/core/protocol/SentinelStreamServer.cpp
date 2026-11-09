@@ -241,7 +241,8 @@ std::string envelope(Json header, const std::vector<sentinel::flow::FlowBar>& ba
 Json header(const Request& q) {
     return {{"type", "flow_history_chunk"}, {"schema_version", 1}, {"req", q.req},
             {"symbol", q.symbol}, {"timeframe_ms", q.tf}, {"oldest_ms", q.from},
-            {"price_scale", 0}, {"row_tick_units", 0}, {"ranges", Json::array()},
+            {"price_scale", 0}, {"row_tick_units", 0}, {"sealed_through_ms", 0},
+            {"ranges", Json::array()},
             {"bars", Json::array()}};
 }
 std::string refused(const Request& q, const std::string& error) {
@@ -267,19 +268,22 @@ struct Page {
     Json metadata;
     std::vector<sentinel::flow::FlowBar> bars;
 };
-Page buildPage(const Request& q, const ServerDataModel::FlowHistorySnapshot& snapshot) {
+Page buildPage(const Request& q, const ServerDataModel::FlowHistorySnapshot& snapshot,
+               int64_t sealedThroughMs) {
     Reply source;
     if (q.tf == 1000) {
         int64_t liveFrom = q.to;
         for (const auto& r : snapshot.data.ranges)
             if (r.toMs > q.from && r.fromMs < q.to)
                 liveFrom = std::min(liveFrom, std::max(q.from, r.fromMs));
-        if (q.from < liveFrom && snapshot.store)
-            append(source, snapshot.store->buildWindow(q.symbol, q.from, liveFrom), q.from, liveFrom);
-        append(source, snapshot.data, liveFrom, q.to);
+        // A sealed second is read from the journal even while still retained in RAM.
+        const auto replayEnd = std::max(liveFrom, std::clamp(sealedThroughMs, q.from, q.to));
+        if (q.from < replayEnd && snapshot.store)
+            append(source, snapshot.store->buildWindow(q.symbol, q.from, replayEnd), q.from, replayEnd);
+        append(source, snapshot.data, replayEnd, q.to);
     } else {
         auto stored = snapshot.store ? snapshot.store->window(q.symbol, q.from, q.to) : Reply{};
-        const auto seam = std::clamp(stored.sealedThroughMs, q.from, q.to);
+        const auto seam = std::clamp(sealedThroughMs, q.from, q.to);
         append(source, std::move(stored), q.from, seam);
         append(source, snapshot.data, seam, q.to);
     }
@@ -331,7 +335,8 @@ Page buildPage(const Request& q, const ServerDataModel::FlowHistorySnapshot& sna
         auto bar = q.tf == parts.front().timeframeMs ? std::move(parts.front()) :
             sentinel::flow::composeFlowBars(parts, q.tf);
         h["bars"].push_back({{"bucket_start_ms", start}, {"revision", revision},
-                              {"complete", !building && !partial}});
+                              {"complete", !building && !partial},
+                              {"source", end <= sealedThroughMs && status == "complete" ? "store" : "live"}});
         bars.push_back(std::move(bar));
     }
     h["status"] = anyBuilding ? "building" : anyPartial ? "partial" : "complete";
@@ -344,6 +349,8 @@ Page buildPage(const Request& q, const ServerDataModel::FlowHistorySnapshot& sna
 std::string build(const Request& q, const ServerDataModel::FlowHistorySnapshot& snapshot) {
     auto h = header(q);
     h["status"] = "complete";
+    const auto sealedThroughMs = snapshot.store ? snapshot.store->sealedThroughMs(q.symbol) : 0;
+    h["sealed_through_ms"] = sealedThroughMs;
     std::vector<sentinel::flow::FlowBar> bars;
     size_t encodedBytes = 0;
     // Bound source memory to a single UTC day even for a 512-day page.
@@ -351,7 +358,7 @@ std::string build(const Request& q, const ServerDataModel::FlowHistorySnapshot& 
         const auto to = std::min(q.to, (from / 86'400'000 + 1) * 86'400'000);
         auto part = q;
         part.from = from; part.to = to;
-        auto page = buildPage(part, snapshot);
+        auto page = buildPage(part, snapshot, sealedThroughMs);
         if (page.metadata["status"] == "building" ||
             (page.metadata["status"] == "partial" && h["status"] == "complete"))
             h["status"] = page.metadata["status"];

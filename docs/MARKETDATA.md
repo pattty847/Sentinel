@@ -204,15 +204,13 @@ invalid requests, unsupported products/timeframes and capacity refusals return
 upstream product: it uses the configured journal products.
 
 The server sends JSON `flow_bar` with `schema_version`, `sub`, `symbol`,
-`timeframe_ms`, `bucket_start_ms`, `closed`, `complete`, `revision`, `row_tick_units`,
-`price_scale`, `encoding: "FLB1/base64"`, and `bar` (base64-encoded FLB1 bytes).
+`timeframe_ms`, `bucket_start_ms`, `closed`, `complete`, `revision`,
+`source: "live"`, `row_tick_units`, `price_scale`, `encoding: "FLB1/base64"`,
+and `bar` (base64-encoded FLB1 bytes).
 FLB1 contains OHLC, integer base/quote volumes and scales, count, native price
 rows, buy/sell totals, delta, maximum row volume and up to eight notable trades.
-Revision is **only envelope metadata**, never part of FLB1 content. Clients
-replace by `(symbol, timeframe_ms, bucket_start_ms)`, reject lower revisions,
-and apply equal-revision updates in stream order (forming updates and the close
-republish can share a revision). A `complete: false` bar must never replace a
-`complete: true` bar at the same revision. Coverage begins when the server
+Revision is **only envelope metadata**, never part of FLB1 content. A forming
+update and close republish can share a live revision. Coverage begins when the server
 receives its first live trade; a bar is complete only if that trade was at or
 before the bucket start and no trade in the bucket was lost or rejected. An
 empty minute is covered, not a loss. Every accepted late
@@ -291,8 +289,10 @@ An accepted request returns one binary WebSocket message:
 
 The header contains `type: "flow_history_chunk"`, `schema_version: 1`, `req`,
 `symbol`, `timeframe_ms`, `price_scale`, `row_tick_units`, `status`, `oldest_ms`,
-`ranges` and `bars`. `bars` entries carry `bucket_start_ms`, uint32 `revision`
-and boolean `complete`, in the same ascending order as the binary records.
+`sealed_through_ms`, `ranges` and `bars`. `bars` entries carry `bucket_start_ms`,
+uint32 `revision`, boolean `complete`, and `source: "store" | "live"`, in the
+same ascending order as the binary records. The watermark is the recorder's
+committed closed-hour boundary for that symbol; it refreshes on every page.
 Revision and completeness are envelope metadata; FLB1 content is unchanged.
 Each range has half-open `from_ms`, `to_ms`, `status`, `price_scale` and
 `row_tick_units`. There is one range per requested bucket, including buckets
@@ -336,15 +336,25 @@ worker-local, one-shot journal replay with no persistent writes. The replay
 window cap is 3,600,000 ms (1 h), enforced independently of the stricter 512-bar
 page cap. A two-hour 1 s request is refused with the one-hour cap named in its
 error. Journal replay uses the same grid resolver, trade builder and receive-time
-tail as the store. A missing/short journal returns partial coverage.
+tail as the store. A missing/short journal returns partial coverage. A
+second replayed inside an unsealed hour remains provisional (`source: "live"`).
+Sealed seconds come from journal replay even when retained live seconds overlap.
 
-Merge history and live by `(symbol, timeframe_ms, bucket_start_ms)`: a higher
-revision wins; at equal revision a complete bar wins over an incomplete bar.
-For equal revision and completeness, preserve a live update received after the
-history request was issued, since the queued history snapshot may precede it.
-Range status is separate from bar replacement: a building range remains visibly
-not built even when the client has a partial bar for it. No client disk cache is
-required.
+### Client merge of flow bars
+
+Key bars by `(symbol, timeframe_ms, bucket_start_ms)`. A complete sealed
+`source: "store"` bar replaces a `source: "live"` bar regardless of revision;
+live never replaces store. Compare revisions only within the same source: the
+higher store generation wins over an older store generation, and the higher
+live revision wins over an older live revision. At equal live revision,
+`complete: true` wins; otherwise apply live updates in stream order. The
+history chunk's `sealed_through_ms` replaces the client's prior watermark for
+that symbol. Drop a later live `flow_bar` when its `bucket_start_ms` is below
+that watermark. This also suppresses live updates to a forming coarse bucket
+that spans the sealed boundary; a history page can still return its provisional
+composition for that bucket, so refresh its page when needed. Range status
+stays separate: show `building` as not built even if a provisional bar exists.
+No client disk cache is required.
 
 ## Heatmap history transport
 

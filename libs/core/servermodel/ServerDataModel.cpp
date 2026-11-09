@@ -879,6 +879,11 @@ void ServerDataModel::onFlowGrid(const std::string& symbol, int64_t dayStartMs,
     }
 }
 
+void ServerDataModel::attachFlowStore(recording::FlowStore* store) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    m_flowStore = store;
+}
+
 ServerDataModel::FlowHistorySnapshot ServerDataModel::flowHistorySnapshot(
     const std::string& symbol, int64_t tf, int64_t from, int64_t to) const {
     Q_ASSERT(QThread::currentThread() == thread());
@@ -998,6 +1003,7 @@ void ServerDataModel::publishFlowBar(const std::string& symbol, int64_t tf,
                 {"schema_version", protocol::SentinelProtocol::kFlowSchemaVersion},
                 {"symbol", symbol}, {"timeframe_ms", tf}, {"bucket_start_ms", bar.startMs},
                 {"closed", closed}, {"complete", complete}, {"revision", revision},
+                {"source", "live"},
                 {"encoding", "FLB1/base64"}, {"bar", encoded.toStdString()},
                 {"row_tick_units", std::llround(bar.nativeTick * bar.priceScale)},
                 {"price_scale", bar.priceScale}};

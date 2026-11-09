@@ -66,7 +66,7 @@ public:
         int64_t observedThroughMs = 0;
     };
     // Model-thread only. Attachment occurs before the stream server starts.
-    void attachFlowStore(recording::FlowStore* store) { m_flowStore = store; }
+    void attachFlowStore(recording::FlowStore* store);
     FlowHistorySnapshot flowHistorySnapshot(const std::string& symbol, int64_t timeframeMs,
                                           int64_t fromMs, int64_t toMs) const;
     void subscribeFlow(std::shared_ptr<FlowSubscription> subscription);

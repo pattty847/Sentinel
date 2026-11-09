@@ -926,6 +926,11 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
             break;
     }
 }
+int64_t FlowStore::sealedThroughMs(const std::string &symbol) const {
+    sentinel::capture::validateSymbol(symbol);
+    return options_.hourThrough(symbol) / Hour * Hour;
+}
+
 FlowStore::Reply FlowStore::buildWindow(const std::string &symbol, int64_t from, int64_t to,
                                             std::stop_token stop) {
     sentinel::capture::validateSymbol(symbol);
@@ -981,7 +986,7 @@ FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int6
     bool missingSealed = false;
     bool sealedRequested = false;
     try {
-        const auto through = options_.hourThrough(symbol) / Hour * Hour;
+        const auto through = sealedThroughMs(symbol);
         reply.sealedThroughMs = through;
         for (auto day = dayFloor(from); day < to; day += Day) {
             const auto path = filePath(symbol, day);

@@ -81,6 +81,8 @@ class FlowStore {
     // One-shot 1s replay; worker-local readers, no persistent writes or shared catalog.
     Reply buildWindow(const std::string &symbol, int64_t fromMs, int64_t toMs,
                       std::stop_token stop = {});
+    // Recorder's committed closed-hour watermark; safe on a history worker.
+    int64_t sealedThroughMs(const std::string &symbol) const;
     std::filesystem::path filePath(const std::string &symbol, int64_t dayMs) const;
     const std::filesystem::path &root() const { return options_.root; }
 

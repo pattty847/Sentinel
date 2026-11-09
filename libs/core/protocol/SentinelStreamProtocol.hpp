@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <cstdint>
 #include <vector>
 #include <nlohmann/json.hpp>
 
@@ -20,6 +21,26 @@ constexpr int kTpoSchemaVersion = 1;
 constexpr int kVolumeProfileSchemaVersion = 1;
 constexpr int kMaxGridHeight = 65536;
 constexpr int kMaxPayloadBytes = 262144; // 256 KiB
+}
+
+// Applies to live flow_bar messages after the client has observed a history page.
+inline bool dropLiveFlowBar(int64_t bucketStartMs, int64_t sealedThroughMs) {
+    return bucketStartMs < sealedThroughMs;
+}
+
+enum class FlowBarSource { Store, Live };
+struct FlowBarVersion {
+    FlowBarSource source = FlowBarSource::Live;
+    uint32_t revision = 0;
+    bool complete = false;
+};
+// Compare revisions only within a source. A sealed store bar owns its bucket.
+inline bool flowBarReplaces(FlowBarVersion existing, FlowBarVersion incoming) {
+    if (existing.source != incoming.source) return incoming.source == FlowBarSource::Store;
+    if (incoming.revision != existing.revision) return incoming.revision > existing.revision;
+    if (incoming.source == FlowBarSource::Store) return false;
+    if (existing.complete != incoming.complete) return incoming.complete;
+    return true; // equal live revision/completeness follows stream order
 }
 
 enum class MessageType {
