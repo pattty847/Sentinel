@@ -212,9 +212,10 @@ Revision is **only envelope metadata**, never part of FLB1 content. Clients
 replace by `(symbol, timeframe_ms, bucket_start_ms)`, reject lower revisions,
 and apply equal-revision updates in stream order (forming updates and the close
 republish can share a revision). A `complete: false` bar must never replace a
-`complete: true` bar at the same revision. `complete: false` means the live
-series has missing minute coverage from the bucket start, including a server
-that began receiving trades partway through the bucket. Every accepted late
+`complete: true` bar at the same revision. Coverage begins when the server
+receives its first live trade; a bar is complete only if that trade was at or
+before the bucket start and no trade in the bucket was lost or rejected. An
+empty minute is covered, not a loss. Every accepted late
 trade behind the published close watermark increments the revision; multiple
 late trades can coalesce into one publication with a correspondingly larger revision.
 
@@ -228,9 +229,9 @@ only 1 s and 1 m bars from trades. It composes 5 m, 15 m and 1 h bars from
 retained 1 m bars, and 4 h and 1 d bars from closed-hour composites plus the
 forming hour. Closed-hour composites are retained for the UTC day and its
 60-second rollover grace, at most 24 per product; the forming hour is separate.
-A coarse composite is recomputed only when one of its minutes
-changes. No journal rebuild or historical coverage is implied by these live
-messages.
+A coarse composite is recomputed when a constituent minute changes, its
+coverage changes, a subscriber attaches, or its bucket closes. No journal
+rebuild or historical coverage is implied by these live messages.
 
 The model's Qt-thread timer materializes and encodes changed bars at most once
 per `recording.live_publish_ms` (clamped to the configured 250–5,000 ms range).
@@ -250,11 +251,13 @@ and 62 minute buckets, including clock/publication slack. Only the
 current and preceding UTC day can be held. Watermark maintenance drops only
 already-published, unchanged finals; a stalled publication loop refuses additions
 that would overrun the slots. `sentinel_flow_dropped_trades_total` counts additions
-refused behind the retention watermark or at capacity, and
-`sentinel_flow_dropped_buckets_total` counts retired buckets. The sibling
+refused behind the retention watermark, at capacity, for missing grids or by
+builder validation. `sentinel_flow_dropped_buckets_total` counts retired buckets. The sibling
 `sentinel_flow_missing_grid_trades_total` counts trades for a UTC day without
-a recorder grid; the server warns once per product-day. These are series
-counts: one input trade can affect several series. Retention bounds the time
+a recorder grid; the server warns once per product-day.
+`sentinel_flow_hour_shrink_refusals_total` counts attempts to replace a cached
+hour from fewer source minutes. Dropped-trade counts are per series, so one
+input trade can affect several series. Retention bounds the time
 window and bucket count, not the exchange's trade rate within a bucket.
 
 `{"type":"flow_live_unsubscribe","sub":7}` cancels the subscription. Cancellation

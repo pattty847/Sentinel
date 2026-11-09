@@ -25,6 +25,21 @@ struct FlowLiveTestAccess {
   }
   static uint64_t missingGridDrops(ServerDataModel &m) { return m.m_flowMissingGridTrades; }
   static uint64_t totalDrops(ServerDataModel &m) { return m.m_flowDroppedTrades; }
+  static uint64_t hourShrinkRefusals(ServerDataModel &m) { return m.m_flowHourShrinkRefusals; }
+  static const auto& hour(ServerDataModel &m, int64_t day, int64_t start) {
+    return m.m_flowProducts.at("BTC-USD").days.at(day).hours.at(start);
+  }
+  static void discardEarlyMinutesAndRecompose(ServerDataModel &m, int64_t day,
+                                               int64_t hourStart) {
+    auto &product = m.m_flowProducts.at("BTC-USD");
+    auto &state = product.days.at(day);
+    auto &minute = state.series.at(60'000);
+    const int64_t keep = hourStart + 59 * 60'000;
+    minute.builder.dropBefore(keep);
+    for (auto &slot : minute.bucketSlots)
+      if (slot.start >= hourStart && slot.start < keep) slot = {};
+    m.updateHour(state, product, hourStart);
+  }
   static const auto& coarse(ServerDataModel &m, int64_t day, int64_t tf, int64_t start) {
     return m.m_flowProducts.at("BTC-USD").days.at(day).coarse.at({tf, start});
   }
@@ -339,7 +354,7 @@ TEST_F(FlowLive, DailySubscriptionKeepsOnlyMinuteAndSecondBuilders) {
   EXPECT_EQ(FlowLiveTestAccess::seriesCount(*model, Day), 2u);
   EXPECT_LE(FlowLiveTestAccess::hourCount(*model, Day), 24u);
   EXPECT_EQ(FlowLiveTestAccess::coarse(*model, Day, 86'400'000, Day).bar.count, 800u);
-  EXPECT_EQ(frames.back()["complete"], false);
+  EXPECT_EQ(frames.back()["complete"], true);
 }
 
 TEST_F(FlowLive, MissingGridTradeIsCounted) {
@@ -404,6 +419,148 @@ TEST_F(FlowLive, MidnightRetainsClosedHoursForLateDailyRevisionWithinGrace) {
   EXPECT_EQ(revised.bar.count, 25u);
   EXPECT_GE(revised.revision, 1u);
   EXPECT_EQ(FlowLiveTestAccess::hourCount(*model, Day), 24u);
+}
+
+TEST_F(FlowLive, WatermarkJumpCannotShrinkHourOrLoseItsClose) {
+  auto hourSub = subscribe(3'600'000);
+  auto daySub = subscribe(86'400'000, 2);
+  const int64_t hourStart = Day + 10 * 3'600'000;
+  for (int minute = 0; minute < 60; ++minute) {
+    model->onTrade(trade(hourStart + minute * 60'000, std::to_string(minute)));
+    tick(hourStart + minute * 60'000 + 1000);
+  }
+  model->onFeedWatermark("BTC-USD", hourStart + 3'600'000 + 121'000);
+  FlowLiveTestAccess::tick(*model);
+  EXPECT_EQ(FlowLiveTestAccess::hour(*model, Day, hourStart).bar.count, 60u);
+  EXPECT_EQ(FlowLiveTestAccess::coarse(*model, Day, 86'400'000, Day).bar.count, 60u);
+  const auto closed = std::find_if(frames.begin(), frames.end(), [&](const Json &frame) {
+    return frame["timeframe_ms"] == 3'600'000 &&
+           frame["bucket_start_ms"] == hourStart && frame["closed"] == true;
+  });
+  ASSERT_NE(closed, frames.end());
+  EXPECT_EQ(sentinel::flow::decodeFlowBar(bytes(*closed)).count, 60u);
+}
+
+TEST_F(FlowLive, LateMinuteBeforeWatermarkCannotShrinkClosedHour) {
+  auto hourSub = subscribe(3'600'000);
+  const int64_t hourStart = Day + 10 * 3'600'000;
+  for (int minute = 0; minute < 60; ++minute) {
+    model->onTrade(trade(hourStart + minute * 60'000, std::to_string(minute)));
+    tick(hourStart + minute * 60'000 + 1000);
+  }
+  tick(hourStart + 3'601'000);
+  model->onTrade(trade(hourStart + 3'599'800, "late"));
+  model->onFeedWatermark("BTC-USD", hourStart + 3'600'000 + 61'200);
+  FlowLiveTestAccess::tick(*model);
+  const auto &closed = FlowLiveTestAccess::hour(*model, Day, hourStart);
+  EXPECT_EQ(closed.bar.count, 61u);
+  EXPECT_GE(closed.revision, 1u);
+  EXPECT_EQ(closed.sourcePartCount, 60u);
+}
+
+TEST_F(FlowLive, CachedClosedHourRefusesShorterSource) {
+  auto sub = subscribe(3'600'000);
+  for (int minute = 0; minute < 60; ++minute) {
+    model->onTrade(trade(Day + minute * 60'000, std::to_string(minute)));
+    tick(Day + minute * 60'000 + 1000);
+  }
+  tick(Day + 3'601'000);
+  ASSERT_EQ(FlowLiveTestAccess::hour(*model, Day, Day).bar.count, 60u);
+  FlowLiveTestAccess::discardEarlyMinutesAndRecompose(*model, Day, Day);
+  EXPECT_EQ(FlowLiveTestAccess::hourShrinkRefusals(*model), 1u);
+  EXPECT_EQ(FlowLiveTestAccess::hour(*model, Day, Day).bar.count, 60u);
+}
+
+TEST_F(FlowLive, EmptyMinutesRemainCoveredWhenHourCloses) {
+  auto sub = subscribe(3'600'000);
+  model->onTrade(trade(Day, "only-trade"));
+  tick(Day + 1000);
+  tick(Day + 3'601'000);
+  const auto closed = std::find_if(frames.begin(), frames.end(), [](const Json &frame) {
+    return frame["timeframe_ms"] == 3'600'000 && frame["closed"] == true;
+  });
+  ASSERT_NE(closed, frames.end());
+  EXPECT_EQ((*closed)["complete"], true);
+  EXPECT_EQ(sentinel::flow::decodeFlowBar(bytes(*closed)).count, 1u);
+}
+
+TEST_F(FlowLive, CapacityDropClearsPreviouslyCompleteDailyBar) {
+  auto sub = subscribe(86'400'000);
+  model->onTrade(trade(Day, "first"));
+  tick(Day + 1000);
+  ASSERT_EQ(frames.back()["complete"], true);
+  for (int minute = 1; minute <= 62; ++minute)
+    model->onTrade(trade(Day + minute * 60'000, std::to_string(minute)));
+  tick(Day + 62 * 60'000 + 1000);
+  EXPECT_GT(FlowLiveTestAccess::series(*model, "BTC-USD", Day, 60'000).capacityDrops, 0u);
+  EXPECT_EQ(frames.back()["complete"], false);
+}
+
+TEST_F(FlowLive, RejectedTradeClearsPreviouslyCompleteDailyBar) {
+  auto sub = subscribe(86'400'000);
+  model->onTrade(trade(Day, "first"));
+  tick(Day + 1000);
+  ASSERT_EQ(frames.back()["complete"], true);
+  model->onTrade(trade(Day + 1000, "invalid-size", 0));
+  tick(Day + 2000);
+  ASSERT_EQ(frames.size(), 2u);
+  EXPECT_EQ(frames.back()["complete"], false);
+  EXPECT_EQ(sentinel::flow::decodeFlowBar(bytes(frames.back())).count, 1u);
+}
+
+TEST_F(FlowLive, MissingGridDropMarksLaterHourIncomplete) {
+  ServerDataModel bare(config);
+  FlowLiveTestAccess::stopTimer(bare);
+  bare.onTrade(trade(Day, "missing"));
+  grid(bare);
+  std::vector<Json> seen;
+  auto sub = std::make_shared<FlowSubscription>();
+  sub->sub = 1; sub->symbol = "BTC-USD"; sub->timeframeMs = 3'600'000;
+  sub->publish = [&](std::string payload) { seen.push_back(Json::parse(payload)); };
+  bare.subscribeFlow(sub);
+  bare.onTrade(trade(Day, "present"));
+  bare.onFeedWatermark("BTC-USD", Day + 1000);
+  FlowLiveTestAccess::tick(bare);
+  ASSERT_EQ(seen.size(), 1u);
+  EXPECT_EQ(seen.front()["complete"], false);
+  EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(bare), 1u);
+}
+
+TEST_F(FlowLive, DailyHourCompositionMatchesDirectBuildWithSweeps) {
+  using namespace sentinel::flow;
+  auto sub = subscribe(86'400'000);
+  const auto scales = flowScales(sentinel::roller::deriveGrid(metadata(), 100000), metadata());
+  FlowBarBuilder direct(86'400'000, scales.nativeTick, scales.priceScale,
+                        scales.baseScale, scales.quoteScale);
+  for (int hour : {0, 2, 5, 8}) {
+    for (int i = 0; i < 4; ++i) {
+      auto t = trade(Day + hour * 3'600'000 + i * 1000,
+                     std::to_string(hour) + "-" + std::to_string(i),
+                     1.0 + i * 0.25, i % 2 ? AggressorSide::Sell : AggressorSide::Buy);
+      t.price = 100000 + (hour % 3) * 3 + i;
+      model->onTrade(t);
+      ASSERT_EQ(direct.add(flowTrade(t)), FlowBarBuilder::AddResult::Accepted);
+    }
+    tick(Day + hour * 3'600'000 + 5000);
+  }
+  const auto &composite = FlowLiveTestAccess::coarse(*model, Day, 86'400'000, Day).bar;
+  const auto expected = direct.bars().front();
+  ASSERT_GT(expected.rows.size(), 1u);
+  ASSERT_EQ(expected.notable.size(), NotableCapacity);
+  const auto wire = encodeFlowBar(composite);
+  EXPECT_EQ(encodeFlowBar(decodeFlowBar(wire)), encodeFlowBar(expected));
+}
+
+TEST_F(FlowLive, StalledPublishStillSendsExpiredCoarseClose) {
+  auto sub = subscribe(300'000);
+  model->onTrade(trade(Day, "first"));
+  tick(Day + 1000);
+  frames.clear();
+  model->onFeedWatermark("BTC-USD", Day + 421'000);
+  FlowLiveTestAccess::tick(*model);
+  ASSERT_EQ(frames.size(), 1u);
+  EXPECT_EQ(frames.front()["bucket_start_ms"], Day);
+  EXPECT_EQ(frames.front()["closed"], true);
 }
 
 TEST_F(FlowLive, RealTimerBoundsBurstAndStopsAfterUnsubscribe) {
