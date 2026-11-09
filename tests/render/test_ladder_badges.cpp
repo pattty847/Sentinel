@@ -92,6 +92,12 @@ int inkChars(const BadgePill& p) {
     for (int i = 0; i < p.length; ++i) n += p.text[i] != ' ';
     return n;
 }
+double sizeTextWidth(const BadgePill& p) {
+    double advance = 0;
+    for (int i = 0; i < p.length && p.text[i] != ' '; ++i)
+        advance += atlas().glyph(QChar(p.text[i])).advance;
+    return advance * chart::kBadgeFontPx / atlas().fontPx();
+}
 
 struct BadgeRig {
     chart::LadderLayer layer;
@@ -100,7 +106,6 @@ struct BadgeRig {
     chart_raster::RasterCamera cam;
     QQuickWindow* window = nullptr;
     bool atlasReady = true;
-    bool cellLabels = false; // the heatmap drew its cell value labels
     uint64_t serial = 0;
     explicit BadgeRig(const chart_raster::RasterCamera& c) : cam(c) { root.appendChildNode(layer.createContainer()); }
     // A fresh valid, complete radar snapshot covering bins [lo, lo + count) at bin 1.
@@ -145,7 +150,7 @@ struct BadgeRig {
         layer.sync(f);
         layer.updateNodes(f, context);
         text.beginFrame(&root, window, atlas());
-        layer.submitLabels(f, context, cellLabels);
+        layer.submitLabels(f, context);
         text.endFrame();
     }
     void post() {
@@ -259,7 +264,7 @@ TEST(LadderBadges, ThinBandWinnersRespectRowCollisionsEdgePillsAndSurfaceBounds)
     }
 }
 
-TEST(LadderBadges, ThinRowsSurviveCoarseAndFractionalTicksAndCellLabelTransitions) {
+TEST(LadderBadges, ThinRowsSurviveCoarseAndFractionalTicksAndRedraws) {
     for (const double tick : {0.01, 1.0, 10.0}) {
         SCOPED_TRACE(tick);
         BadgeRig rig(camera(100 * tick, 180 * tick, tick, 2));
@@ -271,7 +276,6 @@ TEST(LadderBadges, ThinRowsSurviveCoarseAndFractionalTicksAndCellLabelTransition
         const QRectF rect = rig.pills()[0].rect;
         const auto label = text(rig.pills()[0]);
         EXPECT_EQ(label.find('$'), 0u);
-        rig.cellLabels = true;
         rig.draw();
         ASSERT_EQ(rig.rowBadges(), 1);
         EXPECT_EQ(text(rig.pills()[0]), label);
@@ -281,7 +285,6 @@ TEST(LadderBadges, ThinRowsSurviveCoarseAndFractionalTicksAndCellLabelTransition
         rig.draw();
         ASSERT_EQ(rig.rowBadges(), 1);
         rig.cam = camera(100 * tick, 180 * tick, tick, 2);
-        rig.cellLabels = false;
         rig.draw();
         ASSERT_EQ(rig.rowBadges(), 1);
         EXPECT_EQ(rig.pills()[0].rect, rect);
@@ -470,7 +473,7 @@ TEST(LadderBadges, ThinLayoutReusesReservedStorageWithoutAllocating) {
     chart::LadderBadges badges;
     const auto& a = atlas();
     auto frame = rig.frame();
-    badges.layout(s, frame.context, &a, false);
+    badges.layout(s, frame.context, &a);
     ASSERT_GT(badges.stats().rowBadges, 0);
     const auto bytes = badges.capacityBytes();
     const auto* pills = badges.pills().data();
@@ -481,7 +484,7 @@ TEST(LadderBadges, ThinLayoutReusesReservedStorageWithoutAllocating) {
         frame.context.raster = chart_raster::continuousRaster(inputs(100.0 + i * 0.01, 180.0, 1, 2, 320));
         s.rows[100].bidWallMs = i % 2 ? 59'000 : 60'000;
         s.rows[100].bidFlickers = uint16_t(i);
-        badges.layout(s, frame.context, &a, i % 2);
+        badges.layout(s, frame.context, &a);
     }
     gCounting = false;
     EXPECT_EQ(gAllocations.load(), 0u);
@@ -543,6 +546,7 @@ TEST(LadderBadges, RowNotionalsEndAtTheSameXAcrossHistoryAndDpr) {
             if (i) EXPECT_NEAR(glyphRight, right, 1.0 / dpr);
             else right = glyphRight;
             EXPECT_DOUBLE_EQ(pill.rect.right(), 640 - chart::kBadgeInsetPx);
+            EXPECT_NEAR(pill.textLeft + sizeTextWidth(pill), pill.rect.right() - chart::kBadgePadX, 1e-9);
             offset += count;
         }
         ASSERT_EQ(offset, glyphs.size());
@@ -571,37 +575,6 @@ TEST(LadderBadges, ABinWithBothSidesLargeGetsOneBadgeForTheLargerNotional) {
     EXPECT_EQ(rig.pills()[1].colour, BadgePill::Bid) << "bin 102: bid larger";
     EXPECT_EQ(text(rig.pills()[1]), "$1.23k");
     EXPECT_EQ(rig.pills()[2].colour, BadgePill::Ask) << "bin 100: ask larger";
-}
-
-TEST(LadderBadges, VisibleCellLabelsKeepTheNotionalInRowBadges) {
-    BadgeRig rig(camera(90, 110));
-    const auto fill = [&] {
-        rig.snapshot();
-        rig.wall(104, S::kAsk, 7, 60'000, 3, true);
-        rig.wall(102, S::kBid, 12, 5'000);
-        rig.wall(100, S::kBid, 12);
-        rig.candidate(S::kAsk, S::kAbove, 120, 50);
-        rig.post();
-    };
-    fill();
-    ASSERT_EQ(rig.pills().size(), 4u);
-    EXPECT_EQ(text(rig.pills()[1]), "$732");
-    EXPECT_EQ(text(rig.pills()[2]), "$1.23k");
-    EXPECT_EQ(text(rig.pills()[3]), "$1.21k");
-    const QRectF rect = rig.pills()[3].rect;
-    rig.cellLabels = true;
-    rig.draw(); // the same snapshot and frame: the flag alone relays out
-    ASSERT_EQ(rig.pills().size(), 4u);
-    EXPECT_EQ(text(rig.pills()[0]), "$6.00k  +$10.0") << "the edge pill keeps its notional";
-    EXPECT_EQ(text(rig.pills()[1]), "$732");
-    EXPECT_EQ(text(rig.pills()[2]), "$1.23k");
-    EXPECT_EQ(text(rig.pills()[3]), "$1.21k");
-    EXPECT_EQ(rig.pills()[3].rect, rect);
-    EXPECT_DOUBLE_EQ(rig.pills()[3].rect.right(), 640 - chart::kBadgeInsetPx);
-    for (int i = 1; i < 4; ++i) EXPECT_EQ(text(rig.pills()[size_t(i)]).find('$'), 0u);
-    rig.cellLabels = false;
-    rig.draw();
-    EXPECT_EQ(text(rig.pills()[3]), "$1.21k");
 }
 
 TEST(LadderBadges, ARowCutByTheEdgeOrUnderAnEdgePillHasNoBadge) {
@@ -968,7 +941,7 @@ TEST(LadderBadgesGpu, WarmedFramesAllocateNothingThroughEndFrame) {
         rig.layer.sync(frame);
         rig.layer.updateNodes(frame, context);
         rig.text.beginFrame(&root, rig.window, atlas());
-        rig.layer.submitLabels(frame, context, false);
+        rig.layer.submitLabels(frame, context);
         rig.text.endFrame();
     };
     gAllocations = 0;

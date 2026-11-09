@@ -71,9 +71,8 @@ class LadderBadges {
 public:
     LadderBadges();
     // Lays out the badges and pills of a drawn snapshot on this frame; nothing when the
-    // radar is off or the atlas is not built. The cellLabels argument is retained at
-    // the LadderLayer boundary; it does not change badge text.
-    void layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas, bool cellLabels);
+    // radar is off or the atlas is not built.
+    void layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas);
     // Writes backgrounds and arrows (at most kMaxBadgeVertices); returns the count.
     int writeGeometry(QSGGeometry::ColoredPoint2D* v) const;
     const std::vector<ChartGlyphInstance>& glyphs() const { return glyphs_; }

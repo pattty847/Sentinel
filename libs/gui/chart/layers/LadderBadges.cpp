@@ -134,8 +134,7 @@ bool LadderBadges::prepareAtlas(const ChartTextAtlas* atlas) {
     return true;
 }
 
-void LadderBadges::layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas,
-                          bool /*cellLabels*/) {
+void LadderBadges::layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas) {
     pills_.clear();
     glyphs_.clear();
     stats_ = {};
@@ -160,7 +159,7 @@ void LadderBadges::finishPill(BadgePill& p, double right, double top, double dpr
     const double width = std::ceil((2 * kBadgePadX + arrowW + textW) * dpr) / dpr;
     p.rect = QRectF(right - width, top, width, kPillH);
     p.textLeft = p.arrow ? snap(p.rect.left() + kBadgePadX + arrowW, dpr)
-                         : snap(right - kBadgePadX - textW, dpr);
+                         : right - kBadgePadX - textW;
     p.textTop = snap(top + 0.5 * (kPillH - boxH_), dpr);
 }
 
@@ -313,7 +312,7 @@ bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int 
     return true;
 }
 
-// The pill's text origin is already on device pixels; glyphs keep their offsets from it.
+// Glyphs keep their offsets from the pill's text origin.
 void LadderBadges::compose(const BadgePill& p) {
     const QColor colour = QColor::fromRgba(textColour(p.colour));
     double pen = 0;

@@ -206,18 +206,17 @@ void LadderLayer::rebuild(const ChartFrame& frame) {
     ++rebuilds_;
 }
 
-void LadderLayer::rebuildBadges(const ChartFrame& frame, bool cellLabels) {
+void LadderLayer::rebuildBadges(const ChartFrame& frame) {
     QElapsedTimer timer;
     timer.start();
-    badgeLayout_.layout(*current_, frame.context, key_.atlas, cellLabels);
+    badgeLayout_.layout(*current_, frame.context, key_.atlas);
     commitVertices(badges_, badgeLayout_.writeGeometry(badges_->geometry()->vertexDataAsColoredPoint2D()),
                    badgeVertices_);
     ++dirtyMarks_;
     if (!current_->radar || !key_.atlas) return; // no layout ran
     const auto& st = badgeLayout_.stats();
     sLog_Probe("ladder.badges", "serial=" << current_->serial << " rows=" << st.rowBadges << " dropped=" << st.dropped
-               << " pills=" << st.edgePills << " glyphs=" << st.glyphs << " cellLabels=" << cellLabels
-               << " vertices=" << badgeVertices_
+               << " pills=" << st.edgePills << " glyphs=" << st.glyphs << " vertices=" << badgeVertices_
                << " ns=" << timer.nsecsElapsed());
 }
 
@@ -227,12 +226,11 @@ bool LadderLayer::reserveText(ChartTextRenderer& text) const {
            text.reserve(QColor::fromRgba(kHotText), kMaxBadgeGlyphs);
 }
 
-void LadderLayer::submitLabels(const ChartFrame& frame, LayerNodeContext& context, bool cellLabels) {
+void LadderLayer::submitLabels(const ChartFrame& frame, LayerNodeContext& context) {
     if (!gate_ || !drawing_) return;
-    if (!badgesBuilt_ || cellLabels != cellLabels_) {
+    if (!badgesBuilt_) {
         badgesBuilt_ = true;
-        cellLabels_ = cellLabels;
-        rebuildBadges(frame, cellLabels);
+        rebuildBadges(frame);
     }
     if (!current_->radar || !context.atlasReady) return;
     if (!reserved_) reserved_ = reserveText(context.text);
