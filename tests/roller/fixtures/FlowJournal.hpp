@@ -25,10 +25,11 @@ struct Journal {
     uint64_t connection = 1, sequence = 0;
     explicit Journal(const std::filesystem::path &root, std::string symbol = "BTC-USD",
                      std::string baseIncrement = "0.00000001", std::string bidPrice = "99999",
-                     std::string askPrice = "100001")
+                     std::string askPrice = "100001", std::string quoteIncrement = "0.01")
         : writer(config(root, symbol),
                  {{"product_metadata",
-                   {{"product_id", symbol}, {"quote_increment", "0.01"}, {"base_increment", baseIncrement}}}}),
+                   {{"product_id", symbol}, {"quote_increment", quoteIncrement},
+                    {"base_increment", baseIncrement}}}}),
           product(std::move(symbol)), bid(std::move(bidPrice)), ask(std::move(askPrice)) {}
     static sentinel::capture::WriterConfig config(const std::filesystem::path &root,
                                                    const std::string &symbol) {

@@ -1,5 +1,6 @@
 #pragma once
 #include "flow/FlowCodec.hpp"
+#include "flow/FlowScales.hpp"
 #include <chrono>
 #include <array>
 #include <condition_variable>
@@ -7,10 +8,19 @@
 #include <functional>
 #include <mutex>
 #include <map>
+#include <memory>
 #include <stop_token>
 #include <thread>
 
+namespace sentinel::roller { class JournalReader; }
 namespace recording {
+struct FlowStoreGridValues {
+    sentinel::flow::FlowScales scales;
+    double sizeFloor = 0;
+    uint64_t configHash = 0;
+    bool hasHmc2 = false;
+    bool operator==(const FlowStoreGridValues &) const = default;
+};
 // Resolve symlinks and reject overlap in either direction with source, rollup,
 // and protected recording roots.
 std::filesystem::path flowRootFor(const std::string &configured, const std::filesystem::path &hmc2Root,
@@ -35,6 +45,8 @@ class FlowStore {
         // Cancellation-aware synchronization seam, called on the builder after a record.
         std::function<void(std::stop_token)> afterRecordForTest;
         std::function<void(const std::filesystem::path &)> beforeCommitForTest;
+        std::function<void()> afterCatalogConstructForTest;
+        std::function<void(std::stop_token)> afterInventoryFileForTest;
     };
     struct PassResult {
         uint64_t built = 0, failed = 0;
@@ -77,20 +89,23 @@ class FlowStore {
         std::string sources; // sidecar manifest
         std::vector<std::filesystem::path> sourcePaths;
         std::array<uint8_t, 32> fingerprint{};
-        std::array<uint8_t, 32> gridFingerprint{};
+        FlowStoreGridValues grid;
+        std::filesystem::path gridPath; // current HMC2 generation, transient
+        bool gridKnown = false;
         FileIdentity file, state;
         bool valid = false;
     };
     mutable std::mutex indexMutex_;
     std::map<std::pair<std::string, int64_t>, DayIndex> index_;
     std::map<std::string, std::map<std::filesystem::path, FileIdentity>> journalInventory_;
+    std::map<std::string, std::unique_ptr<sentinel::roller::JournalReader>> catalogs_; // builder thread only
     std::map<std::string, int64_t> firstHour_; // builder thread only
     std::stop_source stopSource_;
     std::thread thread_;
     void builderLoop(std::stop_token stop);
     void passSymbol(const std::string &symbol, std::stop_token stop, PassResult &result);
     void writeDay(const sentinel::flow::DayFile &day, uint32_t hours, uint32_t revision,
-                  const std::array<uint8_t, 32> &grid, const std::string &sources,
+                  const FlowStoreGridValues &grid, const std::string &sources,
                   std::stop_token stop);
     bool ownedPath(const std::filesystem::path &path) const;
     static FileIdentity stamp(const std::filesystem::path &path);

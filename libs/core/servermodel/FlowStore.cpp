@@ -28,12 +28,12 @@ constexpr int64_t Minute = 60'000, Hour = 60 * Minute, Day = 24 * Hour;
 // Same receive-time tail as JournalTradeEventSource. Buckets use exchange time.
 constexpr int64_t TradeTail = Minute;
 constexpr qint64 MaxDayBytes = 64 * 1024 * 1024;
-constexpr uint8_t ScaleRuleVersion = 1;
+constexpr uint8_t ScaleRuleVersion = 2;
 using Fingerprint = std::array<uint8_t, 32>;
 struct StoredDay {
     flow::DayFile day;
     uint32_t hours = 0, revision = 1;
-    Fingerprint gridFingerprint{};
+    FlowStoreGridValues grid;
     nlohmann::json sources;
 };
 struct Cancelled {};
@@ -170,25 +170,80 @@ Fingerprint fingerprint(const Sources &sources) {
     std::copy_n(reinterpret_cast<const uint8_t *>(digest.constData()), out.size(), out.begin());
     return out;
 }
-Fingerprint gridFingerprint(const FlowStore::Options &options, const std::string &symbol, int64_t day,
-                            std::stop_token stop = {}) {
+std::map<int64_t, fs::path> hmcDayPaths(const FlowStore::Options &options, const std::string &symbol,
+                                        std::stop_token stop) {
     const auto dir = options.hmc2Root / symbol / "near-60000";
-    const auto name = QDateTime::fromMSecsSinceEpoch(day, QTimeZone::UTC).toString("yyyy-MM-dd").toStdString();
-    Sources files = Sources::array();
+    std::map<int64_t, std::pair<uint32_t, fs::path>> selected;
     std::error_code ec;
     if (fs::is_directory(dir, ec))
         for (const auto &entry : fs::directory_iterator(dir)) {
             checkStop(stop);
             const auto filename = entry.path().filename().string();
-            if (entry.is_regular_file() &&
-                (filename == name + ".hmc2" || (filename.starts_with(name + ".g") && entry.path().extension() == ".hmc2")))
-                files.push_back({{"path", entry.path().generic_string()}, {"size", entry.file_size()},
-                                 {"mtime", entry.last_write_time().time_since_epoch().count()}});
+            if (!entry.is_regular_file() || entry.path().extension() != ".hmc2" || filename.size() < 15)
+                continue;
+            const auto date = QDate::fromString(QString::fromStdString(filename.substr(0, 10)), "yyyy-MM-dd");
+            if (!date.isValid())
+                continue;
+            uint32_t generation = 0;
+            const auto suffix = filename.substr(10);
+            if (suffix != ".hmc2") {
+                if (!suffix.starts_with(".g") || !suffix.ends_with(".hmc2"))
+                    continue;
+                const auto number = suffix.substr(2, suffix.size() - 7);
+                if (number.empty() || !std::all_of(number.begin(), number.end(), ::isdigit))
+                    continue;
+                try {
+                    const auto parsed = std::stoull(number);
+                    if (parsed > UINT32_MAX)
+                        continue;
+                    generation = uint32_t(parsed);
+                } catch (const std::exception &) {
+                    continue;
+                }
+            }
+            const auto day = date.startOfDay(QTimeZone::UTC).toMSecsSinceEpoch();
+            auto &best = selected[day];
+            if (best.second.empty() || generation > best.first)
+                best = {generation, entry.path()};
         }
-    std::sort(files.begin(), files.end(), [](const auto &a, const auto &b) { return a.at("path") < b.at("path"); });
-    return fingerprint(files);
+    std::map<int64_t, fs::path> result;
+    for (auto &[day, best] : selected)
+        result.emplace(day, std::move(best.second));
+    return result;
 }
-QByteArray completion(const QByteArray &bytes, uint32_t hours, uint32_t revision, const Fingerprint &grid,
+void appendWord(QByteArray &bytes, uint64_t value) {
+    for (unsigned i = 0; i < 8; ++i)
+        bytes.append(char(value >> (i * 8)));
+}
+uint64_t readWord(const QByteArray &bytes, size_t at) {
+    uint64_t value = 0;
+    for (unsigned i = 0; i < 8; ++i)
+        value |= uint64_t(uint8_t(bytes[qsizetype(at + i)])) << (i * 8);
+    return value;
+}
+void appendGrid(QByteArray &bytes, const FlowStoreGridValues &grid) {
+    appendWord(bytes, std::bit_cast<uint64_t>(grid.scales.nativeTick));
+    appendWord(bytes, uint64_t(grid.scales.rowTickUnits));
+    appendWord(bytes, uint64_t(grid.scales.priceScale));
+    appendWord(bytes, uint64_t(grid.scales.baseScale));
+    appendWord(bytes, uint64_t(grid.scales.quoteScale));
+    appendWord(bytes, std::bit_cast<uint64_t>(grid.sizeFloor));
+    appendWord(bytes, grid.configHash);
+    appendWord(bytes, grid.hasHmc2 ? 1 : 0);
+}
+FlowStoreGridValues readGrid(const QByteArray &bytes) {
+    FlowStoreGridValues grid;
+    grid.scales.nativeTick = std::bit_cast<double>(readWord(bytes, 13));
+    grid.scales.rowTickUnits = int64_t(readWord(bytes, 21));
+    grid.scales.priceScale = int64_t(readWord(bytes, 29));
+    grid.scales.baseScale = int64_t(readWord(bytes, 37));
+    grid.scales.quoteScale = int64_t(readWord(bytes, 45));
+    grid.sizeFloor = std::bit_cast<double>(readWord(bytes, 53));
+    grid.configHash = readWord(bytes, 61);
+    grid.hasHmc2 = readWord(bytes, 69) != 0;
+    return grid;
+}
+QByteArray completion(const QByteArray &bytes, uint32_t hours, uint32_t revision, const FlowStoreGridValues &grid,
                       const std::string &sources) {
     QByteArray state("FLS1", 4);
     state.append(char(ScaleRuleVersion));
@@ -196,7 +251,7 @@ QByteArray completion(const QByteArray &bytes, uint32_t hours, uint32_t revision
         state.append(char(hours >> (i * 8)));
     for (unsigned i = 0; i < 4; ++i)
         state.append(char(revision >> (i * 8)));
-    state.append(reinterpret_cast<const char *>(grid.data()), qsizetype(grid.size()));
+    appendGrid(state, grid);
     state.append(QByteArray::fromStdString(sources));
     QCryptographicHash hash(QCryptographicHash::Sha256);
     hash.addData(state);
@@ -208,16 +263,15 @@ std::optional<StoredDay> loadDay(const fs::path &path, const std::string &symbol
     try {
         const auto bytes = readFile(path, MaxDayBytes);
         const auto state = readFile(path.string() + ".state", MaxDayBytes);
-        if (state.size() < 79 || uint8_t(state[4]) != ScaleRuleVersion)
+        if (state.size() < 111 || uint8_t(state[4]) != ScaleRuleVersion)
             return {};
         uint32_t hours = 0, revision = 0;
         for (unsigned i = 0; i < 4; ++i) {
             hours |= uint32_t(uint8_t(state[5 + i])) << (i * 8);
             revision |= uint32_t(uint8_t(state[9 + i])) << (i * 8);
         }
-        Fingerprint grid{};
-        std::copy_n(reinterpret_cast<const uint8_t *>(state.constData() + 13), grid.size(), grid.begin());
-        const auto sourceText = state.mid(45, state.size() - 77).toStdString();
+        const auto grid = readGrid(state);
+        const auto sourceText = state.mid(77, state.size() - 109).toStdString();
         if (!hours || hours >> 24 || !revision || state != completion(bytes, hours, revision, grid, sourceText))
             return {};
         auto sources = Sources::parse(sourceText);
@@ -282,29 +336,17 @@ uint32_t revisionHint(const fs::path &path) {
         revision |= uint32_t(uint8_t(header[9 + i])) << (8 * i);
     return revision;
 }
-flow::FlowScales dayScales(const FlowStore::Options &options, const std::string &symbol, int64_t day,
-                           const roller::JournalReader &catalog, std::stop_token stop) {
+FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::string &symbol, int64_t day,
+                             const fs::path &hmcPath, const roller::JournalReader &catalog,
+                             std::stop_token stop) {
     nlohmann::json metadata;
     for (const auto &file : catalog.files()) {
         if (file.header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= day || metadata.is_null())
             metadata = file.header.at("product_metadata");
     }
-    const auto hmcDir = options.hmc2Root / symbol / "near-60000";
-    const auto name = QDateTime::fromMSecsSinceEpoch(day, QTimeZone::UTC).toString("yyyy-MM-dd").toStdString();
-    bool hasDay = false;
-    std::error_code ec;
-    if (fs::is_directory(hmcDir, ec))
-        for (const auto &entry : fs::directory_iterator(hmcDir)) {
-            checkStop(stop);
-            const auto filename = entry.path().filename().string();
-            if (entry.is_regular_file() && (filename == name + ".hmc2" || (filename.starts_with(name + ".g") &&
-                                                                           entry.path().extension() == ".hmc2"))) {
-                hasDay = true;
-                break;
-            }
-        }
+    FlowStoreGridValues values;
     roller::Grid grid;
-    if (hasDay) {
+    if (!hmcPath.empty()) {
         Hmc2Reader reader(options.hmc2Root);
         ReadControl control;
         control.stop = stop;
@@ -326,6 +368,8 @@ flow::FlowScales dayScales(const FlowStore::Options &options, const std::string 
         grid.priceScale = header->priceScale;
         grid.nearTick = double(header->rowTickUnits) / header->priceScale;
         grid.sizeFloor = header->sizeScale.floor;
+        values.configHash = header->configHash;
+        values.hasHmc2 = true;
     } else {
         sLog_Warning("Flow grid using journal fallback symbol=" << symbol << " day=" << day);
         const auto start = firstDurable(catalog, day, stop);
@@ -360,7 +404,9 @@ flow::FlowScales dayScales(const FlowStore::Options &options, const std::string 
         if (!ready)
             throw std::runtime_error("flow grid fallback found no two-sided snapshot");
     }
-    return flow::flowScales(grid, metadata);
+    values.scales = flow::flowScales(grid, metadata);
+    values.sizeFloor = grid.sizeFloor;
+    return values;
 }
 std::vector<flow::FlowBar> buildRun(const FlowStore::Options &options, const std::string &symbol,
                                     const flow::FlowScales &scales, int64_t first, int64_t end,
@@ -550,7 +596,7 @@ FlowStore::DayIndex FlowStore::loadIndex(const std::string &symbol, int64_t day)
         result.revision = stored->revision;
         result.sources = stored->sources.dump();
         result.fingerprint = stored->day.sourceFingerprint;
-        result.gridFingerprint = stored->gridFingerprint;
+        result.grid = stored->grid;
         result.valid = true;
         for (const auto &source : stored->sources)
             result.sourcePaths.emplace_back(source.at("path").get<std::string>());
@@ -584,10 +630,13 @@ std::map<fs::path, FlowStore::FileIdentity> FlowStore::inventory(const std::stri
         checkStop(stop);
         if (it->path().extension() == ".rawl2" && it->is_regular_file())
             result.emplace(it->path(), stamp(it->path()));
+        if (options_.afterInventoryFileForTest)
+            options_.afterInventoryFileForTest(stop);
     }
     return result;
 }
-void FlowStore::writeDay(const flow::DayFile &day, uint32_t hours, uint32_t revision, const Fingerprint &grid,
+void FlowStore::writeDay(const flow::DayFile &day, uint32_t hours, uint32_t revision,
+                         const FlowStoreGridValues &grid,
                          const std::string &sources,
                          std::stop_token stop) {
     const auto path = filePath(day.product, day.dayStartMs);
@@ -641,26 +690,36 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
     const auto currentFiles = inventory(symbol, stop);
     std::vector<fs::path> changed;
     std::set<fs::path> added;
+    bool structuralChanged = false;
     auto &prior = journalInventory_[symbol];
     for (const auto &[path, identity] : currentFiles) {
         const auto it = prior.find(path);
         if (it == prior.end()) {
             changed.push_back(path);
             added.insert(path);
+            structuralChanged = true;
         } else if (it->second != identity)
             changed.push_back(path);
     }
     for (const auto &[path, _] : prior)
-        if (!currentFiles.contains(path))
+        if (!currentFiles.contains(path)) {
             changed.push_back(path);
+            structuralChanged = true;
+        }
     prior = currentFiles;
-    std::unique_ptr<roller::JournalReader> catalog;
+    auto &catalog = catalogs_[symbol];
+    if (structuralChanged)
+        catalog.reset();
     auto getCatalog = [&]() -> roller::JournalReader & {
-        if (!catalog)
+        if (!catalog) {
+            checkStop(stop);
             catalog = std::make_unique<roller::JournalReader>(options_.journalRoot, symbol);
+            if (options_.afterCatalogConstructForTest)
+                options_.afterCatalogConstructForTest();
+        }
         return *catalog;
     };
-    if (!firstHour_.contains(symbol) || !changed.empty()) {
+    if (!firstHour_.contains(symbol) || structuralChanged) {
         auto &files = getCatalog().files();
         int64_t first = through;
         for (const auto &file : files)
@@ -668,6 +727,7 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
         firstHour_[symbol] = std::max<int64_t>(0, first / Hour * Hour);
     }
     const auto first = firstHour_.at(symbol);
+    const auto nearDays = hmcDayPaths(options_, symbol, stop);
     auto potentiallyChanged = [&](const DayIndex &index, int64_t day) {
         for (const auto &path : changed) {
             if (std::find(index.sourcePaths.begin(), index.sourcePaths.end(), path) != index.sourcePaths.end())
@@ -696,20 +756,34 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
             index = loadIndex(symbol, day);
             publishIndex(symbol, day, index);
         }
-        const auto grid = gridFingerprint(options_, symbol, day, stop);
-        bool sourceChanged = index.valid && (potentiallyChanged(index, day) || index.gridFingerprint != grid);
-        if (sourceChanged) {
-            index = loadIndex(symbol, day); // only reload the FLD1 pair on an observed source change
-            publishIndex(symbol, day, index);
-            sourceChanged = !index.valid || index.gridFingerprint != grid ||
-                            !sourcesMatch(Sources::parse(index.sources), getCatalog(),
-                                          sourceCutoff(day, index.hours), stop);
-        }
         uint32_t wanted = 0;
         for (int h = 0; h < 24; ++h)
             if (day + h * Hour >= first && day + (h + 1) * Hour <= through)
                 wanted |= 1u << h;
-        if (!sourceChanged && (index.hours & wanted) == wanted) {
+        const auto nearIt = nearDays.find(day);
+        const fs::path hmcPath = nearIt == nearDays.end() ? fs::path{} : nearIt->second;
+        bool sourceChanged = index.valid && potentiallyChanged(index, day);
+        if (sourceChanged) {
+            const auto knownPath = index.gridPath;
+            const auto wasKnown = index.gridKnown;
+            index = loadIndex(symbol, day); // only reload the FLD1 pair on an observed source change
+            index.gridPath = knownPath;
+            index.gridKnown = wasKnown;
+            publishIndex(symbol, day, index);
+            sourceChanged = !index.valid || !sourcesMatch(Sources::parse(index.sources), getCatalog(),
+                                                          sourceCutoff(day, index.hours), stop);
+        }
+        const bool complete = (index.hours & wanted) == wanted;
+        std::optional<FlowStoreGridValues> currentGrid;
+        if (wanted && (!index.valid || !complete || sourceChanged || !index.gridKnown || index.gridPath != hmcPath)) {
+            currentGrid = dayScales(options_, symbol, day, hmcPath, getCatalog(), stop);
+            if (index.valid && index.grid != *currentGrid)
+                sourceChanged = true;
+            index.gridKnown = true;
+            index.gridPath = hmcPath;
+            publishIndex(symbol, day, index);
+        }
+        if (!sourceChanged && complete) {
             if (day == 0)
                 break;
             continue;
@@ -733,7 +807,8 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
             } else
                 data = std::move(existing->day);
         }
-        auto scales = dayScales(options_, symbol, day, files, stop);
+        const auto grid = currentGrid ? *currentGrid : dayScales(options_, symbol, day, hmcPath, files, stop);
+        const auto &scales = grid.scales;
         if (hours && (data.nativeTick != scales.nativeTick || data.priceScale != scales.priceScale ||
                       data.baseScale != scales.baseScale || data.quoteScale != scales.quoteScale)) {
             hours = 0;
@@ -788,10 +863,12 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
                 }
                 const auto started = std::chrono::steady_clock::now();
                 auto bars = buildRun(options_, symbol, scales, runFirst, runEnd, *start, stop);
-                roller::JournalReader current(options_.journalRoot, symbol);
-                if (!sourcesMatch(sources, current, sourceCutoff(day, nextHours), stop))
+                const auto afterFiles = inventory(symbol, stop);
+                if (afterFiles.size() != currentFiles.size() ||
+                    std::any_of(afterFiles.begin(), afterFiles.end(),
+                                [&](const auto &entry) { return !currentFiles.contains(entry.first); }))
                     return;
-                if (gridFingerprint(options_, symbol, day, stop) != grid)
+                if (!sourcesMatch(sources, files, sourceCutoff(day, nextHours), stop))
                     return;
                 if (options_.hourThrough(symbol) < runEnd)
                     return;
@@ -814,6 +891,8 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
                 data.sourceFingerprint = fingerprint(sources);
                 writeDay(data, hours, revision, grid, sources.dump(), stop);
                 auto fresh = loadIndex(symbol, day);
+                fresh.gridKnown = true;
+                fresh.gridPath = hmcPath;
                 publishIndex(symbol, day, fresh);
                 index = std::move(fresh);
                 result.built += endHour - low + 1;

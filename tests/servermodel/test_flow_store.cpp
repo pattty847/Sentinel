@@ -6,7 +6,8 @@
 #include "roller/JournalFeed.hpp"
 #include "roller/JournalReader.hpp"
 #include "servermodel/Hmc2Store.hpp"
-#include "servermodel/ServerDataModel.hpp"
+#include "Crc32.hpp"
+#include "FlowLiveTestAccess.hpp"
 #include "trading/MarketEventSource.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
@@ -15,13 +16,10 @@
 #include <future>
 #include <fstream>
 #include <iostream>
+#include <bit>
+#include <cstdio>
+#include <cstring>
 
-struct FlowLiveTestAccess {
-    static void stopTimer(ServerDataModel &model) { model.m_flowTimer.stop(); }
-    static auto &series(ServerDataModel &model, const std::string &symbol, int64_t day) {
-        return model.m_flowProducts.at(symbol).days.at(day).series.at(60'000);
-    }
-};
 
 namespace fs = std::filesystem;
 namespace flow = sentinel::flow;
@@ -68,11 +66,11 @@ class FlowStoreTest : public testing::Test {
         fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
     }
     void recordedGrid(const std::string &symbol, double priceScale, int64_t tickUnits, double midpoint,
-                      uint64_t configHash = 42) {
+                      uint64_t configHash = 42, int64_t bucketRel = 0) {
         recording::Hmc2Store store(hmc2);
         recording::Hmc2Record record;
         record.header = {symbol, "near", Minute, priceScale, tickUnits, {}, configHash};
-        record.bucketStartMs = Epoch;
+        record.bucketStartMs = Epoch + bucketRel;
         record.observedMs = Minute;
         record.bidRowLo = record.askRowLo = 0;
         record.bidRowHi = record.askRowHi = 100;
@@ -86,6 +84,36 @@ class FlowStoreTest : public testing::Test {
         if (!f.open(QIODevice::ReadOnly))
             return {};
         return f.readAll();
+    }
+    void addInventoryFiles(int count) {
+        const auto templateBytes = bytes(firstJournal());
+        ASSERT_GT(templateBytes.size(), 16);
+        uint32_t headerLength = 0;
+        for (unsigned i = 0; i < 4; ++i)
+            headerLength |= uint32_t(uint8_t(templateBytes[8 + i])) << (8 * i);
+        const auto original = nlohmann::json::parse(templateBytes.mid(16, headerLength).toStdString());
+        const auto inventoryDir = journal / "BTC-USD" / "inventory";
+        fs::create_directories(inventoryDir);
+        for (int i = 0; i < count; ++i) {
+            auto header = original;
+            auto run = header.at("run_id").get<std::string>();
+            char suffix[9];
+            std::snprintf(suffix, sizeof suffix, "%08x", i + 1);
+            run.replace(run.size() - 8, 8, suffix);
+            header["run_id"] = run;
+            header["opened_system_ns"] = (Epoch + 7 * 86'400'000LL) * 1'000'000;
+            header["run_started_system_ns"] = (Epoch + 7 * 86'400'000LL) * 1'000'000;
+            const auto encoded = header.dump();
+            ASSERT_EQ(encoded.size(), headerLength);
+            auto content = templateBytes;
+            std::memcpy(content.data() + 16, encoded.data(), encoded.size());
+            const auto crc = sentinel::crc32(encoded.data(), encoded.size());
+            for (unsigned j = 0; j < 4; ++j)
+                content[12 + j] = char(crc >> (8 * j));
+            QFile file(QString::fromStdString((inventoryDir / (std::to_string(i) + ".rawl2")).string()));
+            ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+            ASSERT_EQ(file.write(content), content.size());
+        }
     }
 };
 TEST_F(FlowStoreTest, MatchesIndependentJournalTradesAndCodecAfterReconnectAndLateTrade) {
@@ -353,6 +381,8 @@ TEST_F(FlowStoreTest, ActiveTailAppendsDuringBuildAndServeDoNotStarveSealedHours
     live.heartbeat(Hour + Minute + 1);
     live.writer.flush();
     auto o = options();
+    int catalogs = 0;
+    o.afterCatalogConstructForTest = [&] { ++catalogs; };
     int records = 0;
     o.afterRecordForTest = [&](std::stop_token) {
         if (++records == 2) {
@@ -362,8 +392,11 @@ TEST_F(FlowStoreTest, ActiveTailAppendsDuringBuildAndServeDoNotStarveSealedHours
     };
     FlowStore store(o);
     ASSERT_EQ(store.runPass().built, 1);
+    EXPECT_EQ(catalogs, 1);
     live.heartbeat(Hour + 3 * Minute);
     live.writer.flush();
+    EXPECT_EQ(store.runPass().built, 0);
+    EXPECT_EQ(catalogs, 1); // only the active tail grew
     const auto reply = store.window("BTC-USD", Epoch, Epoch + Hour);
     EXPECT_FALSE(reply.building);
     ASSERT_EQ(reply.bars.size(), 1);
@@ -398,13 +431,13 @@ TEST_F(FlowStoreTest, RecorderGridAndProductScalesMatchLiveModelBytes) {
     char name[] = "flow-scale";
     char *argv[] = {name, nullptr};
     QCoreApplication app(argc, argv);
-    for (const auto &[symbol, baseIncrement, bid, ask, priceScale, tickUnits, price] :
-         {std::tuple<std::string, std::string, std::string, std::string, double, int64_t, double>{
-              "BTC-USD", "0.00000001", "99999", "100001", 100, 50, 100000.5},
-          {"PEPE-USD", "0.01", "0.0009999", "0.0010001", 100'000'000, 10, 0.0010001}}) {
+    for (const auto &[symbol, baseIncrement, quoteIncrement, bid, ask, priceScale, tickUnits, price] :
+         {std::tuple<std::string, std::string, std::string, std::string, std::string, double, int64_t, double>{
+              "BTC-USD", "0.00000001", "0.01", "99999", "100001", 100, 50, 100000.5},
+          {"PEPE-USD", "0.01", "0.00000001", "0.0009999", "0.0010001", 100'000'000, 10, 0.0010001}}) {
         const auto caseJournal = journal / symbol;
         fs::create_directories(caseJournal);
-        Journal j(caseJournal, symbol, baseIncrement, bid, ask);
+        Journal j(caseJournal, symbol, baseIncrement, bid, ask, quoteIncrement);
         j.snapshot(0);
         j.trades(1000, {trade(800, "1", price, "BUY", symbol)});
         j.trades(Minute + 1000, {trade(Minute + 800, "2", price, "SELL", symbol)});
@@ -431,18 +464,23 @@ TEST_F(FlowStoreTest, RecorderGridAndProductScalesMatchLiveModelBytes) {
         config.rollerShadow.products = {symbol};
         ServerDataModel live(config);
         FlowLiveTestAccess::stopTimer(live);
+        const nlohmann::json metadata = {{"product_id", symbol}, {"base_increment", baseIncrement},
+                                         {"quote_increment", quoteIncrement}};
         sentinel::roller::Grid grid;
-        grid.priceScale = priceScale;
-        grid.nearTick = double(tickUnits) / priceScale;
-        live.onFlowGrid(symbol, Epoch, grid,
-                        {{"product_id", symbol}, {"base_increment", baseIncrement}, {"quote_increment", "0.01"}});
+        if (symbol == "PEPE-USD")
+            grid = sentinel::roller::deriveGrid(metadata, price);
+        else {
+            grid.priceScale = priceScale;
+            grid.nearTick = double(tickUnits) / priceScale;
+        }
+        live.onFlowGrid(symbol, Epoch, grid, metadata);
         sentinel::roller::JournalReader reader(caseJournal, symbol);
         sentinel::roller::JournalFeed feed(symbol);
         feed.onTrade = [&](const ::Trade &t) { live.onTrade(t); };
         sentinel::roller::JournalRecord input;
         while (reader.next(input))
             feed.apply(input);
-        const auto expected = FlowLiveTestAccess::series(live, symbol, Epoch).builder.bars();
+        const auto expected = FlowLiveTestAccess::series(live, symbol, Epoch, Minute).builder.bars();
         const auto actual = store.window(symbol, Epoch, Epoch + Hour);
         ASSERT_FALSE(actual.building);
         ASSERT_EQ(actual.bars.size(), expected.size());
@@ -450,7 +488,8 @@ TEST_F(FlowStoreTest, RecorderGridAndProductScalesMatchLiveModelBytes) {
         for (size_t i = 0; i < expected.size(); ++i)
             EXPECT_EQ(flow::encodeFlowBar(flow::decodeFlowBar(flow::encodeFlowBar(actual.bars[i]))),
                       flow::encodeFlowBar(flow::decodeFlowBar(flow::encodeFlowBar(expected[i]))));
-        EXPECT_EQ(actual.bars.front().nativeTick, grid.nearTick);
+        const auto decoded = flow::decodeFlowBar(flow::encodeFlowBar(actual.bars.front()));
+        EXPECT_EQ(std::bit_cast<uint64_t>(decoded.nativeTick), std::bit_cast<uint64_t>(grid.nearTick));
         EXPECT_EQ(actual.bars.front().baseScale, symbol == "PEPE-USD" ? 100 : 100'000'000);
     }
 }
@@ -462,12 +501,18 @@ TEST_F(FlowStoreTest, ChangedRecorderGridRebuildsDay) {
     const auto old = store.window("BTC-USD", Epoch, Epoch + 2 * Hour);
     ASSERT_FALSE(old.bars.empty());
     EXPECT_DOUBLE_EQ(old.bars.front().nativeTick, 0.5);
+    recordedGrid("BTC-USD", 100, 50, 100000, 42, Minute);
+    EXPECT_EQ(store.runPass().built, 0);
+    const auto unchanged = store.window("BTC-USD", Epoch, Epoch + 2 * Hour);
+    EXPECT_EQ(unchanged.revisions, old.revisions);
+    FlowStore restarted(options());
+    EXPECT_EQ(restarted.runPass().built, 0);
     recordedGrid("BTC-USD", 100, 25, 100000, 43);
     EXPECT_EQ(store.runPass().built, 2);
     const auto fresh = store.window("BTC-USD", Epoch, Epoch + 2 * Hour);
     ASSERT_FALSE(fresh.bars.empty());
     EXPECT_DOUBLE_EQ(fresh.bars.front().nativeTick, 0.25);
-    EXPECT_GT(fresh.revisions.front(), old.revisions.front());
+    EXPECT_EQ(fresh.revisions.front(), old.revisions.front() + 1);
 }
 TEST_F(FlowStoreTest, LargeSegmentStopJoinsUnderTwoSeconds) {
     Journal j(journal);
@@ -507,6 +552,50 @@ TEST_F(FlowStoreTest, LargeSegmentStopJoinsUnderTwoSeconds) {
     std::cout << "large-segment stop_ms=" << ms << " records=" << records << '\n';
     EXPECT_LT(ms, 2000);
     EXPECT_FALSE(fs::exists(store.filePath("BTC-USD", Epoch)));
+}
+TEST_F(FlowStoreTest, LargeInventoryUsesCachedCatalogAndStopsDuringStatWalk) {
+    Journal j(journal);
+    j.snapshot(0);
+    j.heartbeat(Hour + Minute + 1);
+    j.close();
+    recordedGrid("BTC-USD", 100, 50, 100000);
+    addInventoryFiles(3000);
+    const auto ctorStart = std::chrono::steady_clock::now();
+    sentinel::roller::JournalReader catalog(journal, "BTC-USD");
+    const auto ctorMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - ctorStart).count();
+    std::cout << "large-inventory constructor_ms=" << ctorMs << " files=" << catalog.files().size() << '\n';
+    ASSERT_GE(catalog.files().size(), 3001u);
+    through = Epoch + Hour;
+    auto o = options();
+    o.lowerPriority = false;
+    std::atomic<int> constructors{0}, walked{0};
+    std::atomic<bool> pauseWalk{false};
+    std::promise<void> entered;
+    auto ready = entered.get_future();
+    o.afterCatalogConstructForTest = [&] { ++constructors; };
+    o.afterInventoryFileForTest = [&](std::stop_token stop) {
+        if (!pauseWalk || ++walked != 100)
+            return;
+        entered.set_value();
+        std::mutex mutex;
+        std::condition_variable_any cv;
+        std::unique_lock lock(mutex);
+        cv.wait(lock, stop, [] { return false; });
+    };
+    FlowStore store(o);
+    ASSERT_EQ(store.runPass().built, 1);
+    ASSERT_EQ(constructors, 1);
+    pauseWalk = true;
+    store.start();
+    ASSERT_EQ(ready.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+    const auto start = std::chrono::steady_clock::now();
+    store.stop();
+    const auto stopMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - start).count();
+    std::cout << "large-inventory stop_ms=" << stopMs << " walked=" << walked << '\n';
+    EXPECT_LT(stopMs, 2000);
+    EXPECT_EQ(constructors, 1);
 }
 TEST_F(FlowStoreTest, TornStatePreservesRevisionHintAndScaleVersionRebuilds) {
     fixture();
