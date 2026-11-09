@@ -81,6 +81,7 @@ private:
     int radarIntervalMs_ = kRadarIntervalMs;
     size_t scanWords_ = kMaxScanWords, scanLevels_ = kMaxLevels;
     char asset_[8] = {};
+    int priceExponent_ = 0;
     bool radar_ = false;
     Levels top_, rows_;
     double lastTick_ = 0;

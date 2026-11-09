@@ -1,4 +1,5 @@
 #include "HeatmapGpuLayer.hpp"
+#include "models/PriceUnits.hpp"
 #include "LabelRequestCoverage.hpp"
 #include "HeatmapGpuSelfTest.hpp"
 #include "SentinelLogging.hpp"
@@ -12,7 +13,11 @@
 
 namespace heatmap::gpu {
 namespace {
-QString money(double price) { return QStringLiteral("$") + QString::number(price, 'g', 12); }
+// "$0.5"; in a scaled display unit (PriceUnits) "0.01 x1M".
+QString money(double price, sentinel::PriceDisplayUnit unit = {}) {
+    if (unit.scaled()) return QString::number(unit.toDisplay(price), 'g', 12) + QLatin1Char(' ') + QLatin1String(unit.tag());
+    return QStringLiteral("$") + QString::number(price, 'g', 12);
+}
 QString utc(int64_t ms) {
     return QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::UTC).toString(QStringLiteral("MM-dd HH:mm"));
 }
@@ -753,9 +758,10 @@ QString HeatmapGpuLayer::resolutionIndicator() const {
         hi = std::max(hi, r.price.end);
     }
     const double scale = priceScale();
+    const auto unit = PriceUnits::instance().unitFor(QString::fromStdString(symbol_));
     return QStringLiteral("Resolution: %1 unavailable at %2-%3 in %4 to %5 UTC (no source builds it there). "
                           "Veiled, not coarsened.")
-        .arg(money(fromUnits(tickUnits_, scale)), money(fromUnits(lo, scale)), money(fromUnits(hi, scale)), utc(start),
+        .arg(money(fromUnits(tickUnits_, scale), unit), money(fromUnits(lo, scale), unit), money(fromUnits(hi, scale), unit), utc(start),
              utc(end));
 }
 

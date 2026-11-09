@@ -1,5 +1,6 @@
 #include "../datasources/RemoteGridDataSource.hpp"
 #include "PaperTradingDock.hpp"
+#include "../models/PriceUnits.hpp"
 #include "../render/PnlCurveItem.hpp"
 #include "../datasources/IGridDataSource.hpp"
 
@@ -52,6 +53,14 @@ int priceDecimals(double price) {
     return std::clamp(2 - static_cast<int>(std::floor(std::log10(price))), 2, 8);
 }
 
+// A price of `symbol`: "$0.0000050" plain, "5.04 x1M" in a scaled display unit.
+QString shownPrice(const QString& symbol, double price) {
+    const auto unit = PriceUnits::instance().unitFor(symbol);
+    if (!unit.scaled()) return QString("$%1").arg(price, 0, 'f', priceDecimals(price));
+    const double shown = unit.toDisplay(price);
+    return QString("%1 %2").arg(shown, 0, 'f', priceDecimals(shown)).arg(QLatin1String(unit.tag()));
+}
+
 double roundedDisplayedPrice(double price, int decimals) {
     const long double scale = std::pow(10.0L, decimals);
     return static_cast<double>(std::round(static_cast<long double>(price) * scale) / scale);
@@ -65,6 +74,9 @@ PaperTradingDock::PaperTradingDock(QWidget* parent)
     m_healthTimer = new QTimer(this);
     m_healthTimer->setInterval(1000);
     connect(m_healthTimer, &QTimer::timeout, this, &PaperTradingDock::refreshMarketHealth);
+    connect(&PriceUnits::instance(), &PriceUnits::unitChanged, this, [this](const QString& symbol) {
+        if (symbol == m_symbol) reformatPrices();
+    });
     connect(this, &QDockWidget::visibilityChanged, this, [this](bool exposed) {
         if (exposed) { refreshMarketHealth(); if (m_marketHealth) m_healthTimer->start(); }
         else m_healthTimer->stop();
@@ -179,6 +191,8 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     addRow(0, QStringLiteral("Last:"), m_lastPriceLabel);
     addRow(1, QStringLiteral("Position:"), m_posLabel);
     addRow(2, QStringLiteral("Avg Price:"), m_avgPriceLabel);
+    m_lastPriceLabel->setObjectName(QStringLiteral("paperLastPrice"));
+    m_avgPriceLabel->setObjectName(QStringLiteral("paperAvgPrice"));
     addRow(3, QStringLiteral("uPnL:"), m_uPnlLabel);
     addRow(4, QStringLiteral("rPnL:"), m_rPnlLabel);
     addRow(5, QStringLiteral("Total PnL:"), m_totalPnlLabel);
@@ -648,6 +662,7 @@ void PaperTradingDock::resetForSymbolChange() {
     m_algoActivityEligible = false;
     if (m_symbolLabel) m_symbolLabel->setText(QStringLiteral("PAPER  |  %1").arg(m_symbol.isEmpty() ? QStringLiteral("No symbol") : m_symbol));
     updateNotional();
+    m_shownLast = m_shownAvg = 0.0;
     if (m_lastPriceLabel) {
         m_lastPriceLabel->setStyleSheet("QLabel { color: #e0e0e0; }");
         m_lastPriceLabel->setText(QStringLiteral("---"));
@@ -749,7 +764,8 @@ void PaperTradingDock::onTradeReceived(const Trade& trade) {
                                 : "#e0e0e0";
         m_lastPriceLabel->setStyleSheet(QString("QLabel { color: %1; }").arg(sideColor));
         updatePricePrecision(trade.price);
-        m_lastPriceLabel->setText(QString("$%1").arg(trade.price, 0, 'f', priceDecimals(trade.price)));
+        m_shownLast = trade.price;
+        m_lastPriceLabel->setText(shownPrice(m_symbol, trade.price));
     }
     if (std::isfinite(trade.price) && trade.price > 0.0) {
         m_lastPrice = trade.price;
@@ -806,9 +822,9 @@ void PaperTradingDock::onOrderUpdated(const trading::OrderUpdate& update) {
     m_orderLog->item(row, 1)->setText(QString::fromUtf8(trading::toString(update.side)));
     m_orderLog->item(row, 2)->setText(QString::number(update.qty, 'f', 8));
     m_orderLog->item(row, 3)->setText(QString::number(update.filledQty, 'f', 8));
-    m_orderLog->item(row, 4)->setText(update.limitPrice > 0.0
-        ? QString("$%1").arg(update.limitPrice, 0, 'f', priceDecimals(update.limitPrice))
-        : QString("$%1").arg(update.avgPrice, 0, 'f', priceDecimals(update.avgPrice)));
+    const double logPrice = update.limitPrice > 0.0 ? update.limitPrice : update.avgPrice;
+    m_orderLog->item(row, 4)->setData(Qt::UserRole, logPrice);
+    m_orderLog->item(row, 4)->setText(shownPrice(m_symbol, logPrice));
     m_orderLog->item(row, 5)->setText(QString::fromUtf8(trading::toString(update.status)));
     if (follow) m_orderLog->scrollToBottom();
 
@@ -823,6 +839,14 @@ void PaperTradingDock::onOrderUpdated(const trading::OrderUpdate& update) {
     }
 }
 
+void PaperTradingDock::reformatPrices() {
+    if (m_lastPriceLabel && m_shownLast > 0.0) m_lastPriceLabel->setText(shownPrice(m_symbol, m_shownLast));
+    if (m_avgPriceLabel && m_shownAvg != 0.0) m_avgPriceLabel->setText(shownPrice(m_symbol, m_shownAvg));
+    for (int row = 0; row < m_orderLog->rowCount(); ++row)
+        if (auto* item = m_orderLog->item(row, 4); item && item->data(Qt::UserRole).isValid())
+            item->setText(shownPrice(m_symbol, item->data(Qt::UserRole).toDouble()));
+}
+
 void PaperTradingDock::onPositionUpdated(const trading::PositionUpdate& update) {
     if (m_symbol.isEmpty() || QString::fromStdString(update.symbol) != m_symbol) {
         return;
@@ -830,8 +854,10 @@ void PaperTradingDock::onPositionUpdated(const trading::PositionUpdate& update) 
 
     if (m_posLabel)
         m_posLabel->setText(QString::number(update.positionQty, 'f', 8));
-    if (m_avgPriceLabel)
-        m_avgPriceLabel->setText(QString("$%1").arg(update.avgPrice, 0, 'f', priceDecimals(update.avgPrice)));
+    if (m_avgPriceLabel) {
+        m_shownAvg = update.avgPrice;
+        m_avgPriceLabel->setText(shownPrice(m_symbol, update.avgPrice));
+    }
 
     if (m_uPnlLabel) {
         m_uPnlLabel->setStyleSheet(pnlStyle(update.unrealizedPnl));

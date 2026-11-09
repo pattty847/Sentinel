@@ -3,16 +3,20 @@
 #include <QDebug>
 #include "SentinelLogging.hpp"
 #include "servermodel/PriceLadder.hpp"
+#include "PriceUnits.hpp"
 #include <algorithm>
 #include <cmath>
 
 namespace {
 
-// Use enough integer price units to represent the cell tick without rounding it.
+// Use enough integer price units to represent the cell tick without rounding it. The
+// tolerance is relative to the scaled tick: an absolute one counted a 1e-8 tick as 0
+// units at scale 1, so a tiny-priced product's labels stepped by $1 (none in view).
 double priceScaleForTick(double tick) {
     double scale = 1.0;
-    while (scale < 1e8 &&
-           std::abs(tick * scale - std::round(tick * scale)) > 1e-8) {
+    while (scale < 1e12) {
+        const double units = tick * scale;
+        if (units >= 0.5 && std::abs(units - std::round(units)) <= 1e-8 * units) break;
         scale *= 10.0;
     }
     return scale;
@@ -27,7 +31,23 @@ bool isTickMultiple(double step, double tick) {
 
 PriceAxisModel::PriceAxisModel(QObject* parent)
     : AxisModel(parent) {
+    connect(&PriceUnits::instance(), &PriceUnits::unitChanged, this, [this](const QString& symbol) {
+        if (symbol != m_symbol) return;
+        emit unitChanged();
+        recalculateTicks();
+    });
 }
+
+void PriceAxisModel::setSymbol(const QString& symbol) {
+    if (symbol == m_symbol) return;
+    m_symbol = symbol;
+    m_lastNiceSpacing = 0.0;
+    emit unitChanged();
+    recalculateTicks();
+}
+
+QString PriceAxisModel::unitLabel() const { return PriceUnits::instance().label(m_symbol); }
+double PriceAxisModel::unitFactor() const { return PriceUnits::instance().unitFor(m_symbol).factor(); }
 
 void PriceAxisModel::setTickSize(double size) {
     if (size > 0.0 && size != m_tickSize) {
@@ -139,14 +159,22 @@ QString PriceAxisModel::formatLabel(double value) const {
     double priceRange = m_effectiveViewportValid
         ? (m_effectiveMaxPrice - m_effectiveMinPrice)
         : (getViewportEnd() - getViewportStart());
-    
+    // A scaled unit (PEPE x1M) shows the same digits rule on the scaled values, without
+    // the currency sign: the axis tag names the unit.
+    const auto unit = PriceUnits::instance().unitFor(m_symbol);
+    const QString sign = unit.scaled() ? QString() : QStringLiteral("$");
+    value = unit.toDisplay(value);
+    priceRange = unit.toDisplay(priceRange);
+
     if (priceRange > 1000) {
-        return QString("$%1").arg(static_cast<int>(std::round(value)));
+        return sign + QString::number(static_cast<long long>(std::llround(value)));
     } else if (priceRange > 100) {
-        return QString("$%1").arg(value, 0, 'f', 1);
-    } else {
-        return QString("$%1").arg(value, 0, 'f', 2);
+        return sign + QString::number(value, 'f', 1);
     }
+    // Scaled: at least the digits of the label step (e.g. 0.001 at x1K).
+    const int decimals = unit.scaled()
+        ? std::max(2, sentinel::displayDecimals(unit.toDisplay(m_lastNiceSpacing))) : 2;
+    return sign + QString::number(value, 'f', decimals);
 }
 
 double PriceAxisModel::getViewportStart() const {

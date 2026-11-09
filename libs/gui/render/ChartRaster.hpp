@@ -163,7 +163,8 @@ int64_t followShift(int64_t endMs, int64_t targetMs, int64_t tfMs, int colPx);
 // the inputs unchanged (invalid input or no containing P >= 1 at this tick).
 void fitPriceManualRows(double& lo, double& hi, int H, double tick);
 
-bool fitPriceToRows(double &lo, double &hi, int heightDev, double tick);
+// maxRowPx: rows are at most this many device px (the fit widens to H / maxRowPx rows).
+bool fitPriceToRows(double &lo, double &hi, int heightDev, double tick, int maxRowPx = kMaxCellPx);
 
 struct AutoPriceFit {
     double lo = 0, hi = 0, tick = 0;
@@ -173,9 +174,11 @@ struct AutoPriceFit {
 using BuildsPriceWindow = std::function<bool(int64_t units, double lo, double hi)>;
 // D5: raw candle+margin span -> Auto tick -> containing fit. Auto's existing
 // hysteresis is unchanged (P=1 is permitted). Check candidate buildability over
-// its own fit, never just the raw window. No iteration or retained fit state.
+// its own fit, never just the raw window. No iteration or retained fit state. Rows are
+// at most maxRowPx device px: a window a few ticks tall widens instead of drawing rows
+// a fifth of the chart high (no row finer than the tick is invented).
 std::optional<AutoPriceFit> solveAutoPriceFit(double lo, double hi, int heightDev, int64_t currentUnits,
                                              double priceScale, const heatmap::AutoTickParams &params,
-                                             const BuildsPriceWindow &builds);
+                                             const BuildsPriceWindow &builds, int maxRowPx = kMaxCellPx);
 
 } // namespace chart_raster

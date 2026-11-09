@@ -2,6 +2,7 @@
 #include "PerformanceMonitor.hpp"
 #include "SentinelLogging.hpp"
 #include "UnifiedGridRenderer.h"
+#include "models/PriceUnits.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/HeatmapTelemetryDock.hpp"
@@ -23,6 +24,7 @@ HeatmapChartControls::HeatmapChartControls(heatmap::HeatmapSettingsModel *model,
     m_indicatorTimer->setInterval(kIndicatorMs);
     connect(m_indicatorTimer, &QTimer::timeout, this, &HeatmapChartControls::syncNow);
     connect(m_model, &heatmap::HeatmapSettingsModel::changed, this, &HeatmapChartControls::onModelChanged);
+    connect(&PriceUnits::instance(), &PriceUnits::unitChanged, this, &HeatmapChartControls::scheduleSync);
     // The Manual tick memory follows the chart's symbol and timeframe.
     m_model->setContextProvider([this] {
         heatmap::HeatmapSettingsModel::Context context;
@@ -448,6 +450,7 @@ TopToolbar::TickSelectorState HeatmapChartControls::tickSelectorState() const {
     st.offeredUnits = layer->offeredTickUnits();
     st.priceScale = layer->priceScale();
     st.indicator = layer->resolutionIndicator();
+    st.unit = PriceUnits::instance().unitFor(QString::fromStdString(layer->symbol()));
     return st;
 }
 

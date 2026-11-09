@@ -359,6 +359,17 @@ TEST(LadderBadges, EdgePillsStackAskNearestTheEdgeAndFollowTheCurrentWindow) {
     EXPECT_EQ(text(p[0]), "$6.00k  +$10.0");
     EXPECT_EQ(text(p[2]), "$2.40k  -$10.0");
     EXPECT_TRUE(p[2].hollow);
+    {
+        // A scaled display unit (x1K here) shows the distance in it; the notional stays USD.
+        BadgeRig scaled(camera(90, 110));
+        scaled.snapshot();
+        scaled.layer.mailbox().back().priceExponent = 3;
+        scaled.candidate(S::kAsk, S::kAbove, 120, 50);
+        scaled.candidate(S::kBid, S::kAbove, 115, 40);
+        scaled.post();
+        ASSERT_FALSE(scaled.pills().empty());
+        EXPECT_EQ(text(scaled.pills()[0]), "$6.00k  +10.0k x1K");
+    }
     for (const auto& pill : p) EXPECT_DOUBLE_EQ(pill.rect.right(), 640 - chart::kBadgeInsetPx);
     // Three filled pills (6 + 3) and one capped (6 + 18 outline).
     EXPECT_EQ(rig.layer.badgeVertexCount(), 3 * (6 + 3) + 6 + 18);

@@ -11,6 +11,10 @@
 class PriceAxisModel : public AxisModel {
     Q_OBJECT
     Q_PROPERTY(double tickSize READ tickSize WRITE setTickSize NOTIFY tickSizeChanged)
+    // The chart's symbol: its PriceUnits display unit scales the labels (PEPE: 5.04, x1M).
+    Q_PROPERTY(QString symbol READ symbol WRITE setSymbol NOTIFY unitChanged)
+    Q_PROPERTY(QString unitLabel READ unitLabel NOTIFY unitChanged) // "PEPE x1M"; empty when plain
+    Q_PROPERTY(double unitFactor READ unitFactor NOTIFY unitChanged) // shown = raw * unitFactor
     
 public:
     explicit PriceAxisModel(QObject* parent = nullptr);
@@ -25,8 +29,14 @@ protected:
     double getViewportEnd() const override;
     double valueToScreenPosition(double value) const override;
     
+    QString symbol() const { return m_symbol; }
+    void setSymbol(const QString& symbol);
+    QString unitLabel() const;
+    double unitFactor() const;
+
 signals:
     void tickSizeChanged();
+    void unitChanged();
 
 private:
     double tickSize() const { return m_tickSize; }
@@ -35,6 +45,7 @@ private:
     int getDecimalPlaces(double step) const;
 
     double m_tickSize = 0.0;
+    QString m_symbol;
     double m_effectiveMinPrice = 0.0;
     double m_effectiveMaxPrice = 0.0;
     double m_effectiveOffsetPx = 0.0;

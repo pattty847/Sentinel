@@ -1,5 +1,6 @@
 #include "DomModel.hpp"
 #include "DomGrouping.hpp"
+#include "PriceUnits.hpp"
 #include "SentinelLogging.hpp"
 #include <QColor>
 #include <QDateTime>
@@ -35,6 +36,13 @@ QString DomFreshness::text(qint64 nowMs) const
 
 DomModel::DomModel(QObject* parent) : QAbstractTableModel(parent)
 {
+    // A unit decided after the first rows were shown (the book snapshot decides it).
+    connect(&PriceUnits::instance(), &PriceUnits::unitChanged, this, [this](const QString& symbol) {
+        if (symbol != m_symbol) return;
+        m_textValid.fill(0);
+        emit headerDataChanged(Qt::Horizontal, 0, Columns - 1);
+        if (m_ready) emit dataChanged(index(0, 0), index(Rows - 1, Columns - 1));
+    });
     m_bidBuffer.reserve(1);
     m_askBuffer.reserve(1);
     // One-time: tags are refilled in place, so fresh flashes never allocate.
@@ -59,6 +67,18 @@ QString DomModel::priceText(double price, double tick)
         ++decimals;
     }
     return QString::number(price, 'f', decimals);
+}
+
+QString DomModel::shownPrice(double price, double tick) const
+{
+    const auto unit = PriceUnits::instance().unitFor(m_symbol);
+    return priceText(unit.toDisplay(price), unit.toDisplay(tick));
+}
+
+QString DomModel::quoteUnit() const
+{
+    const auto unit = PriceUnits::instance().unitFor(m_symbol);
+    return unit.scaled() ? m_quote + QLatin1Char(' ') + QLatin1String(unit.tag()) : m_quote;
 }
 
 QString DomModel::sizeText(double value)
@@ -137,14 +157,18 @@ QVariant DomModel::headerData(int section, Qt::Orientation orientation, int role
     if (role == Qt::ToolTipRole) {
         if (section >= Buys) return executionSummary();
         if (section == Price) return QString("Price in %1: each row's lower edge; rows of %2, server tick %3")
-            .arg(m_quote, priceText(m_tick, m_tick), priceText(m_nativeTick, m_nativeTick));
+            .arg(quoteUnit(), shownPrice(m_tick, m_tick), shownPrice(m_nativeTick, m_nativeTick));
         return QString("Resting %1 size in %2%3").arg(section == Bid ? "bid" : "ask", m_base,
             m_cumulative ? QStringLiteral(", cumulative from the touch outward") : QString());
     }
     if (role != Qt::DisplayRole) return {};
     switch (section) {
     case Bid: return m_cumulative ? QStringLiteral("Σ Bid") : QStringLiteral("Bid");
-    case Price: return QStringLiteral("Price");
+    case Price: {
+        const auto unit = PriceUnits::instance().unitFor(m_symbol);
+        // The column fits five characters: the tag alone names the scaled unit.
+        return unit.scaled() ? QString(QLatin1String(unit.tag())) : QStringLiteral("Price");
+    }
     case Ask: return m_cumulative ? QStringLiteral("Σ Ask") : QStringLiteral("Ask");
     case Buys: return QStringLiteral("Buy vol");
     case Sells: return QStringLiteral("Sell vol");
@@ -212,7 +236,7 @@ const QString& DomModel::cachedText(int r, int col) const
         text = value > 0 ? sizeText(value) : QString();
         break;
     }
-    case Price: text = priceText((m_top - r) * m_tick, m_tick); break;
+    case Price: text = shownPrice((m_top - r) * m_tick, m_tick); break;
     case Buys: text = row.buys > 0 ? sizeText(row.buys) : QString(); break;
     case Sells: text = row.sells > 0 ? sizeText(row.sells) : QString(); break;
     default: text = row.buys <= 0 && row.sells <= 0 ? QString() : signedSizeText(delta); break;
@@ -445,7 +469,7 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
         m_tick = m_nativeTick = tick;
         withdrawScaleWork();
         m_aggregationIssue = !origin ? QStringLiteral("Aggregation unavailable for %1").arg(m_symbol)
-            : QStringLiteral("Server aggregation %1 %2 is too coarse for %3").arg(priceText(tick, tick), m_quote, m_symbol);
+            : QStringLiteral("Server aggregation %1 %2 is too coarse for %3").arg(shownPrice(tick, tick), quoteUnit(), m_symbol);
         return;
     }
     const auto center = bucket(mid, tick);
@@ -599,17 +623,17 @@ int DomModel::centerRow() const { return m_ready ? int(std::clamp<qint64>(m_top 
 QString DomModel::aggregation(bool compact) const
 {
     if (!m_aggregationIssue.isEmpty()) return compact
-        ? (m_tick > 0 ? QString("Coarse: %1 %2").arg(priceText(m_tick, m_tick), m_quote) : QString("No aggregation"))
+        ? (m_tick > 0 ? QString("Coarse: %1 %2").arg(shownPrice(m_tick, m_tick), quoteUnit()) : QString("No aggregation"))
         : m_aggregationIssue;
-    const QString native = m_nativeTick > 0 ? priceText(m_nativeTick, m_nativeTick) : QStringLiteral("—");
+    const QString native = m_nativeTick > 0 ? shownPrice(m_nativeTick, m_nativeTick) : QStringLiteral("—");
     if (m_group > 1 && m_nativeTick > 0) {
-        const QString rows = priceText(m_tick, m_tick);
-        if (compact) return QString("Rows %1 %2 · tick %3 · %4").arg(rows, m_quote, native, m_base);
+        const QString rows = shownPrice(m_tick, m_tick);
+        if (compact) return QString("Rows %1 %2 · tick %3 · %4").arg(rows, quoteUnit(), native, m_base);
         return QStringLiteral("Aggregation: rows of %1 %2 (%3 server ticks of %4) · resting size: %5")
-            .arg(rows, m_quote).arg(m_group).arg(native, m_base);
+            .arg(rows, quoteUnit()).arg(m_group).arg(native, m_base);
     }
-    if (compact) return QString("Tick %1 %2 · %3 size").arg(native, m_quote, m_base);
-    return QStringLiteral("Aggregation: %1 %2 · resting size: %3").arg(native, m_quote, m_base);
+    if (compact) return QString("Tick %1 %2 · %3 size").arg(native, quoteUnit(), m_base);
+    return QStringLiteral("Aggregation: %1 %2 · resting size: %3").arg(native, quoteUnit(), m_base);
 }
 QString DomModel::executionSummary() const
 {
@@ -627,11 +651,11 @@ QString DomModel::summary(bool compact) const
 {
     if (!m_aggregationIssue.isEmpty()) return {};
     // The native top, whatever the row grouping.
-    const QString bid = m_bestBid > 0 ? priceText(m_bestBid, m_nativeTick) : "—";
-    const QString ask = m_bestAsk > 0 ? priceText(m_bestAsk, m_nativeTick) : "—";
-    const QString spread = m_bestBid > 0 && m_bestAsk > 0 ? priceText(m_bestAsk - m_bestBid, m_nativeTick) : "—";
+    const QString bid = m_bestBid > 0 ? shownPrice(m_bestBid, m_nativeTick) : "—";
+    const QString ask = m_bestAsk > 0 ? shownPrice(m_bestAsk, m_nativeTick) : "—";
+    const QString spread = m_bestBid > 0 && m_bestAsk > 0 ? shownPrice(m_bestAsk - m_bestBid, m_nativeTick) : "—";
     if (compact) return QString("Spr %1").arg(spread);
-    return QStringLiteral("Bid %1 · Ask %2 · Bucketed spread %3 %4").arg(bid, ask, spread, m_quote);
+    return QStringLiteral("Bid %1 · Ask %2 · Bucketed spread %3 %4").arg(bid, ask, spread, quoteUnit());
 }
 
 void DomModel::clearFlashes(bool repaint)
@@ -854,6 +878,6 @@ QString DomModel::pulseSummary(PulseText form) const
     text = text.arg(sizeText(ask.pulled), sizeText(ask.eaten), sizeText(bid.pulled), sizeText(bid.eaten));
     if (t.largestPull && m_tick > 0 && form != PulseText::NoMax)
         text += (form == PulseText::Compact ? QStringLiteral(" · max %1 @ %2") : QStringLiteral(" · biggest pull %1 @ %2"))
-            .arg(sizeText(t.largestPull->size), priceText(t.largestPull->price, m_tick));
+            .arg(sizeText(t.largestPull->size), shownPrice(t.largestPull->price, m_tick));
     return text;
 }

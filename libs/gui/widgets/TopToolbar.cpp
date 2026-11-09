@@ -1079,8 +1079,11 @@ void TopToolbar::setLayerToggleStates(bool heatmapEnabled,
     }
 }
 
-QString TopToolbar::tickText(int64_t units, double priceScale) {
+QString TopToolbar::tickText(int64_t units, double priceScale, sentinel::PriceDisplayUnit unit) {
     if (units <= 0 || !(priceScale > 0)) return QStringLiteral("-");
+    if (unit.scaled())
+        return QString::number(unit.toDisplay(double(units) / priceScale), 'g', 12) + QLatin1Char(' ') +
+               QLatin1String(unit.tag());
     return QStringLiteral("$") + QString::number(double(units) / priceScale, 'g', 12);
 }
 
@@ -1098,7 +1101,7 @@ void TopToolbar::fillTickPresetCombo(QComboBox* combo, const TickSelectorState& 
     auto* model = qobject_cast<QStandardItemModel*>(combo->model());
     for (const int64_t u : units) {
         const bool offered = u != shown || shownOffered;
-        combo->addItem(tickText(u, state.priceScale) + (offered ? QString() : QStringLiteral(" (unavailable)")),
+        combo->addItem(tickText(u, state.priceScale, state.unit) + (offered ? QString() : QStringLiteral(" (unavailable)")),
                        qlonglong(u));
         if (!offered && model) {
             auto* item = model->item(combo->count() - 1);
@@ -1132,9 +1135,9 @@ void TopToolbar::setTickSelectorState(const TickSelectorState& state) {
         ? QStringLiteral("Manual: the tick stays locked; zoom only scales rows. Remembered per symbol and timeframe.")
         : QStringLiteral("Auto: the smallest preset whose rows are at least the minimum row height."));
     QString tip = state.manual ? QStringLiteral("Locked tick %1. Presets: what some loaded data can build.")
-                                     .arg(tickText(state.manualUnits, state.priceScale))
+                                     .arg(tickText(state.manualUnits, state.priceScale, state.unit))
                                : QStringLiteral("Drawn tick %1 (Auto). Pick a preset to lock it (Manual).")
-                                     .arg(tickText(state.drawnUnits, state.priceScale));
+                                     .arg(tickText(state.drawnUnits, state.priceScale, state.unit));
     if (!state.indicator.isEmpty()) tip += QStringLiteral("\n") + state.indicator;
     m_tickPresetCombo->setToolTip(m_tickPresetCombo->currentText() + QStringLiteral("\n") + tip);
     m_tickVeilLabel->setToolTip(state.indicator);

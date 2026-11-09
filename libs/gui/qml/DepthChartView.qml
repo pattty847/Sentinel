@@ -174,6 +174,10 @@ Rectangle {
         }
 
         function formatPrice(value) {
+            // A scaled unit (PEPE x1M) shows 5.04 for 0.00000504, named by the axis tag.
+            const factor = priceAxisModel.unitFactor
+            if (factor > 1)
+                return (Number(value) * factor).toFixed(2) + " " + priceAxisModel.unitLabel.split(" ").pop()
             return "$" + Number(value).toFixed(2)
         }
 
@@ -605,6 +609,30 @@ Rectangle {
             id: priceAxisModel
             target: unifiedGridRenderer
             tickSize: unifiedGridRenderer.view.heatmapTickSize
+            symbol: root.symbol
+        }
+
+        // The scaled display unit of a tiny-priced symbol: "PEPE x1M" (5.04 = 0.00000504).
+        Rectangle {
+            objectName: "priceUnitTag"
+            visible: priceAxisModel.unitLabel !== ""
+            anchors.bottom: parent.bottom
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottomMargin: 4
+            width: unitTagText.implicitWidth + 10
+            height: unitTagText.implicitHeight + 4
+            radius: 3
+            color: Qt.rgba(0.95, 0.75, 0.2, 0.92)
+            z: 2
+            Text {
+                id: unitTagText
+                anchors.centerIn: parent
+                text: priceAxisModel.unitLabel
+                color: "#141414"
+                font.family: "Roboto Mono"
+                font.pixelSize: 12
+                font.bold: true
+            }
         }
 
         MouseArea {
