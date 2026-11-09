@@ -18,6 +18,8 @@ public:
                    int64_t priceScale, int64_t baseScale, int64_t quoteScale);
     AddResult add(const Trade& trade);
     std::optional<FlowBar> bar(int64_t bucketStartMs);
+    // Materialize one bucket without copying or modifying the live builder.
+    std::optional<FlowBar> snapshotBar(int64_t bucketStartMs) const;
     std::vector<FlowBar> bars();
     // The caller owns the exchange-time clock. After publishing all buckets
     // ending at an aligned exclusiveEndMs as final, call sealThrough(exclusiveEndMs).
@@ -41,7 +43,7 @@ private:
         uint32_t revision = 0;
         FlowBar cached;
     };
-    FlowBar materialize(int64_t startMs, Bucket& bucket);
+    FlowBar materialize(int64_t startMs, Bucket& bucket) const;
     int64_t timeframeMs_;
     double nativeTick_;
     int64_t priceScale_, baseScale_, quoteScale_, rowTickUnits_;

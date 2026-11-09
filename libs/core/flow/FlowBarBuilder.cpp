@@ -167,7 +167,7 @@ FlowBarBuilder::AddResult FlowBarBuilder::add(const Trade& t) {
     }
     return AddResult::Accepted;
 }
-FlowBar FlowBarBuilder::materialize(int64_t start, Bucket& bucket) {
+FlowBar FlowBarBuilder::materialize(int64_t start, Bucket& bucket) const {
     if (!bucket.dirty) return bucket.cached;
     FlowBar bar;
     bar.startMs = start; bar.timeframeMs = timeframeMs_; bar.nativeTick = nativeTick_;
@@ -230,6 +230,12 @@ std::optional<FlowBar> FlowBarBuilder::bar(int64_t start) {
     auto it = buckets_.find(start);
     if (it == buckets_.end()) return {};
     return materialize(start, it->second);
+}
+std::optional<FlowBar> FlowBarBuilder::snapshotBar(int64_t start) const {
+    const auto it = buckets_.find(start);
+    if (it == buckets_.end()) return {};
+    auto bucket = it->second;
+    return materialize(start, bucket);
 }
 std::vector<FlowBar> FlowBarBuilder::bars() {
     std::vector<FlowBar> out;

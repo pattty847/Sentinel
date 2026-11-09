@@ -65,9 +65,12 @@ public:
         std::map<int64_t, uint32_t> liveRevisions; // cached coarse buckets, model thread snapshot
         recording::FlowStore* store = nullptr; // app owns it; server workers stop before destruction
         int64_t observedThroughMs = 0;
+        int64_t retainedFromMs = 0; // first RAM bucket of the requested source timeframe
     };
     // Model-thread only. Attachment occurs before the stream server starts.
     void attachFlowStore(recording::FlowStore* store);
+    void onFlowHourThrough(const std::string& symbol, int64_t hourThroughMs);
+    void wakeFlowStoreOnRecorderHour(const std::string& symbol);
     FlowHistorySnapshot flowHistorySnapshot(const std::string& symbol, int64_t timeframeMs,
                                           int64_t fromMs, int64_t toMs) const;
     void subscribeFlow(std::shared_ptr<FlowSubscription> subscription);
@@ -181,7 +184,7 @@ private:
     struct FlowSeries {
         sentinel::flow::FlowBarBuilder builder;
         std::vector<FlowSlot> bucketSlots;
-        FlowSeries(int64_t tf, const sentinel::flow::FlowScales& scales);
+        FlowSeries(int64_t tf, const sentinel::flow::FlowScales& scales, bool extendedMinutes = false);
         uint64_t capacityDrops = 0;
     };
     struct FlowComposite {
@@ -202,6 +205,7 @@ private:
     };
     struct FlowProduct {
         int64_t clock = 0;
+        int64_t lastLagWarningClock = INT64_MIN;
         int64_t firstLiveMs = -1;
         std::set<int64_t> missingGridWarnedDays;
         std::set<int64_t> lossyMinutes; // accepted series cannot prove these minutes
@@ -210,12 +214,14 @@ private:
         sentinel::flow::Trade scratch;
     };
     recording::FlowStore* m_flowStore = nullptr;
+    std::map<std::string, int64_t> m_flowWakeThrough;
     std::map<std::string, FlowProduct> m_flowProducts;
     std::vector<std::shared_ptr<FlowSubscription>> m_flowSubscriptions;
     QTimer m_flowTimer;
     uint64_t m_flowDroppedTrades = 0, m_flowDroppedBuckets = 0, m_flowMissingGridTrades = 0;
     uint64_t m_flowHourShrinkRefusals = 0;
-    void pruneFlowSeries(int64_t clock, int64_t tf, FlowSeries& series);
+    int64_t flowMinuteRetainedFrom(const std::string& symbol, int64_t clock) const;
+    void pruneFlowSeries(const std::string& symbol, int64_t clock, int64_t tf, FlowSeries& series);
     void addFlowTrade(const Trade& trade, int64_t exchangeMs);
     void publishFlow();
     void publishFlowSeries(const std::string& symbol, FlowProduct& product,

@@ -82,6 +82,13 @@ JournalReader::JournalReader(std::filesystem::path root, std::string product, st
         if (i && order(files_[i-1].header) == order(files_[i].header)) throw std::runtime_error("duplicate journal segment");
         files_[i].superseded = i + 1 < files_.size();
     }
+    selectStart();
+}
+JournalReader::JournalReader(const JournalReader& catalog, std::optional<JournalPos> start)
+    : product_(catalog.product_), files_(catalog.files_), start_(std::move(start)) {
+    selectStart();
+}
+void JournalReader::selectStart() {
     if (start_) {
         if (start_->product != product_) throw std::runtime_error("journal position product mismatch");
         bool found = false;

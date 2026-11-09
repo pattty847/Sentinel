@@ -291,13 +291,21 @@ The header contains `type: "flow_history_chunk"`, `schema_version: 1`, `req`,
 `symbol`, `timeframe_ms`, `price_scale`, `row_tick_units`, `status`, `oldest_ms`,
 `sealed_through_ms`, `ranges` and `bars`. `bars` entries carry `bucket_start_ms`,
 uint32 `revision`, boolean `complete`, and `source: "store" | "live"`, in the
-same ascending order as the binary records. The watermark is the recorder's
-committed closed-hour boundary for that symbol; it refreshes on every page.
+same ascending order as the binary records. The watermark is the store's
+contiguous built-through hour for that symbol (every preceding closed hour is
+built), rather than the recorder's committed `hourThrough`; it refreshes on
+every page. A store read can still report `building` below the watermark if a
+file becomes stale or unreadable after the mark advances.
 Only a bucket ending at or before that boundary is final and served as `store`.
 A coarse bucket crossing it is provisional (`source: "live"`, `complete: false`):
 its FLB1 composes sealed store hours with the live forming part using the shared
 composer. Its revision is the model's live coarse revision if present, otherwise
-zero. The incomplete flag lets a live update at the same revision replace it.
+zero. Missing constituent hours or minutes also force revision zero. The
+incomplete flag lets a live update at the same revision replace it.
+For a final bucket with partial or building store coverage, an available bar
+is `source: "store"`, `complete: false`, with its store revision; a later
+complete store page replaces it by store revision.
+Store revisions use the FLD1 day generation, including empty constituent hours.
 Revision and completeness are envelope metadata; FLB1 content is unchanged.
 Each range has half-open `from_ms`, `to_ms`, `status`, `price_scale` and
 `row_tick_units`. There is one range per requested bucket, including buckets
@@ -331,8 +339,11 @@ chronological. Clients should retry building ranges separately after catch-up.
 
 Minute/coarse requests read only the store's sealed-hour index and FLD1 files,
 plus a queued read-only copy of the model's retained minute series for the
-forming hour and times newer than the sealed watermark. They never replay or
-scan journals. Coarse bars use `flow::composeFlowBars`, the same composition and
+forming hour and times newer than the built-through watermark. Live minutes
+and closed-hour composites remain available until the store builds them, up to
+six extra closed hours; further lag is logged and appears as `building`.
+Minute and coarse requests never replay or scan journals. Coarse bars use
+`flow::composeFlowBars`, the same composition and
 scales as live. Missing sealed hours remain building until the background store
 builder catches up. After a restart, missing unsealed minutes remain building;
 live coverage starts with the first observed trade and cannot prove an earlier
@@ -345,14 +356,21 @@ page cap. A two-hour 1 s request is refused with the one-hour cap named in its
 error. Journal replay uses the same grid resolver, trade builder and receive-time
 tail as the store. A missing/short journal returns partial coverage. A
 second replayed inside an unsealed hour remains provisional (`source: "live"`).
-Sealed seconds come from journal replay even when retained live seconds overlap.
+Seconds inside the 30-minute RAM retention are served from RAM without a
+journal read. A covered second ending at or before the built-through watermark
+is labelled `source: "store"` and final; older seconds use replay. A
+RAM-served final second uses store revision zero so a later journal replay with
+a store generation can replace it. Only one
+replay runs server-wide at a time. A concurrent replay gets a `busy` error;
+session close or server stop cancels an active replay.
 
 ### Client merge of flow bars
 
-Key bars by `(symbol, timeframe_ms, bucket_start_ms)`. A complete sealed
+Key bars by `(symbol, timeframe_ms, bucket_start_ms)`. A final sealed
 `source: "store"` bar replaces a `source: "live"` bar regardless of revision;
 live never replaces store. Compare revisions only within the same source: the
-higher store generation wins over an older store generation, and the higher
+higher store generation wins over an older store generation (at equal generation,
+complete wins over incomplete), and the higher
 live revision wins over an older live revision. At equal live revision,
 `complete: true` wins; otherwise apply live updates in stream order. The
 history chunk's `sealed_through_ms` replaces the client's prior watermark for

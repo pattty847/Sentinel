@@ -41,7 +41,7 @@ struct FlowBarVersion {
 inline bool flowBarReplaces(FlowBarVersion existing, FlowBarVersion incoming) {
     if (existing.source != incoming.source) return incoming.source == FlowBarSource::Store;
     if (incoming.revision != existing.revision) return incoming.revision > existing.revision;
-    if (incoming.source == FlowBarSource::Store) return false;
+    if (incoming.source == FlowBarSource::Store) return incoming.complete && !existing.complete;
     if (existing.complete != incoming.complete) return incoming.complete;
     return true; // equal live revision/completeness follows stream order
 }

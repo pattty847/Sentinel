@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <condition_variable>
+#include <stop_token>
 #include <unordered_map>
 #include "../servermodel/ServerDataModel.hpp"
 #include "../servermodel/ChunkService.hpp"
@@ -129,6 +130,8 @@ private:
     std::mutex m_historyWorkersMutex;
     std::unique_ptr<net::thread_pool> m_historyWorkers;
     std::atomic_size_t m_pendingHistoryTasks{0};
+    std::atomic_bool m_flowReplayBusy{false};
+    std::stop_source m_flowReplayStop;
 
     std::mutex m_sessionsMutex;
     std::condition_variable m_sessionsDrained;

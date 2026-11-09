@@ -47,6 +47,7 @@ class FlowStore {
         std::function<void(std::stop_token)> afterRecordForTest;
         std::function<void(const std::filesystem::path &)> beforeCommitForTest;
         std::function<void()> afterCatalogConstructForTest;
+        std::function<void()> afterWakeForTest;
         std::function<void(std::stop_token)> afterInventoryFileForTest;
     };
     struct PassResult {
@@ -57,6 +58,7 @@ class FlowStore {
         int64_t fromMs = 0, toMs = 0; // half-open, including known empty buckets
         std::string status; // complete, partial, building
         sentinel::flow::FlowScales scales;
+        uint32_t revision = 0; // FLD1 day generation, including empty store ranges
     };
     struct Reply {
         std::vector<sentinel::flow::FlowBar> bars;
@@ -78,10 +80,10 @@ class FlowStore {
     // Minute bucket starts in [fromMs, toMs); requests must be UTC minute aligned.
     Reply window(const std::string &symbol, int64_t fromMs, int64_t toMs);
     static constexpr int64_t kMaxReplayWindowMs = 3'600'000;
-    // One-shot 1s replay; worker-local readers, no persistent writes or shared catalog.
+    // One-shot 1s replay; worker-local cursor over the cached catalog, no persistent writes.
     Reply buildWindow(const std::string &symbol, int64_t fromMs, int64_t toMs,
                       std::stop_token stop = {});
-    // Recorder's committed closed-hour watermark; safe on a history worker.
+    // Contiguous built-through closed-hour watermark; safe on a history worker.
     int64_t sealedThroughMs(const std::string &symbol) const;
     std::filesystem::path filePath(const std::string &symbol, int64_t dayMs) const;
     const std::filesystem::path &root() const { return options_.root; }
@@ -111,8 +113,11 @@ class FlowStore {
     };
     mutable std::mutex indexMutex_;
     std::map<std::pair<std::string, int64_t>, DayIndex> index_;
+    std::map<std::string, int64_t> builtThrough_;
     std::map<std::string, std::map<std::filesystem::path, FileIdentity>> journalInventory_;
-    std::map<std::string, std::unique_ptr<sentinel::roller::JournalReader>> catalogs_; // builder thread only
+    mutable std::mutex catalogMutex_;
+    std::map<std::string, std::shared_ptr<sentinel::roller::JournalReader>> catalogs_;
+    std::map<std::string, std::map<int64_t, std::filesystem::path>> hmcPaths_;
     std::map<std::string, int64_t> firstHour_; // builder thread only
     std::stop_source stopSource_;
     std::thread thread_;

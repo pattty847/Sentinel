@@ -42,6 +42,8 @@ class JournalReader {
 public:
     JournalReader(std::filesystem::path root, std::string product,
                   std::optional<JournalPos> start = {});
+    // A cursor over a previously validated file catalog; does not walk directories.
+    JournalReader(const JournalReader& catalog, std::optional<JournalPos> start);
     bool next(JournalRecord& out);
     // Consume the inclusive applied cursor, or retain a proven gap successor
     // for normal feed invalidation. Any unreported mismatch remains fatal.
@@ -59,6 +61,7 @@ public:
     // Latest snapshot <= receive time, including earlier hours/runs for warmup.
     std::optional<JournalPos> anchor(int64_t receiveMs) const;
 private:
+    void selectStart();
     std::string product_;
     std::vector<JournalFile> files_;
     size_t file_ = 0;
