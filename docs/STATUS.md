@@ -9,8 +9,8 @@ Current facts only: replace old facts, do not append a journal. History is `git 
     1. Wave 3 per TODO Waves: first dispatch a Fable plan (no code) for footprint + CVD + eaten/pulled + bubbles ("why did it move"); journal has every trade with side. Then aesthetics (palette, zoom-out smoothing, size saturation in every theme/palette, axis drag snap-back), heatmap seam.
     2. Owner present: rebuild main, then `deploy-runtime.sh server` for the trade-id window `87c9ccbc` (no format change). The script now refuses a stale build.
     3. After landing any GUI change, build main: the owner's GUI loads QML from the source tree, so a stale binary fails to load the chart (2026-11-08).
-- **Conductor:** Claude Opus 5.5 (2026-11-05 to 2026-11-08 wave 2); next conductor picks up item 1 above.
-- **Conductor:** Claude Opus 5.5 (2026-11-05). No service changes or deployment.
+    4. Squash a branch whose history touched TODO before land (AGENTS 7).
+- **Conductor:** Claude Opus 5.5 (2026-11-05 to 11-08, waves 1-2); next starts at item 1.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high-risk. Owner 2026-11-05: spend all Codex, including a reset credit before it expires (holds 3).
 
 ## Land gate
