@@ -124,6 +124,7 @@ private:
     QDoubleSpinBox *m_sensitivityMin = nullptr;
     QDoubleSpinBox *m_sensitivityMax = nullptr;
     QDoubleSpinBox *m_opacity = nullptr;
+    QCheckBox *m_smoothZoomOut = nullptr;
     QCheckBox *m_crossfadeOn = nullptr;
     QSpinBox *m_crossfadeMs = nullptr;
     QSlider *m_gammaSlider = nullptr;

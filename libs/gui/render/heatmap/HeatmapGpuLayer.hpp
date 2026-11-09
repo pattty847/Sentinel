@@ -229,6 +229,7 @@ private:
     PaletteTone tone_;
     std::shared_ptr<const HeatmapPalette> palette_;
     DrawStyle style_;
+    recording::SizeScale displayScale_;
     std::shared_ptr<const SpanSet> snapshot_;
     std::shared_ptr<const LiveSnapshot> live_;
     std::shared_ptr<const ResolutionSummary> resolution_;

@@ -21,6 +21,7 @@ struct HeatmapChartSettings {
     std::vector<GradientStop> bidGradient{{0, "#000000"}, {1, "#00ffff"}};
     std::vector<GradientStop> askGradient{{0, "#000000"}, {1, "#ffc800"}};
     double sensitivityMin = 0.05, sensitivityMax = 50, opacity = 1;
+    bool smoothZoomOut = false;
     uint64_t gpuCapBytes = 320ull << 20, uploadBudgetBytes = 8ull << 20;
     int prefetchTiles = 1, liveMinIntervalMs = 500;
     bool showTelemetry = false;

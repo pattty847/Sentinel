@@ -187,6 +187,7 @@ public:
         // transition will reach (its start and target), binned once at its start so the
         // glide never rebins; none at rest (the view).
         float coverageGamma = 0.0f;
+        bool smoothZoomOut = false;
         std::optional<ViewWindow> binView;
         recording::SizeScale outputScale;
         uint64_t uploadBudgetBytes = 8ull << 20;

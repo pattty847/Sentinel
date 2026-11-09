@@ -159,10 +159,12 @@ void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     if (symbol_ == symbol) return;
     if (!startupTickReady_) startupTickTimer_->stop();
     symbol_ = symbol;
+    displayScale_ = {};
     autoPriceTick_.reset();
     invalidateTickProposal();
     lastLiveEndMs_ = 0;
     resetLabels(true); // the old symbol's labels never draw on the new picture
+    refreshStyle();
     autoUnits_ = 0; // Auto evaluates fresh on the new symbol's data
     restoreTick();
     noteLimits();
@@ -221,6 +223,13 @@ void HeatmapGpuLayer::setSettings(const HeatmapChartSettings &settings, bool exp
     if (wasManual != manualMode_) autoUnits_ = 0; // back to Auto: the rule resumes from the current zoom
     if (previous.gpuCapBytes != settings.gpuCapBytes) postBudget();
     if (previous.liveMinIntervalMs != settings.liveMinIntervalMs) postLiveInterval();
+    const auto nextScale = displaySizeScale(std::max(settings.sensitivityMax,
+                                                      liquidityRange_.valid ? liquidityRange_.hi : 0.0));
+    if (nextScale.floor > displayScale_.floor) {
+        displayScale_ = nextScale;
+        labelsPosted_ = false;
+        labelEpoch_ = labelSerial_ + 1;
+    }
     refreshStyle();
     if (previous.palettePreset != settings.palettePreset || previous.bidGradient != settings.bidGradient ||
         previous.askGradient != settings.askGradient)
@@ -243,8 +252,11 @@ void HeatmapGpuLayer::setTickMemory(const ManualTickMemory &memory) {
 }
 
 void HeatmapGpuLayer::refreshStyle() {
-    const recording::SizeScale scale; // the binner's output codes (Frame::outputScale)
-    const auto window = codeWindow(settings_.sensitivityMin, settings_.sensitivityMax, scale.floor, scale.codesPerOctave);
+    const bool automatic = displayScale_.floor > recording::SizeScale{}.floor &&
+        settings_.sensitivityMin == 0.05 && settings_.sensitivityMax == 50 && liquidityRange_.valid;
+    const double lo = automatic ? liquidityRange_.lo : settings_.sensitivityMin;
+    const double hi = automatic ? liquidityRange_.hi : settings_.sensitivityMax;
+    const auto window = codeWindow(lo, hi, displayScale_.floor, displayScale_.codesPerOctave);
     style_.codeFloor = window.floor;
     style_.codeRange = window.range;
     style_.opacity = float(std::clamp(settings_.opacity, 0.0, 1.0));
@@ -505,6 +517,8 @@ bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &
     frame.view = view;
     frame.rect = rect;
     frame.coverageGamma = coverageGamma;
+    frame.smoothZoomOut = settings_.smoothZoomOut;
+    frame.outputScale = displayScale_;
     frame.binView = binView;
     frame.uploadBudgetBytes = settings_.uploadBudgetBytes;
     frame.gpuCapBytes = settings_.gpuCapBytes;
@@ -583,6 +597,7 @@ void HeatmapGpuLayer::postLabels(const ViewWindow &view) {
     while (uint64_t(request.columns) * request.rows > kMaxLabelCells && request.rows > uint32_t(rows)) --request.rows;
     while (uint64_t(request.columns) * request.rows > kMaxLabelCells && request.columns > uint32_t(cols)) --request.columns;
     request.asset = symbol_.substr(0, symbol_.find('-'));
+    request.outputScale = displayScale_;
     request.formatText = true;
     postedLabels_ = request;
     labelsPosted_ = true;
@@ -676,6 +691,14 @@ void HeatmapGpuLayer::onLabels() {
     const auto moved = [](double a, double b) { return std::abs(std::log(a / b)) > 0.1; };
     if (range.valid && (!liquidityRange_.valid || moved(range.lo, liquidityRange_.lo) || moved(range.hi, liquidityRange_.hi))) {
         liquidityRange_ = range;
+        const auto scale = displaySizeScale(std::max(range.hi, settings_.sensitivityMax));
+        if (scale.floor > displayScale_.floor) {
+            displayScale_ = scale;
+            labelsPosted_ = false;
+            labelEpoch_ = labelSerial_ + 1;
+            emit frameRequested();
+        }
+        refreshStyle();
         emit liquidityRangeChanged();
     }
     // A republished picture with the same cells (an upload acknowledgement bumps

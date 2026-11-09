@@ -308,7 +308,7 @@ QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
         return {"palettePreset", "bidGradient", "askGradient", "sensitivityMin", "sensitivityMax", "opacity",
-                "crossfadeMs", "showBandEdges"};
+                "crossfadeMs", "showBandEdges", "smoothZoomOut"};
     if (tab == "Budgets") return {"gpuCapBytes", "uploadBudgetBytes", "prefetchTiles"};
     if (tab == "Live") return {"liveMinIntervalMs"};
     if (tab == "Debug") return {"showTelemetry"};
@@ -542,6 +542,9 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     form->addRow("Range high (base asset)", m_sensitivityMax);
     m_opacity = doubleSpin(page, "opacity", 0, 1, 0.05, 2);
     form->addRow("Opacity (0–1)", m_opacity);
+    m_smoothZoomOut = new QCheckBox("Blend cells when zoomed out", page);
+    m_smoothZoomOut->setObjectName("smoothZoomOut");
+    form->addRow("Zoom-out smoothing", m_smoothZoomOut);
     auto *fadeRow = new QHBoxLayout;
     m_crossfadeOn = new QCheckBox("Crossfade tick changes", page);
     m_crossfadeOn->setObjectName("crossfadeOn");
@@ -582,6 +585,7 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     describe(form, m_sensitivityMin, m_sensitivityMin->toolTip());
     describe(form, m_sensitivityMax, m_sensitivityMax->toolTip());
     describe(form, m_opacity, "GPU heatmap opacity: 0 = transparent, 1 = solid. Lower it to see other chart layers through the heatmap.");
+    describe(form, m_smoothZoomOut, "Average covered heatmap cells when a cell is smaller than a screen pixel.");
     describe(form, fadeRow, "Blend old and new GPU heatmap rows over 1-2000 milliseconds when the tick changes. Turn off for an immediate switch, or lower the duration for a quicker blend.");
     describe(toneForm, gammaRow, "Curve of heatmap colour intensity (0.1-5). Lower it to bring out weaker liquidity; higher values favour stronger liquidity, this session only.");
     describe(toneForm, contrastRow, "Spread heatmap colour intensity around its midpoint (0.1-5). Raise it for stronger separation, or lower it for a flatter scale; this session only.");
@@ -598,6 +602,7 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     connect(m_sensitivityMin, &QDoubleSpinBox::valueChanged, this, [this](double v) { apply({{"sensitivityMin", v}}); });
     connect(m_sensitivityMax, &QDoubleSpinBox::valueChanged, this, [this](double v) { apply({{"sensitivityMax", v}}); });
     connect(m_opacity, &QDoubleSpinBox::valueChanged, this, [this](double v) { apply({{"opacity", v}}); });
+    connect(m_smoothZoomOut, &QCheckBox::toggled, this, [this](bool on) { apply({{"smoothZoomOut", on}}); });
     connect(m_crossfadeOn, &QCheckBox::toggled, this, [this](bool on) {
         apply({{"crossfadeMs", on ? m_crossfadeMs->value() : 0}});
     });
@@ -814,6 +819,10 @@ void HeatmapSettingsDialog::refreshFromModel() {
     set(m_sensitivityMin, s.sensitivityMin);
     set(m_sensitivityMax, s.sensitivityMax);
     set(m_opacity, s.opacity);
+    {
+        const QSignalBlocker block(m_smoothZoomOut);
+        m_smoothZoomOut->setChecked(s.smoothZoomOut);
+    }
     {
         const QSignalBlocker block(m_crossfadeOn);
         m_crossfadeOn->setChecked(s.crossfadeMs > 0);

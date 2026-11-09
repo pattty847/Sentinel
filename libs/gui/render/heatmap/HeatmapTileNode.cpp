@@ -83,6 +83,7 @@ struct HeatmapTileNode::Bin {
     uint64_t id = 0;
     SpanId span;
     int64_t tickUnits = 0;
+    recording::SizeScale outputScale;
     double tick = 0;
     std::array<uint64_t, kMaxSpanSources> passes{};
     uint8_t passCount = 0;
@@ -573,6 +574,8 @@ HeatmapTileNode::Bin *HeatmapTileNode::binFor(const SpanRef &ref, int64_t tickUn
     if (!count || tickUnits <= 0 || !indexed_) return nullptr;
     for (const auto &bin : bins_) {
         if (bin->live || bin->span != ref.span->id || bin->tickUnits != tickUnits || bin->passCount != count ||
+            bin->outputScale.floor != frame_.outputScale.floor ||
+            bin->outputScale.codesPerOctave != frame_.outputScale.codesPerOctave ||
             !std::equal(passes.begin(), passes.begin() + count, bin->passes.begin()))
             continue;
         bin->usedFrame = frameNo_;
@@ -586,6 +589,7 @@ HeatmapTileNode::Bin *HeatmapTileNode::binFor(const SpanRef &ref, int64_t tickUn
     bin->id = nextBinId_++;
     bin->span = ref.span->id;
     bin->tickUnits = tickUnits;
+    bin->outputScale = frame_.outputScale;
     bin->tick = fromUnits(tickUnits, indexed_->priceScale);
     bin->passes = passes;
     bin->passCount = count;
@@ -818,10 +822,13 @@ bool HeatmapTileNode::addBinDraw(QRhiResourceUpdateBatch *updates, Bin &bin, flo
         p.rect[0] = float(r.x()); p.rect[1] = float(y0); p.rect[2] = float(r.width()); p.rect[3] = float(y1 - y0);
         p.mapping[0] = mapping.timeOffset; p.mapping[1] = mapping.timeSpan;
         p.mapping[2] = mapping.priceOffset; p.mapping[3] = mapping.priceSpan;
-        p.dims[0] = block.grid.columns; p.dims[1] = block.grid.rows; p.dims[2] = kClampRows;
+        p.dims[0] = block.grid.columns; p.dims[1] = block.grid.rows;
+        p.dims[2] = kClampRows | (frame_.smoothZoomOut ? 2u : 0u) |
+                    (frame_.coverageGamma != 0.0f ? 4u : 0u);
         p.style[0] = frame_.style.codeFloor; p.style[1] = frame_.style.codeRange; p.style[2] = opacity * frame_.style.opacity;
         const auto &tone = palette().tone;
-        p.tone[0] = tone.gamma; p.tone[1] = tone.contrast; p.tone[2] = tone.floor; p.tone[3] = frame_.coverageGamma;
+        p.tone[0] = tone.gamma; p.tone[1] = tone.contrast; p.tone[2] = tone.floor;
+        p.tone[3] = frame_.smoothZoomOut ? 2.2f : frame_.coverageGamma;
         updates->updateDynamicBuffer(block.params.get(), 0, sizeof(p), &p);
         tileDraws_.push_back({block.bindings.get(), opacity});
         any = true;
@@ -1030,6 +1037,8 @@ HeatmapTileNode::Bin *HeatmapTileNode::liveBinFor(int64_t tickUnits, QRhiCommand
     Bin *bin = nullptr;
     for (const auto &b : bins_)
         if (b->live && b->span.tfMs == tf && b->tickUnits == tickUnits && b->span.symbol == live_->symbol &&
+            b->outputScale.floor == frame_.outputScale.floor &&
+            b->outputScale.codesPerOctave == frame_.outputScale.codesPerOctave &&
             !fading(b->id)) {
             bin = b.get();
             break;
@@ -1042,6 +1051,7 @@ HeatmapTileNode::Bin *HeatmapTileNode::liveBinFor(int64_t tickUnits, QRhiCommand
         fresh->live = true;
         fresh->span = {live_->symbol, tf, INT64_MIN};
         fresh->tickUnits = tickUnits;
+        fresh->outputScale = frame_.outputScale;
         const double scale = live_->resolution.priceScale > 0 ? live_->resolution.priceScale
                                                               : (indexed_ ? indexed_->priceScale : 100.0);
         fresh->tick = fromUnits(tickUnits, scale);
@@ -1137,7 +1147,7 @@ void HeatmapTileNode::layout(const std::vector<Draw> &draws) {
 // piece gains or loses time outside the pixel. At rest every pixel shows the one
 // cell under its centre and nothing moves.
 void HeatmapTileNode::snapLiveSeams() {
-    if (frame_.coverageGamma == 0.0f) return;
+    if (frame_.coverageGamma == 0.0f && !frame_.smoothZoomOut) return;
     for (auto &live : pieces_) {
         if (!live.live || !(live.hiMs > live.loMs)) continue;
         const double seam = floorToDevicePixelMs(live.drawLoMs);
@@ -1494,7 +1504,7 @@ void HeatmapTileNode::prepare() {
     stats_->crossfading.store(fadingLayers > 0);
     stats_->drawnTickUnits.store(drawnTick_);
     stats_->drawnTfMs.store(drawnTf_);
-    stats_->coverageBlend.store(frame_.coverageGamma != 0.0f);
+    stats_->coverageBlend.store(frame_.coverageGamma != 0.0f || frame_.smoothZoomOut);
     stats_->complete.store(complete);
     stats_->wantsFrame.store(uploadPending_ || fadingLayers > 0 || pendingLive_ != nullptr ||
                              (binner_ && binner_->selfTestInFlightForTest()));

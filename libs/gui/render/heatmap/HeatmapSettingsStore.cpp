@@ -115,6 +115,7 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"sensitivityMin", s.sensitivityMin},
         {"sensitivityMax", s.sensitivityMax},
         {"opacity", s.opacity},
+        {"smoothZoomOut", s.smoothZoomOut},
         {"gpuCapBytes", qint64(s.gpuCapBytes)},
         {"uploadBudgetBytes", qint64(s.uploadBudgetBytes)},
         {"prefetchTiles", s.prefetchTiles},
@@ -172,6 +173,7 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.sensitivityMin = merged["sensitivityMin"].toDouble();
     out.sensitivityMax = merged["sensitivityMax"].toDouble();
     out.opacity = merged["opacity"].toDouble();
+    out.smoothZoomOut = merged["smoothZoomOut"].toBool();
     out.gpuCapBytes = uint64_t(std::max(0.0, merged["gpuCapBytes"].toDouble()));
     out.uploadBudgetBytes = uint64_t(std::max(0.0, merged["uploadBudgetBytes"].toDouble()));
     out.prefetchTiles = int(std::clamp(merged["prefetchTiles"].toDouble(), -2147483647.0, 2147483647.0));

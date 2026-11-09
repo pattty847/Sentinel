@@ -6,6 +6,7 @@
 #include "render/heatmap/HeatmapDataService.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapSettingsStore.hpp"
+#include "render/heatmap/HeatmapSettingsModel.hpp"
 #include <QCoreApplication>
 #include <QDir>
 #include <QEvent>
@@ -58,6 +59,31 @@ TEST_F(HeatmapPlumbing, ServiceShutdownForgetsPendingAutoPriceTick) {
     service = std::make_unique<HeatmapDataService>([](QObject *) { return new FakeChunkTransport; });
     layer.setService(service.get());
     EXPECT_TRUE(layer.setAutoPriceTick(500)) << "a service swap clears a decision even without a controller";
+}
+
+TEST_F(HeatmapPlumbing, ZoomOutSmoothingPersistsAndReachesTheFrame) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    QSettings ini(dir.filePath("settings.ini"), QSettings::IniFormat);
+    HeatmapSettingsStore store(ini);
+    HeatmapSettingsModel model(store, "main", {});
+    EXPECT_FALSE(model.settings().smoothZoomOut);
+    ASSERT_TRUE(model.apply({{"smoothZoomOut", true}}).isEmpty());
+    ini.sync();
+    QSettings reopened(dir.filePath("settings.ini"), QSettings::IniFormat);
+    EXPECT_TRUE(HeatmapSettingsStore(reopened).load("main", {}).smoothZoomOut);
+    gpu::HeatmapGpuLayer layer;
+    auto service = std::make_unique<HeatmapDataService>([](QObject *) { return new FakeChunkTransport; });
+    layer.setService(service.get());
+    layer.setActive(true);
+    layer.setSettings(model.settings());
+    gpu::HeatmapTileNode::Frame frame;
+    ASSERT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_TRUE(frame.smoothZoomOut);
+    ASSERT_TRUE(model.apply({{"smoothZoomOut", false}}).isEmpty());
+    layer.setSettings(model.settings());
+    ASSERT_TRUE(layer.prepareFrame(frame, QRectF(0, 0, 100, 100), {}));
+    EXPECT_FALSE(frame.smoothZoomOut);
 }
 
 TEST_F(HeatmapPlumbing, AttachBeforeConnectSeesConnectionAndAvailabilityWithNoCharts) {

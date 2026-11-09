@@ -5,6 +5,7 @@
 // section 4, owner decision 4). The 512-texel palette image is sampled with
 // linear filtering: bids in the left half, asks in the right.
 #include "heatmap/HeatmapChartSettings.hpp"
+#include "servermodel/RecordingCodec.hpp"
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -51,6 +52,8 @@ struct CodeWindow {
 };
 CodeWindow codeWindow(double sensitivityMin, double sensitivityMax, double sizeFloor = 1e-6,
                       double codesPerOctave = 819.0);
+// Quantized display scale from observed base-asset sizes. The recording scale is independent.
+recording::SizeScale displaySizeScale(double observedMax);
 
 // CPU reference of heatmap_display.frag in recording mode (a nonzero code
 // without the unknown marker), sampling the palette with linear filtering:

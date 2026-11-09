@@ -151,7 +151,8 @@ public:
     // top/span: the row offset and rows down the image; left/across: the column offset
     // and columns across it. coverageGamma 0: rest (single cell), 2.2: a transition.
     QImage render(const std::vector<uint32_t> &cells, float top, float span, bool clampRows = false,
-                  float coverageGamma = 0.0f, float left = 0.0f, float across = 1.0f) {
+                  float coverageGamma = 0.0f, float left = 0.0f, float across = 1.0f,
+                  bool smoothZoomOut = false) {
         if (cells.size() != size_t(rows_) * columns_) return {};
         Draw draw{};
         QMatrix4x4 projection;
@@ -166,13 +167,14 @@ public:
         draw.mapping[3] = span;
         draw.dims[0] = columns_;
         draw.dims[1] = rows_;
-        draw.dims[2] = clampRows ? 1u : 0u;
+        draw.dims[2] = (clampRows ? 1u : 0u) | (smoothZoomOut ? 2u : 0u) |
+                       (coverageGamma != 0.0f ? 4u : 0u);
         draw.style[1] = 32767.0f;
         draw.style[2] = 1.0f;
         draw.tone[0] = tone_.gamma;
         draw.tone[1] = tone_.contrast;
         draw.tone[2] = tone_.floor;
-        draw.tone[3] = coverageGamma;
+        draw.tone[3] = smoothZoomOut ? 2.2f : coverageGamma;
         QRhiCommandBuffer *cb = nullptr;
         if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) return {};
         auto *updates = rhi_->nextResourceUpdateBatch();
@@ -422,6 +424,25 @@ TEST(HeatmapDisplayRaster, EveryDrawnRowHasTheSameHeight) {
             EXPECT_EQ(bands, 10) << "r=" << r << " offset " << i;
         }
     }
+}
+
+TEST(HeatmapDisplayZoom, OptInZoomOutBlendsSubpixelCellsAndKeepsLargeCellsCrisp) {
+    Headless gpu;
+    if (!gpu.rhi) GTEST_SKIP() << "GPU case skipped: " << gpu.skipReason();
+    const auto palette = solidSidePalette();
+    DisplayReadback display(gpu.rhi.get());
+    ASSERT_TRUE(display.create(QSize(4, 2), 16, palette));
+    std::vector<uint32_t> cells(16);
+    for (size_t i = 0; i < cells.size(); i += 2) cells[i] = hotBid;
+    const auto point = display.render(cells, 0, 16);
+    const auto blended = display.render(cells, 0, 16, false, 0, 0, 1, true);
+    ASSERT_FALSE(point.isNull());
+    ASSERT_FALSE(blended.isNull());
+    EXPECT_NE(point.pixel(2, 0), blended.pixel(2, 0));
+    EXPECT_NEAR(qAlpha(blended.pixel(2, 0)), 128, 16);
+    const auto largePoint = display.render(cells, 0, 0.25f);
+    const auto largeSmooth = display.render(cells, 0, 0.25f, false, 0, 0, 1, true);
+    EXPECT_EQ(largePoint.pixel(2, 0), largeSmooth.pixel(2, 0));
 }
 
 // ---------------------------------------------------------------- smooth zoom (A2)

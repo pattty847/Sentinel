@@ -128,6 +128,17 @@ CodeWindow codeWindow(double sensitivityMin, double sensitivityMax, double sizeF
     return {lo, std::max(hi - lo, 1.0f)};
 }
 
+recording::SizeScale displaySizeScale(double observedMax) {
+    recording::SizeScale scale;
+    if (!std::isfinite(observedMax) || observedMax <= 0) return scale;
+    // Keep the default for BTC-sized books. Powers of 1024 avoid rebuilding the
+    // GPU threshold table for each small movement in the observed maximum.
+    constexpr double kHeadroom = 2.0;
+    const double limit = recording::decodeSize(recording::kMaxCode, scale) / kHeadroom;
+    while (observedMax > limit * (scale.floor / 1e-6)) scale.floor *= 1024.0;
+    return scale;
+}
+
 std::array<float, 4> legacyRecordingColor(uint16_t cell, CodeWindow window, const HeatmapPalette &palette,
                                           float opacity) {
     const int code = cell & 0x7fff;

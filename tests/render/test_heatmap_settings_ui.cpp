@@ -920,6 +920,7 @@ TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     EXPECT_EQ(child<QDoubleSpinBox>(dialog, "sensitivityMin")->value(), 0.2);
     EXPECT_EQ(child<QDoubleSpinBox>(dialog, "sensitivityMax")->value(), 20);
     EXPECT_EQ(child<QDoubleSpinBox>(dialog, "opacity")->value(), 0.75);
+    EXPECT_FALSE(child<QCheckBox>(dialog, "smoothZoomOut")->isChecked());
     EXPECT_FALSE(child<QCheckBox>(dialog, "crossfadeOn")->isChecked());
     EXPECT_FALSE(child<QSpinBox>(dialog, "crossfadeMs")->isEnabled());
     EXPECT_EQ(child<QSpinBox>(dialog, "gpuCapBytes")->value(), 256);
@@ -1123,6 +1124,7 @@ TEST(HeatmapSettingsDialogTest, EveryWidgetWritesItsSettingLiveAndSaved) {
     child<QDoubleSpinBox>(dialog, "sensitivityMax")->setValue(80);
     child<QDoubleSpinBox>(dialog, "sensitivityMin")->setValue(0.5);
     child<QDoubleSpinBox>(dialog, "opacity")->setValue(0.6);
+    child<QCheckBox>(dialog, "smoothZoomOut")->setChecked(true);
     child<QSpinBox>(dialog, "crossfadeMs")->setValue(400);
     // Budgets
     child<QSpinBox>(dialog, "gpuCapBytes")->setValue(128);
@@ -1143,6 +1145,7 @@ TEST(HeatmapSettingsDialogTest, EveryWidgetWritesItsSettingLiveAndSaved) {
     EXPECT_EQ(s.sensitivityMin, 0.5);
     EXPECT_EQ(s.sensitivityMax, 80);
     EXPECT_EQ(s.opacity, 0.6);
+    EXPECT_TRUE(s.smoothZoomOut);
     EXPECT_EQ(s.crossfadeMs, 400);
     EXPECT_EQ(s.gpuCapBytes, 128 * MiB);
     EXPECT_EQ(s.uploadBudgetBytes, 2 * MiB);

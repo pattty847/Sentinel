@@ -6,9 +6,38 @@
 #include <regex>
 #include <string>
 #include <utility>
+#include <set>
 
 namespace {
 using namespace heatmap::gpu;
+TEST(HeatmapPalette, ProductDisplayScaleKeepsGradientsAcrossPresetsAndTones) {
+    for (const auto &sizes : {std::array<double, 5>{0.01, 0.1, 1, 10, 50},
+                              std::array<double, 5>{1e9, 3e9, 1e10, 3e10, 1e11}}) {
+        const auto scale = displaySizeScale(sizes.back());
+        const auto window = codeWindow(sizes.front() * 0.5, sizes.back(), scale.floor, scale.codesPerOctave);
+        std::set<uint16_t> codes;
+        for (double size : sizes) codes.insert(recording::encodeSize(size, scale));
+        EXPECT_EQ(codes.size(), sizes.size());
+        for (const auto preset : {"Electric", "Fire", "Ocean", "Monochrome", "Matrix", "Custom"}) {
+            heatmap::HeatmapChartSettings settings;
+            settings.palettePreset = preset;
+            const auto gradients = gradientsFor(settings);
+            for (const PaletteTone tone : {PaletteTone{}, PaletteTone{0.85f, 1.6f, 0.0f},
+                                           PaletteTone{1.4f, 0.9f, 0.02f}}) {
+                const auto palette = makePalette(gradients, tone);
+                for (bool ask : {false, true}) {
+                    std::set<std::array<int, 4>> colours;
+                    for (double size : sizes) {
+                        const auto code = recording::encodeSize(size, scale);
+                        const auto rgba = legacyRecordingColor(code | (ask ? 0x8000u : 0u), window, *palette);
+                        colours.insert({int(rgba[0] * 255), int(rgba[1] * 255), int(rgba[2] * 255), int(rgba[3] * 255)});
+                    }
+                    EXPECT_GE(colours.size(), 3u) << preset << " ask=" << ask;
+                }
+            }
+        }
+    }
+}
 HeatmapPalette testPalette() {
     HeatmapPalette palette;
     // Codes 128..384 with range 512 produce adjusted 0..1 exactly, including
