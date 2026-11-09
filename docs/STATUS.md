@@ -3,13 +3,13 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends. Keep under 8 KB.
 
-- **Updated:** 2026-11-08, wave 3 in progress. **main** pushed (see `git log -1`). Work order: `docs/TODO.md` Waves.
+- **Updated:** 2026-11-08, wave 3 PAUSED by the owner (needs the Mac for a VM). Nothing running. **main** pushed (see `git log -1`). Work order: `docs/TODO.md` Waves.
 - **Conductor:** Claude Opus 5.5, wave 3 (started 2026-11-08).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high risk. Owner 2026-11-05: spend all Codex, including reset credits before they expire.
 
 ## Next
 
-1. Wave 3 plan: `../Sentinel-Private/research/2026-11-08-why-it-moved-plan.md` (12 slices, section 7 order). Landed: S1 flow-bar-core `131596b4`, heatmap seam `da486efd`, axis drag `b77e7fb9`. Conductor decision: `revision` is not in FLB1 content; the wire envelope carries `revisionAt`. S8a waits for `lt-astra/heatmap-saturation` (both edit `HeatmapChartSettings.hpp`). Owner decisions (plan section 6): 1 flow store = derived store like rollups, measured 0.51 GB per BTC-year (owner has not said yes; needed before S2); 2 bubble defaults: owner judges both modes in the lab (S8a ships both behind a setting); 3 footprint/CVD look: visual pass with the owner in the lab before goldens. Palette waits for the owner's colour variants. Owner to check the seam fix live: 1h, zoom near the now column.
+1. Wave 3 plan: `../Sentinel-Private/research/2026-11-08-why-it-moved-plan.md` (12 slices, section 7 order). Landed: S1 flow-bar-core `131596b4`, heatmap seam `da486efd`, axis drag `b77e7fb9`. Conductor decision: `revision` is not in FLB1 content; the wire envelope carries `revisionAt`. S8a waits for `lt-astra/heatmap-saturation` (both edit `HeatmapChartSettings.hpp`). Owner decisions (plan section 6): 1 flow store = derived store like rollups (owner APPROVED 2026-11-08; normal deploy; measured 0.51 GB per BTC-year), so S2 may dispatch; 2 bubble defaults: owner judges both modes in the lab (S8a ships both behind a setting); 3 footprint/CVD look: visual pass with the owner in the lab before goldens. Palette waits for the owner's colour variants. Owner to check the seam fix live: 1h, zoom near the now column.
 2. With the owner present: build main, then `scripts/dev/deploy-runtime.sh server` for the trade-id window `87c9ccbc` (no format change). The script refuses a stale or dirty build.
 3. After landing any GUI change, build main: the owner's GUI loads QML from the source tree, so a stale binary fails to load the chart.
 4. Squash any branch whose history touched `docs/TODO.md` before land (AGENTS section 7).
@@ -28,8 +28,8 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 ## In flight
 
-- `lt-astra/heatmap-saturation` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-heatmap-saturation`, recreated from `da486efd`): PEPE size saturation (display encoding clamps at ~1.1M units; `RecordingCodec.hpp:30,45`, `HeatmapGpuLayer.cpp:246`) + zoom-out smoothing setting (default off). Writer gpt-6-astra thread `01a1be15-f436-7d21-8eaa-b2a3cfe59f36`, resumed with HeatmapGpuLayer, label query and `HeatmapChartSettings.hpp`; recording format must not change. Reviewer Fable; HIGH; conductor attaches Metal. Phase: writing.
-- `lt-astra/flow-live-model` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-flow-live-model`): plan S3a, live FlowBarBuilder in ServerDataModel + `flow_live_subscribe`/`flow_bar`. Writer gpt-6-astra thread `01a1be55-f2c7-7100-a7f5-134765c768f4`; reviewer Claude Opus. MEDIUM; server deploy later (owner told). Phase: writing.
+- `lt-astra/heatmap-saturation` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-heatmap-saturation`): READY `5a544096` (adaptive per-product display scale from observed sizes, largest kept; smoothing setting default off, 8x8 samples). Native Metal by conductor: 20/20 heatmap+chart tests pass, no GPU skips. Fable review was STOPPED by the pause before a verdict: re-run it on resume (focus: is the adaptive scale deterministic, or should it come from the recording header/product units). Writer thread `01a1be15-f436-7d21-8eaa-b2a3cfe59f36`. HIGH.
+- `lt-astra/flow-live-model` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-flow-live-model`): plan S3a. Writer gpt-6-astra thread `01a1be55-f2c7-7100-a7f5-134765c768f4` STOPPED mid-work by the pause; UNCOMMITTED edits in ServerDataModel, SentinelStreamServer/Protocol, MARKETDATA. On resume: `codex-exec.sh --worktree <wt> --role writer --resume 01a1be55-f2c7-7100-a7f5-134765c768f4` with "continue; you were interrupted". Reviewer Claude Opus. MEDIUM.
 
 Lab branches that never land: `lt-astra/hmc2-rollup-lab`, `lt-claude/hmc2-layout-lab` (results in `/Volumes/T7/sentinel-datalab/hmc2-*`).
 
