@@ -152,7 +152,9 @@ the active value changes only after a move of more than one step. The policy use
 linear-time selection and recomputes at most every 250 ms as window contents
 change, including during panning and ordinary zooming. A placement mode,
 timeframe or minimum change, or a window-width change of at least 2x, can
-recompute sooner but respects a 100 ms minimum interval. Capsule half-width preserves circle area
+recompute sooner but respects a 100 ms minimum interval. First entry into Slot
+computes its aggregate reference immediately so marks are visible on that frame.
+Capsule half-width preserves circle area
 when possible, but is floored at 2 logical pixels for long sweeps, adding area
 when needed for visibility. The size clamps limit scaling at the extremes.
 

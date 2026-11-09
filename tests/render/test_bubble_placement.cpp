@@ -230,6 +230,25 @@ TEST(BubblePlacement, PanIsRateLimitedAndModeSwitchRecomputesNextFrame) {
                  {1201000,1401000,60000,0},Mode::Slot,2060);
     EXPECT_EQ(stats.updates(),before+2);
 }
+TEST(BubblePlacement, FirstSlotFrameComputesAggregateReferenceInsideUrgentFloor) {
+    ReferenceStatistics stats;
+    BubblePlacement placement;
+    const std::array rows{Execution{61000,100,1,0}, Execution{62000,110,2,0},
+                          Execution{63000,120,1,1}};
+    const WindowStamp stamp{1,3,1,3,rows.size(),rows.size()};
+    const VisibleView view{60000,120000,60000,0};
+    const auto individual = stats.update(rows,rows,stamp,view,Mode::Individual,1000);
+    EXPECT_EQ(individual.aggregateP95,0);
+    const auto slot = stats.update(rows,rows,stamp,view,Mode::Slot,1050);
+    EXPECT_EQ(stats.updates(),2);
+    EXPECT_GT(slot.aggregateP95,0);
+    const auto marks = placement.build(rows,{Mode::Slot,slot,0},60000);
+    ASSERT_FALSE(marks.empty());
+    for (const auto& mark : marks)
+        EXPECT_GT(radius(mark.notional,slot.aggregateP95),0);
+    stats.update(rows,rows,stamp,view,Mode::Slot,1060);
+    EXPECT_EQ(stats.updates(),2);
+}
 TEST(BubblePlacement, CapsuleRetainsAtLeastMinimumHalfWidth) {
     EXPECT_GE(capsuleHalfWidth(2,100),1.5);
     EXPECT_DOUBLE_EQ(capsuleHalfWidth(9,0),9);

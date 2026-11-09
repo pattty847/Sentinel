@@ -85,7 +85,7 @@ public:
                                      view.minimum != lastView_.minimum;
         const bool urgent = widthJump || settingsChanged;
         const bool changed = stamp != lastStamp_ || urgent;
-        if (initialized_ && (!changed || nowMs-lastUpdateMs_ < (urgent ? 100 : 250))) return active_;
+        if (initialized_ && (!changed || nowMs-lastUpdateMs_ < interval(mode, active_.aggregateP95, urgent))) return active_;
         const Reference raw = reference(rows);
         if (!initialized_) active_ = {0, 0, 0};
         settle(active_.median, raw.median, true);
@@ -108,6 +108,10 @@ public:
                 select(scratch_.get(), count, size_t(std::ceil(.95*double(count)))-1), 1};
     }
 private:
+    static int64_t interval(Mode mode, double aggregateP95, bool urgent) {
+        if (mode == Mode::Slot && aggregateP95 <= 0) return 0;
+        return urgent ? 100 : 250;
+    }
     static double select(double* values, size_t count, size_t rank) {
         std::nth_element(values, values+rank, values+count);
         return values[rank];

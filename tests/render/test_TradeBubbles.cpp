@@ -136,6 +136,21 @@ TEST(TradeBubbles, SlotAggregateAndNotablesUseAggregateReferenceAndRadiusCap) {
         }
     }
 }
+TEST(TradeBubbles, FirstSlotFrameHasVisibleRadiiWithinUrgentFloor) {
+    const Sample rows[] = {{1200,150,1,AggressorSide::Buy}, {1300,150,1,AggressorSide::Buy}};
+    const Samples samples{rows,{}};
+    const PolicyRows policy{samples};
+    chart::bubbles::ReferenceStatistics stats;
+    const chart::bubbles::WindowStamp stamp{1,2,1,2,2,2};
+    const chart::bubbles::VisibleView view{1000,2000,1000,0};
+    stats.update(policy,policy,stamp,view,chart::bubbles::Mode::Individual,1000);
+    const auto slot = stats.update(policy,policy,stamp,view,chart::bubbles::Mode::Slot,1050);
+    Layout layout;
+    auto m = mapping(); m.appendMs = 1000;
+    const auto bubbles = layout.build(samples,m,{chart::bubbles::Mode::Slot,slot,0});
+    ASSERT_FALSE(bubbles.empty());
+    for (const auto& bubble : bubbles) EXPECT_GT(bubble.radius,0);
+}
 TEST(TradeBubbles, SpatialOverflowRemainsBoundedAndReusesScratch) {
     auto tape = std::make_unique<Tape>();
     for (int i=0; i<100000; ++i)
