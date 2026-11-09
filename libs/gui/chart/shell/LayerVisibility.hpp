@@ -55,6 +55,9 @@ public:
         cvdReset_ = reset; changed("cvdReset", true);
         if (cvdStrip_ > 0) emit cvdHistoryChanged();
     }
+    void refreshCvdSessionHistory() {
+        if (cvdStrip_ > 0 && cvdReset_ == CvdReset::TpoSession) emit cvdHistoryChanged();
+    }
     void setCvdStyle(const QString& value) {
         if (value != "line" && value != "area") return;
         setFootprintOption(cvdArea_, value == "area", "cvdStyle");

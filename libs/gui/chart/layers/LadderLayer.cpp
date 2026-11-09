@@ -38,6 +38,12 @@ Rgba barColour(const LadderSnapshot& s, uint8_t flags, uint8_t large, uint8_t ho
     return (flags & hot) ? kHotWall : wall;
 }
 
+double cvdInset(const CvdPresentation* cvd, const ChartFrame& frame) {
+    const auto& cam = frame.context.raster;
+    if (!cvd || !cam.valid || !(cam.dpr > 0) || !cvd->drawable(frame.context.time.activeTimeframeMs)) return 0;
+    return std::clamp(double(cvd->stripPx), 0.0, std::max(0.0, frame.context.surfaceBounds.height()));
+}
+
 // A vertex-colour triangle node of a fixed capacity, drawing nothing yet.
 QSGGeometryNode* colouredNode(int capacity) {
     auto* node = new QSGGeometryNode();
@@ -139,11 +145,11 @@ bool LadderLayer::drawable(const ChartFrame& frame) const {
 }
 
 void LadderLayer::sync(const ChartFrame& frame) {
-    const double inset = cvd_ ? std::clamp(double(cvd_->stripPx), 0.0, std::max(0.0, frame.context.surfaceBounds.height())) : 0;
+    const auto& cam = frame.context.raster;
+    const double inset = cvdInset(cvd_, frame);
     if (inset != bottomInset_) { bottomInset_ = inset; badgesBuilt_ = false; }
     if (mailbox_.take(current_, generation_)) generation_ = current_->generation;
     drawing_ = drawable(frame);
-    const auto& cam = frame.context.raster;
     if (frame.context.rightGutterPx <= 0 || !cam.valid || !(cam.tick > 0)) return;
     // Built for another frame (tick, rows or drag): ask the feed once per snapshot.
     const auto window = ladderWindow(cam.drawnMinPrice, cam.drawnMaxPrice, cam.tick);

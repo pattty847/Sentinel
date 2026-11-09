@@ -30,7 +30,7 @@ private:
     void geometry(const ChartFrame&);
     void addLabel(const char*, const QRectF&, const ChartTextAtlas&);
     CvdPresentation presentation_, captured_;
-    CvdMailbox mailbox_;
+    CvdMailbox mailbox_{&presentation_};
     std::unique_ptr<CvdSnapshot> current_;
     QSGOpacityNode* gate_ = nullptr;
     QSGGeometryNode* node_ = nullptr;

@@ -506,8 +506,11 @@ TEST(CvdLayer, LazyContainerKeepsDefaultTreeAndInsertsBeforeText) {
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
     EXPECT_EQ(root.childCount(), 7); EXPECT_EQ(root.lastChild(), textRoot);
     layers.cvd.presentation().stripPx = 50;
+    EXPECT_FALSE(layers.cvd.presentation().drawable(1000));
     chart::CvdFeed::build(layers.cvd.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
     layers.cvd.mailbox().post();
+    EXPECT_TRUE(layers.cvd.presentation().drawable(1000));
+    EXPECT_FALSE(layers.cvd.presentation().drawable(60000));
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
     ASSERT_EQ(root.childCount(), 8); EXPECT_EQ(root.lastChild(), textRoot);
     EXPECT_EQ(root.childAtIndex(6)->type(), QSGNode::OpacityNodeType);

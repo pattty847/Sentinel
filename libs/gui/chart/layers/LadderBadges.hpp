@@ -88,7 +88,7 @@ private:
     };
     bool prepareAtlas(const ChartTextAtlas* atlas);
     double textWidth(const BadgePill& p) const;
-    void placeEdges(const LadderSnapshot& s, const FrameContext& f);
+    void placeEdges(const LadderSnapshot& s, const FrameContext& f, bool bottomEdge);
     void placeRows(const LadderSnapshot& s, const FrameContext& f);
     void prepareRows(const LadderSnapshot& s, const FrameContext& f);
     bool overlapsRow(int index, double rowHeight, double spacing) const;

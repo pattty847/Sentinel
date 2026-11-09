@@ -14,6 +14,14 @@ struct CvdPresentation {
     int stripPx = 0;
     CvdReset reset = CvdReset::Visible;
     bool area = false;
+    // GUI mailbox publication, read only during render sync (GUI is blocked).
+    int64_t dataTimeframeMs = 0;
+    CvdReset dataReset = CvdReset::Visible;
+    bool hasData = false;
+    bool drawable(int64_t timeframeMs) const {
+        return stripPx > 0 && hasData && dataReset == reset &&
+            dataTimeframeMs == std::max<int64_t>(1000, timeframeMs);
+    }
 };
 struct CvdSnapshot {
     CvdSeries series;
@@ -23,11 +31,12 @@ struct CvdSnapshot {
 };
 class CvdMailbox {
 public:
-    CvdMailbox();
+    explicit CvdMailbox(CvdPresentation* presentation = nullptr);
     CvdSnapshot& back() { return *back_; }
     void post();
     bool take(std::unique_ptr<CvdSnapshot>&);
 private:
+    CvdPresentation* presentation_ = nullptr;
     std::mutex mutex_;
     std::unique_ptr<CvdSnapshot> back_, pending_;
     bool fresh_ = false;

@@ -45,8 +45,13 @@ void baselineLabel(CvdSnapshot& out) {
     std::snprintf(out.label.data(), out.label.size(), "CVD since %s loaded", text.constData());
 }
 } // namespace
-CvdMailbox::CvdMailbox() : back_(std::make_unique<CvdSnapshot>()), pending_(std::make_unique<CvdSnapshot>()) {}
+CvdMailbox::CvdMailbox(CvdPresentation* presentation) : presentation_(presentation), back_(std::make_unique<CvdSnapshot>()), pending_(std::make_unique<CvdSnapshot>()) {}
 void CvdMailbox::post() {
+    if (presentation_) {
+        presentation_->hasData = back_->series.count > 0;
+        presentation_->dataTimeframeMs = back_->timeframeMs;
+        presentation_->dataReset = back_->reset;
+    }
     std::lock_guard lock(mutex_);
     back_.swap(pending_); fresh_ = true;
 }
@@ -73,7 +78,7 @@ void CvdFeed::bind(ChartViewController& view, const PublishedFrame& published,
     connect(&visibility, &LayerVisibility::layerVisibilityChanged, this, apply);
     connect(&tpo, &ChartTpoQml::tpoConfigChanged, this, [this, &visibility] {
         onFrameChanged();
-        if (presentation_.stripPx > 0 && presentation_.reset == CvdReset::TpoSession) emit visibility.cvdHistoryChanged();
+        visibility.refreshCvdSessionHistory();
     });
     connect(view.viewPtr(), &GridViewState::viewportChanged, this, &CvdFeed::onFrameChanged);
     connect(view.viewPtr(), &GridViewState::panVisualOffsetChanged, this, &CvdFeed::onFrameChanged);

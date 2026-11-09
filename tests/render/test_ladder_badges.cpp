@@ -101,6 +101,7 @@ double sizeTextWidth(const BadgePill& p) {
 
 struct BadgeRig {
     chart::CvdPresentation cvd;
+    chart::CvdMailbox cvdMailbox{&cvd};
     chart::LadderLayer layer{&cvd};
     QSGNode root;
     ChartTextRenderer text;
@@ -138,6 +139,7 @@ struct BadgeRig {
     chart::ChartFrame frame() const {
         chart::ChartFrame f;
         f.context.raster = cam;
+        f.context.time.activeTimeframeMs = int64_t(cam.tfMs);
         f.context.rightGutterPx = kGutter;
         f.context.itemBounds = QRectF(0, 0, 640, cam.heightDev / cam.dpr);
         f.context.surfaceBounds = f.context.itemBounds;
@@ -157,6 +159,12 @@ struct BadgeRig {
     void post() {
         layer.mailbox().post();
         draw();
+    }
+    void cvdData(int64_t tf = kTf, bool populated = true) {
+        auto& data = cvdMailbox.back();
+        data.timeframeMs = tf; data.reset = cvd.reset; data.series.clear();
+        if (populated) data.series.push(0, 1, 0, true);
+        cvdMailbox.post();
     }
     const std::vector<BadgePill>& pills() const { return layer.badges().pills(); }
     int rowBadges() const { return layer.badges().stats().rowBadges; }
@@ -1035,11 +1043,46 @@ TEST(LadderBadges, CvdInsetMovesBottomPillsAndExcludesBottomRowTextWithoutNewDat
     rig.post();
     ASSERT_EQ(rig.layer.badges().stats().edgePills, 2);
     const auto original = rig.pills()[0].rect;
-    rig.cvd.stripPx = 96; rig.draw();
+    rig.cvd.stripPx = 96; rig.cvdData(); rig.draw();
     const double stripTop = rig.frame().context.surfaceBounds.bottom() - 96;
     ASSERT_EQ(rig.layer.badges().stats().edgePills, 2);
     EXPECT_EQ(rig.pills()[0].rect.bottom(), original.bottom() - 96);
     for (const auto& pill : rig.pills()) EXPECT_LE(pill.rect.bottom(), stripTop);
     rig.cvd.stripPx = 0; rig.draw();
     EXPECT_EQ(rig.pills()[0].rect, original);
+}
+
+TEST(LadderBadges, EnabledCvdWithoutDataLeavesBottomPillsInPlace) {
+    BadgeRig rig(camera(100, 180));
+    rig.snapshot(); rig.candidate(S::kAsk, S::kBelow, 90, 10); rig.post();
+    ASSERT_EQ(rig.pills().size(), 1u);
+    const auto original = rig.pills()[0].rect;
+    rig.cvd.stripPx = 96; rig.draw();
+    ASSERT_EQ(rig.pills().size(), 1u);
+    EXPECT_EQ(rig.pills()[0].rect, original);
+    rig.cvdData(kTf * 2); rig.draw(); // data for another timeframe is not drawable
+    EXPECT_EQ(rig.pills()[0].rect, original);
+    rig.cvdData(); rig.draw();
+    EXPECT_EQ(rig.pills()[0].rect.bottom(), original.bottom() - 96);
+    rig.cvd.reset = chart::CvdReset::UtcDay; rig.draw(); // wait for the matching reset data
+    EXPECT_EQ(rig.pills()[0].rect, original);
+    rig.cvdData(); rig.draw();
+    EXPECT_EQ(rig.pills()[0].rect.bottom(), original.bottom() - 96);
+    rig.cvdData(kTf, false); rig.draw(); // withdrawal restores the full ladder immediately
+    EXPECT_EQ(rig.pills()[0].rect, original);
+}
+TEST(LadderBadges, TinyRemainderDropsBottomPillsButKeepsFittingRows) {
+    BadgeRig rig(camera(100, 180));
+    auto& snapshot = rig.snapshot();
+    rig.candidate(S::kAsk, S::kBelow, 90, 10); rig.wall(177, S::kAsk, 20);
+    chart::LadderBadges badges;
+    badges.layout(snapshot, rig.frame().context, &atlas(), 300);
+    EXPECT_EQ(badges.stats().edgePills, 0);
+    ASSERT_EQ(badges.stats().rowBadges, 1);
+    EXPECT_LE(badges.pills()[0].rect.bottom(), 20);
+    // Top pills still exist: only the bottom edge loses its unavailable space.
+    rig.candidate(S::kAsk, S::kAbove, 190, 10);
+    badges.layout(snapshot, rig.frame().context, &atlas(), 300);
+    ASSERT_EQ(badges.stats().edgePills, 1);
+    EXPECT_EQ(badges.pills()[0].arrow, 1);
 }

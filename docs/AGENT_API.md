@@ -177,7 +177,8 @@ The semi-opaque strip overlays the bottom of the chart surface, leaving price ma
 unchanged and excluding the time axis, price axis and ladder gutters. `area` fills to
 zero in green above and red below; `line` draws the cumulative curve. Min/max and reset
 labels use 13 px MSDF text within the strip, with labels omitted where the strip is too small to fit.
-Ladder bottom edge pills and row badges stay above the enabled strip.
+Ladder bottom edge pills and row badges stay above the strip when it has drawable data
+for the current timeframe. With no drawable CVD data, ladder badges keep their full height.
 Missing flow data draws nothing. No default or golden scene changes until enabled.
 
 On an isolated lab at port 17116 (each command is process-only):
