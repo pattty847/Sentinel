@@ -17,6 +17,7 @@
 #include "lab/OffscreenQuick.hpp"
 #include "lab/RhiBackend.hpp"
 #include "mainwindow/HeatmapChartControls.hpp"
+#include "mainwindow/ChartAgentPort.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapSettingsModel.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
@@ -2296,3 +2297,127 @@ int main(int argc, char **argv) {
     lab::LabData::configure(fixtureDir->path().toStdString(), epoch + 4 * kHourMs);
     return RUN_ALL_TESTS();
 }
+
+TEST(FootprintFlowFeed, CoalescesRearmsAndWithdrawsOnSymbolSwitch) {
+    chart::FootprintCellsLayer layer;
+    chart::FlowFeed feed(layer.mailbox());
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000;
+    frame.raster.valid = true; frame.raster.tick = 1;
+    frame.raster.drawnStartMs = 0; frame.raster.drawnEndMs = 1000;
+    frame.raster.drawnMinPrice = 95; frame.raster.drawnMaxPrice = 105;
+    QString symbol = "BTC-USD";
+    int updates = 0;
+    feed.setPorts({[&] { return frame; }, [&] { return symbol; }, [&] { ++updates; }});
+    feed.setEnabled(true);
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = symbol; batch->timeframeMs = 1000;
+    auto& record = batch->bars.emplace_back();
+    record.bar.startMs = 0; record.bar.timeframeMs = 1000;
+    record.bar.nativeTick = 1; record.bar.baseScale = 100; record.bar.lowRow = 100;
+    record.bar.rows = {{0, 100, 200}};
+    record.bar.sellVol = 100; record.bar.buyVol = 200; record.bar.delta = 100;
+    for (int i = 0; i < 10; ++i) feed.receive(batch);
+    EXPECT_TRUE(feed.pending());
+    EXPECT_EQ(updates, 0);
+    QTest::qWait(100);
+    EXPECT_EQ(updates, 1);
+    auto current = std::make_unique<chart::FlowSnapshot>();
+    ASSERT_TRUE(layer.mailbox().take(current));
+    ASSERT_TRUE(current->valid); EXPECT_EQ(current->cellCount, 1);
+    frame.raster.tick = 2;
+    feed.onFrameChanged(); EXPECT_TRUE(feed.pending());
+    QTest::qWait(100);
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->tick, 2);
+    symbol = "ETH-USD";
+    feed.onFrameChanged();
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
+    feed.receive(batch); // stale symbol may not restore the withdrawn data
+    QTest::qWait(100);
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
+    feed.setEnabled(false); EXPECT_FALSE(feed.pending());
+}
+
+#include "render/CandlestickOverlayItem.hpp"
+#include <QSGGeometryNode>
+class FootprintMappingFixture final : public QObject, public ITimeAxisMappingProvider {
+    Q_OBJECT
+    Q_INTERFACES(ITimeAxisMappingProvider)
+public:
+    MappingFrameContext frame;
+    chart::FootprintPresentation* look = nullptr;
+    QObject* viewNotifications() override { return this; }
+    MappingFrameContext currentFrameContext() const override { return frame; }
+    TimeAxisMapping currentTimeAxisMapping() const override { return frame.mapping; }
+    chart::FootprintPresentation* footprintPresentation() override { return look; }
+signals:
+    void viewportChanged();
+    void panVisualOffsetChanged();
+    void timeframeChanged();
+};
+class FootprintCandleFixture : public CandlestickOverlayItem {
+public:
+    QSGNode* paint(QSGNode* old) { return updatePaintNode(old, nullptr); }
+};
+TEST(FootprintCandles, BothDirectionsUseSharedStageAndOnePixelWicks) {
+    chart::FootprintCellsLayer layer;
+    layer.presentation().enabled = true;
+    FootprintMappingFixture provider;
+    provider.look = &layer.presentation();
+    auto& f = provider.frame;
+    f.activeTimeframeMs = 1000; f.viewportValid = true;
+    f.viewportTimeStart = 1000; f.viewportTimeEnd = 3000;
+    f.surfaceBounds = {0, 0, 112, 120};
+    f.raster = chart_raster::computeRaster({1000, 3000, 95, 105, {}, 1000, 1, 112, 120, 1}, {});
+    f.mapping = chart_raster::toMapping(f.raster);
+    CandleSeriesBuffer buffer;
+    buffer.applyHistory("BTC-USD", 1000, {{1000, 2000, 99, 103, 98, 102, 1}, {2000, 3000, 102, 103, 98, 99, 1}});
+    FootprintCandleFixture candle;
+    candle.setSize({112, 120}); candle.setSymbol("BTC-USD"); candle.setTimeframeMs(1000);
+    candle.setCandleBuffer(&buffer); candle.setMappingProvider(&provider); candle.setWickWidth(3);
+    std::unique_ptr<QSGNode> root(candle.paint(nullptr));
+    auto* body = static_cast<QSGGeometryNode*>(root->childAtIndex(1))->geometry();
+    auto* wick = static_cast<QSGGeometryNode*>(root->childAtIndex(0))->geometry();
+    ASSERT_EQ(body->vertexCount(), 48);
+    const auto* b = body->vertexDataAsColoredPoint2D();
+    EXPECT_GT(b[26].x - b[24].x, 0) << "bearish border also draws";
+    EXPECT_FLOAT_EQ(b[25].y - b[24].y, 1) << "bearish body is an outline, not a filled quad";
+    const auto* w = wick->vertexDataAsColoredPoint2D();
+    EXPECT_FLOAT_EQ(w[2].x - w[0].x, 1);
+    chart::ChartFrame layerFrame;
+    layerFrame.context.raster = f.raster;
+    layer.sync(layerFrame);
+    EXPECT_EQ(layer.stage(), chart::FootprintStage::Numbers);
+    provider.look->numbers = false;
+    layer.sync(layerFrame);
+    EXPECT_EQ(layer.stage(), chart::FootprintStage::Cells);
+    EXPECT_EQ(candle.paint(root.get()), root.get());
+    EXPECT_EQ(body->vertexCount(), 48);
+    provider.look->hollowCandles = false;
+    EXPECT_EQ(candle.paint(root.get()), root.get());
+    EXPECT_EQ(body->vertexCount(), 12);
+    EXPECT_FLOAT_EQ(wick->vertexDataAsColoredPoint2D()[2].x - wick->vertexDataAsColoredPoint2D()[0].x, 3);
+    provider.look->hollowCandles = true;
+    candle.setCandleStyle(2);
+    candle.paint(root.get());
+    EXPECT_EQ(body->vertexCount(), 48) << "footprint look overrides line mode too";
+    candle.setMappingProvider(nullptr);
+}
+
+TEST(FootprintKnobs, ChartAgentPortUpdatesSharedRenderLook) {
+    UnifiedGridRenderer renderer;
+    renderer.layers()->setFootprintEnabled(true);
+    auto port = renderer.agentPort();
+    port.applyFootprintSettings({{"footprintIntensity", "window"}, {"footprintHollowCandles", false}, {"footprintNumbers", false}});
+    const auto state = port.footprintSettings();
+    EXPECT_EQ(state["footprintIntensity"], "window");
+    EXPECT_EQ(state["footprintHollowCandles"], false);
+    EXPECT_EQ(state["footprintNumbers"], false);
+    const auto* look = renderer.footprintPresentation();
+    ASSERT_TRUE(look); EXPECT_TRUE(look->enabled); EXPECT_TRUE(look->windowIntensity);
+    EXPECT_FALSE(look->hollowCandles); EXPECT_FALSE(look->numbers);
+    port.applyFootprintSettings({{"footprintIntensity", "bar"}, {"footprintHollowCandles", true}, {"footprintNumbers", true}});
+    EXPECT_FALSE(look->windowIntensity); EXPECT_TRUE(look->hollowCandles); EXPECT_TRUE(look->numbers);
+}
+
+#include "test_chart_ui.moc"

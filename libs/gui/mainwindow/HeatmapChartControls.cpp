@@ -1,4 +1,5 @@
 #include "HeatmapChartControls.hpp"
+#include "ChartAgentPort.hpp"
 #include "PerformanceMonitor.hpp"
 #include "SentinelLogging.hpp"
 #include "UnifiedGridRenderer.h"
@@ -134,6 +135,9 @@ double HeatmapChartControls::currentSymbolPrice() const {
 void HeatmapChartControls::applyLadderSettings() {
     if (!m_renderer) return;
     const auto &s = m_model->settings();
+    m_renderer->agentPort().applyFootprintSettings({
+        {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
+        {"footprintHollowCandles", s.footprintHollowCandles}, {"footprintNumbers", s.footprintNumbers}});
     const AppliedLadder want{s.showLadder, s.ladderWidthPx, s.showWallRadar, s.wallMultiple};
     if (m_appliedLadder == want) return;
     m_appliedLadder = want;

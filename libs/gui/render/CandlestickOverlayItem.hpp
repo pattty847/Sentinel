@@ -94,6 +94,7 @@ private:
     QMetaObject::Connection m_mappingPanConn;
     QMetaObject::Connection m_mappingTimeframeConn;
     QMetaObject::Connection m_mappingDestroyConn;
+    QMetaObject::Connection m_footprintConn;
     QMetaObject::Connection m_candleDirtyConn;
 
     qint64 m_lastBoundarySequence = std::numeric_limits<qint64>::min();

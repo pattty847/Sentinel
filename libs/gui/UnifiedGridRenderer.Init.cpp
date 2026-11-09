@@ -69,10 +69,10 @@ void UnifiedGridRenderer::init() {
     chart::bindLadder({*this, m_layers, m_visibility, *getViewState(), m_frames.published,
                        [this](double bid, double ask) { m_view->livePlacement().setLiveBookTop(bid, ask); }});
     connect(this, &UnifiedGridRenderer::rasterChanged, &m_layers.ladderFeed, &chart::BookLadderFeed::onFrameChanged);
+    m_layers.flowFeed.bind(*m_view, m_frames.published, m_visibility, m_layers.footprintCells.presentation());
+    connect(this, &UnifiedGridRenderer::rasterChanged, &m_layers.flowFeed, &chart::FlowFeed::onFrameChanged);
     m_feeds->startProcessing();
-    // The GPU heatmap is active from construction: the default view model is the
-    // auto price scale; the first view comes from the service's availability, a
-    // book top, a trade or the API (bootstrapGpuTimeView, seedGpuViewport).
+    // Bootstrap the GPU view from the service or live price.
     m_layers.heatmap.gpu->setSymbol(m_view->session().symbol.toStdString());
     m_layers.heatmap.gpu->setTimeframeMs(m_view->session().timeframeMs);
     m_layers.heatmap.gpu->setActive(true);

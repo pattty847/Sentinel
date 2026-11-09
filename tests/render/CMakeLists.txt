@@ -443,3 +443,10 @@ target_include_directories(test_BubblePlacement PRIVATE ${CMAKE_SOURCE_DIR}/libs
 target_link_libraries(test_BubblePlacement PRIVATE GTest::gtest_main)
 add_test(NAME BubblePlacementTests COMMAND test_BubblePlacement)
 set_tests_properties(BubblePlacementTests PROPERTIES LABELS "render;fast")
+
+add_executable(test_footprint_lod test_footprint_lod.cpp)
+set_target_properties(test_footprint_lod PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(test_footprint_lod PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_footprint_lod PRIVATE GTest::gtest_main)
+add_test(NAME FootprintLodTests COMMAND test_footprint_lod)
+set_tests_properties(FootprintLodTests PROPERTIES LABELS "render;fast")

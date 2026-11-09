@@ -10,6 +10,9 @@ class LayerVisibility : public QObject {
     Q_PROPERTY(int primaryField READ primaryField NOTIFY primaryFieldChanged)
     Q_PROPERTY(bool heatmapLayerEnabled READ heatmapEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool footprintLayerEnabled READ footprintEnabled NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(QString footprintIntensity READ footprintIntensity WRITE setFootprintIntensity NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(bool footprintHollowCandles READ footprintHollowCandles WRITE setFootprintHollowCandles NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(bool footprintNumbers READ footprintNumbers WRITE setFootprintNumbers NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool tpoLayerEnabled READ tpoEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool volumeProfileLayerEnabled READ volumeProfileEnabled NOTIFY layerVisibilityChanged)
     // The book ladder strip (independent of the primary field; off by default).
@@ -28,6 +31,18 @@ public:
     int primaryField() const { return primaryField_; }
     bool heatmapEnabled() const { return heatmap_; }
     bool footprintEnabled() const { return footprint_; }
+    QString footprintIntensity() const { return footprintWindowIntensity_ ? QStringLiteral("window") : QStringLiteral("bar"); }
+    bool footprintHollowCandles() const { return footprintHollowCandles_; }
+    bool footprintNumbers() const { return footprintNumbers_; }
+    void setFootprintIntensity(const QString& value) {
+        if (value != "bar" && value != "window") return;
+        const bool window = value == "window";
+        if (window == footprintWindowIntensity_) return;
+        footprintWindowIntensity_ = window;
+        changed("footprintIntensity", window);
+    }
+    void setFootprintHollowCandles(bool value) { setFootprintOption(footprintHollowCandles_, value, "footprintHollowCandles"); }
+    void setFootprintNumbers(bool value) { setFootprintOption(footprintNumbers_, value, "footprintNumbers"); }
     bool tpoEnabled() const { return tpo_; }
     bool volumeProfileEnabled() const { return volumeProfile_; }
     bool ladderEnabled() const { return ladder_; }
@@ -166,6 +181,12 @@ signals:
     void primaryFieldChanged();
     void layerVisibilityChanged();
 private:
+    void setFootprintOption(bool& option, bool value, std::string_view name) {
+        if (option == value) return;
+        option = value;
+        changed(name, value);
+    }
+    bool footprintWindowIntensity_ = false, footprintHollowCandles_ = true, footprintNumbers_ = true;
     void changed(std::string_view field, bool enabled) {
         if (report) report(field, enabled, false);
         if (requestUpdate) requestUpdate();

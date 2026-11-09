@@ -99,6 +99,35 @@ curl -s -H 'Content-Type: application/json' -d '{"kind":"wheel","target":"chart"
 curl -s 'http://127.0.0.1:17100/api/v1/screenshot?name=wheel&target=heatmap&afterOperation=o3&waitMs=5000'
 ```
 
+## Footprint cells
+
+`POST /api/v1/layers` accepts `footprintIntensity` (`"bar"` default, or `"window"`),
+`footprintHollowCandles` (boolean, default true), and `footprintNumbers` (boolean,
+default true). These variants persist through the chart settings model; the response
+and `GET /api/v1/state` report them in `layers`. The same three keys work in
+`POST /api/v1/heatmap/settings`, including its `persist:false` process-only option.
+QML paths are `unifiedGridRenderer.layers.footprintIntensity`,
+`.footprintHollowCandles`, and `.footprintNumbers` (writable properties).
+
+`footprint:true` selects flow-backed bid-left/ask-right cells. The cell stage enters
+at 24 logical pixels per column and 6 per drawn row; numbers enter at 56/12, with
+a 2 px retention band on zoom-out. Labels use a 12 px font, abbreviate thousands
+and millions, and omit a value when it cannot fit. `footprintNumbers:false` caps
+the stage at Cells. `footprintHollowCandles:true` outlines both up/down bodies
+and uses 1 device px wicks in Cells/Numbers; false restores the chosen candle look.
+`bar` divides row volume by that bar's maximum binned row volume; `window` divides
+by the maximum visible row volume. Native bins wider than the drawn tick span
+those rows without inventing a distribution. No data, incompatible grids, and
+sub-second chart timeframes draw no cells.
+
+On an isolated lab instance at port 17115:
+
+```sh
+curl -s -H 'Content-Type: application/json' -d '{"footprint":true,"footprintIntensity":"bar","footprintHollowCandles":true,"footprintNumbers":true}' http://127.0.0.1:17115/api/v1/layers
+curl -s -H 'Content-Type: application/json' -d '{"footprintIntensity":"window"}' http://127.0.0.1:17115/api/v1/layers
+curl -s -H 'Content-Type: application/json' -d '{"footprintHollowCandles":false,"footprintNumbers":false}' http://127.0.0.1:17115/api/v1/layers
+```
+
 ## Trade bubbles (GPU chart)
 
 The toolbar gear menu has **Trades** (off by default) and **Minimum trade notional

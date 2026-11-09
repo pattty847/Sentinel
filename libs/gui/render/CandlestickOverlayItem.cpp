@@ -3,6 +3,7 @@ Sentinel — CandlestickOverlayItem
 GPU-batched candlestick overlay (demo data only).
 */
 #include "CandlestickOverlayItem.hpp"
+#include "chart/core/FootprintLod.hpp"
 #include "CandlePixelGeometry.hpp"
 #include "../chart/core/CandleInterval.hpp"
 #include "../datasources/CandleSeriesBuffer.hpp"
@@ -53,6 +54,7 @@ public:
     QSGVertexColorMaterial* bodyMaterial = nullptr;
     int wickCapacity = 0, bodyCapacity = 0;
     candle_pixels::AxisSnap snap;
+    bool footprintHollow = false;
     double surfaceDpr = 0;
     void setCounts(int wickCount, int bodyCount) {
         candle_pixels::setGeometryCount(*wickGeometry, wickCapacity, wickCount);
@@ -206,6 +208,7 @@ void CandlestickOverlayItem::setMappingProvider(QObject* provider) {
         return;
     }
     disconnect(m_mappingDestroyConn);
+    disconnect(m_footprintConn);
     if (m_mappingViewportConn) {
         disconnect(m_mappingViewportConn);
     }
@@ -223,6 +226,9 @@ void CandlestickOverlayItem::setMappingProvider(QObject* provider) {
                                        [this] { setMappingProvider(nullptr); });
         auto* mapping = qobject_cast<ITimeAxisMappingProvider*>(provider);
         auto* view = mapping ? mapping->viewNotifications() : nullptr;
+        if (mapping && mapping->footprintNotifications())
+            m_footprintConn = connect(mapping->footprintNotifications(), SIGNAL(layerVisibilityChanged()),
+                                      this, SLOT(onPanVisualOffsetChanged()));
         m_mappingViewportConn = QObject::connect(view,
                                                  SIGNAL(viewportChanged()),
                                                  this,
@@ -365,6 +371,12 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     const MappingFrameContext frame = m_mappingProvider->currentFrameContext();
     const TimeAxisMapping mapping = frame.mapping;
     const auto snap = candle_pixels::axisSnap(frame.raster);
+    auto* footprint = m_mappingProvider->footprintPresentation();
+    const bool footprintHollow = footprint && footprint->hollow(frame.raster);
+    if (root->footprintHollow != footprintHollow) {
+        root->footprintHollow = footprintHollow;
+        m_geometryDirty = true;
+    }
     if (mappingChanged(mapping, m_lastMapping) || root->snap != snap ||
         root->surfaceDpr != frame.surfaceDpr) {
         root->snap = snap;
@@ -544,8 +556,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         return root;
     }
 
-    const bool isHollow = (m_candleStyle == 1);
-    const bool isLine   = (m_candleStyle == 2);
+    const bool isHollow = footprintHollow || (m_candleStyle == 1);
+    const int wickWidth = footprintHollow ? 1 : m_wickWidth;
+    const bool isLine   = !footprintHollow && (m_candleStyle == 2);
 
     const uchar bullR = uchar(m_upColor.red()), bullG = uchar(m_upColor.green()), bullB = uchar(m_upColor.blue());
     const uchar bearR = uchar(m_downColor.red()), bearG = uchar(m_downColor.green()), bearB = uchar(m_downColor.blue());
@@ -616,9 +629,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         // An even body and odd wick cannot share an exact device-pixel
         // centre. stroke() resolves that half-pixel tie to the right.
         const auto wickSpan = !snap.x
-            ? candle_pixels::Span{float(centerX - m_wickWidth * 0.5 / dpr),
-                                  float(centerX + m_wickWidth * 0.5 / dpr)}
-            : candle_pixels::stroke(centerX, m_wickWidth, dpr);
+            ? candle_pixels::Span{float(centerX - wickWidth * 0.5 / dpr),
+                                  float(centerX + wickWidth * 0.5 / dpr)}
+            : candle_pixels::stroke(centerX, wickWidth, dpr);
         const float wickX0 = wickSpan.lo;
         const float wickX1 = wickSpan.hi;
         const float yHighF = static_cast<float>(mapping.priceToScreenY(c.high));
@@ -634,9 +647,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
 
         addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wr, wg, wb, 255);
 
-        if (isHollow && bullish && c.open != c.close) {
+        if (isHollow && (footprintHollow || bullish) && c.open != c.close) {
             // Hollow bullish: border outline only (4 quads)
-            const float bw = std::max(1.0f, bodyWidth * 0.12f);
+            const float bw = footprintHollow ? float(1.0 / dpr) : std::max(1.0f, bodyWidth * 0.12f);
             addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY0 + bw, br, bg, bb, ba); // top
             addQuad(bodyVerts, bodyX0, bodyY1 - bw, bodyX1, bodyY1, br, bg, bb, ba); // bottom
             addQuad(bodyVerts, bodyX0, bodyY0, bodyX0 + bw, bodyY1, br, bg, bb, ba); // left

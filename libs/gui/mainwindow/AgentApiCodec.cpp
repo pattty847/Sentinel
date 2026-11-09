@@ -462,6 +462,11 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
                 else result.body.priceMax = v.toDouble();
             } else return reject("invalid_field", "Unknown viewport field");
         } else if (kind == "layers") {
+            if (key == "footprintIntensity") {
+                if (v != "bar" && v != "window") return reject("invalid_layer", "footprintIntensity must be bar or window");
+                result.body.layers.insert(key, v);
+                continue;
+            }
             if (key == "tpoLayout" || key == "tpoTheme") {
                 static const QStringList kLayouts{"split", "collapsed"};
                 static const QStringList kThemes{"rainbow", "calm", "sage"};
@@ -473,7 +478,7 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
                 continue;
             }
             if (key != "heatmap" && key != "candles" && key != "footprint" && key != "tpo" && key != "volumeProfile" &&
-                key != "ladder" && key != "wallRadar")
+                key != "ladder" && key != "wallRadar" && key != "footprintHollowCandles" && key != "footprintNumbers")
                 return reject("invalid_field", "Unknown layer");
             if (!v.isBool()) return reject("invalid_layer", "Layer values must be boolean");
             result.body.layers.insert(key, v);
@@ -571,7 +576,10 @@ QJsonObject stateJson(const StateSnapshot& s) {
             {"trades", integer(s.tradesReceivedAtMs)}, {"footprint", integer(s.footprintReceivedAtMs)},
             {"tpo", integer(s.tpoReceivedAtMs)}, {"volumeProfile", integer(s.volumeProfileReceivedAtMs)}}},
         {"layers", QJsonObject{{"heatmap", boolean(s.heatmapLayer)}, {"candles", boolean(s.candlesLayer)},
-            {"footprint", boolean(s.footprintLayer)}, {"tpo", boolean(s.tpoLayer)},
+            {"footprint", boolean(s.footprintLayer)},
+            {"footprintIntensity", s.footprintSettings.value("footprintIntensity")},
+            {"footprintHollowCandles", s.footprintSettings.value("footprintHollowCandles")},
+            {"footprintNumbers", s.footprintSettings.value("footprintNumbers")}, {"tpo", boolean(s.tpoLayer)},
             {"volumeProfile", boolean(s.volumeProfileLayer)}, {"ladder", boolean(s.ladderLayer)},
             {"wallRadar", boolean(s.wallRadarLayer)},
             {"tpoLayout", s.tpoLayout ? QJsonValue(*s.tpoLayout) : QJsonValue()},
