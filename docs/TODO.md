@@ -5,8 +5,7 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
 
 ## Waves (top-down; one recorder/server item at a time; deploys wait for the owner)
 
-- **Wave 2 (now):** done: anchors stay; duplicate trade id, flaky tests, PEPE units landed.
-- **Wave 3:** footprint/why-it-moved plan (Fable: footprint, CVD, eaten/pulled, bubbles), aesthetics, heatmap seam, trade bubbles rethink.
+- **Wave 3 (now):** footprint/why-it-moved plan (Fable: footprint, CVD, eaten/pulled, bubbles), aesthetics, heatmap seam, trade bubbles rethink.
 - **Wave 4:** Security, land follow-ups, Feature ideas check. Then the Queue.
 
 ## Queue (ordered)
@@ -67,6 +66,7 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
 - Owner 2026-11-07: fix even if not visible. Candle restart-partial bars: the 1m bar and the 5m..1d rollup bars open at a server restart lose their pre-restart part (only 100 ms and 1 s are restored); a GUI keeps the partial closed bar. Owner to confirm it matches the 4h/1d report.
 - `HeatmapGpuBinner` precision self-test intermittently reads back all zeros (1 of 6 starts) and silently drops the fast kernel; suspect readback before dispatch completion in `driveSelfTest`. Seen again 2026-11-05 22:46 (384/384 zeros, Metal M4). Seen again 2026-11-07 on Metal M4 in a reviewer ctest run (fast kernel failed self-test, precise kernel used).
 - Straight RGB into a premultiplied material (as the VP had): `CandlestickBatched.cpp` volume bars draw brighter than their alpha; `CandlestickOverlayItem.cpp` body opacity and wick alpha. Fixing changes looks (owner).
+- PEPE: no last-price label on the price axis after switching to it (owner 2026-11-08, minor).
 - Symbol switch bins a frame with the old view/tick: "native rows exceed int32" for ~35-400 ms on BTC<->PEPE (`HeatmapGpuBinner.cpp:573`; evidence `/Volumes/T7/sentinel-datalab/pepe-units/int32-diag-gui.log`). Fix: view, tick and spans agree on one symbol.
 - Windows: Paper Trading looks for the backtest binary without the multi-config `Release/`/`Debug/` dir or `.exe` (`PaperTradingDock.cpp`).
 - GUI RSS ~1.5 GB after 10 min (unprofiled).
@@ -75,7 +75,7 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
 - Unverified since 2026-09-28 (owner's first look at recording mode): candles overlap the price axis when panned next to it (clip to the plot area); price-axis tick steps disagree with heatmap cell size; confirm the theme dropdown applies to recording mode.
 - Nightly backup of `/Volumes/T7/sentinel-data` (to the MacBook Pro over Tailscale needs Remote Login + an SSH key, or to the owner's new HDD); internal disk space.
 - Axis drag-scale glides back to the last allowed row size mid-drag (since the pan 'wave' fix).
-- Liq slider range carries over on symbol switch (ETH went very high after BTC->PEPE->ETH).
+- Liq slider range carries over on symbol switch (ETH went very high).
 
 ## Feature ideas (unverified against current code since 2026-03; check before starting)
 
