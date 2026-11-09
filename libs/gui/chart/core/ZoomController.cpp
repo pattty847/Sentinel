@@ -243,6 +243,7 @@ void ZoomController::zoomContinuous(double factor, double x, double y, bool time
 
 void ZoomController::zoomContinuousFor(double factor, double x, double y, bool time, bool price,
                                             int settleMs) {
+  if (settleMs <= 0) stop(); // a drag also cancels a preceding wheel/pinch timeout
   if (!canZoomContinuous(factor)) return;
   price = price && !getViewState()->autoPriceScale();
   y = controller_.midLock().zoomAnchorY(y, height(), price); // the settle anchors there too
@@ -273,10 +274,10 @@ void ZoomController::zoomContinuousFor(double factor, double x, double y, bool t
   glide.gesturePrice = glide.gesturePrice || price;
   gestureAt_ = QPointF(x, y);
   applyContinuousView(cam, factor, fracX, fracY, {time, price}, {timeJoins, priceJoins});
-  if (!settleTimer_) {
-    settleTimer_ = timerFactory_([this] { endZoomGesture(); });
+  if (settleMs > 0) {
+    if (!settleTimer_) settleTimer_ = timerFactory_([this] { endZoomGesture(); });
+    settleTimer_->start(settleMs);
   }
-  settleTimer_->start(settleMs);
   emit updateRequested();
 }
 
@@ -352,12 +353,12 @@ void ZoomController::zoomPriceWheel(int angleDelta, int pixelDelta, int phase, d
 }
 
 void ZoomController::zoomTimeDrag(double delta, double x) {
-  zoomContinuousFor(continuousFactor(delta), x, height() / 2, true, false, kGestureSafetyMs);
+  zoomContinuousFor(continuousFactor(delta), x, height() / 2, true, false, 0);
 }
 
 void ZoomController::zoomPriceDrag(double delta, double y) {
   controller_.commands().releasePrice("price-axis drag");
-  zoomContinuousFor(continuousFactor(delta), width() / 2, y, false, true, kGestureSafetyMs);
+  zoomContinuousFor(continuousFactor(delta), width() / 2, y, false, true, 0);
 }
 
 void ZoomController::zoomTimeClicks(int clicks, double x) { zoomClicks(clicks, x, height() / 2, true, false); }

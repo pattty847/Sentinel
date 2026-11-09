@@ -23,7 +23,7 @@ class ZoomController : public QObject {
 public:
     // Trackpad pause, including scrolls without phases or fingers resting on the pad.
     static constexpr int kGestureSettleMs = 160;
-    // A lost explicit end (pinch or axis drag) must also settle.
+    // A pinch with a lost explicit end must also settle.
     static constexpr int kGestureSafetyMs = 1000;
     enum class WheelRoute { Chart, TimeAxis, PriceAxis };
     using TimerFactory = std::function<std::unique_ptr<IZoomTimer>(std::function<void()>)>;
@@ -36,6 +36,7 @@ public:
     void zoomStoredView(double factor, double x, double y, bool time, bool price);
     void zoomClicks(int clicks, double x, double y, bool time = true, bool price = true);
     void zoomContinuous(double factor, double x, double y, bool time = true, bool price = true);
+    // Zero timeout keeps an axis drag continuous until release or cancellation.
     void zoomContinuousFor(double factor, double x, double y, bool time, bool price, int settleMs);
     void endZoomGesture();
     void wheelZoom(int angle, bool pixelDeltaNull, int phase, bool precise,

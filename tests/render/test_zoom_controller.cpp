@@ -1,6 +1,7 @@
 #include "chart/core/ChartViewController.hpp"
 #include "chart/core/PublishedFrame.hpp"
 #include <gtest/gtest.h>
+#include <cmath>
 #include <limits>
 
 namespace {
@@ -287,7 +288,64 @@ TEST_F(ZoomTest, WheelPixelNotchesPrecisePhasesAndEnd) {
     wheel(0,false,0,true);
     EXPECT_TRUE(events.empty());
 }
-TEST_F(ZoomTest, AxisWrappersPreserveOwnershipAndSafetyTimeout) {
+TEST_F(ZoomTest, PriceAxisDragStaysContinuousUntilRelease) {
+    // Press records the pointer in QML; the first move enters the policy gesture.
+    double lastY = 200;
+    double expectedSpan = 100;
+    for (double y : {198., 195., 193., 196.}) {
+        const auto before = c.camera().rasterCameraNow(false);
+        const double anchorPrice = before.priceAtYDev(y);
+        const double delta = -(y - lastY) * 24.0;
+        lastY = y;
+        expectedSpan /= 1.0 + delta * .0005;
+        z.zoomPriceDrag(delta, y);
+        ASSERT_TRUE(c.glide().gesture);
+        EXPECT_FALSE(c.glide().price.active);
+        const auto moved = c.camera().rasterCameraNow(false);
+        EXPECT_NEAR(moved.drawnMaxPrice - moved.drawnMinPrice, expectedSpan, 1e-10);
+        EXPECT_NEAR(moved.priceAtYDev(y), anchorPrice, 1e-10);
+        EXPECT_DOUBLE_EQ(moved.drawnStartMs, before.drawnStartMs);
+        EXPECT_DOUBLE_EQ(moved.drawnEndMs, before.drawnEndMs);
+        // Hold the button stationary beyond the old safety timeout, then render.
+        for (int elapsed : {1000, 90, 1500}) {
+            timer.advance(elapsed);
+            c.zoomGlide().advanceZoomGlide(timer.now);
+            EXPECT_TRUE(c.glide().gesture);
+            EXPECT_FALSE(c.glide().price.active);
+            const auto held = c.camera().rasterCameraNow(false);
+            EXPECT_DOUBLE_EQ(held.drawnMinPrice, moved.drawnMinPrice);
+            EXPECT_DOUBLE_EQ(held.drawnMaxPrice, moved.drawnMaxPrice);
+        }
+    }
+    const auto released = c.camera().rasterCameraNow(false);
+    ASSERT_NE(released.rowPxF, std::round(released.rowPxF));
+    z.endZoomGesture();
+    EXPECT_FALSE(c.glide().gesture);
+    ASSERT_TRUE(c.glide().price.active);
+    EXPECT_EQ(c.glide().row.rowPx, 4);
+    const auto start = c.camera().rasterCameraNow(false);
+    EXPECT_DOUBLE_EQ(start.drawnMinPrice, released.drawnMinPrice);
+    EXPECT_DOUBLE_EQ(start.drawnMaxPrice, released.drawnMaxPrice);
+    timer.advance(2 * chart_raster::kZoomGlideMs);
+    c.zoomGlide().advanceZoomGlide(timer.now);
+    EXPECT_FALSE(c.glide().price.active);
+    const auto landed = c.camera().rasterCameraNow(false);
+    EXPECT_DOUBLE_EQ(landed.rowPxF, 4);
+}
+TEST_F(ZoomTest, AxisDragCancelsPendingWheelSettle) {
+    for (double delta : {0., 48.}) {
+        z.zoomContinuous(1.01, 400, 200, false, true);
+        ASSERT_TRUE(z.gestureSettlePending());
+        z.zoomPriceDrag(delta, 198);
+        EXPECT_FALSE(z.gestureSettlePending());
+        timer.advance(2000);
+        EXPECT_TRUE(c.glide().gesture);
+        EXPECT_FALSE(c.glide().price.active);
+        z.endZoomGesture();
+        EXPECT_FALSE(c.glide().gesture);
+    }
+}
+TEST_F(ZoomTest, AxisWrappersPreserveOwnershipAndExplicitRelease) {
     v.setAutoPriceScale(true);
     z.zoomPriceWheel(0,0,0,200);
     EXPECT_TRUE(v.autoPriceScale());
@@ -297,13 +355,18 @@ TEST_F(ZoomTest, AxisWrappersPreserveOwnershipAndSafetyTimeout) {
     z.zoomTimeWheel(120,1,0,400);
     EXPECT_EQ(c.glide().colPx,10);
     z.zoomTimeDrag(100,400);
-    EXPECT_EQ(timer.deadline,1000);
+    EXPECT_FALSE(z.gestureSettlePending());
+    timer.advance(2000);
+    EXPECT_TRUE(c.glide().gesture);
+    EXPECT_FALSE(c.glide().time.active);
     z.endZoomGesture();
     v.setAutoPriceScale(true);
     z.zoomPriceDrag(100,200);
     EXPECT_FALSE(v.autoPriceScale());
-    EXPECT_EQ(timer.deadline,1000);
+    EXPECT_FALSE(z.gestureSettlePending());
     timer.advance(1000);
+    EXPECT_TRUE(c.glide().gesture);
+    z.endZoomGesture();
     EXPECT_FALSE(c.glide().gesture);
     v.setAutoPriceScale(true);
     z.zoomPriceClicks(1,200);
