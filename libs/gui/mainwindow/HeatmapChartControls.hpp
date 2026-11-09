@@ -11,7 +11,7 @@
 //   its showTelemetry visibility (View menu, close button, setting).
 // - the toolbar's mode (which controls the active layers show, TopToolbar::
 //   controlVisibility), the liquidity range slider and label options (S7b:
-//   sensitivityMin/Max, showLabels, labelCurrency) and the TPO controls;
+//   per-symbol sensitivityMin/Max, showLabels, labelCurrency) and the TPO controls;
 // - the chart settings menu (the toolbar gear): one entry point for chart-level
 //   settings that exist (labels, label size, candle style, the settings dialog,
 //   screenshot, layouts, font). The host supplies the actions it owns (hooks).
@@ -84,6 +84,7 @@ private:
     void onModelChanged(bool explicitManualTick);
     void scheduleSync();
     void scheduleIndicator();
+    void updateSensitivityContext();
     void syncTelemetryVisibility();
     // The persisted ladder toggle and width reach the layers only when they change, so a
     // process-only Agent API layer patch survives unrelated settings changes.
@@ -106,6 +107,7 @@ private:
     qint64 m_shownUnits = -1;
     double m_shownScale = 0;
     bool m_shownManual = false;
+    bool m_sensitivityContextUpdating = false;
     struct AppliedLadder {
         bool showLadder = false;
         int ladderWidthPx = 0;

@@ -159,6 +159,7 @@ void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     if (symbol_ == symbol) return;
     if (!startupTickReady_) startupTickTimer_->stop();
     symbol_ = symbol;
+    priceKnown_ = false;
     displayScale_ = {};
     displayScaleKnown_ = false;
     autoPriceTick_.reset();
@@ -170,6 +171,7 @@ void HeatmapGpuLayer::setSymbol(const std::string &symbol) {
     restoreTick();
     noteLimits();
     viewChanged(); // the controller serial switches; the node holds the old picture
+    emit symbolChanged();
 }
 
 void HeatmapGpuLayer::setTimeframeMs(int64_t tfMs) {
@@ -186,6 +188,7 @@ void HeatmapGpuLayer::setTimeframeMs(int64_t tfMs) {
 
 void HeatmapGpuLayer::setView(const ViewWindow &view, bool priceKnown) {
     if (hasView_ && view == view_ && priceKnown == priceKnown_) return;
+    const bool becameKnown = priceKnown && !priceKnown_;
     // The controller's request carries only symbol, timeframe and time bounds: a
     // price-only move (lock to mid, a price zoom) invalidates the view, posts nothing.
     const bool timeChanged = !hasView_ || view.timeLoMs != view_.timeLoMs || view.timeHiMs != view_.timeHiMs;
@@ -194,6 +197,7 @@ void HeatmapGpuLayer::setView(const ViewWindow &view, bool priceKnown) {
     priceKnown_ = priceKnown;
     ++viewSerial_;
     if (timeChanged) postView();
+    if (becameKnown) emit priceViewKnown();
 }
 
 void HeatmapGpuLayer::setSurface(double widthPx, double heightPx, double dpr) {
@@ -246,8 +250,7 @@ void HeatmapGpuLayer::setTickMemory(const ManualTickMemory &memory) {
 }
 
 void HeatmapGpuLayer::refreshStyle() {
-    const double relative = sensitivityUnitScale();
-    const auto window = codeWindow(settings_.sensitivityMin * relative, settings_.sensitivityMax * relative,
+    const auto window = codeWindow(settings_.sensitivityMin, settings_.sensitivityMax,
                                    displayScale_.floor, displayScale_.codesPerOctave);
     style_.codeFloor = window.floor;
     style_.codeRange = window.range;
@@ -520,7 +523,8 @@ bool HeatmapGpuLayer::setAutoPriceTick(std::optional<int64_t> units) {
 
 bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &view,
                                    float coverageGamma, std::optional<ViewWindow> binView) {
-    if (!controller_) return false;
+    if (!controller_ || !settings_.sensitivityReady ||
+        (!settings_.sensitivitySymbol.empty() && settings_.sensitivitySymbol != symbol_)) return false;
     frame.spans = snapshot_;
     frame.capacity = capacity_;
     frame.tfMs = tfMs_;

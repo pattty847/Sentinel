@@ -307,7 +307,7 @@ QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
                                 "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleWickWidth"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
-        return {"palettePreset", "bidGradient", "askGradient", "sensitivityMin", "sensitivityMax", "opacity",
+        return {"palettePreset", "bidGradient", "askGradient", "opacity",
                 "crossfadeMs", "showBandEdges", "smoothZoomOut"};
     if (tab == "Budgets") return {"gpuCapBytes", "uploadBudgetBytes", "prefetchTiles"};
     if (tab == "Live") return {"liveMinIntervalMs"};
@@ -536,10 +536,17 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     form->addRow("Ask gradient (Custom)", m_askGradient);
     m_sensitivityMin = doubleSpin(page, "sensitivityMin", 0.0001, 1e12, 0.01, 4);
     m_sensitivityMax = doubleSpin(page, "sensitivityMax", 0.0001, 1e15, 1, 4);
-    m_sensitivityMin->setToolTip("Relative sensitivity; the toolbar shows the corresponding base-asset size. Cells below the low handle have no colour or label.");
-    m_sensitivityMax->setToolTip("Relative sensitivity; the toolbar shows the corresponding base-asset size where colour saturates.");
-    form->addRow("Range low (relative)", m_sensitivityMin);
-    form->addRow("Range high (relative)", m_sensitivityMax);
+    m_sensitivityMin->setToolTip("Base-asset size for this symbol. Cells below this size have no colour or label.");
+    m_sensitivityMax->setToolTip("Base-asset size for this symbol where colour saturates.");
+    form->addRow("Range low (base asset)", m_sensitivityMin);
+    form->addRow("Range high (base asset)", m_sensitivityMax);
+    auto *resetSensitivity = new QPushButton("Reset range to auto", page);
+    resetSensitivity->setObjectName("sensitivityResetAuto");
+    resetSensitivity->setToolTip("Recompute this symbol's range from its current price and save it.");
+    form->addRow(resetSensitivity);
+    connect(resetSensitivity, &QPushButton::clicked, this, [this] {
+        if (const auto error = m_model->resetSensitivityToAuto(); !error.isEmpty()) showStatus(error, true);
+    });
     m_opacity = doubleSpin(page, "opacity", 0, 1, 0.05, 2);
     form->addRow("Opacity (0–1)", m_opacity);
     m_smoothZoomOut = new QCheckBox("Blend cells when zoomed out", page);

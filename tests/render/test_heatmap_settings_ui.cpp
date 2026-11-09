@@ -144,6 +144,98 @@ TEST(HeatmapSettingsModelTest, PersistsPerChart) {
     EXPECT_EQ(main.settings().palettePreset, "Ocean");
 }
 
+TEST(HeatmapSettingsModelTest, LiquidityRangeFollowsSymbolAndFreezesUsdDefaultAtFirstPrice) {
+    TempStore t;
+    t.settings.setValue("heatmap/main/sensitivityMin", 99.0);
+    t.settings.setValue("heatmap/main/sensitivityMax", 999.0);
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    EXPECT_FALSE(t.settings.contains("heatmap/main/sensitivityMin"));
+    EXPECT_FALSE(t.settings.contains("heatmap/main/sensitivityMax"));
+    std::string symbol;
+    model.setContextProvider([&] { return HeatmapSettingsModel::Context{symbol, 60'000}; });
+    const auto select = [&](const char *next) { symbol = next; model.selectSymbol(symbol); };
+
+    select("BTC-USD");
+    EXPECT_FALSE(model.settings().sensitivityReady);
+    EXPECT_EQ(model.settings().sensitivityMin, 0.05);
+    EXPECT_FALSE(t.store.loadSensitivity(symbol));
+    model.notePrice(symbol, 100'000);
+    EXPECT_TRUE(model.settings().sensitivityReady);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.05);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 50);
+    ASSERT_TRUE(model.apply({{"sensitivityMin", 0.06}, {"sensitivityMax", 60}}).isEmpty());
+
+    select("ETH-USD");
+    EXPECT_FALSE(model.settings().sensitivityReady);
+    model.notePrice(symbol, 3'000);
+    EXPECT_NEAR(model.settings().sensitivityMin, 1.6666666667, 1e-9);
+    EXPECT_NEAR(model.settings().sensitivityMax, 1666.6666667, 1e-6);
+    const auto eth = t.store.loadSensitivity(symbol);
+    ASSERT_TRUE(eth);
+    model.notePrice(symbol, 4'000);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, eth->min);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, eth->max);
+    ASSERT_TRUE(model.apply({{"sensitivityMin", 2.0}, {"sensitivityMax", 2000.0}}).isEmpty());
+
+    select("SOL-USD");
+    EXPECT_FALSE(model.settings().sensitivityReady);
+    model.notePrice(symbol, 200);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 25);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 25'000);
+    select("BTC-USD");
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.06);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 60);
+    select("ETH-USD");
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 2);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 2000);
+    model.notePrice(symbol, 4'000);
+    ASSERT_TRUE(model.resetSensitivityToAuto().isEmpty());
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 1.25);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 1250);
+    EXPECT_DOUBLE_EQ(t.store.loadSensitivity(symbol)->min, 1.25);
+
+    select("PEPE-USD");
+    model.notePrice(symbol, 1e-5);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 5e8);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 5e11);
+    EXPECT_DOUBLE_EQ(t.store.loadSensitivity(symbol)->max, 5e11);
+    EXPECT_FALSE(t.settings.contains("heatmap/main/sensitivityMin"));
+    EXPECT_FALSE(t.settings.contains("heatmap/main/sensitivityMax"));
+}
+
+TEST(HeatmapSettingsModelTest, ChartControlsSeedEachSymbolsRangeFromItsOwnBookPrice) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model);
+    controls.setRenderer(&renderer);
+    renderer.view()->setTimeframe(60'000);
+    renderer.setActiveSymbol("BTC-USD");
+    EXPECT_FALSE(model.settings().sensitivityReady);
+    renderer.view()->controller().livePlacement().setLiveBookTop(99'990, 100'010);
+    EXPECT_TRUE(model.settings().sensitivityReady);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.05);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 50);
+    controls.requestLiquidityRange(0.1, 100, true);
+    EXPECT_DOUBLE_EQ(t.store.loadSensitivity("BTC-USD")->min, 0.1);
+
+    renderer.setActiveSymbol("ETH-USD");
+    EXPECT_FALSE(model.settings().sensitivityReady);
+    renderer.view()->controller().livePlacement().setLiveBookTop(2'999, 3'001);
+    EXPECT_TRUE(model.settings().sensitivityReady);
+    EXPECT_NEAR(model.settings().sensitivityMin, 5.0 / 3.0, 1e-9);
+    EXPECT_NEAR(model.settings().sensitivityMax, 5'000.0 / 3.0, 1e-6);
+    controls.requestLiquidityRange(2, 2000, true);
+    renderer.view()->controller().livePlacement().setLiveBookTop(3'999, 4'001);
+    ASSERT_TRUE(model.resetSensitivityToAuto().isEmpty());
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 1.25);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 1250);
+    renderer.setActiveSymbol("BTC-USD");
+    EXPECT_TRUE(model.settings().sensitivityReady);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.1);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 100);
+}
+
 TEST(CandleStyleTest, PhysicalWicksSnapAndDojiIsOnePixel) {
     for (double dpr : {1.0, 1.5, 2.0}) {
         for (double zoom : {0.8, 3.0, 17.0, 64.0}) {
@@ -662,8 +754,12 @@ TEST(CandleStyleTest, SettingsValidateAndRoundTripPerChart) {
     EXPECT_EQ(main.settings().candleWickColor, "#F0F0F0");
     EXPECT_DOUBLE_EQ(main.settings().candleBodyOpacity, 0.65);
     EXPECT_EQ(main.settings().candleWickWidth, 3);
-    EXPECT_EQ(t.reload(), main.settings());
-    EXPECT_EQ(t.reload("other"), other.settings());
+    auto savedMain = main.settings();
+    savedMain.sensitivityReady = true;
+    auto savedOther = other.settings();
+    savedOther.sensitivityReady = true;
+    EXPECT_EQ(t.reload(), savedMain);
+    EXPECT_EQ(t.reload("other"), savedOther);
     const auto before = main.settings();
     for (const QJsonObject bad : {QJsonObject{{"candleUpColor", "cyan"}},
                                   QJsonObject{{"candleWickColor", "#12"}},
@@ -897,7 +993,9 @@ HeatmapChartSettings nonDefaults() {
 TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     TempStore t;
     t.store.save("main", nonDefaults());
+    t.store.saveSensitivity("BTC-USD", {0.2, 20});
     HeatmapSettingsModel model(t.store, "main", t.config);
+    model.selectSymbol("BTC-USD");
     HeatmapSettingsDialog dialog(&model, nullptr);
     HeatmapChartControls controls(&model);
     controls.setDialog(&dialog);
@@ -930,6 +1028,22 @@ TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     EXPECT_EQ(child<QSpinBox>(dialog, "cpuCeiling")->value(), 1024);
     EXPECT_EQ(child<QSpinBox>(dialog, "liveMinIntervalMs")->value(), 1200);
     EXPECT_TRUE(child<QCheckBox>(dialog, "showTelemetry")->isChecked());
+}
+
+TEST(HeatmapSettingsDialogTest, ResetRangeToAutoUsesCurrentSymbolsLatestPrice) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    model.setContextProvider([] { return HeatmapSettingsModel::Context{"ETH-USD", 60'000}; });
+    model.selectSymbol("ETH-USD");
+    model.notePrice("ETH-USD", 3'000);
+    ASSERT_TRUE(model.apply({{"sensitivityMin", 3.0}, {"sensitivityMax", 3000.0}}).isEmpty());
+    model.notePrice("ETH-USD", 4'000);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    child<QPushButton>(dialog, "sensitivityResetAuto")->click();
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 1.25);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 1250);
+    EXPECT_DOUBLE_EQ(t.store.loadSensitivity("ETH-USD")->min, 1.25);
+    EXPECT_DOUBLE_EQ(child<QDoubleSpinBox>(dialog, "sensitivityMin")->value(), 1.25);
 }
 
 TEST(HeatmapSettingsDialogTest, EveryVisibleEnabledControlHasATooltip) {
@@ -1103,6 +1217,9 @@ TEST(HeatmapSettingsDialogTest, EveryWidgetWritesItsSettingLiveAndSaved) {
     model.setBudgetSink([&](const heatmap::HeatmapBudgets &b) { applied.push_back(b); return true; });
     HeatmapSettingsDialog dialog(&model, nullptr);
     HeatmapChartControls controls(&model); // tick actions go through the controls
+    model.selectSymbol("BTC-USD");
+    model.notePrice("BTC-USD", 100'000);
+    model.setContextProvider([] { return HeatmapSettingsModel::Context{"BTC-USD", 60'000}; });
     controls.setDialog(&dialog);
     QSignalSpy changed(&model, &HeatmapSettingsModel::changed);
     // Tick
@@ -1154,7 +1271,15 @@ TEST(HeatmapSettingsDialogTest, EveryWidgetWritesItsSettingLiveAndSaved) {
     ASSERT_FALSE(applied.empty());
     EXPECT_EQ(applied.back().cpuCeiling, 2048 * MiB);
     EXPECT_GE(changed.count(), 13); // live: each change reached listeners at once
-    EXPECT_EQ(t.reload(), s);       // and each was saved
+    auto saved = s;
+    saved.sensitivityMin = 0.05;
+    saved.sensitivityMax = 50;
+    saved.sensitivitySymbol.clear();
+    saved.sensitivityReady = true;
+    EXPECT_EQ(t.reload(), saved);
+    ASSERT_TRUE(t.store.loadSensitivity("BTC-USD"));
+    EXPECT_EQ(t.store.loadSensitivity("BTC-USD")->min, 0.5);
+    EXPECT_EQ(t.store.loadSensitivity("BTC-USD")->max, 80);
 
     // Crossfade off is crossfadeMs 0 (hard switch); on restores the ms value.
     child<QCheckBox>(dialog, "crossfadeOn")->setChecked(false);
@@ -1238,7 +1363,9 @@ TEST(HeatmapSettingsDialogTest, ResetRestoresOnlyItsTab) {
 
     click("resetDebug");
     EXPECT_EQ(model.settings().showTelemetry, d.showTelemetry);
-    EXPECT_EQ(model.settings(), d);
+    auto pendingDefaults = d;
+    pendingDefaults.sensitivityReady = false;
+    EXPECT_EQ(model.settings(), pendingDefaults);
     EXPECT_EQ(t.reload(), d); // resets are saved
 }
 

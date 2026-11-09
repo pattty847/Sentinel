@@ -34,6 +34,14 @@ HeatmapChartControls::HeatmapChartControls(heatmap::HeatmapSettingsModel *model,
         }
         return context;
     });
+    m_model->setCurrentPriceProvider([this] {
+        if (!m_renderer || !m_renderer->view()) return 0.0;
+        const auto &controller = m_renderer->view()->controller();
+        if (!controller.flags().priceKnown || controller.flags().reseedPrice ||
+            controller.session().symbol.toStdString() != m_model->activeSymbol()) return 0.0;
+        const auto &session = controller.session();
+        return session.bookMidValid ? session.bookMid : session.lastTrade;
+    });
 }
 
 void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
@@ -48,22 +56,45 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
     renderer->setHeatmapChartSettings(m_model->settings());
     renderer->candles()->setCandleAppearance(m_model->settings());
     connect(renderer->view(), &chart::ChartViewQml::timeframeChanged, this, &HeatmapChartControls::scheduleSync);
-    connect(renderer->view(), &chart::ChartViewQml::viewportChanged, this, &HeatmapChartControls::scheduleIndicator);
+    connect(renderer->view(), &chart::ChartViewQml::viewportChanged, this, [this] {
+        updateSensitivityContext();
+        scheduleIndicator();
+    });
     connect(renderer->layers(), &chart::LayerVisibility::layerVisibilityChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer->tpo(), &chart::ChartTpoQml::tpoConfigChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer->tpo(), &chart::ChartTpoQml::tpoStyleChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer->candles(), &chart::ChartLookSettings::candleStyleChanged, this, &HeatmapChartControls::scheduleSync);
     if (auto *layer = renderer->gpuHeatmapLayer()) {
         using Layer = heatmap::gpu::HeatmapGpuLayer;
+        connect(layer, &Layer::symbolChanged, this, &HeatmapChartControls::updateSensitivityContext);
+        connect(layer, &Layer::priceViewKnown, this, &HeatmapChartControls::updateSensitivityContext);
         connect(layer, &Layer::tickChanged, this, &HeatmapChartControls::scheduleSync);
         connect(layer, &Layer::presetsChanged, this, &HeatmapChartControls::scheduleSync);
-        connect(layer, &Layer::snapshotChanged, this, &HeatmapChartControls::scheduleIndicator);
+        connect(layer, &Layer::snapshotChanged, this, [this] {
+            updateSensitivityContext();
+            scheduleIndicator();
+        });
         connect(layer, &Layer::liquidityRangeChanged, this, &HeatmapChartControls::scheduleIndicator);
     }
     if (m_dock) setTelemetryDock(m_dock); // the provider reads the new renderer
     m_appliedLadder.reset();
     applyLadderSettings();
+    updateSensitivityContext();
     syncNow();
+}
+
+void HeatmapChartControls::updateSensitivityContext() {
+    if (!m_renderer || !m_renderer->gpuHeatmapLayer()) return;
+    const auto &symbol = m_renderer->gpuHeatmapLayer()->symbol();
+    m_sensitivityContextUpdating = true;
+    m_model->selectSymbol(symbol);
+    const auto &controller = m_renderer->view()->controller();
+    if (controller.flags().priceKnown && !controller.flags().reseedPrice) {
+        const auto &session = controller.session();
+        const double price = session.bookMidValid ? session.bookMid : session.lastTrade;
+        m_model->notePrice(symbol, price);
+    }
+    m_sensitivityContextUpdating = false;
 }
 
 void HeatmapChartControls::applyLadderSettings() {
@@ -147,10 +178,8 @@ TopToolbar::ModeState HeatmapChartControls::modeState() const {
 
 void HeatmapChartControls::requestLiquidityRange(double low, double high, bool persist) {
     // Process-only while dragging, persisted on release (one write per edit).
-    const auto *layer = m_renderer ? m_renderer->gpuHeatmapLayer() : nullptr;
-    const double relative = layer ? layer->sensitivityUnitScale() : 1.0;
-    if (const auto error = m_model->apply({{"sensitivityMin", low / relative},
-                                           {"sensitivityMax", high / relative}}, persist); !error.isEmpty())
+    if (const auto error = m_model->apply({{"sensitivityMin", low},
+                                           {"sensitivityMax", high}}, persist); !error.isEmpty())
         sLog_Warning("Liquidity range rejected: " << error);
 }
 
@@ -420,6 +449,11 @@ void HeatmapChartControls::syncTelemetryVisibility() {
 
 void HeatmapChartControls::onModelChanged(bool explicitManualTick) {
     const auto &s = m_model->settings();
+    if (m_sensitivityContextUpdating) {
+        if (m_renderer && m_renderer->gpuHeatmapLayer()) m_renderer->gpuHeatmapLayer()->setSettings(s);
+        syncNow();
+        return;
+    }
     if (m_renderer) {
         m_renderer->setHeatmapChartSettings(s, explicitManualTick);
         m_renderer->candles()->setCandleAppearance(s);
@@ -467,9 +501,8 @@ void HeatmapChartControls::syncNow() {
         const auto &s = m_model->settings();
         const auto *layer = m_renderer ? m_renderer->gpuHeatmapLayer() : nullptr;
         const auto range = layer ? layer->liquidityRange() : heatmap::gpu::HeatmapGpuLayer::LiquidityRange{};
-        const double relative = layer ? layer->sensitivityUnitScale() : 1.0;
         m_toolbar->setLiquidityRange(range.valid ? range.lo : 0, range.valid ? range.hi : 0,
-                                     s.sensitivityMin * relative, s.sensitivityMax * relative);
+                                     s.sensitivityMin, s.sensitivityMax);
         m_toolbar->setLabelOptions(s.showLabels, s.labelCurrency == "usd");
         m_toolbar->setColorPreset(QString::fromStdString(s.palettePreset));
         m_toolbar->chartTypeCombo()->setEnabled(bool(m_renderer));

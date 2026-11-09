@@ -7,7 +7,8 @@
 // Persistence goes through HeatmapSettingsStore: heatmap/<chartId>/... per chart,
 // layouts/<name>/heatmap/<chartId>/ for named workspaces only (never
 // _last_session, INV-088), heatmap/manualTick/<symbol>/<tf> for the Manual tick
-// memory (shared by every chart) and heatmap/budgets/... for the process budgets.
+// memory (shared by every chart), heatmap/sensitivity/<symbol>/ for each asset's
+// base-unit range, and heatmap/budgets/... for the process budgets.
 #include "HeatmapSettingsStore.hpp"
 #include "HeatmapSourceController.hpp"
 #include <QObject>
@@ -33,6 +34,11 @@ public:
     HeatmapSettingsStore &store() { return store_; }
 
     void setContextProvider(std::function<Context()> provider) { context_ = std::move(provider); }
+    void selectSymbol(const std::string &symbol);
+    void notePrice(const std::string &symbol, double price);
+    void setCurrentPriceProvider(std::function<double()> provider) { currentPriceProvider_ = std::move(provider); }
+    QString resetSensitivityToAuto();
+    const std::string &activeSymbol() const { return activeSymbol_; }
 
     // A partial settings patch (the Agent API schema). persist=false changes this
     // process only. Returns the S6a validation error (nothing changes) or empty.
@@ -68,6 +74,9 @@ private:
     HeatmapChartSettings settings_;
     HeatmapBudgets budgets_;
     std::function<Context()> context_;
+    std::string activeSymbol_;
+    double currentPrice_ = 0;
+    std::function<double()> currentPriceProvider_;
     std::function<bool(const HeatmapBudgets &)> budgetSink_;
 };
 

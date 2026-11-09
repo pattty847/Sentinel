@@ -181,7 +181,7 @@ public:
     static uint64_t labelSignature(const LabelCells *labels, const std::vector<uint8_t> &columns, size_t matched);
     int labelRetryMs() const { return retry_.delayMs(); }
     const DrawStyle &drawStyle() const { return style_; }
-    double sensitivityUnitScale() const { return displayScale_.floor / recording::SizeScale{}.floor; }
+    recording::SizeScale displayScale() const { return displayScale_; }
     std::shared_ptr<const HeatmapPalette> palette() const { return palette_; }
     // The liquidity (base-asset quantity, as sensitivityMin/Max) of the valid cells
     // in the last label window of this symbol (5th percentile to maximum): the
@@ -204,6 +204,8 @@ public:
     void setCaptureForTest(std::shared_ptr<HeatmapCellCapture> capture) { capture_ = std::move(capture); }
 
 signals:
+    void symbolChanged();
+    void priceViewKnown();
     void snapshotChanged();
     void liveChanged();
     void frameRequested(); // startup tick needs a fresh render-thread proposal

@@ -3,6 +3,7 @@
 #include "config/ConfigTypes.hpp"
 #include <QJsonObject>
 #include <QSettings>
+#include <optional>
 
 namespace heatmap {
 struct HeatmapBudgets;
@@ -15,10 +16,12 @@ QString applySettingsPatch(HeatmapChartSettings &settings, const QJsonObject &pa
 
 class HeatmapSettingsStore {
 public:
+    struct SensitivityRange { double min = 0, max = 0; };
     HeatmapSettingsStore(); // QSettings("Sentinel", "SentinelTerminal")
     explicit HeatmapSettingsStore(QSettings &settings); // isolated store for tests
     HeatmapChartSettings load(const QString &chartId, const ClientHeatmapConfig &defaults) const;
     void save(const QString &chartId, HeatmapChartSettings value);
+    void removeLegacySensitivity(const QString &chartId);
     // Patches persist only their own fields, never earlier process-only overrides.
     QString applyChartPatch(const QString &chartId, HeatmapChartSettings &current, const QJsonObject &patch,
                             bool persist, const ClientHeatmapConfig &defaults, const std::string &symbol, int64_t tfMs);
@@ -29,6 +32,9 @@ public:
                                       const ClientHeatmapConfig &defaults);
     ManualTickMemory loadManualTicks() const;
     bool saveManualTick(const std::string &symbol, int64_t tfMs, int64_t units);
+    std::optional<SensitivityRange> loadSensitivity(const std::string &symbol) const;
+    bool saveSensitivity(const std::string &symbol, SensitivityRange range);
+    void removeSensitivity(const std::string &symbol);
     HeatmapBudgets loadBudgets(const ClientHeatmapConfig &defaults) const;
     void saveBudgets(const HeatmapBudgets &budgets);
 private:

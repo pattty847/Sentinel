@@ -163,7 +163,7 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         if ((key == "bidGradient" || key == "askGradient") && !validGradient(v)) return "Invalid gradient (2..16 ordered stops, endpoints 0 and 1, hex colors)";
         merged[key] = v;
     }
-    HeatmapChartSettings out;
+    HeatmapChartSettings out = s;
     out.manualTick = int64_t(merged["manualTick"].toDouble());
     out.minRowPx = merged["minRowPx"].toDouble();
     out.hysteresis = merged["hysteresis"].toDouble();
@@ -208,6 +208,7 @@ HeatmapChartSettings HeatmapSettingsStore::loadAt(const QString &prefix, Heatmap
     const auto schema = settingsJson(defaults);
     QJsonObject patch;
     for (auto it = schema.begin(); it != schema.end(); ++it) {
+        if (it.key() == "sensitivityMin" || it.key() == "sensitivityMax") continue;
         if (!settings_->contains(prefix + it.key())) continue;
         const QJsonValue value = QJsonValue::fromVariant(settings_->value(prefix + it.key()));
         // QSettings INI can return scalar strings. Decode against the schema;
@@ -231,13 +232,24 @@ HeatmapChartSettings HeatmapSettingsStore::loadAt(const QString &prefix, Heatmap
 void HeatmapSettingsStore::saveAt(const QString &prefix, HeatmapChartSettings value) {
     clampSettings(value);
     const auto json = settingsJson(value);
-    for (auto it = json.begin(); it != json.end(); ++it) settings_->setValue(prefix + it.key(), it.value().toVariant());
+    for (auto it = json.begin(); it != json.end(); ++it) {
+        if (it.key() == "sensitivityMin" || it.key() == "sensitivityMax") {
+            settings_->remove(prefix + it.key());
+            continue;
+        }
+        settings_->setValue(prefix + it.key(), it.value().toVariant());
+    }
 }
 HeatmapChartSettings HeatmapSettingsStore::load(const QString &id, const ClientHeatmapConfig &defaults) const {
     return loadAt("heatmap/" + segment(id) + "/", chartDefaults(defaults));
 }
 void HeatmapSettingsStore::save(const QString &id, HeatmapChartSettings value) {
     saveAt("heatmap/" + segment(id) + "/", std::move(value));
+}
+void HeatmapSettingsStore::removeLegacySensitivity(const QString &id) {
+    const auto prefix = "heatmap/" + segment(id) + "/";
+    settings_->remove(prefix + "sensitivityMin");
+    settings_->remove(prefix + "sensitivityMax");
 }
 QString HeatmapSettingsStore::applyChartPatch(const QString &id, HeatmapChartSettings &current,
     const QJsonObject &patch, bool persist, const ClientHeatmapConfig &defaults, const std::string &symbol, int64_t tfMs) {
@@ -251,6 +263,8 @@ QString HeatmapSettingsStore::applyChartPatch(const QString &id, HeatmapChartSet
         // choice with a chart-wide default (or a previous process-only override).
         if (next.tickMode == TickMode::Manual && patch.contains("manualTick"))
             saveManualTick(symbol, tfMs, next.manualTick);
+        if (!symbol.empty() && (patch.contains("sensitivityMin") || patch.contains("sensitivityMax")))
+            saveSensitivity(symbol, {next.sensitivityMin, next.sensitivityMax});
     }
     current = std::move(next);
     return {};
@@ -289,6 +303,27 @@ bool HeatmapSettingsStore::saveManualTick(const std::string &symbol, int64_t tf,
     if (!check.set(symbol, tf, units)) return false;
     settings_->setValue("heatmap/manualTick/" + segment(QString::fromStdString(symbol)) + "/" + QString::number(tf), qint64(units));
     return true;
+}
+std::optional<HeatmapSettingsStore::SensitivityRange> HeatmapSettingsStore::loadSensitivity(const std::string &symbol) const {
+    if (symbol.empty()) return std::nullopt;
+    const auto prefix = "heatmap/sensitivity/" + segment(QString::fromStdString(symbol)) + "/";
+    bool lowOk = false, highOk = false;
+    const double low = settings_->value(prefix + "min").toDouble(&lowOk);
+    const double high = settings_->value(prefix + "max").toDouble(&highOk);
+    if (!lowOk || !highOk || !std::isfinite(low) || !std::isfinite(high) || low < 1e-9 || low > 1e12 ||
+        high > 1e15 || high <= low) return std::nullopt;
+    return SensitivityRange{low, high};
+}
+bool HeatmapSettingsStore::saveSensitivity(const std::string &symbol, SensitivityRange range) {
+    if (symbol.empty() || !std::isfinite(range.min) || !std::isfinite(range.max) ||
+        range.min < 1e-9 || range.min > 1e12 || range.max > 1e15 || range.max <= range.min) return false;
+    const auto prefix = "heatmap/sensitivity/" + segment(QString::fromStdString(symbol)) + "/";
+    settings_->setValue(prefix + "min", range.min);
+    settings_->setValue(prefix + "max", range.max);
+    return true;
+}
+void HeatmapSettingsStore::removeSensitivity(const std::string &symbol) {
+    if (!symbol.empty()) settings_->remove("heatmap/sensitivity/" + segment(QString::fromStdString(symbol)));
 }
 HeatmapBudgets HeatmapSettingsStore::loadBudgets(const ClientHeatmapConfig &c) const {
     const auto read = [&](const char *key, uint64_t fallback) {
