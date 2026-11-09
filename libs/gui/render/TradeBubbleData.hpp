@@ -1,5 +1,6 @@
 #pragma once
 #include "TimeAxisMapping.hpp"
+#include "chart/core/BubblePlacement.hpp"
 #include "marketdata/model/TradeData.h"
 #include <array>
 #include <memory>
@@ -13,6 +14,7 @@ struct Sample {
     double price = 0, size = 0;
     AggressorSide side = AggressorSide::Unknown;
     std::string tradeId;
+    int64_t exchangeNs = 0;
     uint64_t sequence = 0; // Assigned by Tape, never reused (including across clear).
 };
 // Two spans expose a wrapped, event-time-ordered ring without copying it.
@@ -25,14 +27,16 @@ struct Samples {
     const Sample& back() const { return (*this)[size()-1]; }
 };
 struct WindowKey {
-    uint64_t first = 0, last = 0;
+    uint64_t first = 0, last = 0, predecessor = 0;
     size_t count = 0;
     bool operator==(const WindowKey&) const = default;
 };
 struct Window {
     Samples rows;
     size_t comparisons = 0;
-    WindowKey key() const { return rows.empty() ? WindowKey{} : WindowKey{rows.front().sequence, rows.back().sequence, rows.size()}; }
+    uint64_t predecessor = 0;
+    double previousPrice = 0;
+    WindowKey key() const { return rows.empty() ? WindowKey{} : WindowKey{rows.front().sequence, rows.back().sequence, predecessor, rows.size()}; }
 };
 // GUI-thread ingestion; updatePaintNode reads while Qt blocks the GUI thread.
 // A future paged history adapter can feed the same event-time samples and IDs.
@@ -56,17 +60,27 @@ private:
     size_t head_ = 0, count_ = 0;
     uint64_t revision_ = 0;
 };
-struct Bubble { float x = 0, y = 0, radius = 0; AggressorSide side = AggressorSide::Unknown; };
+// Converts tape storage to the Qt-free policy without copying strings or rows.
+struct PolicyRows {
+    Samples rows;
+    size_t size() const { return rows.size(); }
+    chart::bubbles::Execution operator[](size_t i) const {
+        const auto& t = rows[i];
+        return {double(t.timeMs), t.price, t.size, int(t.side), t.tradeId, t.exchangeNs};
+    }
+};
+struct Bubble {
+    float x = 0, y = 0, radius = 0;
+    AggressorSide side = AggressorSide::Unknown;
+    float minY = 0, maxY = 0, opacity = 1;
+};
 class Layout {
 public:
     static constexpr size_t MaxBubbles = 4096;
     static constexpr double MaxRadius = 18;
     Layout();
-    static double radius(double notional);
-    std::span<const Bubble> build(Samples trades, const TimeAxisMapping& map, double minNotional);
-    std::span<const Bubble> build(std::span<const Sample> trades, const TimeAxisMapping& map, double minNotional) {
-        return build(Samples{trades, {}}, map, minNotional);
-    }
+    static double radius(double notional, double reference) { return chart::bubbles::radius(notional, reference); }
+    std::span<const Bubble> build(Samples trades, const TimeAxisMapping& map, const chart::bubbles::Options& options, double previousPrice = 0);
     size_t scannedRows() const { return scannedRows_; }
     size_t hashProbes() const { return hashProbes_; }
     size_t coarseCellVisits() const { return coarseCellVisits_; }
@@ -75,10 +89,12 @@ public:
 private:
     struct Point {
         double x = 0, y = 0, notional = 0;
+        double minY = 0, maxY = 0, opacity = 1;
         AggressorSide side = AggressorSide::Unknown;
         uint32_t cellX = 0, cellY = 0;
     };
-    static constexpr size_t FineSlots = 1u << 18; // <=100k cells, load <0.39
+    static constexpr size_t FineSlots = 1u << 18; // <=200k marks, load <0.77
+    chart::bubbles::BubblePlacement policy_;
     std::unique_ptr<Point[]> points_; // raw projected rows, compacted in place to 6 px cells
     std::unique_ptr<uint32_t[]> fineSlots_;
     std::array<uint16_t, MaxBubbles * 2> coarseSlots_{};

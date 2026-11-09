@@ -65,6 +65,8 @@ void clampSettings(HeatmapChartSettings &s) {
     s.sensitivityMin = finiteClamp(s.sensitivityMin, 1e-9, 1e12, d.sensitivityMin);
     s.sensitivityMax = finiteClamp(s.sensitivityMax, 1e-9, 1e15, d.sensitivityMax);
     if (s.sensitivityMax <= s.sensitivityMin) s.sensitivityMax = s.sensitivityMin * 2;
+    if (s.bubblePlacement != "individual" && s.bubblePlacement != "auto" && s.bubblePlacement != "slot")
+        s.bubblePlacement = d.bubblePlacement;
     s.tradeMinNotional = finiteClamp(s.tradeMinNotional, 0, 1e12, d.tradeMinNotional);
     s.opacity = finiteClamp(s.opacity, 0, 1, d.opacity);
     s.gpuCapBytes = std::clamp<uint64_t>(s.gpuCapBytes, MiB, 4096 * MiB);
@@ -125,6 +127,7 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"showTrades", s.showTrades},
         {"tradesAboveCandles", s.tradesAboveCandles},
         {"tradeMinNotional", s.tradeMinNotional},
+        {"bubblePlacement", QString::fromStdString(s.bubblePlacement)},
         {"showLabels", s.showLabels},
         {"labelCurrency", QString::fromStdString(s.labelCurrency)},
         {"labelMinPx", s.labelMinPx},
@@ -154,6 +157,8 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         if (v.isDouble() && (!std::isfinite(v.toDouble()) || std::abs(v.toDouble()) > 9007199254740991.0))
             return "Expected a finite safe number: " + key;
         if (integers.contains(key) && std::floor(v.toDouble()) != v.toDouble()) return "Expected an integer: " + key;
+        if (key == "bubblePlacement" && v != "individual" && v != "auto" && v != "slot")
+            return "bubblePlacement must be individual, auto or slot";
         if (key == "tickMode" && v != "auto" && v != "manual") return "tickMode must be auto or manual";
         if (key == "palettePreset" && !palettes.contains(v.toString())) return "Unknown palettePreset";
         if (key == "labelCurrency" && v != "usd" && v != "asset") return "labelCurrency must be usd or asset";
@@ -182,6 +187,7 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.showTelemetry = merged["showTelemetry"].toBool();
     out.showTrades = merged["showTrades"].toBool();
     out.tradesAboveCandles = merged["tradesAboveCandles"].toBool();
+    out.bubblePlacement = merged["bubblePlacement"].toString().toStdString();
     out.tradeMinNotional = merged["tradeMinNotional"].toDouble();
     out.showLabels = merged["showLabels"].toBool();
     out.labelCurrency = merged["labelCurrency"].toString().toStdString();

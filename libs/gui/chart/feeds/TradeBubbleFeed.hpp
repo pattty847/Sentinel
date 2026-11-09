@@ -25,5 +25,11 @@ private:
     bool above_ = true, show_ = false;
     double minimum_ = 0;
     QColor buy_, sell_;
+    bubbles::Mode requested_ = bubbles::Mode::Individual;
+    bubbles::PlacementMode placement_;
+    bubbles::ReferenceStatistics statistics_;
+    trade_bubbles::WindowKey referenceKey_;
+    bool referenceReady_ = false;
+    uint64_t referenceUpdates_ = 0;
 };
 } // namespace chart

@@ -5,13 +5,14 @@
 #include <algorithm>
 
 namespace {
-struct Vertex { float x, y, u, v, r, g, b, a; };
+struct Vertex { float x, y, u, v, r, g, b, a, halfLength; };
 const QSGGeometry::AttributeSet& attributes() {
     static const QSGGeometry::Attribute a[] = {
         QSGGeometry::Attribute::create(0, 2, QSGGeometry::FloatType, true),
         QSGGeometry::Attribute::create(1, 2, QSGGeometry::FloatType),
-        QSGGeometry::Attribute::create(2, 4, QSGGeometry::FloatType)};
-    static const QSGGeometry::AttributeSet set{3, sizeof(Vertex), a};
+        QSGGeometry::Attribute::create(2, 4, QSGGeometry::FloatType),
+        QSGGeometry::Attribute::create(3, 1, QSGGeometry::FloatType)};
+    static const QSGGeometry::AttributeSet set{4, sizeof(Vertex), a};
     return set;
 }
 class Shader final : public QSGMaterialShader {
@@ -59,9 +60,12 @@ TradeBubbleNode::TradeBubbleNode()
     mesh_.setFlag(OwnsMaterial);
 }
 void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMapping& m,
-                          bool enabled, double minNotional, QColor buy, QColor sell) {
+                          bool enabled, const chart::bubbles::Options& options, QColor buy, QColor sell) {
     lastScanRows_ = rangeComparisons_ = 0;
-    const auto window = enabled && m.valid ? tape.visible(m.viewStartMs, m.viewEndMs) : trade_bubbles::Window{};
+    const bool slot = options.mode == chart::bubbles::Mode::Slot && m.appendMs > 0;
+    const double start = slot ? std::floor(m.viewStartMs / m.appendMs) * m.appendMs : m.viewStartMs;
+    const double end = slot ? std::ceil(m.viewEndMs / m.appendMs) * m.appendMs : m.viewEndMs;
+    const auto window = enabled && m.valid ? tape.visible(start, end) : trade_bubbles::Window{};
     rangeComparisons_ = window.comparisons;
     const auto key = window.key();
     const auto scaleX = [](const TimeAxisMapping& map) { return map.drawRect.width() / (map.appendMs * map.srcRect.width()); };
@@ -69,7 +73,7 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
     // Endpoint identities + count identify an unchanged range: the tape only
     // inserts rows and evicts its oldest row, never edits existing executions.
     // This also ignores updates outside the viewport and duplicate replay rows.
-    if (tape_ == &tape && rebuildCount_ && key == windowKey_ && enabled_ == enabled && minNotional_ == minNotional &&
+    if (tape_ == &tape && rebuildCount_ && key == windowKey_ && enabled_ == enabled && options_ == options && mapping_.appendMs == m.appendMs &&
         buy_ == buy && sell_ == sell && mapping_.valid == m.valid && mapping_.drawRect == m.drawRect &&
         scaleX(mapping_) == scaleX(m) && scaleY(mapping_) == scaleY(m) &&
         mapping_.priceToScreenY(m.viewMinPrice) == m.priceToScreenY(m.viewMinPrice) &&
@@ -83,13 +87,13 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
         return;
     }
     tape_ = &tape;
-    windowKey_ = key; enabled_ = enabled; minNotional_ = minNotional;
+    windowKey_ = key; enabled_ = enabled; options_ = options;
     mapping_ = m; buy_ = buy; sell_ = sell;
     transform_.setMatrix(QMatrix4x4{});
     clip_.setClipRect(m.drawRect);
     QSGGeometry::updateRectGeometry(&clipGeometry_, m.drawRect);
     clip_.markDirty(DirtyGeometry);
-    const auto bubbles = enabled ? layout_.build(window.rows, m, minNotional) : std::span<const trade_bubbles::Bubble>{};
+    const auto bubbles = enabled ? layout_.build(window.rows, m, options, window.previousPrice) : std::span<const trade_bubbles::Bubble>{};
     lastScanRows_ = enabled ? layout_.scannedRows() : 0;
     ++rebuildCount_;
     auto* v = static_cast<Vertex*>(geometry_.vertexData());
@@ -98,12 +102,20 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
     for (const auto& b : bubbles) {
         if (!(b.radius > 0)) continue;
         const auto c = b.side == AggressorSide::Buy ? buy : sell;
-        constexpr float alpha = 0.60f;
+        const float alpha = 0.60f * b.opacity;
+        const double length = double(b.maxY) - b.minY;
+        constexpr float pi = 3.14159265358979323846f;
+        const float area = pi * b.radius * b.radius;
+        // Preserve the circle-equivalent area when stretching into a capsule.
+        const float radius = float(area / (std::sqrt(length * length + pi * area) + length));
+        const float halfLength = float(length / (2 * radius));
+        if (!std::isfinite(halfLength)) continue;
+        const float centreY = float((double(b.minY) + b.maxY) / 2);
         for (const auto& uv : corners) {
-            const float x = b.x + uv[0] * b.radius;
-            const float y = b.y + uv[1] * b.radius;
-            v[count++] = {x, y, uv[0], uv[1],
-                          float(c.redF())*alpha, float(c.greenF())*alpha, float(c.blueF())*alpha, alpha};
+            const float x = b.x + uv[0] * radius;
+            const float y = float(centreY + uv[1] * (length / 2 + radius));
+            v[count++] = {x, y, uv[0], uv[1] * (halfLength + 1),
+                          float(c.redF())*alpha, float(c.greenF())*alpha, float(c.blueF())*alpha, alpha, halfLength};
         }
     }
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)

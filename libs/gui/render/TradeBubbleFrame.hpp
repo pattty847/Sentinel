@@ -11,7 +11,7 @@ struct RenderFrame {
     std::shared_ptr<Tape> tape;
     TimeAxisMapping mapping;
     bool enabled = false;
-    double minNotional = 0;
+    chart::bubbles::Options options;
     QColor buy, sell;
 };
 }

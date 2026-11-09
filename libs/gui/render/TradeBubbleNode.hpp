@@ -20,7 +20,7 @@ public:
     size_t rangeComparisons() const { return rangeComparisons_; }
     const QMatrix4x4& translation() const { return transform_.matrix(); }
     void sync(const trade_bubbles::Tape& tape, const TimeAxisMapping& mapping,
-              bool enabled, double minNotional, QColor buy, QColor sell);
+              bool enabled, const chart::bubbles::Options& options, QColor buy, QColor sell);
 private:
     trade_bubbles::Layout layout_;
     QSGGeometry geometry_, clipGeometry_;
@@ -32,7 +32,7 @@ private:
     uint64_t rebuildCount_ = 0, dirtyMarks_ = 0;
     size_t lastScanRows_ = 0, rangeComparisons_ = 0;
     TimeAxisMapping mapping_;
-    double minNotional_ = -1;
+    chart::bubbles::Options options_;
     bool enabled_ = false;
     int usedVertexCount_ = 0;
     QColor buy_, sell_;

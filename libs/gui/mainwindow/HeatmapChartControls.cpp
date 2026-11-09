@@ -299,7 +299,7 @@ void HeatmapChartControls::buildChartMenu() {
     tradeSize->setObjectName("chartMenuTradeSize");
     auto *tradeGroup = new QActionGroup(tradeSize);
     for (double value : {0., 100., 1000., 10000., 100000.}) {
-        QAction *a = add(tradeSize, value == 0 ? "All sizes" : QString::number(value, 'f', 0),
+        QAction *a = add(tradeSize, value == 0 ? "Auto (visible median)" : QString::number(value, 'f', 0),
                          "chartMenuTradeSizePreset", [this, value] {
             const auto error = m_model->apply({{"tradeMinNotional", value}});
             if (!error.isEmpty()) sLog_Warning("Trade size rejected: " << error);

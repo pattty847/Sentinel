@@ -25,7 +25,7 @@ void trade_bubbles::RenderLink::sync() {
         syncedRevision = providerRevision;
     }
     if (frame) {
-        node->sync(*frame->tape, frame->mapping, frame->enabled, frame->minNotional, frame->buy, frame->sell);
+        node->sync(*frame->tape, frame->mapping, frame->enabled, frame->options, frame->buy, frame->sell);
     } else {
         // Clearing a provider also clears its old mesh; no QObject is accessed here.
         node->clear();
