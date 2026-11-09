@@ -30,7 +30,8 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
 4. **Test and scan follow-ups** (conductor 2026-11-09):
    - `DomDock.QuietConnectedBookRetainsLastChangeAgeAndDetectsDisconnect` failed once under full-ctest load (freshness label read 0 s, expected >= 60 s; 3/3 alone); `CaptureFanoutTests MalformedIngressIsolatesOnlyItsProduct` did the same on 2026-11-09. Find the timing dependence in each.
    - `LiveOrderBook::captureSide` scans from the book band's edges toward the touch; if half the band exceeds the 16,384-word budget (~1M slots, e.g. BTC at a 0.01 server tick) the known range is empty and the ladder never draws. Scan outward from the best bid/ask instead.
-   - Wall radar partial badges (far zoom) show notional only and repeat the heatmap cell label when cell labels draw; classification switches at the coverage edge. Aesthetic pass decides.
+   - Wall radar: classification switches at the partial-coverage edge (tracked flags vs instantaneous ratio). Aesthetic pass decides.
+   - Flicker / replaced-wall signal (owner 2026-11-09: likes it, will pick where it shows): the tracker still counts pulls-and-replaces per wall; badge text no longer shows it. Options: ladder-bar marker, badge tooltip, order book row count, a spoof-watch list.
 5. **Repeatable performance benchmark** on the owner's machines; cite its numbers in the README (the old 110 FPS figure was removed 2026-10-07).
 6. **README + ARCHITECTURE pass** for the finished one-world architecture; also fix `docs/MARKETDATA.md` (TLS described as optional, single-quad heatmap, 110 FPS).
 7. **CI** for macOS, Windows, Linux (no `.github/workflows` today). Hosted runners have no GPU (GPU tests skip and report Passed); GPU coverage needs self-hosted runners on the Mac and Windows.
