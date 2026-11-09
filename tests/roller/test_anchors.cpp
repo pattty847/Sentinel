@@ -23,6 +23,9 @@ using nlohmann::json;
 namespace {
 constexpr int64_t Day = 86'400'000, Minute = 60'000, Quarter = 900'000;
 constexpr int64_t Epoch = 1'791'158'400'000; // 2026-10-05 UTC
+uint64_t replayDecoded(const json& report) {
+    return report.at("decodedRecords").get<uint64_t>() - report.at("tradeSeedDecodedRecords").get<uint64_t>();
+}
 json meta(const std::string& p = "BTC-USD") {
     return {{"product_id",p},{"quote_increment","0.01"},{"base_increment","0.00000001"}};
 }
@@ -369,12 +372,12 @@ TEST(AnchorReplay, EveryQuarterBoundedResumeAndIndependentMidnight) {
         const auto chunk=roll(resumed);
         ASSERT_TRUE(chunk["days"][0].contains("anchorBoundaryMs")) << chunk.dump();
         EXPECT_EQ(chunk["days"][0]["anchorBoundaryMs"],Epoch+quarter*Quarter) << chunk.dump();
-        EXPECT_LE(chunk.at("decodedRecords").get<uint64_t>(),950u);
+        EXPECT_LE(replayDecoded(chunk),950u);
         EXPECT_EQ(chunk["days"][0]["anchorCandidatesDecoded"],1);
         if (quarter==7) { resumed.cancelled={}; resumed.onApplied={}; roll(resumed); }
     }
     parity(full.outputRoot,resumed.outputRoot,"BTC-USD",full.toMs);
-    std::cout<<"ANCHOR_SYNTHETIC every_quarter=8 decoded_bound=950 midnight_independent=true hmc2_diff=0\n";
+    std::cout<<"ANCHOR_SYNTHETIC every_quarter=8 replay_decoded_bound=950 midnight_independent=true hmc2_diff=0\n";
 }
 TEST(AnchorReplay, OldOneSidedPolicyRejectsStateAndReplaysWithExistingCheckpoint) {
     QTemporaryDir tmp; const fs::path root=tmp.path().toStdString();
@@ -409,7 +412,7 @@ TEST(AnchorReplay, OldOneSidedPolicyRejectsStateAndReplaysWithExistingCheckpoint
     EXPECT_FALSE(report["days"][0].contains("anchorBoundaryMs"));
     EXPECT_NE(report["days"][0].at("anchorRejection").get<std::string>().find(
                   "state version/policy/float mismatch"),std::string::npos);
-    EXPECT_GT(report.at("decodedRecords").get<uint64_t>(),0u);
+    EXPECT_GT(replayDecoded(report),0u);
     EXPECT_EQ(files(o.outputRoot),before);
 }
 TEST(AnchorReplay, CorruptMissingAndAheadCandidatesFallbackIdentically) {
@@ -507,13 +510,13 @@ TEST(AnchorReplay, RealDayEveryAnchorMidnightAndSevenProductBenchmark) {
                 ASSERT_TRUE(report["days"][0].contains("anchorBoundaryMs"))<<product<<' '<<quarter<<' '<<report.dump();
                 ASSERT_EQ(report["days"][0]["anchorBoundaryMs"],Epoch+quarter*Quarter)<<product;
                 EXPECT_EQ(report["days"][0]["anchorCandidatesDecoded"],1)<<product<<' '<<quarter;
-                const auto count=report.at("decodedRecords").get<uint64_t>();
+                const auto count=replayDecoded(report);
                 maxDecoded=std::max(maxDecoded,count); total+=count;
                 maxWindow=std::max(maxWindow,last-first);
                 EXPECT_LE(last-first,Quarter+10'000)<<product<<' '<<quarter;
-                // Decoded includes the selected block's prefix. Never a whole
-                // preceding segment/day (also independently tested at reader level).
-                EXPECT_LT(count,baseline.at("decodedRecords").get<uint64_t>()/10)<<product<<' '<<quarter;
+                // Replay excludes the separately reported trade seed scan and
+                // includes the selected block's prefix, never a whole preceding day.
+                EXPECT_LT(count,replayDecoded(baseline)/10)<<product<<' '<<quarter;
             }
             ASSERT_TRUE(sameHmcBytes(full.outputRoot,r.outputRoot))<<product;
             for(const auto* layer:{"near","deep"}) for(int64_t tf:{Minute,int64_t(3'600'000)})
@@ -535,7 +538,7 @@ TEST(AnchorReplay, RealDayEveryAnchorMidnightAndSevenProductBenchmark) {
         const auto after=roll(restart);
         ASSERT_TRUE(after["days"][0].contains("anchorBoundaryMs"))<<after.dump();
         EXPECT_LT(after.at("wallSeconds").get<double>(),before.at("wallSeconds").get<double>());
-        EXPECT_LT(after.at("decodedRecords").get<uint64_t>(),before.at("decodedRecords").get<uint64_t>()/10);
+        EXPECT_LT(replayDecoded(after),replayDecoded(before)/10);
         std::cout<<"ANCHOR_RESTART product="<<product<<" before_s="<<before["wallSeconds"]
             <<" after_s="<<after["wallSeconds"]<<" before_decoded="<<before["decodedRecords"]
             <<" after_decoded="<<after["decodedRecords"]<<std::endl;

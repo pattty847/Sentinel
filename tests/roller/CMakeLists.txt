@@ -1,4 +1,4 @@
-add_executable(test_roller test_roller.cpp)
+add_executable(test_roller test_roller.cpp test_trade_seed.cpp)
 target_link_libraries(test_roller PRIVATE sentinel_core capture_legacy_v2_fixture GTest::gtest_main Qt6::Core)
 add_test(NAME RollerTests COMMAND test_roller)
 set_tests_properties(RollerTests PROPERTIES LABELS "roller" TIMEOUT 120)

@@ -2,7 +2,7 @@
 #include "JournalReader.hpp"
 #include "marketdata/model/TradeData.h"
 #include "servermodel/BookRecorder.hpp"
-#include <unordered_set>
+#include "TradeRecordWindow.hpp"
 
 namespace sentinel::roller {
 // Native-price durable book, also used by the journal model tap. Boundary
@@ -37,12 +37,22 @@ public:
     // Boundary-only, validated before installation; never emits an event.
     nlohmann::json exportState() const;
     void importState(const nlohmann::json&);
-    // 16K IDs cover many 100-trade reconnect snapshots while capping per-product memory.
-    static constexpr size_t TradeIdWindowCapacity = 16'384;
-    size_t retainedTradeIds() const { return tradeIds_.size(); }
-    // Read-only view of the retained nonempty IDs (at most the window capacity);
-    // copy it to keep it past further apply() calls.
-    const std::unordered_set<std::string>& tradeIds() const { return tradeIds_; }
+    // Last 16K trade occurrences, including duplicates; not serialized.
+    static constexpr size_t TradeIdWindowCapacity = TradeRecordWindow::Capacity;
+    size_t retainedTradeIds() const { return tradeWindow_.uniqueIds(); }
+    // Cold boundary snapshot for candle restore; no hot-path set copy.
+    std::unordered_set<std::string> tradeIds() const { return tradeWindow_.ids(); }
+    struct TradeSeedStats {
+        size_t records = 0, ids = 0, segments = 0;
+        uint64_t decodedRecords = 0;
+        bool degraded = false;
+        double ms = 0;
+    };
+    // Rebuild only dedupe state; preserves feed state and emits no callbacks.
+    // inclusive is true for an already-applied anchor cursor, false for a
+    // snapshot fallback or a midnight anchor's not-yet-applied resume cursor.
+    TradeSeedStats seedTradeIds(const std::vector<JournalFile>& files,
+                               const JournalPos& cursor, bool inclusive);
 private:
     std::string product_, run_;
     uint64_t connection_ = 0;
@@ -50,16 +60,16 @@ private:
     std::optional<uint64_t> sequence_;
     bool anchored_ = false;
     // Retained across run/connection boundaries; reconnect snapshots resend trades.
-    std::vector<std::string> tradeIdRing_;
-    std::unordered_set<std::string> tradeIds_;
-    size_t nextTradeId_ = 0;
+    TradeRecordWindow tradeWindow_;
     struct PendingTrade {
         Trade trade;
         std::optional<uint64_t> numericId;
         size_t order;
+        bool fresh = false;
     };
     std::vector<PendingTrade> frameTrades_; // Reuse storage across frames.
     bool rememberTradeId(const std::string& id);
+    void collectTrades(const nlohmann::json&, int64_t local);
     void invalid(int64_t local, const std::string& reason);
 };
 } // namespace sentinel::roller

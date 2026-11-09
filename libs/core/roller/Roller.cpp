@@ -105,7 +105,7 @@ json roll(const RollOptions& o) {
         std::ifstream in(cpPath); in >> cp;
         if (cp.at("rollerVersion") != Version || cp.at("product") != o.product) throw std::runtime_error("checkpoint version/product mismatch");
     }
-    uint64_t records = 0, bytes = 0, columns = 0, decoded = 0;
+    uint64_t records = 0, bytes = 0, columns = 0, decoded = 0, tradeSeedDecoded = 0;
     const auto anchorRoot = o.anchorRoot.empty() ? o.outputRoot : o.anchorRoot;
     json days = json::array();
     bool pending = false, warnedDegraded = false;
@@ -237,6 +237,11 @@ json roll(const RollOptions& o) {
         feed.onTick = [&](int64_t t) { if (recorder) recorder->onTick(t); };
         feed.onConnection = [&](bool up) { bookUp = up; };
         if (o.onFeed) o.onFeed(feed);
+        const auto seedTrades = [&](const JournalPos& cursor, bool inclusive) {
+            if (!feed.onTrade) return;
+            const auto seeded = feed.seedTradeIds(inventory.files(), cursor, inclusive);
+            tradeSeedDecoded += seeded.decodedRecords;
+        };
         std::vector<fs::path> candidates;
         if (o.useAnchors && !o.dryRun) {
             try { candidates = AnchorStore::candidates(anchorRoot,o.product,day); }
@@ -371,6 +376,7 @@ json roll(const RollOptions& o) {
             }
             // Consumer installation errors must propagate, never re-enter fallback
             // with partially attached external consumers.
+            seedTrades(restoreCursor, restoreCursorApplied);
             claimProvenance();
             sLog_Data("Roller anchor restored product=" << o.product
                 << " boundaryMs=" << dayReport.at("anchorBoundaryMs").get<int64_t>()
@@ -397,7 +403,9 @@ json roll(const RollOptions& o) {
                 if (!check.next(saved)) throw std::runtime_error("checkpoint journal position unavailable");
                 decoded += check.decodedRecords();
             }
-            reader = std::make_unique<JournalReader>(o.journalRoot,o.product,inventory.anchor(day));
+            const auto start = inventory.anchor(day);
+            reader = std::make_unique<JournalReader>(o.journalRoot,o.product,start);
+            if (start) seedTrades(*start, false);
         }
         const auto saveAnchor = [&](int64_t boundary, const JournalRecord* resume = nullptr) {
             // Snapshot fallback may be warming up below an existing output
@@ -515,7 +523,7 @@ json roll(const RollOptions& o) {
     }
     decoded += inventory.decodedRecords();
     const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
-    return {{"product",o.product},{"dryRun",o.dryRun},{"records",records},{"jsonBytes",bytes},{"decodedRecords",decoded},
+    return {{"product",o.product},{"dryRun",o.dryRun},{"records",records},{"jsonBytes",bytes},{"decodedRecords",decoded + tradeSeedDecoded},{"tradeSeedDecodedRecords",tradeSeedDecoded},
             {"wallSeconds",seconds},{"recordsPerSecond",records/seconds},{"jsonMBPerSecond",bytes/seconds/1e6},
             {"columnsWritten",columns},{"outputBytes",o.dryRun ? 0 : outputBytes(o.outputRoot,o.product)},
             {"pendingTail",pending},{"days",days}};
