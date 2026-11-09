@@ -103,33 +103,6 @@ int formatMoney(double usd, char* out) {
     return n;
 }
 
-int formatAge(uint32_t ms, char* out) {
-    const uint32_t s = ms / 1000;
-    int n = 0;
-    if (s < 60) {
-        n += writeUint(s, out);
-        out[n++] = 's';
-    } else if (s < 3600) {
-        n += writeUint(s / 60, out);
-        out[n++] = 'm';
-        n += writeUint(s % 60, out + n, 2);
-        out[n++] = 's';
-    } else if (s < 100 * 3600) {
-        n += writeUint(s / 3600, out);
-        out[n++] = 'h';
-        n += writeUint(s / 60 % 60, out + n, 2);
-        out[n++] = 'm';
-    } else {
-        n = append(out, "99h+");
-    }
-    return n;
-}
-
-int formatFlickers(uint32_t count, char* out) {
-    out[0] = 'x';
-    return 1 + writeUint(count, out + 1);
-}
-
 LadderBadges::LadderBadges() {
     pills_.reserve(kMaxBadges + kEdgePills);
     glyphs_.reserve(kMaxBadgeGlyphs);
@@ -162,13 +135,13 @@ bool LadderBadges::prepareAtlas(const ChartTextAtlas* atlas) {
 }
 
 void LadderBadges::layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas,
-                          bool cellLabels) {
+                          bool /*cellLabels*/) {
     pills_.clear();
     glyphs_.clear();
     stats_ = {};
     if (!s.radar || !(f.raster.dpr > 0) || !prepareAtlas(atlas)) return;
     placeEdges(s, f);
-    placeRows(s, f, cellLabels);
+    placeRows(s, f);
     for (const BadgePill& p : pills_) compose(p);
     stats_.glyphs = int(glyphs_.size());
 }
@@ -183,9 +156,11 @@ double LadderBadges::textWidth(const BadgePill& p) const {
 // width rounds up to whole device pixels so the right edge stays where it was put.
 void LadderBadges::finishPill(BadgePill& p, double right, double top, double dpr) {
     const double arrowW = p.arrow ? kArrowPx + kArrowGapPx : 0;
-    const double width = std::ceil((2 * kBadgePadX + arrowW + textWidth(p)) * dpr) / dpr;
+    const double textW = textWidth(p);
+    const double width = std::ceil((2 * kBadgePadX + arrowW + textW) * dpr) / dpr;
     p.rect = QRectF(right - width, top, width, kPillH);
-    p.textLeft = snap(p.rect.left() + kBadgePadX + arrowW, dpr);
+    p.textLeft = p.arrow ? snap(p.rect.left() + kBadgePadX + arrowW, dpr)
+                         : snap(right - kBadgePadX - textW, dpr);
     p.textTop = snap(top + 0.5 * (kPillH - boxH_), dpr);
 }
 
@@ -226,23 +201,6 @@ BadgePill edgePill(const WallCandidate& c, int side, bool top, const chart_raste
     p.length += append(p.text + p.length, " ");
     p.length += append(p.text + p.length, unit.tag());
     return p;
-}
-
-// Notional (unless the heatmap's cell labels show it), wall age, then the flicker count
-// or "new".
-void rowText(BadgePill& p, double usd, uint32_t seenMs, uint16_t flickers, bool notional) {
-    p.length = 0;
-    if (notional) {
-        p.length = formatMoney(usd, p.text);
-        p.length += append(p.text + p.length, "  ");
-    }
-    p.length += formatAge(seenMs, p.text + p.length);
-    if (flickers > 0) {
-        p.length += append(p.text + p.length, "  ");
-        p.length += formatFlickers(flickers, p.text + p.length);
-    } else if (seenMs < kNewMs) {
-        p.length += append(p.text + p.length, "  new");
-    }
 }
 
 } // namespace
@@ -305,7 +263,7 @@ bool LadderBadges::overlapsRow(int index, double rowHeight, double spacing) cons
     return false;
 }
 
-void LadderBadges::placeRows(const LadderSnapshot& s, const FrameContext& f, bool cellLabels) {
+void LadderBadges::placeRows(const LadderSnapshot& s, const FrameContext& f) {
     prepareRows(s, f);
     const double rowHeight = f.raster.rowPxF / f.raster.dpr;
     const double spacing = std::ceil(kPillH * f.raster.dpr) / f.raster.dpr;
@@ -316,7 +274,7 @@ void LadderBadges::placeRows(const LadderSnapshot& s, const FrameContext& f, boo
             ++stats_.dropped;
             occupied = 1;
         } else if (!overlapsRow(candidate.index, rowHeight, spacing) &&
-                   placeRow(s, f, candidate.index, cellLabels)) {
+                   placeRow(s, f, candidate.index)) {
             occupied = 1;
             selectedRows_.push_back(candidate.index);
             ++stats_.rowBadges;
@@ -331,7 +289,7 @@ void LadderBadges::placeRows(const LadderSnapshot& s, const FrameContext& f, boo
 // The larger notional's side when both are walls (tie: ask). Keep the pill wholly
 // inside the surface and clear of edge pills. An unplaceable winner leaves its band
 // available for the next-largest candidate.
-bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels) {
+bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int index) {
     const auto& cam = f.raster;
     const LadderRow& row = s.rows[size_t(index)];
     const double bin = s.binPrice(), k = double(s.binLo + index);
@@ -346,12 +304,9 @@ bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int 
     const bool hot = row.flags & (ask ? LadderRow::kAskHot : LadderRow::kBidHot);
     BadgePill p;
     p.colour = hot ? BadgePill::Hot : ask ? BadgePill::Ask : BadgePill::Bid;
-    if (s.complete)
-        rowText(p, ask ? askUsd : bidUsd, ask ? row.askWallMs : row.bidWallMs,
-                ask ? row.askFlickers : row.bidFlickers, !cellLabels);
-    else
-        p.length = formatMoney(ask ? askUsd : bidUsd, p.text); // partial captures have no observed age
-    finishPill(p, snap(f.itemBounds.right() - kBadgeInsetPx, cam.dpr), top, cam.dpr);
+    p.length = formatMoney(ask ? askUsd : bidUsd, p.text);
+    const double right = snap(f.itemBounds.right() - kBadgeInsetPx, cam.dpr);
+    finishPill(p, right, top, cam.dpr);
     for (int j = 0; j < stats_.edgePills; ++j)
         if (pills_[size_t(j)].rect.intersects(p.rect)) return false; // already placed pills win
     pills_.push_back(p);
