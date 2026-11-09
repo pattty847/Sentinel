@@ -221,3 +221,10 @@ if(NOT WIN32) # getrusage
     target_include_directories(rollup_levels_check PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
     target_link_libraries(rollup_levels_check PRIVATE sentinel_core nlohmann_json::nlohmann_json)
 endif()
+
+add_executable(test_flow_live test_flow_live.cpp)
+target_include_directories(test_flow_live PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_flow_live PRIVATE sentinel_core GTest::gtest_main Qt6::Core Qt6::Network)
+add_test(NAME FlowLiveTests COMMAND test_flow_live)
+set_tests_properties(FlowLiveTests PROPERTIES LABELS "servermodel;flow" TIMEOUT 30)
+add_dependencies(servermodel_tests test_flow_live)

@@ -14,6 +14,7 @@ namespace recording {
 struct Hmc2Record;
 }
 namespace sentinel::roller {
+struct Grid;
 struct JournalRecord;
 struct CandleRestore;
 // Journal live feed: the server's live model follows
@@ -33,6 +34,9 @@ struct ModelSink {
   std::function<void(const std::string &product, const std::string &reason)>
       invalidate;
   std::function<void(const Trade &)> trade; // aggressor side
+  // The recorder's exact UTC-day native grid, before any live trade for it.
+  std::function<void(const std::string &product, int64_t dayStartMs,
+                     const Grid &grid, const nlohmann::json &metadata)> grid;
   std::function<void(const std::string &product, bool connected)> connection;
   // Journal time (capture receive ms) of the newest record handed over, after
   // its trades; at most one call per product per journal second. The model

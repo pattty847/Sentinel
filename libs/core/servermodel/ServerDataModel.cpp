@@ -1,6 +1,9 @@
 #include "ServerDataModel.hpp"
 #include "SentinelLogging.hpp"
 #include "RecordingDir.hpp"
+#include "flow/FlowCodec.hpp"
+#include "flow/FlowCompose.hpp"
+#include "protocol/SentinelStreamProtocol.hpp"
 #include "metrics/MetricsRegistry.hpp"
 #include "roller/Grid.hpp"
 #include <algorithm>
@@ -11,6 +14,11 @@
 #include <cstdlib>
 
 namespace {
+bool flowLossIn(const std::set<int64_t>& losses, int64_t start, int64_t end) {
+    const auto it = losses.lower_bound(start);
+    return it != losses.end() && *it < end;
+}
+
 int64_t localNowMs() {
     const auto now = std::chrono::system_clock::now();
     return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
@@ -120,6 +128,11 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
     connect(m_aggregator.get(), &TimeframeAggregator::liveRollupsUpdated, this,
             &ServerDataModel::liveRollupsUpdated);
 
+    m_flowTimer.setTimerType(Qt::PreciseTimer);
+    m_flowTimer.setInterval(std::clamp(config.recording.livePublishMs,
+        ServerRecordingConfig::kLivePublishMinMs, ServerRecordingConfig::kLivePublishMaxMs));
+    connect(&m_flowTimer, &QTimer::timeout, this, &ServerDataModel::publishFlow);
+    m_flowTimer.start();
     startRollerServing();
 }
 
@@ -243,6 +256,11 @@ void ServerDataModel::onFeedMetadata(const std::string& symbol, const nlohmann::
     onProductMetadata(symbol, metadata);
 }
 void ServerDataModel::onFeedWatermark(const std::string& symbol, int64_t journalMs) {
+    if (auto it = m_flowProducts.find(symbol); it != m_flowProducts.end()) {
+        it->second.clock = std::max(it->second.clock, journalMs - kFlowCloseDelayMs);
+        for (auto& [day, state] : it->second.days)
+            pruneFlowSeries(it->second.clock, 1000, state.series.at(1000));
+    }
     if (!m_aggregator) return;
     // Receive time leads exchange time by the feed latency: close only buckets
     // that ended kJournalCandleLagMs before it, so in-flight trades still land.
@@ -354,6 +372,14 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
                sampleFeeds([](const FeedState& f) { return f.ups; }));
     r.familyFn("sentinel_live_feed_down_total", "Product journal feed down transitions in this process.", Registry::Type::Counter,
                sampleFeeds([](const FeedState& f) { return f.downs; }));
+    r.counterFn("sentinel_flow_dropped_trades_total", "Flow series additions rejected by retention, capacity, grid or validation.", {},
+                [this]() -> Value { return double(m_flowDroppedTrades); });
+    r.counterFn("sentinel_flow_dropped_buckets_total", "Published flow buckets retired from live retention.", {},
+                [this]() -> Value { return double(m_flowDroppedBuckets); });
+    r.counterFn("sentinel_flow_missing_grid_trades_total", "Flow trades dropped because the UTC day has no grid.", {},
+                [this]() -> Value { return double(m_flowMissingGridTrades); });
+    r.counterFn("sentinel_flow_hour_shrink_refusals_total", "Closed flow hour recompositions refused because source minutes were lost.", {},
+                [this]() -> Value { return double(m_flowHourShrinkRefusals); });
     r.gaugeFn("sentinel_exchange_clock_offset_ms", "Smoothed local minus exchange clock in ms (0 = not yet measured).", {},
               [this]() -> Value { return double(m_exchangeOffsetMs.load(std::memory_order_relaxed)); });
     r.familyFn("sentinel_candle_late_trades_total", "Trades the candle aggregator dropped as older than its open bucket.",
@@ -504,6 +530,7 @@ void ServerDataModel::onTrade(const Trade& trade) {
     const int64_t exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         trade.timestamp.time_since_epoch()).count();
     updateExchangeOffsetMs(exchangeMs);
+    addFlowTrade(trade, exchangeMs);
 
     if (m_aggregator) {
         m_aggregator->onTrade(trade);
@@ -805,4 +832,356 @@ void ServerDataModel::publishAggregatedBook(const QString& productId, SymbolHotD
               << " range=[" << data.rawMinPrice << ".." << data.rawMaxPrice << "]"
               << " tick=" << tickSize);
 
+}
+
+ServerDataModel::FlowSeries::FlowSeries(int64_t tf, const sentinel::flow::FlowScales& scales)
+    : builder(tf, scales.nativeTick, scales.priceScale, scales.baseScale, scales.quoteScale),
+      bucketSlots(tf == 1000 ? 1802 : 62) {}
+
+void ServerDataModel::onFlowGrid(const std::string& symbol, int64_t dayStartMs,
+                                 const sentinel::roller::Grid& grid,
+                                 const nlohmann::json& metadata) {
+    if (!m_feeds.contains(symbol) || dayStartMs < 0 || dayStartMs % 86'400'000 != 0) return;
+    try {
+        const auto scales = sentinel::flow::flowScales(grid, metadata);
+        auto& product = m_flowProducts[symbol];
+        if (!product.days.empty() && dayStartMs < product.days.rbegin()->first - 86'400'000) return;
+        if (auto it = product.days.find(dayStartMs); it != product.days.end()) {
+            const auto& oldGrid = it->second.grid;
+            if (it->second.scales == scales && oldGrid.priceScale == grid.priceScale &&
+                oldGrid.nearTick == grid.nearTick && oldGrid.deepTick == grid.deepTick &&
+                oldGrid.sizeFloor == grid.sizeFloor) return;
+            if (it->second.hasBuckets) {
+                sLog_Warning("Flow grid changed after trades: symbol=" << symbol << " day=" << dayStartMs
+                    << " old=[" << oldGrid.priceScale << ',' << oldGrid.nearTick << ','
+                    << oldGrid.deepTick << ',' << oldGrid.sizeFloor << ',' << it->second.scales.baseScale
+                    << "] new=[" << grid.priceScale << ',' << grid.nearTick << ','
+                    << grid.deepTick << ',' << grid.sizeFloor << ',' << scales.baseScale << ']');
+                return;
+            }
+            product.days.erase(it);
+        }
+        FlowDay day;
+        day.grid = grid;
+        day.scales = scales;
+        day.series.try_emplace(1000, 1000, scales);
+        day.series.try_emplace(60'000, 60'000, scales);
+        product.days.emplace(dayStartMs, std::move(day));
+        product.scratch.id.reserve(128);
+        product.days.erase(product.days.begin(), product.days.lower_bound(dayStartMs - 86'400'000));
+        sLog_Data("Flow grid ready: symbol=" << symbol << " day=" << dayStartMs
+            << " rowTickUnits=" << scales.rowTickUnits << " priceScale=" << scales.priceScale
+            << " baseScale=" << scales.baseScale);
+    } catch (const std::exception& e) {
+        sLog_Warning("Flow grid refused: symbol=" << symbol << " day=" << dayStartMs
+            << " error=" << e.what());
+    }
+}
+
+void ServerDataModel::subscribeFlow(std::shared_ptr<FlowSubscription> sub) {
+    if (!sub->active.load()) return;
+    const auto tf = sub->timeframeMs;
+    const auto& configured = m_serverConfig.chart.timeframesMs;
+    const bool supported = tf == 1000 || tf == 60'000 ||
+        (tf >= 60'000 && tf <= 86'400'000 && 86'400'000 % tf == 0 &&
+         std::find(configured.begin(), configured.end(), tf) != configured.end());
+    std::erase_if(m_flowSubscriptions, [](const auto& s) { return !s->active.load(); });
+    if (!supported || !m_feeds.contains(sub->symbol) || m_flowSubscriptions.size() >= 256) {
+        if (sub->publishError) sub->publishError(nlohmann::json{{"type", "error"},
+            {"context", "flow_live_subscribe"}, {"sub", sub->sub}, {"symbol", sub->symbol},
+            {"message", "unsupported flow series or capacity reached"}}.dump());
+        sub->active.store(false);
+        return;
+    }
+    m_flowProducts.try_emplace(sub->symbol);
+    m_flowSubscriptions.push_back(std::move(sub));
+}
+
+void ServerDataModel::addFlowTrade(const Trade& trade, int64_t ms) {
+    if (ms < 0) return;
+    auto& product = m_flowProducts[trade.product_id];
+    if (product.firstLiveMs < 0) product.firstLiveMs = ms;
+    const int64_t minuteStart = ms / 60'000 * 60'000;
+    const int64_t dayStart = ms / 86'400'000 * 86'400'000;
+    const auto markLoss = [&] {
+        if (product.lossyMinutes.insert(minuteStart).second) {
+            product.newLossyMinutes.insert(minuteStart);
+            if (const auto day = product.days.find(dayStart); day != product.days.end())
+                for (auto& [tf, series] : day->second.series) {
+                    auto& slot = series.bucketSlots[(ms / tf) % series.bucketSlots.size()];
+                    if (slot.start == ms / tf * tf) slot.dirty = true;
+                }
+        }
+    };
+    const auto day = product.days.find(dayStart);
+    if (day == product.days.end()) {
+        ++m_flowDroppedTrades;
+        ++m_flowMissingGridTrades;
+        markLoss();
+        if (product.missingGridWarnedDays.insert(dayStart).second) {
+            sLog_Warning("Flow trade dropped: symbol=" << trade.product_id
+                << " day=" << dayStart << " reason=missing_grid");
+        }
+        return;
+    }
+    auto& input = product.scratch;
+    input.id = trade.trade_id;
+    input.exchangeMs = ms; input.price = trade.price; input.size = trade.size;
+    input.side = trade.side == AggressorSide::Buy ? sentinel::flow::Side::Buy :
+                 trade.side == AggressorSide::Sell ? sentinel::flow::Side::Sell : sentinel::flow::Side::Unknown;
+    for (auto& [tf, series] : day->second.series) {
+        const auto start = ms / tf * tf;
+        auto& slot = series.bucketSlots[(ms / tf) % series.bucketSlots.size()];
+        if (slot.start >= 0 && slot.start != start) {
+            ++series.capacityDrops; ++m_flowDroppedTrades; markLoss(); continue;
+        }
+        const auto dropped = series.builder.droppedRejectCount();
+        const auto result = series.builder.add(input);
+        if (result == sentinel::flow::FlowBarBuilder::AddResult::Accepted) {
+            slot.start = start; slot.dirty = true;
+            day->second.hasBuckets = true;
+        } else if (result == sentinel::flow::FlowBarBuilder::AddResult::Rejected) {
+            markLoss();
+            if (series.builder.droppedRejectCount() == dropped) ++m_flowDroppedTrades;
+        }
+        m_flowDroppedTrades += series.builder.droppedRejectCount() - dropped;
+    }
+}
+
+void ServerDataModel::publishFlowBar(const std::string& symbol, int64_t tf,
+                                     const sentinel::flow::FlowBar& bar, uint32_t revision,
+                                     bool closed, bool complete, bool initialOnly) {
+    std::optional<nlohmann::json> payload;
+    for (const auto& sub : m_flowSubscriptions) {
+        if (!sub->active.load() || sub->symbol != symbol || sub->timeframeMs != tf ||
+            (initialOnly && !sub->initial)) continue;
+        if (!payload) {
+            const auto bytes = sentinel::flow::encodeFlowBar(bar);
+            const auto encoded = QByteArray(reinterpret_cast<const char*>(bytes.data()), bytes.size()).toBase64();
+            payload = nlohmann::json{{"type", "flow_bar"},
+                {"schema_version", protocol::SentinelProtocol::kFlowSchemaVersion},
+                {"symbol", symbol}, {"timeframe_ms", tf}, {"bucket_start_ms", bar.startMs},
+                {"closed", closed}, {"complete", complete}, {"revision", revision},
+                {"encoding", "FLB1/base64"}, {"bar", encoded.toStdString()},
+                {"row_tick_units", std::llround(bar.nativeTick * bar.priceScale)},
+                {"price_scale", bar.priceScale}};
+        }
+        (*payload)["sub"] = sub->sub;
+        sub->publish(payload->dump());
+    }
+}
+
+void ServerDataModel::publishFlowSeries(const std::string& symbol, FlowProduct& product,
+                                        int64_t tf, FlowSeries& series) {
+    const auto finalEnd = product.clock / tf * tf;
+    int64_t newest = -1;
+    const bool anyInitial = std::any_of(m_flowSubscriptions.begin(), m_flowSubscriptions.end(),
+        [&](const auto& s) { return s->active.load() && s->initial &&
+            s->symbol == symbol && s->timeframeMs == tf; });
+    if (anyInitial) for (const auto& slot : series.bucketSlots) newest = std::max(newest, slot.start);
+    for (auto& slot : series.bucketSlots) {
+        if (slot.start < 0) continue;
+        const bool closed = slot.start < finalEnd;
+        const bool changed = slot.dirty || (closed && !slot.closed);
+        if (!changed && !(anyInitial && slot.start == newest)) continue;
+        if (const auto bar = series.builder.bar(slot.start))
+            publishFlowBar(symbol, tf, *bar, *series.builder.revisionAt(slot.start),
+                           closed, product.firstLiveMs <= slot.start &&
+                           !flowLossIn(product.lossyMinutes, slot.start, slot.start + tf), !changed);
+        slot.dirty = false; slot.closed = closed;
+    }
+    series.builder.sealThrough(finalEnd);
+    pruneFlowSeries(product.clock, tf, series);
+}
+
+void ServerDataModel::pruneFlowSeries(int64_t clock, int64_t tf, FlowSeries& series) {
+    const auto finalEnd = clock / tf * tf;
+    const int64_t drop = tf == 1000 ? finalEnd - kFlowSecondRetentionMs + tf :
+        (clock - kFlowRolloverGraceMs) / 3'600'000 * 3'600'000;
+    int64_t safeDrop = drop;
+    for (const auto& slot : series.bucketSlots)
+        if (slot.start >= 0 && (!slot.closed || slot.dirty)) safeDrop = std::min(safeDrop, slot.start);
+    series.builder.dropBefore(safeDrop);
+    for (auto& slot : series.bucketSlots) if (slot.start >= 0 && slot.start < safeDrop) {
+        slot = {}; ++m_flowDroppedBuckets;
+    }
+}
+
+void ServerDataModel::updateHour(FlowDay& day, const FlowProduct& product, int64_t hourStart) {
+    auto& minutes = day.series.at(60'000);
+    std::vector<sentinel::flow::FlowBar> parts;
+    uint32_t revision = 0;
+    for (const auto& slot : minutes.bucketSlots) if (slot.start >= hourStart && slot.start < hourStart + 3'600'000) {
+        if (auto bar = minutes.builder.bar(slot.start)) {
+            parts.push_back(std::move(*bar));
+            revision += *minutes.builder.revisionAt(slot.start);
+        }
+    }
+    const bool closed = product.clock >= hourStart + 3'600'000;
+    const bool complete = product.firstLiveMs <= hourStart &&
+        !flowLossIn(product.lossyMinutes, hourStart, hourStart + 3'600'000);
+    auto existing = day.hours.find(hourStart);
+    FlowComposite* prior = existing != day.hours.end() ? &existing->second : nullptr;
+    if (!prior && day.formingHour && day.formingHour->first == hourStart)
+        prior = &day.formingHour->second;
+    if (parts.empty() && !prior) return;
+    std::sort(parts.begin(), parts.end(), [](const auto& a, const auto& b) { return a.startMs < b.startMs; });
+    if (prior && (parts.size() < prior->sourcePartCount ||
+                  (!parts.empty() && parts.front().startMs > prior->firstPartStart))) {
+        ++m_flowHourShrinkRefusals;
+        if (closed && day.formingHour && day.formingHour->first == hourStart) {
+            day.hours[hourStart] = std::move(day.formingHour->second);
+            day.formingHour.reset();
+            prior = &day.hours.at(hourStart);
+        }
+        if (prior->complete != complete || prior->closed != closed) prior->dirty = true;
+        prior->complete = complete;
+        prior->closed = closed;
+        return;
+    }
+    if (parts.empty()) return;
+    FlowComposite* hour = nullptr;
+    if (closed) {
+        hour = &day.hours[hourStart];
+    } else {
+        if (!day.formingHour || day.formingHour->first != hourStart)
+            day.formingHour.emplace(hourStart, FlowComposite{});
+        hour = &day.formingHour->second;
+    }
+    hour->bar = sentinel::flow::composeFlowBars(parts, 3'600'000);
+    hour->complete = complete; hour->revision = revision;
+    hour->closed = closed; hour->dirty = true;
+    hour->sourcePartCount = parts.size();
+    hour->firstPartStart = parts.front().startMs;
+    if (closed && day.formingHour && day.formingHour->first == hourStart)
+        day.formingHour.reset();
+}
+
+void ServerDataModel::updateCoarse(FlowDay& day, const FlowProduct& product,
+                                   int64_t tf, int64_t bucketStart) {
+    std::vector<sentinel::flow::FlowBar> parts;
+    uint32_t revision = 0;
+    bool complete = product.firstLiveMs <= bucketStart &&
+        !flowLossIn(product.lossyMinutes, bucketStart, bucketStart + tf);
+    if (tf < 3'600'000) {
+        auto& minutes = day.series.at(60'000);
+        for (const auto& slot : minutes.bucketSlots) if (slot.start >= bucketStart && slot.start < bucketStart + tf) {
+            if (auto bar = minutes.builder.bar(slot.start)) {
+                revision += *minutes.builder.revisionAt(slot.start);
+                parts.push_back(std::move(*bar));
+            }
+        }
+    } else {
+        for (const auto& [start, hour] : day.hours) if (start >= bucketStart && start < bucketStart + tf) {
+            parts.push_back(hour.bar); revision += hour.revision; complete &= hour.complete;
+        }
+        if (day.formingHour && day.formingHour->first >= bucketStart &&
+            day.formingHour->first < bucketStart + tf) {
+            parts.push_back(day.formingHour->second.bar);
+            revision += day.formingHour->second.revision;
+            complete &= day.formingHour->second.complete;
+        }
+    }
+    const auto key = std::pair{tf, bucketStart};
+    auto existing = day.coarse.find(key);
+    if (parts.empty() && existing == day.coarse.end()) return;
+    std::sort(parts.begin(), parts.end(), [](const auto& a, const auto& b) { return a.startMs < b.startMs; });
+    if (existing != day.coarse.end() &&
+        (parts.size() < existing->second.sourcePartCount ||
+         (!parts.empty() && parts.front().startMs > existing->second.firstPartStart))) {
+        if (existing->second.complete != complete) {
+            existing->second.complete = complete;
+            existing->second.dirty = true;
+        }
+        return;
+    }
+    if (parts.empty()) return;
+    auto bar = sentinel::flow::composeFlowBars(parts, tf);
+    auto& state = day.coarse[key];
+    if (state.bar != bar || state.complete != complete || state.revision != revision) {
+        state.bar = std::move(bar); state.complete = complete;
+        state.revision = revision; state.dirty = true;
+    }
+    state.sourcePartCount = parts.size();
+    state.firstPartStart = parts.front().startMs;
+}
+
+void ServerDataModel::publishCoarse(const std::string& symbol, FlowProduct& product, FlowDay& day) {
+    std::map<int64_t, int64_t> newest;
+    for (const auto& [key, state] : day.coarse)
+        newest[key.first] = std::max(newest[key.first], key.second);
+    for (auto it = day.coarse.begin(); it != day.coarse.end();) {
+        const auto [tf, start] = it->first;
+        const bool subscribed = std::any_of(m_flowSubscriptions.begin(), m_flowSubscriptions.end(),
+            [&](const auto& sub) { return sub->active.load() && sub->symbol == symbol && sub->timeframeMs == tf; });
+        const bool expired = start < (product.clock - kFlowRolloverGraceMs) / tf * tf;
+        if (!subscribed || (expired && it->second.closed && !it->second.dirty)) {
+            it = day.coarse.erase(it); continue;
+        }
+        auto& state = it->second;
+        const bool closed = product.clock >= start + tf;
+        const bool changed = state.dirty || (closed && !state.closed);
+        const bool initial = std::any_of(m_flowSubscriptions.begin(), m_flowSubscriptions.end(),
+            [&](const auto& sub) { return sub->active.load() && sub->initial &&
+                sub->symbol == symbol && sub->timeframeMs == tf; });
+        if (changed || (initial && start == newest[tf]))
+            publishFlowBar(symbol, tf, state.bar, state.revision, closed,
+                           state.complete, !changed);
+        state.dirty = false; state.closed = closed;
+        ++it;
+    }
+}
+
+void ServerDataModel::publishFlow() {
+    std::erase_if(m_flowSubscriptions, [](const auto& s) { return !s->active.load(); });
+    for (auto& [symbol, product] : m_flowProducts) {
+        for (auto& [dayStart, day] : product.days) {
+            auto& minute = day.series.at(60'000);
+            std::vector<int64_t> changed;
+            for (const auto& slot : minute.bucketSlots)
+                if (slot.start >= 0 && (slot.dirty || (!slot.closed && product.clock >= slot.start + 60'000)))
+                    changed.push_back(slot.start);
+            for (const auto start : product.newLossyMinutes)
+                if (start >= dayStart && start < dayStart + 86'400'000) changed.push_back(start);
+            std::sort(changed.begin(), changed.end());
+            changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
+            std::vector<int64_t> closedHours;
+            for (const auto& [start, hour] : day.hours)
+                if (!hour.closed && product.clock >= start + 3'600'000) closedHours.push_back(start);
+            if (day.formingHour && product.clock >= day.formingHour->first + 3'600'000)
+                closedHours.push_back(day.formingHour->first);
+            std::set<int64_t> hoursToUpdate(closedHours.begin(), closedHours.end());
+            for (const auto start : changed) hoursToUpdate.insert(start / 3'600'000 * 3'600'000);
+            for (const auto start : hoursToUpdate)
+                updateHour(day, product, start);
+            std::set<std::pair<int64_t, int64_t>> coarseUpdates;
+            for (const auto& sub : m_flowSubscriptions) {
+                if (!sub->active.load() || sub->symbol != symbol || sub->timeframeMs <= 60'000) continue;
+                const auto tf = sub->timeframeMs;
+                for (const auto start : changed) coarseUpdates.emplace(tf, start / tf * tf);
+                if (sub->initial && !minute.bucketSlots.empty()) {
+                    int64_t latest = -1;
+                    for (const auto& slot : minute.bucketSlots) latest = std::max(latest, slot.start);
+                    if (latest >= 0) coarseUpdates.emplace(tf, latest / tf * tf);
+                }
+                for (const auto start : closedHours) coarseUpdates.emplace(tf, start / tf * tf);
+            }
+            for (const auto& [key, state] : day.coarse)
+                if (!state.closed && product.clock >= key.second + key.first)
+                    coarseUpdates.insert(key);
+            for (const auto& [tf, start] : coarseUpdates) updateCoarse(day, product, tf, start);
+            publishFlowSeries(symbol, product, 1000, day.series.at(1000));
+            publishFlowSeries(symbol, product, 60'000, minute);
+            publishCoarse(symbol, product, day);
+            if (product.clock >= dayStart + 86'400'000 + kFlowRolloverGraceMs)
+                day.hours.clear();
+        }
+        product.days.erase(product.days.begin(), product.days.lower_bound(
+            std::max<int64_t>(0, product.clock - kFlowSecondRetentionMs) / 86'400'000 * 86'400'000));
+        product.newLossyMinutes.clear();
+        const auto keepFrom = std::max<int64_t>(0, product.clock - kFlowRolloverGraceMs) /
+            86'400'000 * 86'400'000;
+        product.lossyMinutes.erase(product.lossyMinutes.begin(), product.lossyMinutes.lower_bound(keepFrom));
+    }
+    for (const auto& sub : m_flowSubscriptions) sub->initial = false;
 }

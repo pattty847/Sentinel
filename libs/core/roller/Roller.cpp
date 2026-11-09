@@ -185,6 +185,7 @@ json roll(const RollOptions& o) {
         const auto describeGrid = [&](const Grid& grid) {
             dayReport["grid"] = {{"priceScale",grid.priceScale},{"nearTick",grid.nearTick},
                                   {"deepTick",grid.deepTick},{"sizeFloor",grid.sizeFloor}};
+            if (o.onGrid) o.onGrid(day, grid, gridMetadata);
         };
 
         const auto claimProvenance = [&] {

@@ -184,6 +184,89 @@ An empty or overlap-only successful page advances the scan cursor to the previou
 
 Candle schema version 2 carries timeframes and history boundaries in integer milliseconds. The server's configured 100ms and 1s history contract is an inclusive `end_time_ms` with `limit` counting retained bars (capped at 350), drawn from per-timeframe RAM retention: a timeframe with a `chart.history_bars` entry keeps between the value and the value + 10 percent closed bars once populated, and a timeframe without an entry keeps the 10,000-bar cap (9,001..10,000 once populated). The checked-in configuration serves 100ms with an entry of 18,000 (30 minutes of contiguous buckets) and 1s with no entry. After a server restart each captured product rebuilds, from the capture journal at the first handshake and before any live trade reaches the model, the newest 30 minutes of its 100ms and 1s bars (their window needs at most 4 journal files) and the open bar of every served timeframe from 1m to 1d (the open 1m bar and each coarser bar's closed minutes, built exactly as the live aggregator builds them; closed 1m and coarser bars stay REST-served and are not installed). The bars come from exactly one continuous replay from a fixed position: the journal file holding the earlier of the window start and the oldest open bucket start (UTC midnight when 1d is served), less one minute of lead-in and a 2 h safety margin, clamped to the journal's start and to 32 files (4 without open bars). The margin lets the continuous read converge on the uninterrupted path (carried bars, delayed trades across file boundaries) before the first bar that matters; the bars are installed only into empty series, so each open bar equals the bar an uninterrupted server would hold. There is no extension or second read: when the replay holds no 1m bar before the oldest open bucket, or no 100ms / 1s bar before the window, the outcome is `partial`. When the cap leaves out a journal file whose header shows the receive clock past the rebuilt bars and past the replay's first file (a clock regression the uninterrupted aggregator saw), no exact result exists: the rebuild fails (warming ends, nothing is installed, the failure is logged and counted). Its cost grows with the time since that bucket began plus the margin (measured on 2026-11-07 recordings: BTC-USD about 0.9 s per journal hour, about 25 s just before UTC midnight, 7 products in parallel peak about 120 MB RSS); the product's live feed and journal roll start after it. Live delivery continues from exactly the record after the rebuilt one, and reconnect resends of a rebuilt trade id are dropped until 16,384 new nonempty ids have been delivered. An open bucket that began before the journal's oldest readable record (or beyond the 32-file cap), or a thin product with no trade in the margin, holds only the trades the replay has; nothing is synthesized for the rest, no empty bar is installed, and the rebuild logs and counts `outcome=partial`. Timeframes longer than 1d are not rebuilt: their open bar starts with the first live minute. Until that rebuild ends, a 100ms or 1s request for the product is answered with a `candle_history_chunk` that carries `status: "warming"`, an empty `candles` array and the echoed `symbol`, `timeframe_ms`, `start_time_ms` and `end_time_ms`; 1m and coarser requests never warm, and a ready product never sends `status`. A rebuild that fails or cannot establish its initial state inside the file caps still ends warming: the product serves an empty window and live-only open bars (failure) or bars from its first trade the read holds (`partial`), and the server logs and counts it. Live bars flow during warming. Nothing is persisted. For sparse series, returned bars may predate the nominal `start_time_ms = max(0, end_time_ms - timeframe_ms * limit)` metadata; that field is not a lower filter bound. The client pages backward with `end_time_ms = oldest_loaded_ms - timeframe_ms` to exclude overlap. Coarser history uses REST time windows.
 
+### Live flow bars
+
+`server_config.flow` announces `schema_version: 1`, `live`, `encoding: "FLB1/base64"`,
+`notable_k: 8`, `live_publish_ms`, `close_delay_ms: 1000`, and
+`second_retention_ms: 1800000`. `history: false` means that this server does not yet
+serve flow history. `grid: "per_bar"` means that `row_tick_units` and `price_scale`
+come with each bar: the recorder's grid is specific to the product and UTC day,
+so there is no single global grid in the connection handshake.
+
+A client sends
+`{"type":"flow_live_subscribe","sub":7,"symbol":"BTC-USD","timeframe_ms":60000}`.
+`sub` is an unsigned 64-bit connection-local identifier. Reusing it replaces the
+previous subscription. Supported timeframes are 1 s, 1 m, and configured chart
+timeframes from 1 m through 1 d that divide a UTC day exactly. Sub-second flow is
+refused. There are at most 32 subscriptions per connection and 256 in the model;
+invalid requests, unsupported products/timeframes and capacity refusals return
+`error` with `context: "flow_live_subscribe"`. Subscription does not admit a new
+upstream product: it uses the configured journal products.
+
+The server sends JSON `flow_bar` with `schema_version`, `sub`, `symbol`,
+`timeframe_ms`, `bucket_start_ms`, `closed`, `complete`, `revision`, `row_tick_units`,
+`price_scale`, `encoding: "FLB1/base64"`, and `bar` (base64-encoded FLB1 bytes).
+FLB1 contains OHLC, integer base/quote volumes and scales, count, native price
+rows, buy/sell totals, delta, maximum row volume and up to eight notable trades.
+Revision is **only envelope metadata**, never part of FLB1 content. Clients
+replace by `(symbol, timeframe_ms, bucket_start_ms)`, reject lower revisions,
+and apply equal-revision updates in stream order (forming updates and the close
+republish can share a revision). A `complete: false` bar must never replace a
+`complete: true` bar at the same revision. Coverage begins when the server
+receives its first live trade; a bar is complete only if that trade was at or
+before the bucket start and no trade in the bucket was lost or rejected. An
+empty minute is covered, not a loss. Every accepted late
+trade behind the published close watermark increments the revision; multiple
+late trades can coalesce into one publication with a correspondingly larger revision.
+
+Trades use exchange-time, UTC-aligned half-open buckets and the shared
+`flow::FlowBarBuilder`. Its 4,096-id window protects against reconnect resends;
+unknown aggressor side contributes to total volume/count only. The native grid
+is supplied by the recorder for that UTC day, with decimal base-increment
+precision and a quote-volume scale of 100,000,000. The existing TPO/VP tape remains.
+The live model starts at the first live trade after process start. It builds
+only 1 s and 1 m bars from trades. It composes 5 m, 15 m and 1 h bars from
+retained 1 m bars, and 4 h and 1 d bars from closed-hour composites plus the
+forming hour. Closed-hour composites are retained for the UTC day and its
+60-second rollover grace, at most 24 per product; the forming hour is separate.
+A coarse composite is recomputed when a constituent minute changes, its
+coverage changes, a subscriber attaches, or its bucket closes. No journal
+rebuild or historical coverage is implied by these live messages.
+
+The model's Qt-thread timer materializes and encodes changed bars at most once
+per `recording.live_publish_ms` (clamped to the configured 250–5,000 ms range).
+A newly attached subscriber receives the newest retained bucket on its next
+turn. During midnight rollover, this may include the newest slot of both the
+preceding and current UTC days. A final close is republished once even if the
+content did not change.
+The product clock is its monotonic journal receive watermark minus 1,000 ms;
+wall time and quiet/disconnected intervals do not close bars. Publication
+precedes `sealThrough`; late trades remain revisable until retention drops them.
+
+The 1 s series keeps the last 30 minutes, and the 1 m series keeps the forming
+UTC hour with 60 seconds of rollover grace for the preceding hour. A subscribed
+coarse view keeps its forming composite and the preceding composite until 60
+seconds after close. Fixed slots cap each day/series at 1,802 second buckets
+and 62 minute buckets, including clock/publication slack. Only the
+current and preceding UTC day can be held. Watermark maintenance drops only
+already-published, unchanged finals; a stalled publication loop refuses additions
+that would overrun the slots. `sentinel_flow_dropped_trades_total` counts additions
+refused behind the retention watermark, at capacity, for missing grids or by
+builder validation. `sentinel_flow_dropped_buckets_total` counts retired buckets. The sibling
+`sentinel_flow_missing_grid_trades_total` counts trades for a UTC day without
+a recorder grid; the server warns once per product-day.
+`sentinel_flow_hour_shrink_refusals_total` counts attempts to replace a cached
+hour from fewer source minutes. Dropped-trade counts are per series, so one
+input trade can affect several series. Retention bounds the time
+window and bucket count, not the exchange's trade rate within a bucket.
+
+`{"type":"flow_live_unsubscribe","sub":7}` cancels the subscription. Cancellation
+and replacement discard queued frames; an already in-flight WebSocket frame can
+finish. Disconnect also cancels registrations and publication. The stream I/O
+thread only admits requests and sends prepared messages; model-thread aggregation
+and FLB1/base64/JSON encoding never run there. Flow uses the existing bounded
+16 MiB session write queue and slow-client disconnect policy.
+
 ## Heatmap history transport
 
 History uses binary chunks requested by `heatmap_chunk_request`, with the raw

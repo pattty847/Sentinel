@@ -8,6 +8,8 @@ add_library(sentinel_core
     flow/FlowBarBuilder.cpp
     flow/FlowCompose.hpp
     flow/FlowCompose.cpp
+    flow/FlowScales.hpp
+    flow/FlowScales.cpp
     flow/FlowCodec.hpp
     flow/FlowCodec.cpp
     roller/AnchorStore.cpp

@@ -166,6 +166,12 @@ sentinel::roller::ModelSink SentinelServerApp::journalModelSink() {
     sink.metadata = [modelPtr](const std::string& product, const nlohmann::json& metadata) {
         safeInvoke(modelPtr, [product, metadata](ServerDataModel& model) { model.onFeedMetadata(product, metadata); });
     };
+    sink.grid = [modelPtr](const std::string& product, int64_t dayStartMs,
+                           const sentinel::roller::Grid& grid, const nlohmann::json& metadata) {
+        safeInvoke(modelPtr, [product, dayStartMs, grid, metadata](ServerDataModel& model) {
+            model.onFlowGrid(product, dayStartMs, grid, metadata);
+        });
+    };
     sink.candleRestore = [modelPtr](const std::string& product,
                                     std::optional<sentinel::roller::CandleRestore> restore) {
         // Shared so the queued functor stays copyable without copying the bars.
