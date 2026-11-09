@@ -7,7 +7,6 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
 
 - **Wave 3 (now):** footprint/why-it-moved plan (Fable: footprint, CVD, eaten/pulled, bubbles), aesthetics, heatmap seam, trade bubbles rethink.
   - **Heatmap aesthetic pass** (owner 2026-11-09, after the heatmap-saturation branch lands): new palette (owner's colour variants) and the auto range rule (today: one-time fit to the visible cells' lo/hi, saved per asset with origin auto|user, fittedAt time/price) judged together on 1080p and the ~2500px screen; 3 models + the owner judge variants side by side in the lab. Also decide when a saved AUTO range should refit (price moved a lot, palette or scale changed); USER ranges never move.
-  - **Wall radar disappears at some zooms** (owner 2026-11-09, priority bug): the ladder wall badges (wall radar) do not show at certain zoom levels. Find the zoom/tick condition that hides them (`LadderLayer` badge layout, its cellLabels/heatmap-label coupling) and make them show at every zoom where the chart shows a heatmap.
   - **Heatmap cell label rule** (owner 2026-11-09, design): today a label shows wherever its own text fits, so a `$1M` cell is labelled before neighbouring `$45k` cells and labels pop in patchily. Want uniform behaviour: when every visible cell's text fits at that zoom, show all; plus a rule for how text size scales with zoom so it reads well (MSDF, 1080p and ~2500px screens). Part of the heatmap aesthetic pass.
 - **Wave 4:** Security, land follow-ups (land rebuilds main's build dir), Gemini 3.1 Pro reviewer trial on past diffs, Feature ideas check. Then the Queue.
 
@@ -28,9 +27,13 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
    - zoom-to-footprint: candles widen into bid/ask footprint cells, then numbers appear (extends Footprint and text LOD below);
    - **Trade bubbles rethink** (owner 2026-10-25; folded into the wave 3 footprint plan): at 1m zoomed out bubbles bury the chart; zoomed in they sit at trade time, the owner expected candle centre. Topics: x placement, size scaling, filtering large/price-moving trades from passive flow (min size, per-slot aggregation, sweeps). No bubble history after a GUI restart.
    - **Heatmap stops after sub-minute switches** (owner 2026-10-25, to debug): panning/zooming at 1 s, then 1m -> 1s -> 100ms, left the heatmap empty from the switch time on; back on 1m, time after the switch shows the hatched not-built background. Log `~/Library/Logs/Sentinel/sentinel-gui-20261024-235229-50461.log` 18:10-18:14 EDT: `Heatmap CPU ceiling refused visible spans ... tf=3600000 spans=7 bytes=1189108208` at 18:10:35, live subscribe `sub=5206` at 18:12:56 on 1m, no live subscribe at 1 s/100 ms. Live columns are requested only for tf >= 1m (`HeatmapSourceController.cpp:882`). Check whether the 1m live resubscribe resumes and whether the CPU ceiling (about 1 GB committed after a long session) is what leaves spans unbuilt.
-4. **Repeatable performance benchmark** on the owner's machines; cite its numbers in the README (the old 110 FPS figure was removed 2026-10-07).
-5. **README + ARCHITECTURE pass** for the finished one-world architecture; also fix `docs/MARKETDATA.md` (TLS described as optional, single-quad heatmap, 110 FPS).
-6. **CI** for macOS, Windows, Linux (no `.github/workflows` today). Hosted runners have no GPU (GPU tests skip and report Passed); GPU coverage needs self-hosted runners on the Mac and Windows.
+4. **Test and scan follow-ups** (conductor 2026-11-09):
+   - `DomDock.QuietConnectedBookRetainsLastChangeAgeAndDetectsDisconnect` failed once under full-ctest load (freshness label read 0 s, expected >= 60 s; 3/3 alone); `CaptureFanoutTests MalformedIngressIsolatesOnlyItsProduct` did the same on 2026-11-09. Find the timing dependence in each.
+   - `LiveOrderBook::captureSide` scans from the book band's edges toward the touch; if half the band exceeds the 16,384-word budget (~1M slots, e.g. BTC at a 0.01 server tick) the known range is empty and the ladder never draws. Scan outward from the best bid/ask instead.
+   - Wall radar partial badges (far zoom) show notional only and repeat the heatmap cell label when cell labels draw; classification switches at the coverage edge. Aesthetic pass decides.
+5. **Repeatable performance benchmark** on the owner's machines; cite its numbers in the README (the old 110 FPS figure was removed 2026-10-07).
+6. **README + ARCHITECTURE pass** for the finished one-world architecture; also fix `docs/MARKETDATA.md` (TLS described as optional, single-quad heatmap, 110 FPS).
+7. **CI** for macOS, Windows, Linux (no `.github/workflows` today). Hosted runners have no GPU (GPU tests skip and report Passed); GPU coverage needs self-hosted runners on the Mac and Windows.
 
 ## Security (owner decides when)
 
