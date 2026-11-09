@@ -12,6 +12,7 @@
 #include <QMenu>
 #include <QTimer>
 #include <algorithm>
+#include <cmath>
 
 HeatmapChartControls::HeatmapChartControls(heatmap::HeatmapSettingsModel *model, QObject *parent)
     : QObject(parent), m_model(model) {
@@ -34,14 +35,7 @@ HeatmapChartControls::HeatmapChartControls(heatmap::HeatmapSettingsModel *model,
         }
         return context;
     });
-    m_model->setCurrentPriceProvider([this] {
-        if (!m_renderer || !m_renderer->view()) return 0.0;
-        const auto &controller = m_renderer->view()->controller();
-        if (!controller.flags().priceKnown || controller.flags().reseedPrice ||
-            controller.session().symbol.toStdString() != m_model->activeSymbol()) return 0.0;
-        const auto &session = controller.session();
-        return session.bookMidValid ? session.bookMid : session.lastTrade;
-    });
+    m_model->setCurrentPriceProvider([this] { return currentSymbolPrice(); });
     m_model->setVisibleLiquidityProvider([this](const std::string &symbol)
         -> std::optional<heatmap::HeatmapSettingsModel::VisibleLiquidity> {
         const auto *layer = m_renderer ? m_renderer->gpuHeatmapLayer() : nullptr;
@@ -68,6 +62,8 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
         updateSensitivityContext();
         scheduleIndicator();
     });
+    connect(&renderer->view()->controller().livePlacement(), &chart::LivePlacement::priceSourceChanged,
+            this, [this] { if (!m_model->settings().sensitivityReady) updateSensitivityContext(); });
     connect(renderer->layers(), &chart::LayerVisibility::layerVisibilityChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer->tpo(), &chart::ChartTpoQml::tpoConfigChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer->tpo(), &chart::ChartTpoQml::tpoStyleChanged, this, &HeatmapChartControls::scheduleSync);
@@ -76,6 +72,8 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
         using Layer = heatmap::gpu::HeatmapGpuLayer;
         connect(layer, &Layer::symbolChanged, this, &HeatmapChartControls::updateSensitivityContext);
         connect(layer, &Layer::priceViewKnown, this, &HeatmapChartControls::updateSensitivityContext);
+        connect(layer, &Layer::liveChanged, this,
+                [this] { if (!m_model->settings().sensitivityReady) updateSensitivityContext(); });
         connect(layer, &Layer::tickChanged, this, &HeatmapChartControls::scheduleSync);
         connect(layer, &Layer::presetsChanged, this, &HeatmapChartControls::scheduleSync);
         connect(layer, &Layer::snapshotChanged, this, [this] {
@@ -109,13 +107,28 @@ void HeatmapChartControls::updateSensitivityContext() {
     const auto &symbol = m_renderer->gpuHeatmapLayer()->symbol();
     m_sensitivityContextUpdating = true;
     m_model->selectSymbol(symbol);
-    const auto &controller = m_renderer->view()->controller();
-    if (controller.flags().priceKnown && !controller.flags().reseedPrice) {
-        const auto &session = controller.session();
-        const double price = session.bookMidValid ? session.bookMid : session.lastTrade;
-        m_model->notePrice(symbol, price);
-    }
+    m_model->notePrice(symbol, currentSymbolPrice());
     m_sensitivityContextUpdating = false;
+}
+
+double HeatmapChartControls::currentSymbolPrice() const {
+    if (!m_renderer || !m_renderer->view()) return 0.0;
+    const auto *layer = m_renderer->gpuHeatmapLayer();
+    const auto &controller = m_renderer->view()->controller();
+    const auto &session = controller.session();
+    if (!layer || layer->symbol() != m_model->activeSymbol() ||
+        session.symbol.toStdString() != m_model->activeSymbol()) return 0.0;
+    const auto positive = [](double value) { return std::isfinite(value) && value > 0; };
+    if (session.bookMidValid && positive(session.bookMid)) return session.bookMid;
+    if (positive(session.lastTrade)) return session.lastTrade;
+    const double snapshotMid = layer->recentMidPrice();
+    if (positive(snapshotMid)) return snapshotMid;
+    if (controller.flags().priceKnown && !controller.flags().reseedPrice) {
+        const auto *view = m_renderer->getViewState();
+        const double mid = (view->getMinPrice() + view->getMaxPrice()) * 0.5;
+        if (positive(mid)) return mid;
+    }
+    return 0.0;
 }
 
 void HeatmapChartControls::applyLadderSettings() {

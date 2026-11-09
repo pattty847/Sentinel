@@ -1,6 +1,7 @@
 #include "HeatmapSettingsModel.hpp"
 #include "SentinelLogging.hpp"
 #include <QDateTime>
+#include <QTimer>
 #include <algorithm>
 #include <cmath>
 
@@ -29,6 +30,8 @@ HeatmapSettingsModel::HeatmapSettingsModel(HeatmapSettingsStore &store, QString 
 
 void HeatmapSettingsModel::selectSymbol(const std::string &symbol) {
     if (activeSymbol_ == symbol) return;
+    const bool inheritPendingEdit = activeSymbol_.empty() && userEditedRange_;
+    const double pendingMin = settings_.sensitivityMin, pendingMax = settings_.sensitivityMax;
     activeSymbol_ = symbol;
     currentPrice_ = 0;
     userEditedRange_ = false;
@@ -40,11 +43,18 @@ void HeatmapSettingsModel::selectSymbol(const std::string &symbol) {
         settings_.sensitivityReady = true;
     } else {
         activeRangeSaved_ = false;
-        settings_.sensitivityMin = 0.05;
-        settings_.sensitivityMax = 50;
-        settings_.sensitivityReady = false;
+        settings_.sensitivityMin = inheritPendingEdit ? pendingMin : 0.05;
+        settings_.sensitivityMax = inheritPendingEdit ? pendingMax : 50;
+        settings_.sensitivityReady = inheritPendingEdit;
+        userEditedRange_ = inheritPendingEdit;
     }
     emit changed(false);
+    if (!symbol.empty()) QTimer::singleShot(10'000, this, [this, symbol] {
+        if (activeSymbol_ != symbol || activeRangeSaved_) return;
+        sLog_Warning("Heatmap range unsaved symbol=" << symbol
+                      << " reason=" << (userEditedRange_ ? "pending_user_edit" :
+                                         currentPrice_ > 0 ? "waiting_for_visible_liquidity" : "waiting_for_price_or_liquidity"));
+    });
 }
 
 void HeatmapSettingsModel::notePrice(const std::string &symbol, double price) {

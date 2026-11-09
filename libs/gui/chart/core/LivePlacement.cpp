@@ -10,6 +10,9 @@
 
 namespace chart {
 namespace {
+bool hasSessionPrice(const ChartSession& session) {
+  return (session.bookMidValid && session.bookMid > 0) || session.lastTrade > 0;
+}
 class BootstrapTimer final : public ILivePlacementTimer {
 public:
     explicit BootstrapTimer(std::function<void()> timeout) {
@@ -184,10 +187,12 @@ void LivePlacement::enableAutoScroll(bool enabled) {
 void LivePlacement::setLiveBookTop(double bestBid, double bestAsk) {
   // The book top seeds the first viewport (and the price window after a symbol switch).
   auto& session = controller_.session();
+  const bool hadPrice = hasSessionPrice(session);
   session.bookMidValid = std::isfinite(bestBid) && std::isfinite(bestAsk) && bestBid > 0 && bestAsk >= bestBid;
   if (session.bookMidValid) session.bookMid = (bestBid + bestAsk) * 0.5;
   seedGpuViewport(bestBid, bestAsk);
   controller_.midLock().targetChanged();
+  if (!hadPrice && session.bookMidValid) emit priceSourceChanged();
 }
 bool LivePlacement::matchesUtf8Product(QStringView symbol, std::string_view product) {
   // QString::fromUtf8 consumes one initial BOM; the non-owning UTF-8 comparison
@@ -198,6 +203,7 @@ bool LivePlacement::matchesUtf8Product(QStringView symbol, std::string_view prod
 
 void LivePlacement::onTrade(const std::string& product, double price, int64_t timeMs) {
   if (!tradeTimeAllowed(timeMs)) return;
+  const bool hadPrice = hasSessionPrice(controller_.session());
   // The live price for auto-fit compares the ASCII product id without conversion.
   if (std::isfinite(price) && price > 0 &&
       controller_.session().symbol == QLatin1String(product.data(), static_cast<qsizetype>(product.size())))
@@ -210,6 +216,7 @@ void LivePlacement::onTrade(const std::string& product, double price, int64_t ti
     seedGpuViewport(price, price);
   if (accepted) followTrade(previousTradeMs);
   controller_.midLock().targetChanged(); // the lock's target while the book is one-sided
+  if (!hadPrice && controller_.session().lastTrade > 0) emit priceSourceChanged();
 }
 
 void LivePlacement::followTrade(int64_t previousTradeMs) {

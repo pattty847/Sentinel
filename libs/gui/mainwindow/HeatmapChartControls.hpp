@@ -85,6 +85,7 @@ private:
     void scheduleSync();
     void scheduleIndicator();
     void updateSensitivityContext();
+    double currentSymbolPrice() const;
     void fitVisibleLiquidity(double lo, double hi);
     void syncTelemetryVisibility();
     // The persisted ladder toggle and width reach the layers only when they change, so a

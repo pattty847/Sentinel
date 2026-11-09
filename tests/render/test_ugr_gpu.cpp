@@ -2388,6 +2388,9 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     ugr->view()->setViewport(t0, t1, 99'500, 101'500); // auto off; the book a quarter up
     ugr->setLiveBook(bookWithTop(99'999, 100'001));
     // BTC -> TINY (price scale 1e10, recorded).
+    auto tinyMemory = layer().tickMemory();
+    ASSERT_TRUE(tinyMemory.set("TINY-USD", 60000, 1000));
+    ugr->setHeatmapTickMemory(tinyMemory);
     ugr->setActiveSymbol("TINY-USD");
     EXPECT_FALSE(layer().priceScaleCurrent());
     EXPECT_EQ(view->maxPriceSpan(), 0.0) << "TINY's limits are unknown, not BTC's";
@@ -2477,6 +2480,9 @@ TEST_F(UgrGpu, CarryWaitsForTheScaleWhenNoSnapshotExistsYet) {
     const int64_t t0 = view->getVisibleTimeStart(), t1 = view->getVisibleTimeEnd();
     ugr->view()->setViewport(t0, t1, 99'500, 101'500);
     ugr->setLiveBook(bookWithTop(99'999, 100'001));
+    auto tinyMemory = layer().tickMemory();
+    ASSERT_TRUE(tinyMemory.set("TINY-USD", 60000, 1000));
+    ugr->setHeatmapTickMemory(tinyMemory);
     ugr->setActiveSymbol("TINY-USD");
     ugr->setLiveBook(bookWithTop(0.0000099, 0.0000101));
     auto expectCarried = [&](double mid, const char *what) {
@@ -4013,6 +4019,14 @@ TEST(UgrTickCpu, ManualTickNeverCarriesAcrossSymbolOrTimeframe) {
     ASSERT_GT(firstAutomatic, 0);
     EXPECT_EQ(layer.tickUnits(), firstAutomatic);
     EXPECT_FALSE(layer.tickMemory().get("BTC-USD", minute));
+    EXPECT_TRUE(layer.manualTickLocked());
+    EXPECT_GT(layer.maxPriceSpan(), 0);
+    const heatmap::gpu::ViewWindow zoomed{view.timeLoMs + minute, view.timeLoMs + 2 * minute, 100140, 100145};
+    layer.chooseTickForView(zoomed);
+    QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+    EXPECT_EQ(layer.tickUnits(), firstAutomatic);
+    EXPECT_EQ(layer.predictTickUnits(zoomed), firstAutomatic);
+    EXPECT_FALSE(layer.tickMemory().get("BTC-USD", minute));
     layer.setSettings(settings, true);
     layer.chooseTickForView(view);
     QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
@@ -4055,6 +4069,8 @@ TEST(UgrTickCpu, ManualTickNeverCarriesAcrossSymbolOrTimeframe) {
     ASSERT_GT(automatic, 0);
     EXPECT_EQ(layer.tickUnits(), automatic);
     EXPECT_EQ(layer.manualTickUnits(), automatic);
+    EXPECT_TRUE(layer.manualTickLocked());
+    EXPECT_GT(layer.maxPriceSpan(), 0);
     EXPECT_FALSE(layer.tickMemory().get("BTC-USD", 5 * minute));
 
     layer.setTimeframeMs(minute);
@@ -4062,6 +4078,39 @@ TEST(UgrTickCpu, ManualTickNeverCarriesAcrossSymbolOrTimeframe) {
     EXPECT_EQ(layer.tickUnits(), 0);
     ASSERT_TRUE(pump(minute));
     EXPECT_EQ(layer.tickUnits(), 2000);
+    layer.setService(nullptr);
+}
+
+TEST(UgrTickCpu, TinyWithoutMemoryHoldsItsFirstAutoTick) {
+    heatmap::gpu::HeatmapGpuLayer layer;
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 3 * kHourMs),
+                                        0.000009, 0.000011};
+    layer.setSymbol("TINY-USD");
+    layer.setTimeframeMs(minute);
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    auto settings = layer.settings();
+    settings.tickMode = heatmap::TickMode::Manual;
+    layer.setSettings(settings);
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (!layer.hasCurrentResolution() && elapsed.elapsed() < 10'000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    ASSERT_TRUE(layer.hasCurrentResolution());
+    layer.chooseTickForView(view);
+    QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+    const int64_t held = layer.tickUnits();
+    ASSERT_GT(held, 0);
+    EXPECT_TRUE(layer.manualTickLocked());
+    EXPECT_GT(layer.maxPriceSpan(), 0);
+    EXPECT_FALSE(layer.tickMemory().get("TINY-USD", minute));
+    const heatmap::gpu::ViewWindow zoomed{view.timeLoMs, view.timeLoMs + minute, 0.0000099, 0.0000101};
+    layer.chooseTickForView(zoomed);
+    QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+    EXPECT_EQ(layer.tickUnits(), held);
+    EXPECT_EQ(layer.predictTickUnits(zoomed), held);
     layer.setService(nullptr);
 }
 

@@ -113,7 +113,7 @@ public:
     int64_t tfMs() const { return tfMs_; }
     const std::string &symbol() const { return symbol_; }
     bool manualMode() const { return manualMode_; }
-    bool manualTickLocked() const { return manualMode_ && !manualFallback_; }
+    bool manualTickLocked() const { return manualMode_ && (!manualFallback_ || manualFallbackResolved_); }
     int64_t manualTickUnits() const { return manualUnits_; }
     int64_t tickUnits() const { return tickUnits_; } // chosen for the last frame
     double priceScale() const;
@@ -245,6 +245,7 @@ private:
     std::shared_ptr<HeatmapTileStats> tileStats_ = std::make_shared<HeatmapTileStats>();
     bool manualMode_ = false;
     bool manualFallback_ = false;
+    bool manualFallbackResolved_ = false;
     int64_t manualUnits_ = 100;
     ManualTickMemory tickMemory_;
     std::vector<int64_t> offered_;

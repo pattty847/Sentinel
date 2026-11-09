@@ -235,7 +235,7 @@ void HeatmapGpuLayer::setSettings(const HeatmapChartSettings &settings, bool exp
     const bool wasManual = manualMode_;
     const int64_t wasUnits = manualUnits_;
     manualMode_ = settings.tickMode == TickMode::Manual;
-    if (!manualMode_) manualFallback_ = false;
+    if (!manualMode_) manualFallback_ = manualFallbackResolved_ = false;
     if (manualMode_) startupTickTimer_->stop();
     else armStartupTick();
     if (manualMode_) {
@@ -243,9 +243,16 @@ void HeatmapGpuLayer::setSettings(const HeatmapChartSettings &settings, bool exp
             manualUnits_ = settings.manualTick;
             tickMemory_.set(symbol_, tfMs_, manualUnits_);
             manualFallback_ = false;
+            manualFallbackResolved_ = false;
         } else if (!wasManual) {
             const auto remembered = tickMemory_.get(symbol_, tfMs_);
+            const bool currentTick = snapshot_ && snapshot_->symbol == symbol_ && snapshot_->tfMs == tfMs_;
+            if (!currentTick) {
+                tickUnits_ = 0;
+                postedTickUnits_ = -1;
+            }
             manualFallback_ = !remembered;
+            manualFallbackResolved_ = !remembered && currentTick && tickUnits_ > 0;
             manualUnits_ = remembered.value_or(tickUnits_);
         }
     }
@@ -274,7 +281,8 @@ void HeatmapGpuLayer::setTickMemory(const ManualTickMemory &memory) {
 }
 
 void HeatmapGpuLayer::refreshStyle() {
-    const auto window = codeWindow(settings_.sensitivityMin, settings_.sensitivityMax,
+    const double fallbackScale = settings_.sensitivityReady ? 1.0 : displayScale_.floor / recording::SizeScale{}.floor;
+    const auto window = codeWindow(settings_.sensitivityMin * fallbackScale, settings_.sensitivityMax * fallbackScale,
                                    displayScale_.floor, displayScale_.codesPerOctave);
     style_.codeFloor = window.floor;
     style_.codeRange = window.range;
@@ -303,6 +311,7 @@ void HeatmapGpuLayer::restoreTick() {
     const auto units = tickMemory_.get(symbol_, tfMs_);
     const int64_t next = units.value_or(tickUnits_);
     manualFallback_ = !units;
+    manualFallbackResolved_ = false;
     if (next != manualUnits_) {
         manualUnits_ = next;
         emit tickChanged();
@@ -321,7 +330,7 @@ bool HeatmapGpuLayer::priceScaleCurrent() const {
 }
 
 double HeatmapGpuLayer::maxPriceSpan() const {
-    if (!active_ || !manualMode_ || manualFallback_ || !isPresetUnits(manualUnits_) || !priceScaleCurrent()) return 0.0;
+    if (!active_ || !manualTickLocked() || !isPresetUnits(manualUnits_) || !priceScaleCurrent()) return 0.0;
     return maxManualPriceSpan(heightPx_ * dpr_, fromUnits(manualUnits_, priceScale()));
 }
 
@@ -329,7 +338,7 @@ double HeatmapGpuLayer::minTimeSpanMs() const { return active_ && tfMs_ > 0 ? do
 
 double HeatmapGpuLayer::minPriceSpan() const {
     if (!active_ || !priceScaleCurrent()) return 0.0;
-    const int64_t units = manualMode_ && !manualFallback_ && isPresetUnits(manualUnits_)
+    const int64_t units = manualTickLocked() && isPresetUnits(manualUnits_)
                               ? manualUnits_ : (offered_.empty() ? 0 : offered_.front());
     return units > 0 ? kMinZoomRows * fromUnits(units, priceScale()) : 0.0;
 }
@@ -438,7 +447,7 @@ void HeatmapGpuLayer::refreshPresets() {
 // ------------------------------------------------------------------ frame
 int64_t HeatmapGpuLayer::chooseTick(const ViewWindow &view) {
     if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_) return tickUnits_; // nothing built yet
-    if (manualMode_ && !manualFallback_) return isPresetUnits(manualUnits_) ? manualUnits_ : 0;
+    if (manualTickLocked()) return isPresetUnits(manualUnits_) ? manualUnits_ : 0;
     if (autoPriceTick_) {
         autoUnits_ = *autoPriceTick_;
         return autoUnits_;
@@ -502,13 +511,17 @@ void HeatmapGpuLayer::commitProposedTick() {
     // GUI thread (the render thread only reads tickUnits_ while the GUI thread is blocked).
     if (!manualMode_ && !startupTickReady_) return;
     const int64_t tick = proposedTickUnits_.load(std::memory_order_relaxed);
-    if (tick == tickUnits_) return; // superseded (the proposal went back to the drawn tick)
+    if (tick == tickUnits_ && !(manualFallback_ && !manualFallbackResolved_ && tick > 0)) return; // superseded
     if (proposedPolicy_.load(std::memory_order_relaxed) != tickPolicy_.load(std::memory_order_relaxed)) {
         sLog_Probe("heatmap.gpu.tick", "stale proposal dropped tf=" << tfMs_ << " units=" << tick);
         return; // chosen under another symbol, timeframe or tick setting: the next frame proposes again
     }
     tickUnits_ = tick;
-    if (manualFallback_) manualUnits_ = tick;
+    if (manualFallback_ && !manualFallbackResolved_ && tick > 0) {
+        manualUnits_ = tick;
+        manualFallbackResolved_ = true;
+        noteLimits();
+    }
     ++tickChanges_;
     sLog_Probe("heatmap.gpu.tick", "tf=" << tfMs_ << " units=" << tick << " mode=" << (manualMode_ ? "manual" : "auto"));
     emit tickChanged();
@@ -516,7 +529,7 @@ void HeatmapGpuLayer::commitProposedTick() {
 
 int64_t HeatmapGpuLayer::predictTickUnits(const ViewWindow &view) const {
     if (!snapshot_ || snapshot_->tfMs != tfMs_ || snapshot_->symbol != symbol_ || !priceKnown_) return tickUnits_;
-    if (manualMode_ && !manualFallback_) return isPresetUnits(manualUnits_) ? manualUnits_ : 0;
+    if (manualTickLocked()) return isPresetUnits(manualUnits_) ? manualUnits_ : 0;
     if (autoPriceTick_) return *autoPriceTick_;
 
     const ResolutionSummary &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;
@@ -553,7 +566,7 @@ bool HeatmapGpuLayer::setAutoPriceTick(std::optional<int64_t> units) {
 
 bool HeatmapGpuLayer::prepareFrame(HeatmapTileNode::Frame &frame, const QRectF &rect, const ViewWindow &view,
                                    float coverageGamma, std::optional<ViewWindow> binView) {
-    if (!controller_ || !settings_.sensitivityReady ||
+    if (!controller_ ||
         (!settings_.sensitivitySymbol.empty() && settings_.sensitivitySymbol != symbol_)) return false;
     frame.spans = snapshot_;
     frame.capacity = capacity_;
