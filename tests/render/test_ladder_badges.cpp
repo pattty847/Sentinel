@@ -546,7 +546,10 @@ TEST(LadderBadges, RowNotionalsEndAtTheSameXAcrossHistoryAndDpr) {
             if (i) EXPECT_NEAR(glyphRight, right, 1.0 / dpr);
             else right = glyphRight;
             EXPECT_DOUBLE_EQ(pill.rect.right(), 640 - chart::kBadgeInsetPx);
-            EXPECT_NEAR(pill.textLeft + sizeTextWidth(pill), pill.rect.right() - chart::kBadgePadX, 1e-9);
+            EXPECT_LE(std::abs(pill.textLeft + sizeTextWidth(pill) -
+                               (pill.rect.right() - chart::kBadgePadX)),
+                      0.5 / dpr + 1e-9);
+            EXPECT_NEAR(pill.textLeft * dpr, std::round(pill.textLeft * dpr), 1e-9);
             offset += count;
         }
         ASSERT_EQ(offset, glyphs.size());

@@ -159,7 +159,7 @@ void LadderBadges::finishPill(BadgePill& p, double right, double top, double dpr
     const double width = std::ceil((2 * kBadgePadX + arrowW + textW) * dpr) / dpr;
     p.rect = QRectF(right - width, top, width, kPillH);
     p.textLeft = p.arrow ? snap(p.rect.left() + kBadgePadX + arrowW, dpr)
-                         : right - kBadgePadX - textW;
+                         : snap(right - kBadgePadX - textW, dpr);
     p.textTop = snap(top + 0.5 * (kPillH - boxH_), dpr);
 }
 
