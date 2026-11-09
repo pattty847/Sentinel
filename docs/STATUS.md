@@ -30,6 +30,8 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 - `lt-astra/heatmap-saturation` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-heatmap-saturation`): tip `521e68b7` = display scale keyed on the recording floor (`60b90cd9`, native Metal 20/20) + per-asset liquidity slider (reset-to-auto, global keys deleted; owner 2026-11-09: never carries across assets; first-time range FITS the visible heatmap liquidity and is saved, USD default only until that arrives; packet `astra-saturation-autofit.txt` queued after the tick fix). Now writing owner decision 2026-11-09 (packet `astra-saturation-tick.txt`): in Manual mode a (symbol, tf) with no remembered tick uses that asset's Auto tick, never the previous asset's. Then Fable reviews `0e578e94..tip`, conductor reruns Metal, land; owner rebuilds the GUI and checks BTC/ETH/SOL/DOGE/PEPE. Writer thread `01a1be15-f436-7d21-8eaa-b2a3cfe59f36`. HIGH.
 
+- `lt-astra/flow-history` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-flow-history`): plan S3b, from `88abae1a`. Writer gpt-6-astra (high) dispatched 2026-11-09 (packet `astra-s3b.txt`). Reviewer Claude Opus. MEDIUM.
+
 Lab branches that never land: `lt-astra/hmc2-rollup-lab`, `lt-claude/hmc2-layout-lab` (results in `/Volumes/T7/sentinel-datalab/hmc2-*`).
 
 ## Waiting on the owner
