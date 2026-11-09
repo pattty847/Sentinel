@@ -27,6 +27,7 @@
 #include "render/PaperTradeOverlayModel.hpp"
 #include "render/PaperTradeOverlayRenderer.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
+#include "render/heatmap/HeatmapCellQuery.hpp"
 #include "render/heatmap/HeatmapPalette.hpp"
 #include "servermodel/Hmc2Store.hpp"
 #include "heatmap/LocalChunkTransport.hpp"
@@ -55,6 +56,7 @@
 #include <climits>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <iostream>
 #include <numeric>
 #include <optional>
@@ -4060,6 +4062,62 @@ TEST(UgrTickCpu, ManualTickNeverCarriesAcrossSymbolOrTimeframe) {
     EXPECT_EQ(layer.tickUnits(), 0);
     ASSERT_TRUE(pump(minute));
     EXPECT_EQ(layer.tickUnits(), 2000);
+    layer.setService(nullptr);
+}
+
+TEST(UgrTickCpu, VisibleLiquidityUsesCurrentCellsOutsideTheColourWindow) {
+    heatmap::gpu::HeatmapGpuLayer layer;
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 2 * kHourMs + 10 * minute),
+                                        100'000, 100'180};
+    layer.setSymbol("BTC-USD");
+    layer.setTimeframeMs(minute);
+    layer.setSurface(640, 320, 1);
+    layer.setView(view, true);
+    auto settings = layer.settings();
+    settings.tickMode = heatmap::TickMode::Manual;
+    settings.manualTick = 100;
+    settings.sensitivityMin = 0.4;
+    settings.sensitivityMax = 0.5;
+    layer.setSettings(settings, true);
+    layer.setService(&lab::LabData::instance().service());
+    layer.setActive(true);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (!layer.visibleLiquidityRange().valid && elapsed.elapsed() < 10'000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        if (!layer.hasCurrentResolution()) continue;
+        layer.chooseTickForView(view);
+        QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
+        if (layer.tickUnits() == 100) {
+            heatmap::gpu::HeatmapTileNode::Frame frame;
+            layer.prepareFrame(frame, QRectF(0, 0, 640, 320), view);
+        }
+    }
+    const auto range = layer.visibleLiquidityRange();
+    ASSERT_TRUE(range.valid);
+    const auto labels = layer.controller()->cellQuery()->latestLabels();
+    ASSERT_TRUE(labels);
+    double expectedLo = std::numeric_limits<double>::infinity(), expectedHi = 0;
+    const auto &key = labels->key;
+    const double tick = heatmap::fromUnits(key.tickUnits, key.priceScale);
+    for (uint32_t y = 0; y < key.rows; ++y) {
+        const double bin = double(key.firstBin) + double(key.rows - 1 - y);
+        if ((bin + 1) * tick <= view.priceLo || bin * tick >= view.priceHi) continue;
+        for (uint32_t x = 0; x < key.columns; ++x) {
+            const double bucket = double(key.firstBucket) + double(x);
+            if ((bucket + 1) * minute <= view.timeLoMs || bucket * minute >= view.timeHiMs) continue;
+            const auto &cell = labels->cells[size_t(y) * key.columns + x];
+            if (heatmap::tiles::cellState(cell.word) != heatmap::tiles::kCellValid || cell.value <= 0) continue;
+            expectedLo = std::min(expectedLo, cell.value);
+            expectedHi = std::max(expectedHi, cell.value);
+        }
+    }
+    EXPECT_DOUBLE_EQ(range.lo, expectedLo);
+    EXPECT_DOUBLE_EQ(range.hi, expectedHi);
+    EXPECT_LT(range.lo, settings.sensitivityMin);
+    EXPECT_GT(range.hi, settings.sensitivityMax);
+    layer.setSymbol("TINY-USD");
+    EXPECT_FALSE(layer.visibleLiquidityRange().valid);
     layer.setService(nullptr);
 }
 

@@ -16,7 +16,13 @@ QString applySettingsPatch(HeatmapChartSettings &settings, const QJsonObject &pa
 
 class HeatmapSettingsStore {
 public:
-    struct SensitivityRange { double min = 0, max = 0; };
+    enum class RangeOrigin { Auto, User };
+    struct SensitivityRange {
+        double min = 0, max = 0;
+        RangeOrigin origin = RangeOrigin::User;
+        int64_t fittedAtMs = 0;
+        double fittedAtPrice = 0;
+    };
     HeatmapSettingsStore(); // QSettings("Sentinel", "SentinelTerminal")
     explicit HeatmapSettingsStore(QSettings &settings); // isolated store for tests
     HeatmapChartSettings load(const QString &chartId, const ClientHeatmapConfig &defaults) const;
@@ -24,7 +30,8 @@ public:
     void removeLegacySensitivity(const QString &chartId);
     // Patches persist only their own fields, never earlier process-only overrides.
     QString applyChartPatch(const QString &chartId, HeatmapChartSettings &current, const QJsonObject &patch,
-                            bool persist, const ClientHeatmapConfig &defaults, const std::string &symbol, int64_t tfMs);
+                            bool persist, const ClientHeatmapConfig &defaults, const std::string &symbol, int64_t tfMs,
+                            std::optional<SensitivityRange> sensitivity = std::nullopt);
     void saveLayout(const QString &name, const QString &chartId, const ClientHeatmapConfig &defaults);
     void restoreLayoutInto(const QString &name, const QString &chartId, HeatmapChartSettings &current,
                            const ClientHeatmapConfig &defaults);

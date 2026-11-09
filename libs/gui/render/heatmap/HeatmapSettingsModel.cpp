@@ -1,5 +1,6 @@
 #include "HeatmapSettingsModel.hpp"
 #include "SentinelLogging.hpp"
+#include <QDateTime>
 #include <algorithm>
 #include <cmath>
 
@@ -30,12 +31,15 @@ void HeatmapSettingsModel::selectSymbol(const std::string &symbol) {
     if (activeSymbol_ == symbol) return;
     activeSymbol_ = symbol;
     currentPrice_ = 0;
+    userEditedRange_ = false;
     settings_.sensitivitySymbol = symbol;
     if (const auto saved = store_.loadSensitivity(symbol)) {
+        activeRangeSaved_ = true;
         settings_.sensitivityMin = saved->min;
         settings_.sensitivityMax = saved->max;
         settings_.sensitivityReady = true;
     } else {
+        activeRangeSaved_ = false;
         settings_.sensitivityMin = 0.05;
         settings_.sensitivityMax = 50;
         settings_.sensitivityReady = false;
@@ -50,30 +54,68 @@ void HeatmapSettingsModel::notePrice(const std::string &symbol, double price) {
     settings_.sensitivityMin = kAutoLowUsd / price;
     settings_.sensitivityMax = kAutoHighUsd / price;
     clampSettings(settings_);
-    if (!store_.saveSensitivity(symbol, {settings_.sensitivityMin, settings_.sensitivityMax})) return;
+    settings_.sensitivityReady = true;
+    emit changed(false);
+}
+
+void HeatmapSettingsModel::refreshCurrentPrice() {
+    if (!currentPriceProvider_) return;
+    const double price = currentPriceProvider_();
+    if (std::isfinite(price) && price > 0) currentPrice_ = price;
+}
+
+void HeatmapSettingsModel::noteVisibleLiquidity(const std::string &symbol, double lo, double hi) {
+    if (symbol != activeSymbol_ || symbol.empty() || activeRangeSaved_ || userEditedRange_ ||
+        !std::isfinite(lo) || !std::isfinite(hi) || lo <= 0 || hi <= lo) return;
+    refreshCurrentPrice();
+    HeatmapSettingsStore::SensitivityRange range{lo, hi, HeatmapSettingsStore::RangeOrigin::Auto,
+                                                  QDateTime::currentMSecsSinceEpoch(), currentPrice_};
+    if (!store_.saveSensitivity(symbol, range)) return;
+    activeRangeSaved_ = true;
+    settings_.sensitivityMin = lo;
+    settings_.sensitivityMax = hi;
     settings_.sensitivityReady = true;
     emit changed(false);
 }
 
 QString HeatmapSettingsModel::resetSensitivityToAuto() {
-    if (currentPriceProvider_) {
-        const double price = currentPriceProvider_();
-        if (!std::isfinite(price) || price <= 0) return QStringLiteral("Waiting for a price for this symbol");
-        notePrice(activeSymbol_, price);
-    }
-    if (activeSymbol_.empty() || !(currentPrice_ > 0)) return QStringLiteral("Waiting for a price for this symbol");
+    refreshCurrentPrice();
+    if (activeSymbol_.empty()) return QStringLiteral("Waiting for a symbol");
     store_.removeSensitivity(activeSymbol_);
+    activeRangeSaved_ = false;
+    userEditedRange_ = false;
     settings_.sensitivityReady = false;
-    notePrice(activeSymbol_, currentPrice_);
+    if (visibleLiquidity_) {
+        const auto visible = visibleLiquidity_(activeSymbol_);
+        if (visible) {
+            noteVisibleLiquidity(activeSymbol_, visible->lo, visible->hi);
+            if (activeRangeSaved_) return {};
+        }
+    }
+    settings_.sensitivityMin = 0.05;
+    settings_.sensitivityMax = 50;
+    if (currentPrice_ > 0) notePrice(activeSymbol_, currentPrice_);
+    else emit changed(false);
     return {};
 }
 
 QString HeatmapSettingsModel::apply(const QJsonObject &patch, bool persist) {
     const Context context = context_ ? context_() : Context{};
+    const bool rangeEdited = patch.contains("sensitivityMin") || patch.contains("sensitivityMax");
+    if (rangeEdited && persist) refreshCurrentPrice();
+    std::optional<HeatmapSettingsStore::SensitivityRange> sensitivity;
+    if (rangeEdited && persist)
+        sensitivity = HeatmapSettingsStore::SensitivityRange{0, 0, HeatmapSettingsStore::RangeOrigin::User,
+                                                               QDateTime::currentMSecsSinceEpoch(), currentPrice_};
     auto next = settings_;
-    const auto error = store_.applyChartPatch(chartId_, next, patch, persist, defaults_, context.symbol, context.tfMs);
+    const std::string symbol = rangeEdited ? activeSymbol_ : context.symbol;
+    const auto error = store_.applyChartPatch(chartId_, next, patch, persist, defaults_, symbol, context.tfMs, sensitivity);
     if (!error.isEmpty()) return error;
-    if (patch.contains("sensitivityMin") || patch.contains("sensitivityMax")) next.sensitivityReady = true;
+    if (rangeEdited) {
+        next.sensitivityReady = true;
+        userEditedRange_ = true;
+        if (persist && symbol == activeSymbol_ && !symbol.empty()) activeRangeSaved_ = true;
+    }
     const bool explicitTick = patch.contains("manualTick") && next.tickMode == TickMode::Manual;
     if (next == settings_ && !explicitTick) return {};
     settings_ = std::move(next);

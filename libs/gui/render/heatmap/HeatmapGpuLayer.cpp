@@ -10,6 +10,7 @@
 #include <QTimeZone>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace heatmap::gpu {
 namespace {
@@ -717,20 +718,8 @@ void HeatmapGpuLayer::onLabels() {
         labelResultSeen_ = true;
         labelDropNoticed_ = false;
     }
-    // The slider's ends: the window's largest cell, and its 5th percentile at the
-    // low end (dust far below anything visible would waste most of the track).
-    LiquidityRange range;
-    liquidityScratch_.clear();
-    for (const auto &cell : labels->cells)
-        if (tiles::cellState(cell.word) == tiles::kCellValid && cell.value > 0 && std::isfinite(cell.value))
-            liquidityScratch_.push_back(cell.value);
-    if (liquidityScratch_.size() >= 2) {
-        auto lo = liquidityScratch_.begin() + ptrdiff_t(liquidityScratch_.size() / 20);
-        std::nth_element(liquidityScratch_.begin(), lo, liquidityScratch_.end());
-        range.lo = *lo;
-        range.hi = *std::max_element(liquidityScratch_.begin(), liquidityScratch_.end());
-        range.valid = range.hi > range.lo;
-    }
+    const LiquidityRange range = visibleLiquidityRange();
+    if (range.valid) emit visibleLiquiditySampled(range.lo, range.hi);
     // Ends move only by more than ~10% (live revisions nudge them every second).
     const auto moved = [](double a, double b) { return std::abs(std::log(a / b)) > 0.1; };
     if (range.valid && (!liquidityRange_.valid || moved(range.lo, liquidityRange_.lo) || moved(range.hi, liquidityRange_.hi))) {
@@ -750,6 +739,37 @@ void HeatmapGpuLayer::onLabels() {
     if (notifiedLabels_ && sameCells(*notifiedLabels_, *labels)) return;
     notifiedLabels_ = labels;
     emit labelsChanged();
+}
+
+HeatmapGpuLayer::LiquidityRange HeatmapGpuLayer::visibleLiquidityRange() const {
+    LiquidityRange range;
+    if (!controller_ || !controller_->cellQuery() || !snapshot_ || snapshot_->symbol != symbol_ ||
+        !labelsPosted_ || !priceKnown_ || !hasView_) return range;
+    const auto labels = controller_->cellQuery()->latestLabels();
+    if (!labels || labels->key.serial < labelEpoch_ || labels->key.serial != postedLabels_.serial ||
+        labels->key.spanVersion != snapshot_->version || labels->key.tfMs != tfMs_ ||
+        labels->key.tickUnits != tickUnits_) return range;
+    const auto &key = labels->key;
+    const double tick = fromUnits(key.tickUnits, key.priceScale);
+    if (!(tick > 0) || !std::isfinite(view_.timeLoMs) || !std::isfinite(view_.timeHiMs) ||
+        !std::isfinite(view_.priceLo) || !std::isfinite(view_.priceHi)) return range;
+    range.lo = std::numeric_limits<double>::infinity();
+    for (uint32_t y = 0; y < key.rows; ++y) {
+        const double bin = double(key.firstBin) + double(key.rows - 1 - y);
+        if ((bin + 1) * tick <= view_.priceLo || bin * tick >= view_.priceHi) continue;
+        for (uint32_t x = 0; x < key.columns; ++x) {
+            const double bucket = double(key.firstBucket) + double(x);
+            if ((bucket + 1) * double(tfMs_) <= view_.timeLoMs || bucket * double(tfMs_) >= view_.timeHiMs) continue;
+            const auto &cell = labels->cells[size_t(y) * key.columns + x];
+            if (tiles::cellState(cell.word) != tiles::kCellValid || !(cell.value > 0) || !std::isfinite(cell.value))
+                continue;
+            range.lo = std::min(range.lo, cell.value);
+            range.hi = std::max(range.hi, cell.value);
+        }
+    }
+    range.valid = std::isfinite(range.lo) && range.hi > range.lo;
+    if (!range.valid) range = {};
+    return range;
 }
 
 // No result for the posted request: forget it so the next frame posts again, and

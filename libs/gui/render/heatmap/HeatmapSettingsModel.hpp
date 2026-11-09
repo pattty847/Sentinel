@@ -8,7 +8,8 @@
 // layouts/<name>/heatmap/<chartId>/ for named workspaces only (never
 // _last_session, INV-088), heatmap/manualTick/<symbol>/<tf> for the Manual tick
 // memory (shared by every chart), heatmap/sensitivity/<symbol>/ for each asset's
-// base-unit range, and heatmap/budgets/... for the process budgets.
+// base-unit range and its origin/time/price, and heatmap/budgets/... for the
+// process budgets.
 #include "HeatmapSettingsStore.hpp"
 #include "HeatmapSourceController.hpp"
 #include <QObject>
@@ -36,6 +37,11 @@ public:
     void setContextProvider(std::function<Context()> provider) { context_ = std::move(provider); }
     void selectSymbol(const std::string &symbol);
     void notePrice(const std::string &symbol, double price);
+    struct VisibleLiquidity { double lo = 0, hi = 0; };
+    void noteVisibleLiquidity(const std::string &symbol, double lo, double hi);
+    void setVisibleLiquidityProvider(std::function<std::optional<VisibleLiquidity>(const std::string &)> provider) {
+        visibleLiquidity_ = std::move(provider);
+    }
     void setCurrentPriceProvider(std::function<double()> provider) { currentPriceProvider_ = std::move(provider); }
     QString resetSensitivityToAuto();
     const std::string &activeSymbol() const { return activeSymbol_; }
@@ -68,6 +74,7 @@ signals:
     void budgetsChanged();
 
 private:
+    void refreshCurrentPrice();
     HeatmapSettingsStore &store_;
     QString chartId_;
     ClientHeatmapConfig defaults_;
@@ -76,7 +83,10 @@ private:
     std::function<Context()> context_;
     std::string activeSymbol_;
     double currentPrice_ = 0;
+    bool activeRangeSaved_ = false;
+    bool userEditedRange_ = false;
     std::function<double()> currentPriceProvider_;
+    std::function<std::optional<VisibleLiquidity>(const std::string &)> visibleLiquidity_;
     std::function<bool(const HeatmapBudgets &)> budgetSink_;
 };
 

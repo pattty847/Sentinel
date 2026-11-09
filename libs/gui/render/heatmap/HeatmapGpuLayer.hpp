@@ -184,16 +184,16 @@ public:
     const DrawStyle &drawStyle() const { return style_; }
     recording::SizeScale displayScale() const { return displayScale_; }
     std::shared_ptr<const HeatmapPalette> palette() const { return palette_; }
-    // The liquidity (base-asset quantity, as sensitivityMin/Max) of the valid cells
-    // in the last label window of this symbol (5th percentile to maximum): the
-    // range slider's ends. valid false until one arrived; kept while the label
-    // gate is closed (zoomed out past kMaxLabelCells).
+    // The liquidity (base-asset quantity, as sensitivityMin/Max) of valid cells
+    // in the visible view from the latest current label result: the range slider's
+    // ends. valid false until one arrived; kept while the label gate is closed.
     struct LiquidityRange {
         double lo = 0, hi = 0;
         bool valid = false;
         bool operator==(const LiquidityRange &) const = default;
     };
     LiquidityRange liquidityRange() const { return liquidityRange_; }
+    LiquidityRange visibleLiquidityRange() const;
     struct LabelCounters {
         uint64_t posted = 0, results = 0, retries = 0, failures = 0;
         uint64_t lastPostedSerial = 0, epoch = 0;
@@ -216,6 +216,7 @@ signals:
     void buildFailed(QString message);
     void labelsChanged();         // a new label result (or a retry): the chart redraws
     void liquidityRangeChanged(); // liquidityRange() changed
+    void visibleLiquiditySampled(double lo, double hi);
 
 private:
     HeatmapDataService *service_ = nullptr;
@@ -281,7 +282,6 @@ private:
     mutable std::vector<HeatmapTileStats::Segment> segmentScratch_; // reused (matchLabelColumns)
     mutable std::vector<uint8_t> signatureColumns_;                 // reused (labelSignature)
     LiquidityRange liquidityRange_;
-    std::vector<double> liquidityScratch_;
     LabelCounters labelCounters_;
     std::shared_ptr<HeatmapCellCapture> capture_;
     std::atomic<int> rowPxDrawn_{0}, colPxDrawn_{0};

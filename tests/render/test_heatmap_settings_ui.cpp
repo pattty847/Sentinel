@@ -144,7 +144,7 @@ TEST(HeatmapSettingsModelTest, PersistsPerChart) {
     EXPECT_EQ(main.settings().palettePreset, "Ocean");
 }
 
-TEST(HeatmapSettingsModelTest, LiquidityRangeFollowsSymbolAndFreezesUsdDefaultAtFirstPrice) {
+TEST(HeatmapSettingsModelTest, VisibleLiquidityFitsOncePerSymbolAndRemembersUserEdits) {
     TempStore t;
     t.settings.setValue("heatmap/main/sensitivityMin", 99.0);
     t.settings.setValue("heatmap/main/sensitivityMax", 999.0);
@@ -155,52 +155,107 @@ TEST(HeatmapSettingsModelTest, LiquidityRangeFollowsSymbolAndFreezesUsdDefaultAt
     model.setContextProvider([&] { return HeatmapSettingsModel::Context{symbol, 60'000}; });
     const auto select = [&](const char *next) { symbol = next; model.selectSymbol(symbol); };
 
-    select("BTC-USD");
-    EXPECT_FALSE(model.settings().sensitivityReady);
-    EXPECT_EQ(model.settings().sensitivityMin, 0.05);
-    EXPECT_FALSE(t.store.loadSensitivity(symbol));
-    model.notePrice(symbol, 100'000);
-    EXPECT_TRUE(model.settings().sensitivityReady);
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.05);
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 50);
-    ASSERT_TRUE(model.apply({{"sensitivityMin", 0.06}, {"sensitivityMax", 60}}).isEmpty());
-
     select("ETH-USD");
     EXPECT_FALSE(model.settings().sensitivityReady);
+    EXPECT_FALSE(t.store.loadSensitivity(symbol));
     model.notePrice(symbol, 3'000);
+    EXPECT_TRUE(model.settings().sensitivityReady);
     EXPECT_NEAR(model.settings().sensitivityMin, 1.6666666667, 1e-9);
     EXPECT_NEAR(model.settings().sensitivityMax, 1666.6666667, 1e-6);
+    EXPECT_FALSE(t.store.loadSensitivity(symbol));
+    model.notePrice(symbol, 4'000);
+    EXPECT_NEAR(model.settings().sensitivityMin, 1.6666666667, 1e-9);
+    model.noteVisibleLiquidity(symbol, 0.1, 10);
     const auto eth = t.store.loadSensitivity(symbol);
     ASSERT_TRUE(eth);
-    model.notePrice(symbol, 4'000);
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, eth->min);
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, eth->max);
-    ASSERT_TRUE(model.apply({{"sensitivityMin", 2.0}, {"sensitivityMax", 2000.0}}).isEmpty());
+    EXPECT_DOUBLE_EQ(eth->min, 0.1);
+    EXPECT_DOUBLE_EQ(eth->max, 10);
+    EXPECT_EQ(eth->origin, HeatmapSettingsStore::RangeOrigin::Auto);
+    EXPECT_GT(eth->fittedAtMs, 0);
+    EXPECT_DOUBLE_EQ(eth->fittedAtPrice, 4'000);
+    model.noteVisibleLiquidity(symbol, 0.2, 20);
+    model.notePrice(symbol, 5'000);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.1);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 10);
+    EXPECT_EQ(t.store.loadSensitivity(symbol)->fittedAtMs, eth->fittedAtMs);
+    EXPECT_DOUBLE_EQ(t.store.loadSensitivity(symbol)->fittedAtPrice, 4'000);
 
-    select("SOL-USD");
-    EXPECT_FALSE(model.settings().sensitivityReady);
-    model.notePrice(symbol, 200);
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 25);
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 25'000);
     select("BTC-USD");
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.06);
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 60);
-    select("ETH-USD");
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 2);
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 2000);
-    model.notePrice(symbol, 4'000);
+    EXPECT_FALSE(model.settings().sensitivityReady);
+    model.noteVisibleLiquidity("ETH-USD", 0.2, 20);
+    EXPECT_FALSE(t.store.loadSensitivity(symbol));
+    model.notePrice(symbol, 100'000);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.05);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 50);
+    EXPECT_FALSE(t.store.loadSensitivity(symbol));
+    model.noteVisibleLiquidity(symbol, 0.01, 25);
+    EXPECT_DOUBLE_EQ(t.store.loadSensitivity(symbol)->min, 0.01);
+    ASSERT_TRUE(model.apply({{"sensitivityMin", 0.02}, {"sensitivityMax", 30}}).isEmpty());
+    EXPECT_EQ(t.store.loadSensitivity(symbol)->origin, HeatmapSettingsStore::RangeOrigin::User);
+    EXPECT_DOUBLE_EQ(t.store.loadSensitivity(symbol)->fittedAtPrice, 100'000);
+
+    ASSERT_TRUE(t.store.saveSensitivity("SOL-USD", {25, 25'000}));
+    select("SOL-USD");
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 25);
+    select("BTC-USD");
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.02);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 30);
+    model.notePrice(symbol, 100'000);
+    model.setVisibleLiquidityProvider([](const std::string &symbol)
+        -> std::optional<HeatmapSettingsModel::VisibleLiquidity> {
+        if (symbol == "BTC-USD") return HeatmapSettingsModel::VisibleLiquidity{0.005, 40};
+        return std::nullopt;
+    });
     ASSERT_TRUE(model.resetSensitivityToAuto().isEmpty());
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 1.25);
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 1250);
-    EXPECT_DOUBLE_EQ(t.store.loadSensitivity(symbol)->min, 1.25);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.005);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 40);
+    EXPECT_EQ(t.store.loadSensitivity(symbol)->origin, HeatmapSettingsStore::RangeOrigin::Auto);
+    EXPECT_DOUBLE_EQ(t.store.loadSensitivity(symbol)->fittedAtPrice, 100'000);
+    t.settings.sync();
+    QSettings reloaded(t.path, QSettings::IniFormat);
+    const auto autoRoundTrip = HeatmapSettingsStore(reloaded).loadSensitivity(symbol);
+    ASSERT_TRUE(autoRoundTrip);
+    EXPECT_EQ(autoRoundTrip->origin, HeatmapSettingsStore::RangeOrigin::Auto);
+    EXPECT_EQ(autoRoundTrip->fittedAtMs, t.store.loadSensitivity(symbol)->fittedAtMs);
+    EXPECT_DOUBLE_EQ(autoRoundTrip->fittedAtPrice, 100'000);
 
     select("PEPE-USD");
     model.notePrice(symbol, 1e-5);
     EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 5e8);
     EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 5e11);
-    EXPECT_DOUBLE_EQ(t.store.loadSensitivity(symbol)->max, 5e11);
+    EXPECT_FALSE(t.store.loadSensitivity(symbol));
+    model.noteVisibleLiquidity(symbol, 1e9, 1e11);
+    EXPECT_DOUBLE_EQ(t.store.loadSensitivity(symbol)->max, 1e11);
     EXPECT_FALSE(t.settings.contains("heatmap/main/sensitivityMin"));
     EXPECT_FALSE(t.settings.contains("heatmap/main/sensitivityMax"));
+}
+
+TEST(HeatmapSettingsModelTest, DragBeforeVisibleFitWinsAndMetadataRoundTrips) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    model.selectSymbol("DOGE-USD");
+    model.notePrice("DOGE-USD", 0.06);
+    ASSERT_TRUE(model.apply({{"sensitivityMin", 2}, {"sensitivityMax", 200}}, false).isEmpty());
+    model.noteVisibleLiquidity("DOGE-USD", 1, 100);
+    EXPECT_FALSE(t.store.loadSensitivity("DOGE-USD"));
+    ASSERT_TRUE(model.apply({{"sensitivityMin", 2}, {"sensitivityMax", 200}}, true).isEmpty());
+    const auto saved = t.store.loadSensitivity("DOGE-USD");
+    ASSERT_TRUE(saved);
+    EXPECT_DOUBLE_EQ(saved->min, 2);
+    EXPECT_DOUBLE_EQ(saved->max, 200);
+    EXPECT_EQ(saved->origin, HeatmapSettingsStore::RangeOrigin::User);
+    EXPECT_GT(saved->fittedAtMs, 0);
+    EXPECT_DOUBLE_EQ(saved->fittedAtPrice, 0.06);
+    model.noteVisibleLiquidity("DOGE-USD", 3, 300);
+    t.settings.sync();
+    QSettings again(t.path, QSettings::IniFormat);
+    const auto roundTrip = HeatmapSettingsStore(again).loadSensitivity("DOGE-USD");
+    ASSERT_TRUE(roundTrip);
+    EXPECT_DOUBLE_EQ(roundTrip->min, saved->min);
+    EXPECT_DOUBLE_EQ(roundTrip->max, saved->max);
+    EXPECT_EQ(roundTrip->origin, saved->origin);
+    EXPECT_EQ(roundTrip->fittedAtMs, saved->fittedAtMs);
+    EXPECT_DOUBLE_EQ(roundTrip->fittedAtPrice, saved->fittedAtPrice);
 }
 
 TEST(HeatmapSettingsModelTest, ChartControlsSeedEachSymbolsRangeFromItsOwnBookPrice) {
@@ -216,6 +271,7 @@ TEST(HeatmapSettingsModelTest, ChartControlsSeedEachSymbolsRangeFromItsOwnBookPr
     EXPECT_TRUE(model.settings().sensitivityReady);
     EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.05);
     EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 50);
+    EXPECT_FALSE(t.store.loadSensitivity("BTC-USD"));
     controls.requestLiquidityRange(0.1, 100, true);
     EXPECT_DOUBLE_EQ(t.store.loadSensitivity("BTC-USD")->min, 0.1);
 
@@ -225,15 +281,65 @@ TEST(HeatmapSettingsModelTest, ChartControlsSeedEachSymbolsRangeFromItsOwnBookPr
     EXPECT_TRUE(model.settings().sensitivityReady);
     EXPECT_NEAR(model.settings().sensitivityMin, 5.0 / 3.0, 1e-9);
     EXPECT_NEAR(model.settings().sensitivityMax, 5'000.0 / 3.0, 1e-6);
+    EXPECT_FALSE(t.store.loadSensitivity("ETH-USD"));
     controls.requestLiquidityRange(2, 2000, true);
     renderer.view()->controller().livePlacement().setLiveBookTop(3'999, 4'001);
     ASSERT_TRUE(model.resetSensitivityToAuto().isEmpty());
     EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 1.25);
     EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 1250);
+    EXPECT_FALSE(t.store.loadSensitivity("ETH-USD"));
     renderer.setActiveSymbol("BTC-USD");
     EXPECT_TRUE(model.settings().sensitivityReady);
     EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.1);
     EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 100);
+}
+
+TEST(HeatmapSettingsModelTest, ChartControlsSaveTheCurrentCellQueryRange) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    UnifiedGridRenderer renderer;
+    renderer.setSize(QSizeF(640, 320));
+    renderer.setHeatmapService(&lab::LabData::instance().service());
+    renderer.setActiveSymbol("BTC-USD");
+    renderer.view()->setTimeframe(int(minute));
+    HeatmapChartControls controls(&model);
+    controls.setRenderer(&renderer);
+    renderer.view()->controller().livePlacement().setLiveBookTop(99'990, 100'010);
+    ASSERT_TRUE(model.settings().sensitivityReady);
+    renderer.view()->setAutoPriceScale(false);
+    const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 2 * kHourMs + 10 * minute),
+                                        100'000, 100'180};
+    renderer.view()->setViewport(qint64(view.timeLoMs), qint64(view.timeHiMs), view.priceLo, view.priceHi);
+    EXPECT_FALSE(t.store.loadSensitivity("BTC-USD"));
+    ASSERT_TRUE(model.apply({{"tickMode", "manual"}, {"manualTick", 100}}).isEmpty());
+    auto *layer = renderer.gpuHeatmapLayer();
+    ASSERT_TRUE(layer);
+    std::optional<heatmap::HeatmapSettingsModel::VisibleLiquidity> sampled;
+    QObject::connect(layer, &heatmap::gpu::HeatmapGpuLayer::visibleLiquiditySampled, &renderer,
+                     [&](double lo, double hi) {
+                         if (!sampled) sampled = heatmap::HeatmapSettingsModel::VisibleLiquidity{lo, hi};
+                     });
+    layer->setSurface(640, 320, 1);
+    layer->setView(view, true);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (!t.store.loadSensitivity("BTC-USD") && elapsed.elapsed() < 10'000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        if (!layer->hasCurrentResolution()) continue;
+        layer->chooseTickForView(view);
+        QCoreApplication::sendPostedEvents(layer, QEvent::MetaCall);
+        if (layer->tickUnits() == 100) {
+            heatmap::gpu::HeatmapTileNode::Frame frame;
+            layer->prepareFrame(frame, QRectF(0, 0, 640, 320), view);
+        }
+    }
+    const auto saved = t.store.loadSensitivity("BTC-USD");
+    ASSERT_TRUE(saved);
+    ASSERT_TRUE(sampled);
+    EXPECT_DOUBLE_EQ(saved->min, sampled->lo);
+    EXPECT_DOUBLE_EQ(saved->max, sampled->hi);
+    EXPECT_EQ(saved->origin, HeatmapSettingsStore::RangeOrigin::Auto);
+    renderer.setHeatmapService(nullptr);
 }
 
 TEST(CandleStyleTest, PhysicalWicksSnapAndDojiIsOnePixel) {
@@ -1030,7 +1136,7 @@ TEST(HeatmapSettingsDialogTest, EveryTabShowsTheModel) {
     EXPECT_TRUE(child<QCheckBox>(dialog, "showTelemetry")->isChecked());
 }
 
-TEST(HeatmapSettingsDialogTest, ResetRangeToAutoUsesCurrentSymbolsLatestPrice) {
+TEST(HeatmapSettingsDialogTest, ResetRangeToAutoFitsVisibleLiquidity) {
     TempStore t;
     HeatmapSettingsModel model(t.store, "main", t.config);
     model.setContextProvider([] { return HeatmapSettingsModel::Context{"ETH-USD", 60'000}; });
@@ -1038,12 +1144,17 @@ TEST(HeatmapSettingsDialogTest, ResetRangeToAutoUsesCurrentSymbolsLatestPrice) {
     model.notePrice("ETH-USD", 3'000);
     ASSERT_TRUE(model.apply({{"sensitivityMin", 3.0}, {"sensitivityMax", 3000.0}}).isEmpty());
     model.notePrice("ETH-USD", 4'000);
+    model.setVisibleLiquidityProvider([](const std::string &)
+        -> std::optional<HeatmapSettingsModel::VisibleLiquidity> {
+        return HeatmapSettingsModel::VisibleLiquidity{0.8, 800};
+    });
     HeatmapSettingsDialog dialog(&model, nullptr);
     child<QPushButton>(dialog, "sensitivityResetAuto")->click();
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 1.25);
-    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 1250);
-    EXPECT_DOUBLE_EQ(t.store.loadSensitivity("ETH-USD")->min, 1.25);
-    EXPECT_DOUBLE_EQ(child<QDoubleSpinBox>(dialog, "sensitivityMin")->value(), 1.25);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMin, 0.8);
+    EXPECT_DOUBLE_EQ(model.settings().sensitivityMax, 800);
+    EXPECT_DOUBLE_EQ(t.store.loadSensitivity("ETH-USD")->min, 0.8);
+    EXPECT_EQ(t.store.loadSensitivity("ETH-USD")->origin, HeatmapSettingsStore::RangeOrigin::Auto);
+    EXPECT_DOUBLE_EQ(child<QDoubleSpinBox>(dialog, "sensitivityMin")->value(), 0.8);
 }
 
 TEST(HeatmapSettingsDialogTest, EveryVisibleEnabledControlHasATooltip) {

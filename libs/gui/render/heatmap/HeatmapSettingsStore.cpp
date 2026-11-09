@@ -1,4 +1,5 @@
 #include "HeatmapSettingsStore.hpp"
+#include <QDateTime>
 #include "HeatmapSourceController.hpp"
 #include <QJsonArray>
 #include <QRegularExpression>
@@ -252,7 +253,8 @@ void HeatmapSettingsStore::removeLegacySensitivity(const QString &id) {
     settings_->remove(prefix + "sensitivityMax");
 }
 QString HeatmapSettingsStore::applyChartPatch(const QString &id, HeatmapChartSettings &current,
-    const QJsonObject &patch, bool persist, const ClientHeatmapConfig &defaults, const std::string &symbol, int64_t tfMs) {
+    const QJsonObject &patch, bool persist, const ClientHeatmapConfig &defaults, const std::string &symbol, int64_t tfMs,
+    std::optional<SensitivityRange> sensitivity) {
     auto next = current;
     if (const auto error = applySettingsPatch(next, patch); !error.isEmpty()) return error;
     if (persist) {
@@ -263,8 +265,13 @@ QString HeatmapSettingsStore::applyChartPatch(const QString &id, HeatmapChartSet
         // choice with a chart-wide default (or a previous process-only override).
         if (next.tickMode == TickMode::Manual && patch.contains("manualTick"))
             saveManualTick(symbol, tfMs, next.manualTick);
-        if (!symbol.empty() && (patch.contains("sensitivityMin") || patch.contains("sensitivityMax")))
-            saveSensitivity(symbol, {next.sensitivityMin, next.sensitivityMax});
+        if (!symbol.empty() && (patch.contains("sensitivityMin") || patch.contains("sensitivityMax"))) {
+            auto range = sensitivity.value_or(SensitivityRange{next.sensitivityMin, next.sensitivityMax,
+                RangeOrigin::User, QDateTime::currentMSecsSinceEpoch(), 0});
+            range.min = next.sensitivityMin;
+            range.max = next.sensitivityMax;
+            saveSensitivity(symbol, range);
+        }
     }
     current = std::move(next);
     return {};
@@ -312,14 +319,24 @@ std::optional<HeatmapSettingsStore::SensitivityRange> HeatmapSettingsStore::load
     const double high = settings_->value(prefix + "max").toDouble(&highOk);
     if (!lowOk || !highOk || !std::isfinite(low) || !std::isfinite(high) || low < 1e-9 || low > 1e12 ||
         high > 1e15 || high <= low) return std::nullopt;
-    return SensitivityRange{low, high};
+    const QString origin = settings_->value(prefix + "origin", "user").toString();
+    bool timeOk = false, priceOk = false;
+    const int64_t atMs = settings_->value(prefix + "fittedAtMs", 0).toLongLong(&timeOk);
+    const double atPrice = settings_->value(prefix + "fittedAtPrice", 0.0).toDouble(&priceOk);
+    if ((origin != "auto" && origin != "user") || !timeOk || atMs < 0 || !priceOk ||
+        !std::isfinite(atPrice) || atPrice < 0) return std::nullopt;
+    return SensitivityRange{low, high, origin == "auto" ? RangeOrigin::Auto : RangeOrigin::User, atMs, atPrice};
 }
 bool HeatmapSettingsStore::saveSensitivity(const std::string &symbol, SensitivityRange range) {
     if (symbol.empty() || !std::isfinite(range.min) || !std::isfinite(range.max) ||
-        range.min < 1e-9 || range.min > 1e12 || range.max > 1e15 || range.max <= range.min) return false;
+        range.min < 1e-9 || range.min > 1e12 || range.max > 1e15 || range.max <= range.min ||
+        range.fittedAtMs < 0 || !std::isfinite(range.fittedAtPrice) || range.fittedAtPrice < 0) return false;
     const auto prefix = "heatmap/sensitivity/" + segment(QString::fromStdString(symbol)) + "/";
     settings_->setValue(prefix + "min", range.min);
     settings_->setValue(prefix + "max", range.max);
+    settings_->setValue(prefix + "origin", range.origin == RangeOrigin::Auto ? "auto" : "user");
+    settings_->setValue(prefix + "fittedAtMs", qlonglong(range.fittedAtMs));
+    settings_->setValue(prefix + "fittedAtPrice", range.fittedAtPrice);
     return true;
 }
 void HeatmapSettingsStore::removeSensitivity(const std::string &symbol) {

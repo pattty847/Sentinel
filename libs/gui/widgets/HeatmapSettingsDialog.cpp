@@ -542,7 +542,7 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     form->addRow("Range high (base asset)", m_sensitivityMax);
     auto *resetSensitivity = new QPushButton("Reset range to auto", page);
     resetSensitivity->setObjectName("sensitivityResetAuto");
-    resetSensitivity->setToolTip("Recompute this symbol's range from its current price and save it.");
+    resetSensitivity->setToolTip("Fit this symbol's visible liquidity again when it is available.");
     form->addRow(resetSensitivity);
     connect(resetSensitivity, &QPushButton::clicked, this, [this] {
         if (const auto error = m_model->resetSensitivityToAuto(); !error.isEmpty()) showStatus(error, true);

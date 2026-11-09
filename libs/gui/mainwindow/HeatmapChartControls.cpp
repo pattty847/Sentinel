@@ -42,6 +42,14 @@ HeatmapChartControls::HeatmapChartControls(heatmap::HeatmapSettingsModel *model,
         const auto &session = controller.session();
         return session.bookMidValid ? session.bookMid : session.lastTrade;
     });
+    m_model->setVisibleLiquidityProvider([this](const std::string &symbol)
+        -> std::optional<heatmap::HeatmapSettingsModel::VisibleLiquidity> {
+        const auto *layer = m_renderer ? m_renderer->gpuHeatmapLayer() : nullptr;
+        if (!layer || layer->symbol() != symbol) return std::nullopt;
+        const auto range = layer->visibleLiquidityRange();
+        if (!range.valid) return std::nullopt;
+        return heatmap::HeatmapSettingsModel::VisibleLiquidity{range.lo, range.hi};
+    });
 }
 
 void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
@@ -75,12 +83,25 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
             scheduleIndicator();
         });
         connect(layer, &Layer::liquidityRangeChanged, this, &HeatmapChartControls::scheduleIndicator);
+        connect(layer, &Layer::visibleLiquiditySampled, this,
+                [this](double lo, double hi) { fitVisibleLiquidity(lo, hi); });
     }
     if (m_dock) setTelemetryDock(m_dock); // the provider reads the new renderer
     m_appliedLadder.reset();
     applyLadderSettings();
     updateSensitivityContext();
+    if (const auto range = renderer->gpuHeatmapLayer()->visibleLiquidityRange(); range.valid)
+        fitVisibleLiquidity(range.lo, range.hi);
     syncNow();
+}
+
+void HeatmapChartControls::fitVisibleLiquidity(double lo, double hi) {
+    if (!m_renderer || !m_renderer->gpuHeatmapLayer()) return;
+    const auto *layer = m_renderer->gpuHeatmapLayer();
+    const bool wasUpdating = m_sensitivityContextUpdating;
+    m_sensitivityContextUpdating = true;
+    m_model->noteVisibleLiquidity(layer->symbol(), lo, hi);
+    m_sensitivityContextUpdating = wasUpdating;
 }
 
 void HeatmapChartControls::updateSensitivityContext() {
@@ -450,7 +471,10 @@ void HeatmapChartControls::syncTelemetryVisibility() {
 void HeatmapChartControls::onModelChanged(bool explicitManualTick) {
     const auto &s = m_model->settings();
     if (m_sensitivityContextUpdating) {
-        if (m_renderer && m_renderer->gpuHeatmapLayer()) m_renderer->gpuHeatmapLayer()->setSettings(s);
+        if (m_renderer && m_renderer->gpuHeatmapLayer()) {
+            m_renderer->gpuHeatmapLayer()->setSettings(s);
+            m_renderer->update();
+        }
         syncNow();
         return;
     }
