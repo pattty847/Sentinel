@@ -215,12 +215,14 @@ private:
     };
     recording::FlowStore* m_flowStore = nullptr;
     std::map<std::string, int64_t> m_flowWakeThrough;
+    std::map<std::string, int64_t> m_flowRetentionFloor;
     std::map<std::string, FlowProduct> m_flowProducts;
     std::vector<std::shared_ptr<FlowSubscription>> m_flowSubscriptions;
     QTimer m_flowTimer;
     uint64_t m_flowDroppedTrades = 0, m_flowDroppedBuckets = 0, m_flowMissingGridTrades = 0;
     uint64_t m_flowHourShrinkRefusals = 0;
     int64_t flowMinuteRetainedFrom(const std::string& symbol, int64_t clock) const;
+    void updateFlowRetentionFloor(const std::string& symbol, int64_t clock);
     void pruneFlowSeries(const std::string& symbol, int64_t clock, int64_t tf, FlowSeries& series);
     void addFlowTrade(const Trade& trade, int64_t exchangeMs);
     void publishFlow();

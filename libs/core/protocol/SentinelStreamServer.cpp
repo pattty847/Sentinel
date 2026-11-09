@@ -273,8 +273,6 @@ Page buildPage(const Request& q, const ServerDataModel::FlowHistorySnapshot& sna
     int64_t replayEnd = q.from;
     if (q.tf == 1000) {
         replayEnd = std::clamp(snapshot.retainedFromMs, q.from, q.to);
-        if (replayEnd - q.from > recording::FlowStore::kMaxReplayWindowMs)
-            throw std::invalid_argument("1s journal replay cap is 3600000 ms (1 h)");
         if (q.from < replayEnd && snapshot.store)
             append(source, snapshot.store->buildWindow(q.symbol, q.from, replayEnd, stop), q.from, replayEnd);
         append(source, snapshot.data, replayEnd, q.to);
@@ -1653,12 +1651,6 @@ public:
         if (closing_.load()) return;
         const bool replay = q.tf == 1000 && snapshot.store &&
             q.from < std::clamp(snapshot.retainedFromMs, q.from, q.to);
-        if (replay && std::clamp(snapshot.retainedFromMs, q.from, q.to) - q.from >
-                          recording::FlowStore::kMaxReplayWindowMs) {
-            flowHistoryBusy_ = false;
-            flowHistoryError(q, "1s journal replay cap is 3600000 ms (1 h)");
-            return;
-        }
         if (replay && owner_->m_flowReplayBusy.exchange(true, std::memory_order_acq_rel)) {
             flowHistoryBusy_ = false;
             flowHistoryError(q, "1s journal replay busy");

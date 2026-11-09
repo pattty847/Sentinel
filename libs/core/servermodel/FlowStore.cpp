@@ -635,8 +635,44 @@ FlowStore::DayIndex FlowStore::indexFor(const std::string &symbol, int64_t day) 
     return index_.try_emplace(key, std::move(loaded)).first->second;
 }
 void FlowStore::publishIndex(const std::string &symbol, int64_t day, const DayIndex &index) {
+    {
+        std::lock_guard lock(indexMutex_);
+        index_[{symbol, day}] = index;
+    }
+    if (index.valid)
+        for (int h = 0; h < 24; ++h)
+            if (index.hours & (1u << h)) buildFailures_.erase({symbol, day + h * Hour});
+    refreshBuiltThrough(symbol);
+}
+void FlowStore::setLiveRetentionFloor(const std::string &symbol, int64_t hourMs) {
+    sentinel::capture::validateSymbol(symbol);
+    if (hourMs < 0 || hourMs % Hour) throw std::invalid_argument("invalid live retention floor");
     std::lock_guard lock(indexMutex_);
-    index_[{symbol, day}] = index;
+    liveRetentionFloor_[symbol] = hourMs;
+}
+void FlowStore::refreshBuiltThrough(const std::string &symbol) {
+    const auto first = firstHour_.find(symbol);
+    if (first == firstHour_.end()) return;
+    const auto through = options_.hourThrough(symbol) / Hour * Hour;
+    int64_t floor = std::max<int64_t>(0, through - 6 * Hour);
+    {
+        std::lock_guard lock(indexMutex_);
+        if (const auto it = liveRetentionFloor_.find(symbol); it != liveRetentionFloor_.end()) floor = it->second;
+    }
+    auto built = std::max(first->second, floor);
+    for (auto hour = built; hour < through; hour += Hour) {
+        const auto index = indexFor(symbol, dayFloor(hour));
+        if (!index.valid || !(index.hours & (1u << ((hour - dayFloor(hour)) / Hour)))) break;
+        built = hour + Hour;
+    }
+    std::lock_guard lock(indexMutex_);
+    builtThrough_[symbol] = std::min(built, through);
+}
+void FlowStore::noteBuildFailure(const std::string &symbol, int64_t hour, const std::string &reason) {
+    const auto count = ++buildFailures_[{symbol, hour}];
+    if (count == 1 || count % 10 == 0)
+        sLog_Warning("Flow hour build failed symbol=" << symbol << " hour=" << hour
+                     << " count=" << count << " reason=" << reason);
 }
 std::map<fs::path, FlowStore::FileIdentity> FlowStore::inventory(const std::string &symbol,
                                                                  std::stop_token stop) const {
@@ -685,19 +721,6 @@ void FlowStore::writeDay(const flow::DayFile &day, uint32_t hours, uint32_t revi
 FlowStore::PassResult FlowStore::runPass(std::stop_token stop) {
     std::lock_guard lock(passMutex_);
     PassResult result;
-    const auto refreshBuiltThrough = [&](const std::string& symbol) {
-        const auto it = firstHour_.find(symbol);
-        if (it == firstHour_.end()) return;
-        const auto through = options_.hourThrough(symbol) / Hour * Hour;
-        auto built = it->second;
-        std::lock_guard indexLock(indexMutex_);
-        for (; built < through; built += Hour) {
-            const auto index = index_.find({symbol, dayFloor(built)});
-            if (index == index_.end() || !index->second.valid ||
-                !(index->second.hours & (1u << ((built - dayFloor(built)) / Hour)))) break;
-        }
-        builtThrough_[symbol] = built;
-    };
     for (const auto &symbol : options_.symbols) {
         try {
             checkStop(stop);
@@ -710,7 +733,6 @@ FlowStore::PassResult FlowStore::runPass(std::stop_token stop) {
             ++result.failed;
             sLog_Warning("Flow build failed symbol=" << symbol << " error=" << e.what());
         }
-        refreshBuiltThrough(symbol);
     }
     result.stopped = result.stopped || stop.stop_requested();
     return result;
@@ -765,6 +787,8 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
         firstHour_[symbol] = std::max<int64_t>(0, first / Hour * Hour);
     }
     const auto first = firstHour_.at(symbol);
+    // Load the recent committed indexes before any journal replay can block this pass.
+    refreshBuiltThrough(symbol);
     const auto nearDays = hmcDayPaths(options_, symbol, stop);
     {
         std::lock_guard catalogLock(catalogMutex_);
@@ -802,6 +826,11 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
         for (int h = 0; h < 24; ++h)
             if (day + h * Hour >= first && day + (h + 1) * Hour <= through)
                 wanted |= 1u << h;
+        const auto noteRunFailure = [&](int64_t from, int64_t to, const char *reason) {
+            for (auto hour = from; hour < to; hour += Hour)
+                noteBuildFailure(symbol, hour, reason);
+        };
+        try {
         const auto nearIt = nearDays.find(day);
         const fs::path hmcPath = nearIt == nearDays.end() ? fs::path{} : nearIt->second;
         bool sourceChanged = index.valid && potentiallyChanged(index, day);
@@ -916,12 +945,18 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
                 const auto afterFiles = inventory(symbol, stop);
                 if (afterFiles.size() != currentFiles.size() ||
                     std::any_of(afterFiles.begin(), afterFiles.end(),
-                                [&](const auto &entry) { return !currentFiles.contains(entry.first); }))
+                                [&](const auto &entry) { return !currentFiles.contains(entry.first); })) {
+                    noteRunFailure(runFirst, runEnd, "journal inventory changed");
                     return;
-                if (!sourcesMatch(sources, files, sourceCutoff(day, nextHours), stop))
+                }
+                if (!sourcesMatch(sources, files, sourceCutoff(day, nextHours), stop)) {
+                    noteRunFailure(runFirst, runEnd, "journal source changed");
                     return;
-                if (options_.hourThrough(symbol) < runEnd)
+                }
+                if (options_.hourThrough(symbol) < runEnd) {
+                    noteRunFailure(runFirst, runEnd, "recorder hourThrough regressed");
                     return;
+                }
                 data.bars.insert(data.bars.end(), std::make_move_iterator(bars.begin()),
                                  std::make_move_iterator(bars.end()));
                 data.revisions.insert(data.revisions.end(), bars.size(), revision);
@@ -956,8 +991,19 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
                 high = low - 1;
                 built = true;
             }
-            if (!built)
+            if (!built) {
+                noteRunFailure(day + low * Hour, day + (high + 1) * Hour, "journal tail unavailable");
                 high = low - 1;
+            }
+        }
+        } catch (const Cancelled &) {
+            throw;
+        } catch (const std::exception &e) {
+            const auto current = indexFor(symbol, day);
+            for (int h = 0; h < 24; ++h)
+                if ((wanted & (1u << h)) && (!current.valid || !(current.hours & (1u << h))))
+                    noteBuildFailure(symbol, day + h * Hour, e.what());
+            ++result.failed;
         }
         if (day == 0)
             break;

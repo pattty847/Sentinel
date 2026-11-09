@@ -4,6 +4,8 @@
 #include "roller/fixtures/FlowJournal.hpp"
 #include "roller/Grid.hpp"
 #include <gtest/gtest.h>
+#include <QCryptographicHash>
+#include <QFile>
 #include <future>
 #include <iostream>
 #include <thread>
@@ -534,6 +536,76 @@ TEST_F(FlowHistory, BuiltThroughSeamRetainsLaggingHourWithoutDuplicateStoreMinut
         EXPECT_EQ(seam.header["bars"][i]["source"], i < 2 ? "store" : "live");
     for (size_t i = 1; i < seam.bars.size(); ++i)
         EXPECT_EQ(seam.bars[i].startMs - seam.bars[i - 1].startMs, Minute);
+}
+TEST_F(FlowHistory, RestartLoadsBuiltWatermarkBeforeNextHourCommits) {
+    Journal writer(journal);
+    writer.snapshot(0); writer.heartbeat(3 * Hour + Minute); writer.close();
+    through = Epoch + 2 * Hour;
+    ASSERT_EQ(store->runPass().built, 2u);
+    fixture->model->attachFlowStore(nullptr);
+    store.reset();
+    through = Epoch + 3 * Hour;
+    std::promise<void> entered, release;
+    auto released = release.get_future().share();
+    recording::FlowStore::Options options;
+    options.root = root; options.journalRoot = journal; options.hmc2Root = hmc;
+    options.symbols = {"BTC-USD"};
+    options.hourThrough = [this](const std::string&) { return through; };
+    options.beforeCommitForTest = [&](const fs::path&) { entered.set_value(); released.wait(); };
+    store = std::make_unique<recording::FlowStore>(std::move(options));
+    fixture->model->attachFlowStore(store.get());
+    auto ready = entered.get_future();
+    auto pass = std::async(std::launch::async, [&] { return store->runPass(); });
+    const auto status = ready.wait_for(5s);
+    if (status != std::future_status::ready) {
+        release.set_value();
+        FAIL() << "new hour did not reach commit";
+    }
+    EXPECT_EQ(store->sealedThroughMs("BTC-USD"), Epoch + 2 * Hour);
+    release.set_value();
+    EXPECT_EQ(pass.get().built, 1u);
+    EXPECT_EQ(store->sealedThroughMs("BTC-USD"), Epoch + 3 * Hour);
+}
+TEST_F(FlowHistory, OldFailedHourDoesNotPinRecentBuiltWatermark) {
+    Journal writer(journal);
+    writer.snapshot(0);
+    writer.trades(24 * Hour + 1000, {trade(24 * Hour + 800, "recent", 100000)});
+    writer.heartbeat(25 * Hour + Minute); writer.close();
+    through = Epoch + 25 * Hour;
+    ASSERT_EQ(store->runPass().built, 25u);
+    const auto path = store->filePath("BTC-USD", Epoch);
+    QFile file(QString::fromStdString(path.string()));
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    const auto dayBytes = file.readAll(); file.close();
+    QFile sidecar(QString::fromStdString(path.string() + ".state"));
+    ASSERT_TRUE(sidecar.open(QIODevice::ReadOnly));
+    auto state = sidecar.readAll(); sidecar.close();
+    ASSERT_GT(state.size(), 32);
+    ASSERT_NE(uint8_t(state[5]) & 1u, 0u);
+    state[5] = char(uint8_t(state[5]) & ~1u); // the old, empty hour stays unbuilt
+    QCryptographicHash digest(QCryptographicHash::Sha256);
+    digest.addData(QByteArrayView(state.constData(), state.size() - 32));
+    digest.addData(dayBytes);
+    state.replace(state.size() - 32, 32, digest.result());
+    ASSERT_TRUE(sidecar.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    ASSERT_EQ(sidecar.write(state), state.size()); sidecar.close();
+    fs::last_write_time(path.string() + ".state",
+                        fs::last_write_time(path.string() + ".state") + std::chrono::seconds(2));
+    failRebuild.store(true);
+    EXPECT_EQ(store->runPass().failed, 1u);
+    EXPECT_EQ(store->runPass().failed, 1u);
+    EXPECT_EQ(store->sealedThroughMs("BTC-USD"), through);
+    const auto old = store->window("BTC-USD", Epoch, Epoch + Hour);
+    ASSERT_EQ(old.ranges.size(), 1u);
+    EXPECT_EQ(old.ranges[0].status, "building");
+    const auto recent = store->window("BTC-USD", Epoch + 19 * Hour, through);
+    ASSERT_EQ(recent.ranges.size(), 6u);
+    for (const auto& range : recent.ranges) EXPECT_EQ(range.status, "complete");
+    ASSERT_EQ(recent.bars.size(), 1u);
+    connect();
+    const auto page = request(Hour, Epoch, 1);
+    EXPECT_EQ(page.header["status"], "building");
+    EXPECT_EQ(page.header["sealed_through_ms"], through);
 }
 TEST_F(FlowHistory, InvalidatedHourRollsBackBuiltThroughBeforeRebuildCompletes) {
     seed();

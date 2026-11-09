@@ -349,11 +349,20 @@ builder catches up. After a restart, missing unsealed minutes remain building;
 live coverage starts with the first observed trade and cannot prove an earlier
 prefix. Empty observed minutes are covered without fabricating trades.
 
+The built-through watermark scans contiguous indexed hours from the live
+retention floor (the journal clock less the one-minute grace and six closed
+hours). An older unbuilt hour remains `building` in its own range but does not
+hold the watermark behind the live fallback window. On restart, committed day
+indexes establish the watermark before new hours finish building. Repeated
+hour-build failures log the symbol, hour and reason.
+
 Second bars use the retained live 30-minute series. Older portions use a
 worker-local, one-shot journal replay with no persistent writes. The replay
-window cap is 3,600,000 ms (1 h), enforced independently of the stricter 512-bar
-page cap. A two-hour 1 s request is refused with the one-hour cap named in its
-error. Journal replay uses the same grid resolver, trade builder and receive-time
+API has a 3,600,000 ms (1 h) defensive window cap; the 512-bar page limit is
+stricter for server requests. A two-hour 1 s request is refused with both limits
+named in its error. The time cap does not bound replay work to one hour of
+records: a request may read one hourly journal segment plus the requested
+window. Journal replay uses the same grid resolver, trade builder and receive-time
 tail as the store. A missing/short journal returns partial coverage. A
 second replayed inside an unsealed hour remains provisional (`source: "live"`).
 Seconds inside the 30-minute RAM retention are served from RAM without a
@@ -362,7 +371,7 @@ is labelled `source: "store"` and final; older seconds use replay. A
 RAM-served final second uses store revision zero so a later journal replay with
 a store generation can replace it. Only one
 replay runs server-wide at a time. A concurrent replay gets a `busy` error;
-session close or server stop cancels an active replay.
+session close or server stop cancels an active replay per record.
 
 ### Client merge of flow bars
 

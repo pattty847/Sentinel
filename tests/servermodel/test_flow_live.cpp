@@ -5,6 +5,7 @@
 #include "flow/FlowScales.hpp"
 #include "roller/JournalFeed.hpp"
 #include "roller/Roller.hpp"
+#include "servermodel/FlowStore.hpp"
 #include <QTimeZone>
 #include <gtest/gtest.h>
 
@@ -128,6 +129,41 @@ TEST_F(FlowLive, CoalescesChangesClosesOnceAndRevisesLateTrade) {
   model->onTrade(trade(Day + 64000, "after-unsubscribe"));
   tick(Day + 65000);
   EXPECT_EQ(frames.size(), 3u);
+}
+
+TEST_F(FlowLive, RetainedClosedMinuteThreeHoursOldRevisesWithoutLosingCompleteness) {
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  const auto base = std::filesystem::path(temp.path().toStdString());
+  std::filesystem::create_directory(base / "journal");
+  std::filesystem::create_directory(base / "hmc");
+  recording::FlowStore::Options options;
+  options.root = base / "flow";
+  options.journalRoot = base / "journal";
+  options.hmc2Root = base / "hmc";
+  options.symbols = {"BTC-USD"};
+  options.hourThrough = [](const std::string&) { return Day; };
+  recording::FlowStore store(std::move(options));
+  model->attachFlowStore(&store);
+  auto sub = subscribe();
+  model->onTrade(trade(Day, "first"));
+  tick(Day + 61'000);
+  ASSERT_FALSE(frames.empty());
+  const auto initial = frames.back();
+  ASSERT_EQ(initial["bucket_start_ms"], Day);
+  EXPECT_EQ(initial["revision"], 0);
+  EXPECT_EQ(initial["complete"], true);
+  tick(Day + 3 * 3'600'000 + 60'000);
+  const auto before = frames.size();
+  model->onTrade(trade(Day + 30'000, "late"));
+  tick(Day + 3 * 3'600'000 + 61'000);
+  ASSERT_GT(frames.size(), before);
+  EXPECT_EQ(frames.back()["bucket_start_ms"], Day);
+  EXPECT_EQ(frames.back()["revision"], 1);
+  EXPECT_EQ(frames.back()["complete"], initial["complete"]);
+  EXPECT_EQ(sentinel::flow::decodeFlowBar(bytes(frames.back())).count, 2u);
+  sub->active.store(false);
+  model->attachFlowStore(nullptr);
 }
 
 TEST_F(FlowLive, SecondRetentionDropsOldTradesAndCannotGrowWithoutTimer) {

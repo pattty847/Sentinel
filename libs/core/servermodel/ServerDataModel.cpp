@@ -259,6 +259,7 @@ void ServerDataModel::onFeedMetadata(const std::string& symbol, const nlohmann::
 void ServerDataModel::onFeedWatermark(const std::string& symbol, int64_t journalMs) {
     if (auto it = m_flowProducts.find(symbol); it != m_flowProducts.end()) {
         it->second.clock = std::max(it->second.clock, journalMs - kFlowCloseDelayMs);
+        updateFlowRetentionFloor(symbol, it->second.clock);
         for (auto& [day, state] : it->second.days)
             pruneFlowSeries(symbol, it->second.clock, 1000, state.series.at(1000));
     }
@@ -895,6 +896,21 @@ void ServerDataModel::attachFlowStore(recording::FlowStore* store) {
     }
     m_flowStore = store;
     m_flowWakeThrough.clear();
+    m_flowRetentionFloor.clear();
+    if (store)
+        for (const auto& [symbol, product] : m_flowProducts)
+            if (product.clock > 0) updateFlowRetentionFloor(symbol, product.clock);
+}
+
+void ServerDataModel::updateFlowRetentionFloor(const std::string& symbol, int64_t clock) {
+    if (!m_flowStore) return;
+    const auto normal = std::max<int64_t>(0, clock - kFlowRolloverGraceMs) /
+        3'600'000 * 3'600'000;
+    const auto floor = std::max<int64_t>(0, normal - 6 * 3'600'000);
+    auto [it, inserted] = m_flowRetentionFloor.try_emplace(symbol, floor);
+    if (!inserted && it->second == floor) return;
+    it->second = floor;
+    m_flowStore->setLiveRetentionFloor(symbol, floor);
 }
 
 void ServerDataModel::onFlowHourThrough(const std::string& symbol, int64_t through) {
@@ -1018,9 +1034,14 @@ void ServerDataModel::addFlowTrade(const Trade& trade, int64_t ms) {
                  trade.side == AggressorSide::Sell ? sentinel::flow::Side::Sell : sentinel::flow::Side::Unknown;
     for (auto& [tf, series] : day->second.series) {
         const auto start = ms / tf * tf;
+        // An expired RAM second is replayed from the journal; its rejection does not lose the minute.
+        const bool expiredSecond = tf == 1000 &&
+            ms < product.clock / 1000 * 1000 - kFlowSecondRetentionMs + 1000;
         auto& slot = series.bucketSlots[(ms / tf) % series.bucketSlots.size()];
         if (slot.start >= 0 && slot.start != start) {
-            ++series.capacityDrops; ++m_flowDroppedTrades; markLoss(); continue;
+            ++series.capacityDrops; ++m_flowDroppedTrades;
+            if (!expiredSecond) markLoss();
+            continue;
         }
         const auto dropped = series.builder.droppedRejectCount();
         const auto result = series.builder.add(input);
@@ -1028,7 +1049,7 @@ void ServerDataModel::addFlowTrade(const Trade& trade, int64_t ms) {
             slot.start = start; slot.dirty = true;
             day->second.hasBuckets = true;
         } else if (result == sentinel::flow::FlowBarBuilder::AddResult::Rejected) {
-            markLoss();
+            if (!expiredSecond) markLoss();
             if (series.builder.droppedRejectCount() == dropped) ++m_flowDroppedTrades;
         }
         m_flowDroppedTrades += series.builder.droppedRejectCount() - dropped;
