@@ -148,7 +148,7 @@ TEST(TradeBubbleFeed, TapeSettingsAndPublicationStayTogether) {
     TimeAxisMapping mapping; mapping.viewStartMs = 42;
     feed.publish(mapping);
     EXPECT_EQ(feed.tradeBubbleRenderFrame(), frame);
-    EXPECT_TRUE(frame->enabled); EXPECT_EQ(frame->minNotional, 30);
+    EXPECT_TRUE(frame->enabled); EXPECT_EQ(frame->options.minimum, 30);
     EXPECT_EQ(frame->mapping.viewStartMs, 42);
     feed.disableFrame(); EXPECT_FALSE(frame->enabled);
     feed.clear(); EXPECT_TRUE(frame->tape->samples().empty());

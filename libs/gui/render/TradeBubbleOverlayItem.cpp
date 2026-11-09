@@ -2,6 +2,7 @@
 #include "TradeBubbleNode.hpp"
 #include "chart/feeds/TradeBubbleFeed.hpp"
 #include <QQuickWindow>
+#include <QTimer>
 
 namespace {
 class OverlayRoot final : public QSGNode {
@@ -25,7 +26,7 @@ void trade_bubbles::RenderLink::sync() {
         syncedRevision = providerRevision;
     }
     if (frame) {
-        node->sync(*frame->tape, frame->mapping, frame->enabled, frame->minNotional, frame->buy, frame->sell);
+        node->sync(*frame->tape, frame->mapping, frame->enabled, frame->options, frame->buy, frame->sell);
     } else {
         // Clearing a provider also clears its old mesh; no QObject is accessed here.
         node->clear();
@@ -59,7 +60,18 @@ void TradeBubbleOverlayItem::connectWindow() {
     // afterSynchronizing runs on the render thread while the GUI is blocked,
     // before QSG batching. Capture only C++ render data, never a QObject graph.
     m_syncConnection = connect(window(), &QQuickWindow::afterSynchronizing, window(),
-                              [link=m_link] { link->sync(); }, Qt::DirectConnection);
+                              [this, link=m_link] {
+        link->sync();
+        if (!link->frame || !link->frame->referencePending.load() || link->retryQueued.exchange(true)) return;
+        const int delay = link->frame->referenceRetryMs;
+        QMetaObject::invokeMethod(this, [this, link, delay] {
+            QTimer::singleShot(delay, this, [this, link] {
+                link->retryQueued.store(false);
+                if (link != m_link || !link->frame || !link->frame->referencePending.load()) return;
+                if (auto* item = qobject_cast<QQuickItem*>(m_renderer.data())) item->update();
+            });
+        }, Qt::QueuedConnection);
+    }, Qt::DirectConnection);
 }
 QSGNode* TradeBubbleOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
     auto* root = static_cast<OverlayRoot*>(oldNode);

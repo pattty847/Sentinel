@@ -13,7 +13,7 @@ class TradeBubbleFeed final : public ITradeBubbleFrameSource {
     friend struct ::TradeBubbleRendererTest;
 public:
     bool append(const Trade& trade);
-    void clear() { tape_->clear(); }
+    void clear() { tape_->clear(); statistics_.reset(); }
     void setSettings(const heatmap::HeatmapChartSettings&, const std::function<void()>& notify);
     void publish(const TimeAxisMapping&);
     void disableFrame() { frame_->enabled = false; }
@@ -25,5 +25,9 @@ private:
     bool above_ = true, show_ = false;
     double minimum_ = 0;
     QColor buy_, sell_;
+    bubbles::Mode requested_ = bubbles::Mode::Individual;
+    bubbles::PlacementMode placement_;
+    bubbles::ReferenceStatistics statistics_;
+
 };
 } // namespace chart

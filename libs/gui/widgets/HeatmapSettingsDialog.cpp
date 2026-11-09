@@ -303,7 +303,7 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 }
 
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
-    if (tab == "Chart") return {"tradesAboveCandles", "showLabels", "labelCurrency", "labelMinPx", "labelMaxPx",
+    if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelMinPx", "labelMaxPx",
                                 "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleWickWidth"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
@@ -404,6 +404,38 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_tradesAboveCandles->setToolTip("Keep translucent executions visible over opaque candle bodies.");
     form->addRow("Trades", m_tradesAboveCandles);
     connect(m_tradesAboveCandles, &QCheckBox::toggled, this, [this](bool on) { apply({{"tradesAboveCandles", on}}); });
+    m_bubblePlacement = new QComboBox(page);
+    m_bubblePlacement->setObjectName("bubblePlacement");
+    m_bubblePlacement->addItem("Individual (trade time)", "individual");
+    m_bubblePlacement->addItem("Auto (zoom dependent)", "auto");
+    m_bubblePlacement->addItem("Slot (candle centre)", "slot");
+    form->addRow("Bubble placement", m_bubblePlacement);
+    connect(m_bubblePlacement, &QComboBox::currentIndexChanged, this, [this] {
+        apply({{"bubblePlacement", m_bubblePlacement->currentData().toString()}});
+    });
+    m_tradeMinMode = new QComboBox(page);
+    m_tradeMinMode->setObjectName("tradeMinNotionalMode");
+    m_tradeMinMode->addItem("All trades", 0);
+    m_tradeMinMode->addItem("Auto (visible median)", -1);
+    m_tradeMinMode->addItem("Custom minimum", 1);
+    form->addRow("Minimum trade notional (quote)", m_tradeMinMode);
+    m_tradeMinNotional = doubleSpin(page, "tradeMinNotional", 0.01, 1e12, 100, 2);
+    m_tradeMinNotional->setValue(100);
+    form->addRow("Custom minimum (quote)", m_tradeMinNotional);
+    connect(m_tradeMinMode, &QComboBox::currentIndexChanged, this, [this] {
+        const double mode = m_tradeMinMode->currentData().toDouble();
+        m_tradeMinNotional->setEnabled(mode > 0);
+        apply({{"tradeMinNotional", mode > 0 ? m_tradeMinNotional->value() : mode}});
+    });
+    connect(m_tradeMinNotional, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        if (m_tradeMinMode->currentData().toDouble() > 0) apply({{"tradeMinNotional", value}});
+    });
+    describe(form, m_tradeMinMode, "All trades preserves the old visible set. Auto hides marks below "
+             "the visible median; Custom uses a fixed quote notional.");
+    describe(form, m_bubblePlacement, "Individual uses exchange time. Slot groups each candle side at its VWAP, "
+             "with the three largest executions at the candle centre. Auto switches near 40 pixels per candle; "
+             "timeframes of one second or less stay individual.");
+    describe(form, m_tradeMinNotional, "Fixed minimum in quote currency. Sweep executions are combined before filtering.");
     auto *candles = new QGroupBox("Candles", page);
     auto *candleForm = new QFormLayout(candles);
     m_candleStyle = new QComboBox(candles);
@@ -799,10 +831,18 @@ void HeatmapSettingsDialog::refreshFromModel() {
     {
         const QSignalBlocker a(m_showLabels), b(m_labelCurrency);
         m_showLabels->setChecked(s.showLabels);
+        const QSignalBlocker placement(m_bubblePlacement);
+        m_bubblePlacement->setCurrentIndex(m_bubblePlacement->findData(QString::fromStdString(s.bubblePlacement)));
         const QSignalBlocker trades(m_tradesAboveCandles);
         m_tradesAboveCandles->setChecked(s.tradesAboveCandles);
         m_labelCurrency->setCurrentIndex(std::max(0, m_labelCurrency->findData(QString::fromStdString(s.labelCurrency))));
     }
+    {
+        const QSignalBlocker mode(m_tradeMinMode);
+        m_tradeMinMode->setCurrentIndex(s.tradeMinNotional == 0 ? 0 : s.tradeMinNotional < 0 ? 1 : 2);
+        m_tradeMinNotional->setEnabled(s.tradeMinNotional > 0);
+    }
+    if (s.tradeMinNotional > 0) set(m_tradeMinNotional, s.tradeMinNotional);
     set(m_labelMinPx, s.labelMinPx);
     set(m_labelMaxPx, s.labelMaxPx);
     auto swatch = [](QPushButton *button, const std::string &value) {

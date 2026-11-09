@@ -29,7 +29,8 @@ struct HeatmapChartSettings {
     bool showTelemetry = false;
     bool showTrades = false;
     bool tradesAboveCandles = true;
-    double tradeMinNotional = 0; // quote units (USD for BASE-USD), before aggregation
+    double tradeMinNotional = 0; // 0 all, -1 visible median, >0 fixed quote minimum
+    std::string bubblePlacement = "individual";
     // Liquidity labels (S7b, owner decision 1/2): on every coloured cell where the
     // text fits at labelMinPx plus padding, growing to at most labelMaxPx; USD
     // (price x size) or the asset amount ("usd" or "asset").

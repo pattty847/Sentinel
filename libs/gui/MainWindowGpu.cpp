@@ -1602,6 +1602,7 @@ QJsonObject MainWindowGPU::agentApiHeatmapSnapshot() const {
         // Live layer state replaces the S6a placeholders (plan section 5).
         const auto state = layer->state();
         for (auto it = state.begin(); it != state.end(); ++it) out[it.key()] = it.value();
+        if (renderer->tradeBubbleRenderFrame()->referencePending.load()) out["settled"] = false;
         out["tickUnits"] = state["tickUnits"];
     }
     return out;

@@ -102,40 +102,77 @@ curl -s 'http://127.0.0.1:17100/api/v1/screenshot?name=wheel&target=heatmap&afte
 ## Trade bubbles (GPU chart)
 
 The toolbar gear menu has **Trades** (off by default) and **Minimum trade notional
-(quote)** presets: all sizes, 100, 1,000, 10,000 and 100,000. Notional is price times
-asset size, in the pair's quote currency (USD for BTC-USD, ETH-USD, etc.).
-The same per-chart/named-layout settings are exposed in `heatmap/state` under
-`settings.showTrades` and `settings.tradeMinNotional`. Set them through:
+(quote)** presets: All trades, Auto (visible median), 100, 1,000, 10,000 and 100,000. Notional is
+price times asset size, in the pair's quote currency (USD for BTC-USD, ETH-USD, etc.).
+The Chart settings tab exposes **Bubble placement** and All / Auto / Custom minimum controls.
+The same per-chart/named-layout settings are exposed in `heatmap/state` and accept:
 
 ```json
-{"showTrades":true,"tradeMinNotional":1000,"persist":false}
+{"showTrades":true,"bubblePlacement":"auto","tradeMinNotional":0,"persist":false}
 ```
 
 POST this to `/api/v1/heatmap/settings`; `persist` defaults to true, and the normal
 operation/render acknowledgement applies. `showTrades` is boolean;
-`tradeMinNotional` accepts finite numbers clamped to 0..1e12. Arbitrary thresholds
-are available through the API; the menu checks a preset only for an exact match.
+`tradeMinNotional` accepts finite numbers clamped to -1..1e12: 0 (default)
+shows all trades, -1 hides marks below the visible median, and a positive value
+sets a fixed minimum in quote currency. `bubblePlacement` accepts exactly:
 
+- `individual` (default): exchange time and execution price, with sweep merging.
+- `slot`: one aggregate per epoch-aligned (bar, side), at the bar centre and side
+  VWAP, with summed side notional. Also draw that bar's three largest merged
+  executions at the bar centre, ranked across both sides from the retained live tape.
+- `auto`: initially individual at a column width >= 40 logical pixels, slot below
+  40. Once selected, switch to individual at >= 42 and to slot at <= 38, retaining
+  the previous mode between those limits. Timeframes <= 1 second always select
+  individual. Explicit `slot` also works at those short timeframes.
 
-Bubbles use exchange time and execution price. **Trades above candles** in the
-Chart tab defaults on (`settings.tradesAboveCandles: true`): translucent executions
-remain visible over opaque candle bodies. Set `tradesAboveCandles` to `false` in
-`POST /api/v1/heatmap/settings` for the previous order below candles. This boolean
-persists per chart/named layout, supports `persist:false`, and resets with the Chart
-tab. Both orders remain above the heatmap and below algo/order overlays.
-Buy uses the bid palette endpoint; sell uses the ask endpoint, both at 60% opacity,
-with a one-screen-pixel darker ring for contrast over same-colour walls.
-Area scales with summed quote notional: radius = min(18, 3 * sqrt(notional/1000))
-logical pixels. The threshold filters **individual trades before aggregation**.
-Up to 4,096 qualifying executions draw individually, even at identical coordinates.
-Above that count, each side aggregates independently into initially 6 px square bins,
-with a notional-weighted centre. If more than 4,096 side/bin pairs remain occupied,
-the renderer compacts the 6 px cells once, then selects the smallest **6 px
-multiple** (6, 12, 18, …) that fits. Impossible sizes are skipped using the fine-cell
-occupancy bound; candidates inspect cells rather than rescanning all executions.
-Thus 6 px is the fine-grid target, not a guaranteed maximum: widely spread overflow requires coarser bins to preserve
-all qualifying volume within the hard cap. Larger circles draw first so smaller
-executions stay on top, regardless of side or bin. Tiny trades can be subpixel.
+Placement and minimum persist per chart/named layout, support `persist:false`, and
+reset with the Chart tab. Slot aggregation includes all retained trades in each
+bar overlapping the time window, including its offscreen portion; the aggregate
+and notable marks each pass the minimum independently. Notables also contribute
+to the aggregate; their extra marks identify large executions, not additional volume.
+A notable is omitted when it is the sole contributor to its side aggregate.
+
+In every mode, consecutive same-side trades with identical exchange timestamps
+(including sub-millisecond precision) and consecutive unsigned numeric IDs merge
+into one sweep capsule. Its endpoints are the lowest and highest execution prices;
+its notional is summed, and `sweepLevels` counts distinct prices. Gaps, nonnumeric
+IDs, side changes and different timestamps break the run. Sweep merging precedes
+minimum filtering. A price change from the preceding retained trade gives full
+bubble opacity. The first execution without a predecessor is passive; same-price passive executions use 35% of that opacity. A sweep
+with any price change uses full bubble opacity.
+
+Sizing uses `radius = clamp(2, 18, 9 * sqrt(notional / ref))` in logical pixels.
+Individual marks use the p95 of individual trade notionals in the visible
+half-open **time** window. Side aggregates and their notable marks use the p95
+of the side-bar aggregate notionals drawn in Slot mode. Each notable's radius
+is capped at its side aggregate's radius. Auto minimum uses the visible lower median
+of individual trades. The p95 and median are quantised to quarter-octave steps;
+the active value changes only after a move of more than one step. The policy uses
+linear-time selection and recomputes at most every 250 ms as window contents
+change, including during panning and ordinary zooming. A placement mode,
+timeframe or minimum change, or a window-width change of at least 2x, can
+recompute sooner but respects a 100 ms minimum interval. First entry into Slot
+computes its aggregate reference immediately so marks are visible on that frame.
+When a reference update is deferred, the bubble overlay requests a frame at its
+deadline; chart settlement waits until that update has completed.
+Capsule half-width preserves circle area
+when possible, but is floored at 2 logical pixels for long sweeps, adding area
+when needed for visibility. The size clamps limit scaling at the extremes.
+
+**Trades above candles** defaults on (`settings.tradesAboveCandles: true`). Set it
+to false to draw below candles; both orders remain above the heatmap and below
+algo/order overlays. Buy uses the bid palette endpoint and sell the ask endpoint.
+Full bubble opacity is 60%, passive opacity is 21%, with a darker outer pixel.
+Larger marks draw first so smaller executions stay on top.
+
+The existing 4,096-mark geometry cap remains. Above it, each side aggregates into
+6 px spatial bins with notional-weighted centres, then the smallest fitting 6 px
+multiple if needed. This density fallback applies to both placements, preserves
+qualifying notional, and may combine slot/notable marks or separate executions;
+it retains the largest capsule span in a bin at the bin centre and the strongest
+opacity. All tape, policy scratch, projection scratch and QSG geometry are bounded
+and reused. No historical bubble request is introduced.
 
 Coverage is **live chart-session history only**, retained even with Trades off:
 the latest 100,000 valid trades for the active symbol, surviving timeframe

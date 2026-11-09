@@ -66,6 +66,7 @@ struct TradeBubbleRendererTest {
     static int64_t firstTime(const UnifiedGridRenderer& r) { return r.m_bubbles.tape_->samples().front().timeMs; }
     static bool enabled(const UnifiedGridRenderer& r) { return r.m_bubbles.show_; }
     static double threshold(const UnifiedGridRenderer& r) { return r.m_bubbles.minimum_; }
+    static uint64_t referenceUpdates(const UnifiedGridRenderer& r) { return r.m_bubbles.statistics_.updates(); }
 };
 
 struct TradeBubbleOverlayTest {
@@ -1691,7 +1692,7 @@ TEST(TradeBubbleControls, SiblingOverlayConsumesLatestFrameAndOwnsTypedNode) {
     ASSERT_TRUE(QMetaObject::invokeMethod(&window,"afterSynchronizing",Qt::DirectConnection));
     EXPECT_EQ(link->node,original);
     ASSERT_EQ(original->usedVertexCount(),6);
-    EXPECT_NEAR(static_cast<const float*>(original->geometry()->vertexData())[0],320-trade_bubbles::Layout::radius(150),1e-4);
+    EXPECT_NEAR(static_cast<const float*>(original->geometry()->vertexData())[0],320-trade_bubbles::Layout::radius(150,renderer.tradeBubbleRenderFrame()->options.reference.p95),1e-4);
     m.srcRect.translate(1,0); m.viewStartMs+=100; m.viewEndMs+=100;
     TradeBubbleRendererTest::publish(renderer,m);
     ASSERT_TRUE(QMetaObject::invokeMethod(&window,"afterSynchronizing",Qt::DirectConnection));
@@ -1827,7 +1828,7 @@ TEST(TradeBubbleControls, PublishKeepsTapeSettingsAndSignalOrder) {
     EXPECT_EQ(frame, renderer.tradeBubbleRenderFrame());
     EXPECT_EQ(frame->tape, tape);
     EXPECT_TRUE(frame->enabled);
-    EXPECT_EQ(frame->minNotional, 1234);
+    EXPECT_EQ(frame->options.minimum, 1234);
     EXPECT_EQ(frame->mapping.viewStartMs, 100);
     EXPECT_EQ(frame->mapping.viewMaxPrice, 110);
 }
@@ -1845,16 +1846,42 @@ TEST(TradeBubbleControls, GuiIngestionKeepsHiddenSessionTradesAndIsolatesSymbols
     ASSERT_EQ(TradeBubbleRendererTest::count(renderer), 1);
     EXPECT_EQ(TradeBubbleRendererTest::firstTime(renderer), 1791030896789LL);
     heatmap::HeatmapChartSettings settings;
-    settings.showTrades = true; settings.tradeMinNotional = 1000;
+    settings.showTrades = true; settings.tradeMinNotional = 1000; settings.bubblePlacement = "slot";
     renderer.setHeatmapChartSettings(settings);
     EXPECT_TRUE(TradeBubbleRendererTest::enabled(renderer));
     EXPECT_EQ(TradeBubbleRendererTest::threshold(renderer), 1000);
     EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 1);
+    TimeAxisMapping mapping;
+    mapping.valid = true;
+    mapping.viewStartMs = 1791030896000.; mapping.viewEndMs = 1791030897000.;
+    mapping.appendMs = 60000; mapping.srcRect.setWidth(20); mapping.drawRect.setWidth(400);
+    TradeBubbleRendererTest::publish(renderer, mapping);
+    const auto frame = renderer.tradeBubbleRenderFrame();
+    EXPECT_EQ(frame->options.mode, chart::bubbles::Mode::Slot);
+    EXPECT_EQ(frame->options.minimum, 1000);
+    EXPECT_NEAR(frame->options.reference.p95, 215.269, .01);
+    const auto updates = TradeBubbleRendererTest::referenceUpdates(renderer);
+    TradeBubbleRendererTest::publish(renderer, mapping);
+    EXPECT_EQ(TradeBubbleRendererTest::referenceUpdates(renderer), updates);
+    t.trade_id = "live-124"; t.price = 200;
+    t.timestamp += std::chrono::seconds(1);
+    renderer.onTradeReceived(t);
+    TradeBubbleRendererTest::publish(renderer, mapping);
+    EXPECT_EQ(TradeBubbleRendererTest::referenceUpdates(renderer), updates); // outside the window
+    mapping.viewStartMs += 1000; mapping.viewEndMs += 1000;
+    TradeBubbleRendererTest::publish(renderer, mapping);
+    EXPECT_EQ(TradeBubbleRendererTest::referenceUpdates(renderer), updates);
+    EXPECT_TRUE(frame->referencePending.load());
+    QTest::qWait(260);
+    TradeBubbleRendererTest::publish(renderer, mapping);
+    EXPECT_FALSE(frame->referencePending.load());
+    EXPECT_NEAR(frame->options.reference.p95, 430.539, .01);
+    EXPECT_EQ(TradeBubbleRendererTest::referenceUpdates(renderer), updates + 1);
     renderer.view()->setTimeframe(300000);
-    EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 1);
+    EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 2);
     t.product_id = "ETH-USD";
     renderer.onTradeReceived(t);
-    EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 1);
+    EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 2);
     renderer.setActiveSymbol("ETH-USD");
     EXPECT_EQ(TradeBubbleRendererTest::count(renderer), 0);
     renderer.onTradeReceived(t);
@@ -1876,23 +1903,55 @@ TEST(TradeBubbleControls, GearTogglePresetsAndApiSharePersistedChartSettings) {
     auto* sizes = toolbar.chartMenu()->findChild<QMenu*>("chartMenuTradeSize");
     ASSERT_NE(sizes, nullptr);
     auto actions = sizes->actions();
-    ASSERT_EQ(actions.size(), 5);
-    actions[2]->trigger();
+    ASSERT_EQ(actions.size(), 6);
+    actions[3]->trigger();
     EXPECT_EQ(model.settings().tradeMinNotional, 1000);
     EXPECT_EQ(t.reload().tradeMinNotional, 1000);
     AgentApi::Request request{"POST", "/api/v1/heatmap/settings", {},
-        R"({"showTrades":false,"tradeMinNotional":10000,"persist":false})"};
+        R"({"showTrades":false,"tradeMinNotional":10000,"bubblePlacement":"auto","persist":false})"};
     const auto validated = AgentApi::validateControl(request, std::nullopt);
     ASSERT_EQ(validated.status, 200);
     ASSERT_TRUE(model.apply(validated.body.heatmapSettings, validated.body.persistHeatmapSettings).isEmpty());
+    EXPECT_EQ(model.settings().bubblePlacement, "auto");
+    EXPECT_EQ(t.reload().bubblePlacement, "individual");
     controls.refreshChartMenu();
     EXPECT_FALSE(toggle->isChecked());
-    EXPECT_TRUE(actions[3]->isChecked());
+    EXPECT_TRUE(actions[4]->isChecked());
     EXPECT_TRUE(t.reload().showTrades);
     EXPECT_EQ(t.reload().tradeMinNotional, 1000);
     controls.refreshChartMenu();
     EXPECT_TRUE(toggle->isEnabled());
     EXPECT_TRUE(sizes->menuAction()->isEnabled());
+}
+
+TEST(TradeBubbleControls, DialogPlacementAndMinimumPersistAndResetWithChartTab) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    auto* placement = dialog.findChild<QComboBox*>("bubblePlacement");
+    auto* minimum = dialog.findChild<QDoubleSpinBox*>("tradeMinNotional");
+    ASSERT_NE(placement, nullptr);
+    ASSERT_NE(minimum, nullptr);
+    EXPECT_EQ(placement->currentData().toString(), "individual");
+    EXPECT_FALSE(minimum->isEnabled());
+    auto* minimumMode = dialog.findChild<QComboBox*>("tradeMinNotionalMode");
+    ASSERT_NE(minimumMode,nullptr);
+    EXPECT_EQ(minimumMode->currentData().toInt(), 0);
+    placement->setCurrentIndex(placement->findData("slot"));
+    minimumMode->setCurrentIndex(1);
+    EXPECT_EQ(model.settings().tradeMinNotional,-1);
+    minimumMode->setCurrentIndex(0);
+    EXPECT_EQ(model.settings().tradeMinNotional,0);
+    minimumMode->setCurrentIndex(2);
+    minimum->setValue(1234);
+    EXPECT_EQ(t.reload().bubblePlacement, "slot");
+    EXPECT_EQ(t.reload().tradeMinNotional, 1234);
+    ASSERT_TRUE(model.apply({{"bubblePlacement", "auto"}, {"tradeMinNotional", 4321}}, false).isEmpty());
+    EXPECT_EQ(placement->currentData().toString(), "auto");
+    EXPECT_EQ(minimum->value(), 4321);
+    ASSERT_TRUE(model.resetKeys(HeatmapSettingsDialog::tabKeys("Chart")).isEmpty());
+    EXPECT_EQ(t.reload().bubblePlacement, "individual");
+    EXPECT_EQ(t.reload().tradeMinNotional, 0);
 }
 
 // ----------------------------------------------------------- telemetry dock

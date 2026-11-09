@@ -10,7 +10,8 @@ bool Tape::append(Sample s) {
     if (!s.tradeId.empty() && ids_.contains(s.tradeId)) return false;
     // Keep the newest Capacity executions by event time, including late arrivals.
     if (count_ == Capacity) {
-        if (s.timeMs < at(0).timeMs) return false;
+        if (s.timeMs < at(0).timeMs ||
+            (s.timeMs == at(0).timeMs && s.exchangeNs < at(0).exchangeNs)) return false;
         if (!at(0).tradeId.empty()) ids_.erase(at(0).tradeId);
         head_ = (head_ + 1) % Capacity;
         --count_;
@@ -19,7 +20,8 @@ bool Tape::append(Sample s) {
     s.sequence = ++revision_;
     // Normally O(1). Late/reconnect rows take the ordered insertion slow path.
     size_t pos = count_;
-    while (pos && at(pos-1).timeMs > s.timeMs) {
+    while (pos && (at(pos-1).timeMs > s.timeMs ||
+           (at(pos-1).timeMs == s.timeMs && at(pos-1).exchangeNs > s.exchangeNs))) {
         at(pos) = std::move(at(pos-1));
         --pos;
     }
@@ -53,6 +55,7 @@ Window Tape::visible(double startMs, double endMs) const {
     };
     const size_t begin = lower(startMs), end = lower(endMs);
     result.rows = slice(begin, end);
+    if (begin) { result.predecessor = at(begin - 1).sequence; result.previousPrice = at(begin - 1).price; }
     return result;
 }
 namespace {
@@ -66,36 +69,35 @@ uint64_t cellHash(uint32_t x, uint32_t y, AggressorSide side) {
     return h ^ (h >> 31);
 }
 }
-Layout::Layout() : points_(std::make_unique<Point[]>(Tape::Capacity)),
+Layout::Layout() : points_(std::make_unique<Point[]>(PointCapacity)),
                    fineSlots_(std::make_unique<uint32_t[]>(FineSlots)) {}
-double Layout::radius(double notional) { return std::min(MaxRadius, 3 * std::sqrt(notional / 1000)); }
-std::span<const Bubble> Layout::build(Samples trades, const TimeAxisMapping& map, double minNotional) {
+std::span<const Bubble> Layout::build(Samples trades, const TimeAxisMapping& map,
+                                      const chart::bubbles::Options& options, double previousPrice) {
     count_ = scannedRows_ = 0;
     binSize_ = 0;
     hashProbes_ = coarseCellVisits_ = fineCellCount_ = 0;
-    if (!map.valid || !std::isfinite(minNotional) || minNotional < 0 ||
+    if (!map.valid || !std::isfinite(options.minimum) || options.minimum < -1 ||
         !std::isfinite(map.drawRect.width()) || !std::isfinite(map.drawRect.height()) ||
         map.drawRect.width() <= 0 || map.drawRect.height() <= 0) return {};
+    const auto marks = policy_.build(PolicyRows{trades}, options, map.appendMs, previousPrice);
+    scannedRows_ = trades.size();
     size_t pointCount = 0;
     double maxX = 0, maxY = 0;
-    for (size_t i = 0; i < trades.size(); ++i) {
-        const auto& t = trades[i];
-        ++scannedRows_;
-        const double n = t.price * t.size;
-        if (t.timeMs < map.viewStartMs || t.timeMs >= map.viewEndMs ||
-            t.price < map.viewMinPrice || t.price > map.viewMaxPrice ||
-            !std::isfinite(n) || n <= 0 || n < minNotional ||
-            (t.side != AggressorSide::Buy && t.side != AggressorSide::Sell)) continue;
-        const double x = map.timeToScreenX(double(t.timeMs)), y = map.priceToScreenY(t.price);
-        if (!std::isfinite(x) || !std::isfinite(y)) continue;
-        // All callers pass a bounded Tape or a smaller test span.
-        if (pointCount == Tape::Capacity) break;
-        points_[pointCount++] = {x, y, n, t.side};
+    for (const auto& t : marks) {
+        if (options.mode != chart::bubbles::Mode::Slot &&
+            (t.timeMs < map.viewStartMs || t.timeMs >= map.viewEndMs)) continue;
+        if (t.maxPrice < map.viewMinPrice || t.minPrice > map.viewMaxPrice) continue;
+        const double x = map.timeToScreenX(t.timeMs), y = map.priceToScreenY(t.price);
+        const double lowY = map.priceToScreenY(t.maxPrice), highY = map.priceToScreenY(t.minPrice);
+        if (!std::isfinite(float(x)) || !std::isfinite(float(y)) || !std::isfinite(float(lowY)) || !std::isfinite(float(highY))) continue;
+        points_[pointCount++] = {x, y, t.notional, lowY, highY, t.moving ? 1.0 : 0.35, t.radiusCap, t.aggregate, AggressorSide(t.side)};
         maxX = std::max(maxX, x-map.drawRect.x());
         maxY = std::max(maxY, y-map.drawRect.y());
     }
     const auto appendBubble = [&](const Point& p) {
-        bubbles_[count_++] = {float(p.x), float(p.y), float(radius(p.notional)), p.side};
+        const double reference = options.mode == chart::bubbles::Mode::Slot ? options.reference.aggregateP95 : options.reference.p95;
+        bubbles_[count_++] = {float(p.x), float(p.y), float(std::min(p.radiusCap, radius(p.notional, reference))), p.side,
+                             float(p.minY), float(p.maxY), float(p.opacity), p.notional};
     };
     if (pointCount <= MaxBubbles) {
         for (size_t i = 0; i < pointCount; ++i) appendBubble(points_[i]);
@@ -113,6 +115,12 @@ std::span<const Bubble> Layout::build(Samples trades, const TimeAxisMapping& map
             if (!std::isfinite(total)) return;
             dst.x += (src.x-dst.x) * (src.notional/total);
             dst.y += (src.y-dst.y) * (src.notional/total);
+            const double halfExtent = std::max((dst.maxY-dst.minY)/2, (src.maxY-src.minY)/2);
+            dst.minY = dst.y - halfExtent;
+            dst.maxY = dst.y + halfExtent;
+            dst.opacity = std::max(dst.opacity, src.opacity);
+            dst.radiusCap = MaxRadius;
+            dst.aggregate = dst.aggregate || src.aggregate;
             dst.notional = total;
         };
         for (size_t i = 0; i < pointCount; ++i) {

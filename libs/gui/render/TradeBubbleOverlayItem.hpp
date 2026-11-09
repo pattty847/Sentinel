@@ -1,5 +1,6 @@
 #pragma once
 #include "TradeBubbleFrame.hpp"
+#include <atomic>
 #include <QQuickItem>
 #include <QPointer>
 #include <QtQml/qqmlregistration.h>
@@ -11,6 +12,7 @@ struct RenderLink {
     std::shared_ptr<RenderFrame> frame;
     TradeBubbleNode* node = nullptr;
     uint64_t providerRevision = 1, syncedRevision = 0;
+    std::atomic_bool retryQueued = false;
     void sync();
 };
 }
