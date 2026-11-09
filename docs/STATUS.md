@@ -3,13 +3,13 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends. Keep under 8 KB.
 
-- **Updated:** 2026-11-08, wave 3 dispatched. **main** pushed (see `git log -1`). Work order: `docs/TODO.md` Waves.
+- **Updated:** 2026-11-08, wave 3 in progress. **main** pushed (see `git log -1`). Work order: `docs/TODO.md` Waves.
 - **Conductor:** Claude Opus 5.5, wave 3 (started 2026-11-08).
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high risk. Owner 2026-11-05: spend all Codex, including reset credits before they expire.
 
 ## Next
 
-1. Wave 3: review the Fable "why it moved" plan when it returns; dispatch its first slices. Palette replacement waits for the owner's colour variants; axis drag snap-back is not dispatched yet.
+1. Wave 3 plan: `../Sentinel-Private/research/2026-11-08-why-it-moved-plan.md` (12 slices, section 7 order). Slot 1 = S1 (running) + S8a; S8a waits for `lt-astra/heatmap-saturation` (both edit `HeatmapChartSettings.hpp`; the plan missed this). Owner decisions (plan section 6): 1 flow store = derived store like rollups (explained 2026-11-08, owner has not said yes; needed before S2); 2 bubble defaults: owner wants to see both modes in the lab (S8a ships both behind a setting); 3 footprint/CVD look: owner wants a proper visual pass in the lab before goldens. Palette waits for the owner's colour variants.
 2. With the owner present: build main, then `scripts/dev/deploy-runtime.sh server` for the trade-id window `87c9ccbc` (no format change). The script refuses a stale or dirty build.
 3. After landing any GUI change, build main: the owner's GUI loads QML from the source tree, so a stale binary fails to load the chart.
 4. Squash any branch whose history touched `docs/TODO.md` before land (AGENTS section 7).
@@ -28,10 +28,9 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 ## In flight
 
-- **Fable plan** (no code): footprint, CVD, eaten/pulled, trade bubbles -> `../Sentinel-Private/research/2026-11-08-why-it-moved-plan.md` (Claude subagent, running).
 - `lt-claude/heatmap-seam` (worktree `/Volumes/T7/sentinel-worktrees/lt-claude-heatmap-seam`): seam left of the now column. Writer Claude Opus subagent; reviewer gpt-6-astra. HIGH. Owns HeatmapGpuLayer, HeatmapSourceController. Phase: writing.
 - `lt-astra/heatmap-saturation` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-heatmap-saturation`): PARKED until the seam lands (needs HeatmapGpuLayer.cpp). Root cause: display size encoding clamps at code 32767 (~1.1M units; `RecordingCodec.hpp:30,45`, hard-coded scale at `HeatmapGpuLayer.cpp:246`), so PEPE sizes all read max. Resume thread `01a1be15-f436-7d21-8eaa-b2a3cfe59f36` with HeatmapGpuLayer, the label query and `HeatmapChartSettings.hpp` added to its files; the smoothing shader loop is capped at 4 cells per axis. Recording format must not change. Reviewer Fable; HIGH.
-- `lt-astra/axis-drag-snapback` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-axis-drag-snapback`): price-axis drag glides back mid-drag. Writer gpt-6-astra thread `01a1be17-f95b-7550-9718-9cd35f04fd45`; reviewer Claude Opus. MEDIUM; native chart GPU run from the conductor. Owns `libs/gui/chart/core/**`. Phase: writing.
+- `lt-sol/flow-bar-core` (worktree `/Volumes/T7/sentinel-worktrees/lt-sol-flow-bar-core`): plan S1, Qt-free flow bar core + read-only BTC size bench. Writer gpt-6-sol thread `01a1be23-430c-77d1-9fc1-a0b4fa76b23b`; reviewer Claude Opus. LOW. Phase: writing.
 
 Lab branches that never land: `lt-astra/hmc2-rollup-lab`, `lt-claude/hmc2-layout-lab` (results in `/Volumes/T7/sentinel-datalab/hmc2-*`).
 
