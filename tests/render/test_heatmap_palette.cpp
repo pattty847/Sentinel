@@ -10,12 +10,22 @@
 
 namespace {
 using namespace heatmap::gpu;
+TEST(HeatmapPalette, RecordingFloorSelectsProductDisplayOctave) {
+    const double base = recording::SizeScale{}.floor;
+    const std::array<std::pair<const char *, double>, 7> products{{
+        {"BTC/ETH/SOL/AVAX", 1e-8}, {"synthetic BTC", base}, {"FARTCOIN", 0.01},
+        {"DOGE", 0.1}, {"PEPE", 1.0}, {"small alternate grid", 1e-7},
+        {"invalid grid", 0.0}}};
+    const std::array<int, 7> octaves{0, 0, 2, 2, 3, 0, 0};
+    for (size_t i = 0; i < products.size(); ++i)
+        EXPECT_DOUBLE_EQ(displaySizeScale(products[i].second).floor,
+                         base * std::pow(1024.0, octaves[i])) << products[i].first;
+}
 TEST(HeatmapPalette, ProductDisplayScaleKeepsGradientsAcrossPresetsAndTones) {
     for (const auto &[recordingFloor, sizes] : {
              std::pair{1e-8, std::array<double, 5>{0.01, 0.1, 1, 10, 50}},
              std::pair{1.0, std::array<double, 5>{1e9, 3e9, 1e10, 3e10, 1e11}}}) {
-        const auto recordingMax = recording::decodeSize(recording::kMaxCode, {recordingFloor, 819});
-        const auto scale = displaySizeScale(recordingMax);
+        const auto scale = displaySizeScale(recordingFloor);
         const double relative = scale.floor / recording::SizeScale{}.floor;
         const auto window = codeWindow(0.05 * relative, 50 * relative, scale.floor, scale.codesPerOctave);
         std::set<uint16_t> codes;

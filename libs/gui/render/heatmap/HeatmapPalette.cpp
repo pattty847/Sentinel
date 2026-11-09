@@ -128,15 +128,17 @@ CodeWindow codeWindow(double sensitivityMin, double sensitivityMax, double sizeF
     return {lo, std::max(hi - lo, 1.0f)};
 }
 
-recording::SizeScale displaySizeScale(double recordingMax) {
+recording::SizeScale displaySizeScale(double recordingFloor) {
     recording::SizeScale scale;
-    if (!std::isfinite(recordingMax) || recordingMax <= 0) return scale;
-    // Keep the default for BTC-sized books. Powers of 1024 keep one scale
-    // for a product even when the visible liquidity range changes.
-    constexpr double kHeadroom = 2.0;
-    const double limit = recording::decodeSize(recording::kMaxCode, scale) / kHeadroom;
-    const double defaultFloor = scale.floor;
-    while (recordingMax > limit * (scale.floor / defaultFloor)) scale.floor *= 1024.0;
+    if (!std::isfinite(recordingFloor) || recordingFloor <= scale.floor) return scale;
+    // Round twice the base increment upward in powers of 1024. Keep the
+    // default for BTC-sized books and synthetic grids at that floor.
+    const double target = recordingFloor * 2.0;
+    while (scale.floor < target) {
+        const double next = scale.floor * 1024.0;
+        if (!std::isfinite(next)) break;
+        scale.floor = next;
+    }
     return scale;
 }
 

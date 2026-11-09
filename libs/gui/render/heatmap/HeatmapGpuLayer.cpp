@@ -256,9 +256,19 @@ void HeatmapGpuLayer::refreshStyle() {
 
 void HeatmapGpuLayer::adoptDisplayScale(const SpanSet &snapshot) {
     if (displayScaleKnown_ || snapshot.symbol != symbol_ || !snapshot.recordingScaleKnown) return;
-    displayScale_ = displaySizeScale(recording::decodeSize(recording::kMaxCode, snapshot.recordingScale));
+    const auto next = displaySizeScale(snapshot.recordingScale.floor);
+    const bool changed = next.floor != displayScale_.floor || next.codesPerOctave != displayScale_.codesPerOctave;
+    displayScale_ = next;
     displayScaleKnown_ = true;
     refreshStyle();
+    if (changed) {
+        labelsPosted_ = false;
+        labelResultSeen_ = labelDropNoticed_ = false;
+        labelEpoch_ = labelSerial_ + 1;
+        labelCounters_.epoch = labelEpoch_;
+        notifiedLabels_.reset();
+        emit frameRequested();
+    }
 }
 
 // Manual: the tick remembered for (symbol, timeframe) wins; with none, the locked

@@ -52,8 +52,9 @@ struct CodeWindow {
 };
 CodeWindow codeWindow(double sensitivityMin, double sensitivityMax, double sizeFloor = 1e-6,
                       double codesPerOctave = 819.0);
-// Quantized display scale covering the advertised recording grid's maximum size.
-recording::SizeScale displaySizeScale(double recordingMax);
+// Quantized display scale from the advertised product size floor. The recording
+// code count is a format limit, not an estimate of actual book sizes.
+recording::SizeScale displaySizeScale(double recordingFloor);
 
 // CPU reference of heatmap_display.frag in recording mode (a nonzero code
 // without the unknown marker), sampling the palette with linear filtering:
