@@ -411,7 +411,7 @@ TEST(LadderLayer, WarmedFramesAllocateNothingAndRewriteOnlyOnChange) {
     auto draw = [&](const chart::ChartFrame& frame) {
         rig.layer.sync(frame);
         rig.layer.updateNodes(frame, context);
-        rig.layer.submitLabels(frame, context, false); // the text stage lays out the badges
+        rig.layer.submitLabels(frame, context); // the text stage lays out the badges
     };
     rig.view(rest);
     rig.feed.publish(*a);

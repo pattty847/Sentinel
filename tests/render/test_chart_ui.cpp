@@ -1971,14 +1971,12 @@ TEST_F(ChartLabels, ZoomedOutPostsNoLabelRequest) {
     EXPECT_TRUE(ugr->gpuLabelGlyphs().empty());
 }
 
-// The text stage tells the ladder whether the heatmap drew its cell value labels this
-// frame: while they draw, wall badges leave out the notional (the layout itself is
-// tested in LadderBadges; here the flag, read from the "ladder.badges" probe).
+// Wall badges stay present when the heatmap's cell value labels toggle.
 QStringList *gBadgeProbes = nullptr;
 void captureBadgeProbe(QtMsgType, const QMessageLogContext &, const QString &message) {
     if (gBadgeProbes && message.startsWith(QLatin1String("[ladder.badges]"))) gBadgeProbes->append(message);
 }
-TEST_F(ChartLabels, WallBadgesLearnWhetherTheCellLabelsDrew) {
+TEST_F(ChartLabels, WallBadgesRemainWhenCellLabelsToggle) {
     ASSERT_TRUE(sentinel::logging::probeEnabled("ladder.badges")) << "main enables the probe";
     QStringList probes;
     gBadgeProbes = &probes;
@@ -1993,15 +1991,18 @@ TEST_F(ChartLabels, WallBadgesLearnWhetherTheCellLabelsDrew) {
     ugr->layers()->setWallRadarEnabled(true);
     ugr->setLiveBook(book);
     zoomIn();
-    // One wall badge (bin 100'005, 10x the near-touch median) with the cell flag as drawn.
+    // One $1.00M wall badge (bin 100'005, 10x the near-touch median) in each label state.
     QString last; // the newest badge probe line, for a failure message
-    const auto badge = [&](bool cellLabels) {
-        const QString flag = cellLabels ? QStringLiteral(" cellLabels=true ") : QStringLiteral(" cellLabels=false ");
+    const auto badge = [&](bool expectedLabels) {
         return pump(20'000, [&] {
             if (!probes.isEmpty()) last = probes.back();
-            if (labelsDrawn() != cellLabels) return false;
+            if (labelsDrawn() != expectedLabels) {
+                probes.clear();
+                return false;
+            }
             for (const auto &line : probes)
-                if (line.contains(QLatin1String(" rows=1 ")) && line.contains(flag)) return true;
+                if (line.contains(QLatin1String(" rows=1 ")) && line.contains(QLatin1String(" pills=0 glyphs=6 ")))
+                    return true;
             probes.clear();
             return false;
         });
@@ -2012,8 +2013,8 @@ TEST_F(ChartLabels, WallBadgesLearnWhetherTheCellLabelsDrew) {
     const bool hidden = badge(false);
     qInstallMessageHandler(previous);
     gBadgeProbes = nullptr;
-    EXPECT_TRUE(drawn) << "no badge laid out with cellLabels=true while the labels drew; last: " << last.toStdString();
-    EXPECT_TRUE(hidden) << "no badge laid out with cellLabels=false after the labels went off; last: " << last.toStdString();
+    EXPECT_TRUE(drawn) << "no badge laid out while cell labels drew; last: " << last.toStdString();
+    EXPECT_TRUE(hidden) << "no badge laid out after cell labels went off; last: " << last.toStdString();
 }
 
 // HeatmapCellQuery::cancel() drops its result without a signal: the chart must

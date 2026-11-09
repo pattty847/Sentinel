@@ -92,6 +92,12 @@ int inkChars(const BadgePill& p) {
     for (int i = 0; i < p.length; ++i) n += p.text[i] != ' ';
     return n;
 }
+double sizeTextWidth(const BadgePill& p) {
+    double advance = 0;
+    for (int i = 0; i < p.length && p.text[i] != ' '; ++i)
+        advance += atlas().glyph(QChar(p.text[i])).advance;
+    return advance * chart::kBadgeFontPx / atlas().fontPx();
+}
 
 struct BadgeRig {
     chart::LadderLayer layer;
@@ -100,7 +106,6 @@ struct BadgeRig {
     chart_raster::RasterCamera cam;
     QQuickWindow* window = nullptr;
     bool atlasReady = true;
-    bool cellLabels = false; // the heatmap drew its cell value labels
     uint64_t serial = 0;
     explicit BadgeRig(const chart_raster::RasterCamera& c) : cam(c) { root.appendChildNode(layer.createContainer()); }
     // A fresh valid, complete radar snapshot covering bins [lo, lo + count) at bin 1.
@@ -145,7 +150,7 @@ struct BadgeRig {
         layer.sync(f);
         layer.updateNodes(f, context);
         text.beginFrame(&root, window, atlas());
-        layer.submitLabels(f, context, cellLabels);
+        layer.submitLabels(f, context);
         text.endFrame();
     }
     void post() {
@@ -158,7 +163,7 @@ struct BadgeRig {
 };
 
 // --------------------------------------------------------------- formatting
-TEST(LadderBadges, FormatsMoneyAgesAndFlickersInFixedBuffers) {
+TEST(LadderBadges, FormatsMoneyInFixedBuffers) {
     char b[chart::kBadgeChars];
     const auto money = [&](double v) { return std::string(b, size_t(chart::formatMoney(v, b))); };
     EXPECT_EQ(money(0), "$0.00");
@@ -172,14 +177,6 @@ TEST(LadderBadges, FormatsMoneyAgesAndFlickersInFixedBuffers) {
     EXPECT_EQ(money(2.1e9), "$2.10B");
     EXPECT_EQ(money(5e12), "$999B+");
     EXPECT_EQ(money(std::nan("")), "$0.00");
-    const auto age = [&](uint32_t ms) { return std::string(b, size_t(chart::formatAge(ms, b))); };
-    EXPECT_EQ(age(12'999), "12s");
-    EXPECT_EQ(age(59'999), "59s");
-    EXPECT_EQ(age(60'000), "1m00s");
-    EXPECT_EQ(age(192'000), "3m12s");
-    EXPECT_EQ(age(2 * 3'600'000 + 5 * 60'000), "2h05m");
-    EXPECT_EQ(age(0xffffffffu), "99h+");
-    EXPECT_EQ(std::string(b, size_t(chart::formatFlickers(65535, b))), "x65535");
 }
 
 // ------------------------------------------------------------ (16) layout
@@ -231,9 +228,9 @@ TEST(LadderBadges, ThinBandsChooseTheLargestWallNotionalAndKeepItsRowAndSide) {
         rig.wall(164, S::kAsk, 32, 60'000, 3, true); // side tie: hot ask
         rig.post();
         ASSERT_EQ(rig.rowBadges(), 2);
-        EXPECT_EQ(text(rig.pills()[0]), "$2.22k  1m00s");
+        EXPECT_EQ(text(rig.pills()[0]), "$2.22k");
         EXPECT_EQ(rig.pills()[0].colour, BadgePill::Ask);
-        EXPECT_EQ(text(rig.pills()[1]), "$5.26k  1m00s  x3");
+        EXPECT_EQ(text(rig.pills()[1]), "$5.26k");
         EXPECT_EQ(rig.pills()[1].colour, BadgePill::Hot);
         EXPECT_NEAR(rig.pills()[0].rect.center().y(), rig.cam.yDev(170.5) / dpr, 0.5 / dpr);
         EXPECT_NEAR(rig.pills()[1].rect.center().y(), rig.cam.yDev(164.5) / dpr, 0.5 / dpr);
@@ -257,8 +254,8 @@ TEST(LadderBadges, ThinBandWinnersRespectRowCollisionsEdgePillsAndSurfaceBounds)
         rig.post();
         ASSERT_EQ(rig.layer.badges().stats().edgePills, 2);
         ASSERT_EQ(rig.rowBadges(), 2);
-        EXPECT_EQ(text(rig.pills()[2]), "$6.86k  1m00s");
-        EXPECT_EQ(text(rig.pills()[3]), "$3.27k  1m00s");
+        EXPECT_EQ(text(rig.pills()[2]), "$6.86k");
+        EXPECT_EQ(text(rig.pills()[3]), "$3.27k");
         for (size_t i = 0; i < rig.pills().size(); ++i) {
             EXPECT_TRUE(rig.frame().context.surfaceBounds.contains(rig.pills()[i].rect));
             for (size_t j = 0; j < i; ++j)
@@ -267,7 +264,7 @@ TEST(LadderBadges, ThinBandWinnersRespectRowCollisionsEdgePillsAndSurfaceBounds)
     }
 }
 
-TEST(LadderBadges, ThinRowsSurviveCoarseAndFractionalTicksAndCellLabelTransitions) {
+TEST(LadderBadges, ThinRowsSurviveCoarseAndFractionalTicksAndRedraws) {
     for (const double tick : {0.01, 1.0, 10.0}) {
         SCOPED_TRACE(tick);
         BadgeRig rig(camera(100 * tick, 180 * tick, tick, 2));
@@ -277,17 +274,17 @@ TEST(LadderBadges, ThinRowsSurviveCoarseAndFractionalTicksAndCellLabelTransition
         ASSERT_TRUE(rig.layer.drawing());
         ASSERT_EQ(rig.rowBadges(), 1);
         const QRectF rect = rig.pills()[0].rect;
-        EXPECT_EQ(text(rig.pills()[0]).find('$'), 0u);
-        rig.cellLabels = true;
+        const auto label = text(rig.pills()[0]);
+        EXPECT_EQ(label.find('$'), 0u);
         rig.draw();
         ASSERT_EQ(rig.rowBadges(), 1);
-        EXPECT_EQ(text(rig.pills()[0]), "1m00s");
+        EXPECT_EQ(text(rig.pills()[0]), label);
+        EXPECT_EQ(rig.pills()[0].rect, rect);
         EXPECT_DOUBLE_EQ(rig.pills()[0].rect.top(), rect.top());
         rig.cam = camera(145 * tick, 155 * tick, tick, 2); // tall rows, same snapshot
         rig.draw();
         ASSERT_EQ(rig.rowBadges(), 1);
         rig.cam = camera(100 * tick, 180 * tick, tick, 2);
-        rig.cellLabels = false;
         rig.draw();
         ASSERT_EQ(rig.rowBadges(), 1);
         EXPECT_EQ(rig.pills()[0].rect, rect);
@@ -476,7 +473,7 @@ TEST(LadderBadges, ThinLayoutReusesReservedStorageWithoutAllocating) {
     chart::LadderBadges badges;
     const auto& a = atlas();
     auto frame = rig.frame();
-    badges.layout(s, frame.context, &a, false);
+    badges.layout(s, frame.context, &a);
     ASSERT_GT(badges.stats().rowBadges, 0);
     const auto bytes = badges.capacityBytes();
     const auto* pills = badges.pills().data();
@@ -485,7 +482,9 @@ TEST(LadderBadges, ThinLayoutReusesReservedStorageWithoutAllocating) {
     gCounting = true;
     for (int i = 0; i < 120; ++i) {
         frame.context.raster = chart_raster::continuousRaster(inputs(100.0 + i * 0.01, 180.0, 1, 2, 320));
-        badges.layout(s, frame.context, &a, i % 2);
+        s.rows[100].bidWallMs = i % 2 ? 59'000 : 60'000;
+        s.rows[100].bidFlickers = uint16_t(i);
+        badges.layout(s, frame.context, &a);
     }
     gCounting = false;
     EXPECT_EQ(gAllocations.load(), 0u);
@@ -511,8 +510,55 @@ TEST(LadderBadges, AdjacentWallRowsGetSeparatePillsRightAlignedLeftOfTheStrip) {
         EXPECT_LT(a.top(), b.top()) << "from the top: bin 100 first";
         EXPECT_NEAR(a.top() * dpr, std::round(a.top() * dpr), 1e-9) << "on device pixels";
         EXPECT_NEAR(rig.cam.yDev(100.5) / dpr, a.center().y(), 0.5) << "centred on its row";
-        EXPECT_EQ(text(rig.pills()[0]), "$1.21k  1m00s");
+        EXPECT_EQ(text(rig.pills()[0]), "$1.21k");
         EXPECT_EQ(rig.layer.badgeVertexCount(), 2 * 6);
+    }
+}
+
+TEST(LadderBadges, RowNotionalsEndAtTheSameXAcrossHistoryAndDpr) {
+    for (const double dpr : {1.0, 1.5, 2.0}) {
+        SCOPED_TRACE(dpr);
+        BadgeRig rig(camera(90, 110, 1, dpr));
+        const auto fill = [&](uint32_t age, uint16_t flickers) {
+            rig.snapshot();
+            rig.wall(104, S::kAsk, 47'942, 14'000);
+            rig.wall(102, S::kBid, 12, 60'000);
+            rig.wall(100, S::kAsk, 7, age, flickers);
+            rig.wall(98, S::kBid, 50, 120'000, 65'535);
+        };
+        fill(59'000, 3);
+        rig.post();
+        ASSERT_EQ(rig.pills().size(), 4u);
+        EXPECT_EQ(text(rig.pills()[0]), "$5.01M");
+        EXPECT_EQ(text(rig.pills()[1]), "$1.23k");
+        EXPECT_EQ(text(rig.pills()[2]), "$704");
+        EXPECT_EQ(text(rig.pills()[3]), "$4.93k");
+        const auto& glyphs = rig.layer.badges().glyphs();
+        size_t offset = 0;
+        double right = 0;
+        std::vector<QRectF> original;
+        for (size_t i = 0; i < rig.pills().size(); ++i) {
+            const auto& pill = rig.pills()[i];
+            const size_t count = size_t(inkChars(pill));
+            ASSERT_GT(count, 0u);
+            ASSERT_LE(offset + count, glyphs.size());
+            const double glyphRight = glyphs[offset + count - 1].rect.right();
+            if (i) EXPECT_NEAR(glyphRight, right, 1.0 / dpr);
+            else right = glyphRight;
+            EXPECT_DOUBLE_EQ(pill.rect.right(), 640 - chart::kBadgeInsetPx);
+            EXPECT_LE(std::abs(pill.textLeft + sizeTextWidth(pill) -
+                               (pill.rect.right() - chart::kBadgePadX)),
+                      0.5 / dpr + 1e-9);
+            EXPECT_NEAR(pill.textLeft * dpr, std::round(pill.textLeft * dpr), 1e-9);
+            offset += count;
+        }
+        ASSERT_EQ(offset, glyphs.size());
+        for (const auto& glyph : glyphs) original.push_back(glyph.rect);
+        fill(60'000, 0);
+        rig.post();
+        ASSERT_EQ(rig.layer.badges().glyphs().size(), original.size());
+        for (size_t i = 0; i < original.size(); ++i)
+            EXPECT_EQ(rig.layer.badges().glyphs()[i].rect, original[i]);
     }
 }
 
@@ -521,50 +567,17 @@ TEST(LadderBadges, ABinWithBothSidesLargeGetsOneBadgeForTheLargerNotional) {
     rig.snapshot();
     rig.wall(100, S::kBid, 10);
     rig.wall(100, S::kAsk, 11);
-    rig.wall(102, S::kBid, 12, 5'000); // new
+    rig.wall(102, S::kBid, 12, 5'000);
     rig.wall(102, S::kAsk, 9, 60'000, 3, true);
     rig.wall(104, S::kBid, 7);
     rig.wall(104, S::kAsk, 7, 60'000, 3, true); // tie: ask (hot)
     rig.post();
     ASSERT_EQ(rig.pills().size(), 3u);
     EXPECT_EQ(rig.pills()[0].colour, BadgePill::Hot) << "bin 104: tie -> ask";
-    EXPECT_EQ(text(rig.pills()[0]), "$732  1m00s  x3");
+    EXPECT_EQ(text(rig.pills()[0]), "$732");
     EXPECT_EQ(rig.pills()[1].colour, BadgePill::Bid) << "bin 102: bid larger";
-    EXPECT_EQ(text(rig.pills()[1]), "$1.23k  5s  new");
+    EXPECT_EQ(text(rig.pills()[1]), "$1.23k");
     EXPECT_EQ(rig.pills()[2].colour, BadgePill::Ask) << "bin 100: ask larger";
-}
-
-// With the heatmap's own cell value labels on screen the notional is redundant: the
-// badge keeps the age, the flicker count and "new"; edge pills keep theirs.
-TEST(LadderBadges, VisibleCellLabelsDropTheNotionalFromRowBadges) {
-    BadgeRig rig(camera(90, 110));
-    const auto fill = [&] {
-        rig.snapshot();
-        rig.wall(104, S::kAsk, 7, 60'000, 3, true);
-        rig.wall(102, S::kBid, 12, 5'000);
-        rig.wall(100, S::kBid, 12);
-        rig.candidate(S::kAsk, S::kAbove, 120, 50);
-        rig.post();
-    };
-    fill();
-    ASSERT_EQ(rig.pills().size(), 4u);
-    EXPECT_EQ(text(rig.pills()[1]), "$732  1m00s  x3");
-    EXPECT_EQ(text(rig.pills()[2]), "$1.23k  5s  new");
-    EXPECT_EQ(text(rig.pills()[3]), "$1.21k  1m00s");
-    const double wide = rig.pills()[3].rect.width();
-    rig.cellLabels = true;
-    rig.draw(); // the same snapshot and frame: the flag alone relays out
-    ASSERT_EQ(rig.pills().size(), 4u);
-    EXPECT_EQ(text(rig.pills()[0]), "$6.00k  +$10.0") << "the edge pill keeps its notional";
-    EXPECT_EQ(text(rig.pills()[1]), "1m00s  x3");
-    EXPECT_EQ(text(rig.pills()[2]), "5s  new");
-    EXPECT_EQ(text(rig.pills()[3]), "1m00s");
-    EXPECT_LT(rig.pills()[3].rect.width(), wide);
-    EXPECT_DOUBLE_EQ(rig.pills()[3].rect.right(), 640 - chart::kBadgeInsetPx);
-    for (int i = 1; i < 4; ++i) EXPECT_EQ(text(rig.pills()[size_t(i)]).find('$'), std::string::npos);
-    rig.cellLabels = false;
-    rig.draw();
-    EXPECT_EQ(text(rig.pills()[3]), "$1.21k  1m00s");
 }
 
 TEST(LadderBadges, ARowCutByTheEdgeOrUnderAnEdgePillHasNoBadge) {
@@ -824,8 +837,8 @@ ColourNodes colourNodes(QSGNode& root) {
 }
 
 // Frame f (1-based): min(f, 70) wall rows from the top (at most 64 badges); asks from frame 30, the hot
-// colour from frame 45, the four edge pills from frame 60; ages and sizes cross digit
-// boundaries ($999k -> $1.00M, 59s -> 1m00s, x9 -> x10).
+// colour from frame 45, the four edge pills from frame 60; history and size
+// still cross digit boundaries, though only the size is rendered.
 void fillFrame(BadgeRig& rig, int f) {
     auto& s = rig.snapshot(1000, 200);
     for (int64_t k = 1000; k < 1200; ++k) rig.row(k).bid = 1;
@@ -905,8 +918,10 @@ TEST(LadderBadgesGpu, WarmedFramesAllocateNothingThroughEndFrame) {
     };
     EXPECT_TRUE(has("$999k") || has("$998k")) << "below a million";
     EXPECT_TRUE(has("$1.00M"));
-    EXPECT_TRUE(has("59s") && has("1m00s"));
-    EXPECT_TRUE(has("x9") && has("x10"));
+    for (const auto& label : seen) {
+        if (label.find("  +") == std::string::npos && label.find("  -") == std::string::npos)
+            EXPECT_EQ(label.find(' '), std::string::npos);
+    }
 
     // A second reservation allocates nothing.
     rig.text.beginFrame(&rig.root, rig.window, atlas());
@@ -929,7 +944,7 @@ TEST(LadderBadgesGpu, WarmedFramesAllocateNothingThroughEndFrame) {
         rig.layer.sync(frame);
         rig.layer.updateNodes(frame, context);
         rig.text.beginFrame(&root, rig.window, atlas());
-        rig.layer.submitLabels(frame, context, false);
+        rig.layer.submitLabels(frame, context);
         rig.text.endFrame();
     };
     gAllocations = 0;

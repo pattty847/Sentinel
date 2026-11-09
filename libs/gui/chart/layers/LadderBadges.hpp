@@ -1,6 +1,5 @@
 #pragma once
-// Wall radar text on the chart: one badge per wall row or thin-row band (notional, wall age, new or
-// flicker count; no notional while the heatmap draws its own cell value labels)
+// Wall radar text on the chart: one notional badge per wall row or thin-row band,
 // right-aligned at the ladder strip's left edge, and up to four arrow pills at the
 // drawn window's edges for the nearest wall per side beyond each edge.
 // Render thread (LadderLayer::submitLabels). Glyph templates are taken from the atlas once
@@ -29,7 +28,6 @@ constexpr int kBadgeChars = 24;     // longest badge text plus room
 constexpr int kMaxBadgeGlyphs = (kMaxBadges + kEdgePills) * kBadgeChars;
 constexpr int kArrowFilledVertices = 3, kArrowHollowVertices = 18; // one triangle, three stroke quads
 constexpr int kMaxBadgeVertices = kMaxBadges * 6 + kEdgePills * (6 + kArrowHollowVertices);
-constexpr uint32_t kNewMs = 10'000; // a wall for less than this is "new"
 
 // Geometry, logical px.
 constexpr double kBadgeFontPx = 12;
@@ -53,10 +51,6 @@ constexpr BadgeRgba kAskArrowSrgb{255, 200, 0, 255};
 // Text formatting into a caller's buffer (no terminator); each returns the length.
 // Money: three significant digits, $999 / $12.3k / $1.07M / $2.10B, $999B+ beyond.
 int formatMoney(double usd, char* out);
-// Age from a saturated wall age: 12s / 3m12s / 2h05m / 99h+.
-int formatAge(uint32_t ms, char* out);
-// Flicker count: x1 .. x65535.
-int formatFlickers(uint32_t n, char* out);
 
 struct BadgePill {
     enum Colour : uint8_t { Bid, Ask, Hot };
@@ -77,9 +71,8 @@ class LadderBadges {
 public:
     LadderBadges();
     // Lays out the badges and pills of a drawn snapshot on this frame; nothing when the
-    // radar is off or the atlas is not built. cellLabels: the heatmap draws its cell
-    // value labels this frame, so row badges leave out the notional.
-    void layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas, bool cellLabels);
+    // radar is off or the atlas is not built.
+    void layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas);
     // Writes backgrounds and arrows (at most kMaxBadgeVertices); returns the count.
     int writeGeometry(QSGGeometry::ColoredPoint2D* v) const;
     const std::vector<ChartGlyphInstance>& glyphs() const { return glyphs_; }
@@ -96,10 +89,10 @@ private:
     bool prepareAtlas(const ChartTextAtlas* atlas);
     double textWidth(const BadgePill& p) const;
     void placeEdges(const LadderSnapshot& s, const FrameContext& f);
-    void placeRows(const LadderSnapshot& s, const FrameContext& f, bool cellLabels);
+    void placeRows(const LadderSnapshot& s, const FrameContext& f);
     void prepareRows(const LadderSnapshot& s, const FrameContext& f);
     bool overlapsRow(int index, double rowHeight, double spacing) const;
-    bool placeRow(const LadderSnapshot& s, const FrameContext& f, int index, bool cellLabels);
+    bool placeRow(const LadderSnapshot& s, const FrameContext& f, int index);
     void finishPill(BadgePill& p, double right, double top, double dpr);
     void compose(const BadgePill& p);
     std::array<UnitGlyph, 128> unit_{};

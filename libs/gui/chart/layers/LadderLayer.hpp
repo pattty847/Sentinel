@@ -89,7 +89,7 @@ private:
 // the strip (LadderBadges): their backgrounds and arrows in a second node outside the
 // strip's clip, their text through the text stage (submitLabels, between the text
 // renderer's beginFrame and endFrame). The badges are laid out in the text stage, after
-// the heatmap's cell labels, because their text depends on whether those drew.
+// the heatmap's cell labels.
 class LadderLayer final : public IChartLayer {
 public:
     static constexpr float kInsetPx = 2.0f;
@@ -101,11 +101,10 @@ public:
     void sync(const ChartFrame&) override;
     void updateNodes(const ChartFrame&, LayerNodeContext&) override;
     void afterRendering() override;
-    // The text stage: lays out the badges when the drawn snapshot, frame or cellLabels
-    // (the heatmap drew its cell value labels this frame) changed, and submits their
-    // glyphs. Reserves the badge colours' text nodes once per root, so a colour's first
-    // use later allocates nothing.
-    void submitLabels(const ChartFrame&, LayerNodeContext&, bool cellLabels);
+    // The text stage: lays out the badges when the drawn snapshot or frame changed,
+    // and submits their glyphs. Reserves the badge colours' text nodes once per root,
+    // so a colour's first use later allocates nothing.
+    void submitLabels(const ChartFrame&, LayerNodeContext&);
     LadderMailbox& mailbox() { return mailbox_; }
     // Called from afterRendering (render thread) when the snapshot was built for
     // another frame; the callback queues the republish on the GUI thread.
@@ -128,7 +127,7 @@ private:
     };
     bool drawable(const ChartFrame&) const;
     void rebuild(const ChartFrame&);
-    void rebuildBadges(const ChartFrame&, bool cellLabels);
+    void rebuildBadges(const ChartFrame&);
     bool reserveText(ChartTextRenderer& text) const;
     LadderMailbox mailbox_;
     std::unique_ptr<LadderSnapshot> current_;
@@ -140,7 +139,7 @@ private:
     QSGGeometryNode* bars_ = nullptr;
     QSGGeometryNode* badges_ = nullptr; // child of the gate, outside the strip's clip
     LadderBadges badgeLayout_;
-    bool drawing_ = false, built_ = false, reserved_ = false, badgesBuilt_ = false, cellLabels_ = false;
+    bool drawing_ = false, built_ = false, reserved_ = false, badgesBuilt_ = false;
     Key key_;
     uint64_t rebuilds_ = 0, dirtyMarks_ = 0, creations_ = 0;
     int vertices_ = 0, badgeVertices_ = 0;
