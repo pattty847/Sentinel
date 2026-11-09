@@ -1,5 +1,5 @@
 #pragma once
-#include "datasources/FlowSeriesBuffer.hpp"
+#include "chart/feeds/FlowBufferAccess.hpp"
 #include "chart/core/FootprintLod.hpp"
 #include "render/ITimeAxisMappingProvider.hpp"
 #include <QTimer>
@@ -74,11 +74,10 @@ private:
     void post();
     bool visible(const MappingFrameContext&);
     void report(const FlowSnapshot&);
-    std::function<const FlowSeriesBuffer*()> sourceBuffer_;
     FlowMailbox& mailbox_;
     FlowFeedPorts ports_;
     std::function<void()> coverageChanged_;
-    FlowSeriesBuffer buffer_;
+    FlowBufferAccess buffer_;
     QTimer timer_;
     QMetaObject::Connection sourceConnection_;
     QString symbol_;

@@ -134,13 +134,16 @@ bool LadderBadges::prepareAtlas(const ChartTextAtlas* atlas) {
     return true;
 }
 
-void LadderBadges::layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas) {
+void LadderBadges::layout(const LadderSnapshot& s, const FrameContext& f, const ChartTextAtlas* atlas,
+                          double bottomInset) {
     pills_.clear();
     glyphs_.clear();
     stats_ = {};
     if (!s.radar || !(f.raster.dpr > 0) || !prepareAtlas(atlas)) return;
-    placeEdges(s, f);
-    placeRows(s, f);
+    auto bounds = f;
+    if (bottomInset > 0) bounds.surfaceBounds.setHeight(std::max(0.0, f.surfaceBounds.height() - bottomInset));
+    placeEdges(s, bounds, bottomInset <= 0 || bounds.surfaceBounds.height() >= kPillH + 2 * kEdgeInsetPx);
+    placeRows(s, bounds);
     for (const BadgePill& p : pills_) compose(p);
     stats_.glyphs = int(glyphs_.size());
 }
@@ -204,11 +207,12 @@ BadgePill edgePill(const WallCandidate& c, int side, bool top, const chart_raste
 
 } // namespace
 
-void LadderBadges::placeEdges(const LadderSnapshot& s, const FrameContext& f) {
+void LadderBadges::placeEdges(const LadderSnapshot& s, const FrameContext& f, bool bottomEdge) {
     const auto& cam = f.raster;
     const EdgeSlots slot = edgeSlots(s, cam);
     const double right = snap(f.itemBounds.right() - kBadgeInsetPx, cam.dpr);
     for (int edge = 0; edge < 2; ++edge) {
+        if (edge == 1 && !bottomEdge) continue;
         int stacked = 0; // the ask pill nearest the edge, the bid pill inward
         for (const int side : {LadderSnapshot::kAsk, LadderSnapshot::kBid}) {
             const WallCandidate* c = slot[size_t(edge)][size_t(side)];

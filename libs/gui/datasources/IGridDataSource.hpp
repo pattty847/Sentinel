@@ -31,7 +31,7 @@ public:
     virtual void unsubscribe(const QString& symbol) = 0;
     // Flow is optional for datasources without this stream. History arguments
     // describe the visible half-open window; the remote source adds prefetch.
-    virtual void requestFlowHistory(const QString&, int64_t, int64_t, int64_t) {}
+    virtual void requestFlowHistory(const QString&, int64_t, int64_t, int64_t, int64_t = -1) {}
     virtual void subscribeFlowLive(const QString&, int64_t) {}
     virtual void unsubscribeFlowLive() {}
     virtual void requestFootprintHistory(const QString& symbol,

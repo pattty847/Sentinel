@@ -2710,3 +2710,143 @@ TEST(FootprintFlowFeed, PublicationWakesCandlesOnCoverageTransitionsIncludingRee
 }
 
 #include "test_chart_ui.moc"
+
+TEST(CvdKnobs, QmlAndAgentPortPersistAndProcessOnlyChangesStayLocal) {
+    TempStore store;
+    HeatmapSettingsModel model(store.store, "main", store.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
+    auto* layers = renderer.layers();
+    EXPECT_EQ(layers->cvdStripPx(), 0); EXPECT_EQ(layers->cvdReset(), "visible"); EXPECT_EQ(layers->cvdStyle(), "line");
+    ASSERT_TRUE(QQmlProperty::write(layers, "cvdStripPx", 96));
+    ASSERT_TRUE(QQmlProperty::write(layers, "cvdReset", "visible"));
+    ASSERT_TRUE(QQmlProperty::write(layers, "cvdStyle", "area"));
+    controls.syncNow();
+    auto saved = store.reload();
+    EXPECT_EQ(saved.cvdStripPx, 96); EXPECT_EQ(saved.cvdReset, "visible"); EXPECT_EQ(saved.cvdStyle, "area");
+    const QJsonObject patch{{"cvdStripPx", 128}, {"cvdReset", "tpoSession"}, {"cvdStyle", "line"}};
+    ASSERT_TRUE(model.apply(ChartAgentPort::footprintPatch(patch), false).isEmpty()); controls.syncNow();
+    for (auto it = patch.begin(); it != patch.end(); ++it) EXPECT_EQ(renderer.agentPort().footprintSettings()[it.key()], it.value());
+    saved = store.reload();
+    EXPECT_EQ(saved.cvdStripPx, 96); EXPECT_EQ(saved.cvdReset, "visible"); EXPECT_EQ(saved.cvdStyle, "area");
+    HeatmapSettingsModel restarted(store.store, "main", store.config);
+    UnifiedGridRenderer second;
+    HeatmapChartControls restored(&restarted); restored.setRenderer(&second);
+    EXPECT_EQ(second.layers()->cvdStripPx(), 96); EXPECT_EQ(second.layers()->cvdReset(), "visible"); EXPECT_EQ(second.layers()->cvdStyle(), "area");
+    ASSERT_TRUE(QQmlProperty::write(layers, "cvdStripPx", 128));
+    EXPECT_EQ(store.reload().cvdStripPx, 128);
+}
+
+TEST(CvdFeed, RemoteHistoryAndFormingReplacementWorkWithoutFootprintAtAnyZoom) {
+    RemoteGridDataSource source("127.0.0.1", "1");
+    chart::CvdLayer layer;
+    layer.presentation().reset = chart::CvdReset::UtcDay;
+    chart::CvdFeed feed(layer.mailbox(), layer.presentation());
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000;
+    frame.raster = chart_raster::computeRaster({1000, 2000, 95, 105, {}, 1000, 1, 10, 20, 1}, {});
+    QString symbol = "BTC-USD";
+    feed.setPorts({[&] { return frame; }, [&] { return symbol; }, [] { return 4; }, [] {}});
+    feed.bindSource(source);
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = symbol; batch->timeframeMs = 1000;
+    for (int i = 0; i < 2; ++i) {
+        auto& bar = batch->bars.emplace_back().bar;
+        bar.startMs = i * 1000; bar.timeframeMs = 1000; bar.baseScale = 1; bar.delta = 5;
+    }
+    FlowDataSourceTest::deliver(source, batch); // while CVD and footprint are both off
+    layer.presentation().stripPx = 80;
+    feed.onFrameChanged(); feed.publish();
+    auto current = std::make_unique<chart::CvdSnapshot>();
+    ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_EQ(current->series.count, 1);
+    EXPECT_EQ(current->series.points[0].value, 10);
+    batch->bars[1].bar.delta = -2;
+    FlowDataSourceTest::deliver(source, batch); feed.publish();
+    ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_EQ(current->series.count, 1);
+    EXPECT_EQ(current->series.points[0].value, 3);
+    symbol = "ETH-USD"; feed.onFrameChanged(); feed.publish();
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->series.count, 0);
+}
+
+TEST(CvdKnobs, BothApiRoutesPersistAllThreeFields) {
+    TempStore store;
+    HeatmapSettingsModel model(store.store, "main", store.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
+    for (const char* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
+        for (const char* body : {R"({"cvdStripPx":96,"cvdReset":"visible","cvdStyle":"area"})",
+                                R"({"cvdStripPx":0,"cvdReset":"utcDay","cvdStyle":"line"})",
+                                R"({"cvdStripPx":64,"cvdReset":"tpoSession","cvdStyle":"line"})"}) {
+            const auto validated = AgentApi::validateControl({"POST", path, {}, body}, std::nullopt);
+            ASSERT_EQ(validated.status, 200);
+            const auto patch = validated.body.layers.isEmpty() ? validated.body.heatmapSettings
+                : ChartAgentPort::footprintPatch(validated.body.layers);
+            ASSERT_TRUE(model.apply(patch).isEmpty()); controls.syncNow();
+            const auto saved = heatmap::settingsJson(store.reload());
+            for (auto it = patch.begin(); it != patch.end(); ++it) {
+                EXPECT_EQ(renderer.agentPort().footprintSettings()[it.key()], it.value());
+                EXPECT_EQ(saved[it.key()], it.value());
+            }
+        }
+    }
+}
+
+TEST(CvdFeed, FallbackAccumulatesWhileOffAndCanEnableWithoutAnotherBatch) {
+    chart::CvdLayer layer;
+    layer.presentation().reset = chart::CvdReset::UtcDay;
+    chart::CvdFeed feed(layer.mailbox(), layer.presentation());
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000; frame.raster.valid = true;
+    frame.raster.drawnStartMs = 1000; frame.raster.drawnEndMs = 2000;
+    feed.setPorts({[&] { return frame; }, [] { return QStringLiteral("BTC-USD"); }, [] { return 4; }, [] {}});
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = "BTC-USD"; batch->timeframeMs = 1000;
+    for (int i = 0; i < 2; ++i) {
+        auto& bar = batch->bars.emplace_back().bar;
+        bar.startMs = 1000 * i; bar.timeframeMs = 1000; bar.baseScale = 1; bar.delta = 5;
+    }
+    feed.receive(batch);
+    layer.presentation().stripPx = 96; feed.publish();
+    auto current = std::make_unique<chart::CvdSnapshot>();
+    ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_EQ(current->series.count, 1);
+    EXPECT_EQ(current->series.points[0].value, 10);
+}
+TEST(CvdKnobs, HeightClampsAndPersistsOnQmlAndBothApiRoutes) {
+    TempStore store;
+    HeatmapSettingsModel model(store.store, "main", store.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
+    for (const int input : {-100, 0, 96, 400, 401, INT_MAX}) {
+        const int expected = std::clamp(input, 0, 400);
+        ASSERT_TRUE(QQmlProperty::write(renderer.layers(), "cvdStripPx", input)); controls.syncNow();
+        EXPECT_EQ(renderer.layers()->cvdStripPx(), expected); EXPECT_EQ(store.reload().cvdStripPx, expected);
+        for (const char* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
+            const auto body = QByteArray("{\"cvdStripPx\":") + QByteArray::number(input) + "}";
+            const auto validated = AgentApi::validateControl({"POST", path, {}, body}, std::nullopt);
+            ASSERT_EQ(validated.status, 200);
+            const auto patch = validated.body.layers.isEmpty() ? validated.body.heatmapSettings : ChartAgentPort::footprintPatch(validated.body.layers);
+            ASSERT_TRUE(model.apply(patch).isEmpty()); controls.syncNow();
+            EXPECT_EQ(renderer.layers()->cvdStripPx(), expected); EXPECT_EQ(store.reload().cvdStripPx, expected);
+        }
+    }
+    heatmap::HeatmapChartSettings direct;
+    direct.cvdStripPx = INT_MAX; heatmap::clampSettings(direct); EXPECT_EQ(direct.cvdStripPx, 400);
+}
+
+TEST(CvdKnobs, RemovedResetIsRejectedByQmlAndNormalisedOnlyOnLoad) {
+    TempStore store;
+    EXPECT_EQ(store.reload().cvdReset, "visible");
+    store.settings.setValue("heatmap/main/cvdReset", "none");
+    EXPECT_EQ(store.reload().cvdReset, "visible");
+    // A saved layout must also choose the default, even over a current day reset.
+    store.settings.setValue("heatmap/main/cvdReset", "utcDay");
+    store.settings.setValue("layouts/lab/heatmap/main/cvdReset", "none");
+    EXPECT_EQ(store.store.restoreLayout("lab", "main", store.config).cvdReset, "visible");
+    HeatmapSettingsModel model(store.store, "main", store.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
+    EXPECT_EQ(renderer.layers()->cvdReset(), "visible");
+    ASSERT_TRUE(QQmlProperty::write(renderer.layers(), "cvdReset", "utcDay")); controls.syncNow();
+    ASSERT_TRUE(QQmlProperty::write(renderer.layers(), "cvdReset", "none")); controls.syncNow();
+    EXPECT_EQ(renderer.layers()->cvdReset(), "utcDay"); EXPECT_EQ(store.reload().cvdReset, "utcDay");
+}

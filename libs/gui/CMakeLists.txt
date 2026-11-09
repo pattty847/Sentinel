@@ -67,6 +67,9 @@ set(GRID_CORE_SOURCES
     chart/layers/TradeLayers.cpp
     chart/layers/LadderLayer.cpp
     chart/layers/LadderBadges.cpp
+    chart/feeds/FlowBufferAccess.cpp
+    chart/feeds/CvdFeed.cpp
+    chart/layers/CvdLayer.cpp
     chart/feeds/FlowFeed.cpp
     chart/layers/FootprintCellsLayer.cpp
     chart/feeds/BookLadderFeed.cpp

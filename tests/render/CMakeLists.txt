@@ -451,3 +451,9 @@ target_include_directories(test_footprint_lod PRIVATE ${CMAKE_SOURCE_DIR}/libs/g
 target_link_libraries(test_footprint_lod PRIVATE GTest::gtest_main)
 add_test(NAME FootprintLodTests COMMAND test_footprint_lod)
 set_tests_properties(FootprintLodTests PROPERTIES LABELS "render;fast")
+
+add_executable(test_cvd_series test_cvd_series.cpp)
+set_target_properties(test_cvd_series PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(test_cvd_series PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_cvd_series PRIVATE GTest::gtest_main)
+add_test(NAME CvdSeriesTests COMMAND test_cvd_series)

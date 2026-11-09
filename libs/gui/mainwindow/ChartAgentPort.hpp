@@ -6,15 +6,16 @@
 namespace chart { class ChartViewController; class PublishedFrame; class FrameAck; }
 
 class IGridDataSource;
-namespace chart { class FlowFeed; class LayerVisibility; }
+namespace chart { class CvdFeed; class FlowFeed; class LayerVisibility; }
 class ChartAgentPort {
 public:
     ChartAgentPort() = default;
     ChartAgentPort(chart::ChartViewController& view, const chart::PublishedFrame& published,
                    chart::FrameAck& ack, std::function<void()> update,
-                   chart::FlowFeed* flow = nullptr, chart::LayerVisibility* layers = nullptr)
-        : view_(&view), published_(&published), ack_(&ack), update_(std::move(update)), flow_(flow), layers_(layers) {}
+                   chart::FlowFeed* flow = nullptr, chart::LayerVisibility* layers = nullptr, chart::CvdFeed* cvd = nullptr)
+        : view_(&view), published_(&published), ack_(&ack), update_(std::move(update)), flow_(flow), layers_(layers), cvd_(cvd) {}
     void bindFlowSource(IGridDataSource&) const;
+    int64_t cvdHistoryAnchor(int64_t start, int64_t timeframe) const;
     QJsonObject footprintSettings() const;
     static QJsonObject footprintPatch(const QJsonObject&);
     void applyFootprintSettings(const QJsonObject&) const;
@@ -30,4 +31,5 @@ private:
     std::function<void()> update_;
     chart::FlowFeed* flow_ = nullptr;
     chart::LayerVisibility* layers_ = nullptr;
+    chart::CvdFeed* cvd_ = nullptr;
 };

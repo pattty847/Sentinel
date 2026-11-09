@@ -462,6 +462,13 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
                 else result.body.priceMax = v.toDouble();
             } else return reject("invalid_field", "Unknown viewport field");
         } else if (kind == "layers") {
+            if (key == "cvdStripPx" || key == "cvdReset" || key == "cvdStyle") {
+                heatmap::HeatmapChartSettings settings;
+                const auto error = heatmap::applySettingsPatch(settings, {{key, v}});
+                if (!error.isEmpty()) return reject("invalid_layer", error.toUtf8().constData());
+                result.body.layers.insert(key, v);
+                continue;
+            }
             if (key == "footprintSource") {
                 if (v != "q16" && v != "cells") return reject("invalid_layer", "footprintSource must be q16 or cells");
                 result.body.layers.insert(key, v);
@@ -582,6 +589,8 @@ QJsonObject stateJson(const StateSnapshot& s) {
             {"tpo", integer(s.tpoReceivedAtMs)}, {"volumeProfile", integer(s.volumeProfileReceivedAtMs)}}},
         {"layers", QJsonObject{{"heatmap", boolean(s.heatmapLayer)}, {"candles", boolean(s.candlesLayer)},
             {"footprint", boolean(s.footprintLayer)},
+            {"cvdStripPx", s.footprintSettings.value("cvdStripPx")},
+            {"cvdReset", s.footprintSettings.value("cvdReset")}, {"cvdStyle", s.footprintSettings.value("cvdStyle")},
             {"footprintSource", s.footprintSettings.value("footprintSource")},
             {"footprintIntensity", s.footprintSettings.value("footprintIntensity")},
             {"footprintHollowCandles", s.footprintSettings.value("footprintHollowCandles")},

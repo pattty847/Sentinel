@@ -5,7 +5,7 @@
 
 namespace chart {
 // Registration is completed before the first root is built. Each layer receives
-// its own container, so lazy child creation cannot change the paint order.
+// its own ordered container; a layer may defer it until enabled.
 class LayerRegistry {
 public:
     void add(IChartLayer& layer, FrameProfiler::Stage stage = FrameProfiler::StageCount) {
@@ -17,6 +17,7 @@ public:
     }
     void updateNodes(const ChartFrame& frame, LayerNodeContext context) {
         for (auto& entry : layers_) {
+            ensureContainer(entry);
             context.root = entry.container;
             entry.layer->updateNodes(frame, context);
             // Repeated Overlays marks report the sum across layers and retain the per-frame maximum.
@@ -36,6 +37,8 @@ public:
     }
 private:
     struct Entry { IChartLayer* layer; QSGNode* container; FrameProfiler::Stage stage; };
+    void ensureContainer(Entry&);
+    QSGNode* root_ = nullptr;
     std::vector<Entry> layers_;
 };
 } // namespace chart

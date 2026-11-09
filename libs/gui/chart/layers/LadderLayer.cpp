@@ -1,4 +1,5 @@
 #include "chart/layers/LadderLayer.hpp"
+#include "chart/feeds/CvdFeed.hpp"
 #include "chart/layers/LadderGrid.hpp"
 #include "chart/core/ChartFrame.hpp"
 #include "render/ChartTextRenderer.hpp"
@@ -35,6 +36,12 @@ constexpr Rgba kHotWall = premultiply(kHotWallSrgb);
 Rgba barColour(const LadderSnapshot& s, uint8_t flags, uint8_t large, uint8_t hot, Rgba plain, Rgba wall) {
     if (!s.radar || !(flags & large)) return plain;
     return (flags & hot) ? kHotWall : wall;
+}
+
+double cvdInset(const CvdPresentation* cvd, const ChartFrame& frame) {
+    const auto& cam = frame.context.raster;
+    if (!cvd || !cam.valid || !(cam.dpr > 0) || !cvd->drawable(frame.context.time.activeTimeframeMs)) return 0;
+    return std::clamp(double(cvd->stripPx), 0.0, std::max(0.0, frame.context.surfaceBounds.height()));
 }
 
 // A vertex-colour triangle node of a fixed capacity, drawing nothing yet.
@@ -95,7 +102,7 @@ bool LadderMailbox::take(std::unique_ptr<LadderSnapshot>& current, uint64_t minG
     return true;
 }
 
-LadderLayer::LadderLayer() : current_(std::make_unique<LadderSnapshot>()) {}
+LadderLayer::LadderLayer(const CvdPresentation* cvd) : cvd_(cvd), current_(std::make_unique<LadderSnapshot>()) {}
 LadderLayer::~LadderLayer() = default;
 
 void LadderLayer::onRootRebuilt() {
@@ -138,9 +145,11 @@ bool LadderLayer::drawable(const ChartFrame& frame) const {
 }
 
 void LadderLayer::sync(const ChartFrame& frame) {
+    const auto& cam = frame.context.raster;
+    const double inset = cvdInset(cvd_, frame);
+    if (inset != bottomInset_) { bottomInset_ = inset; badgesBuilt_ = false; }
     if (mailbox_.take(current_, generation_)) generation_ = current_->generation;
     drawing_ = drawable(frame);
-    const auto& cam = frame.context.raster;
     if (frame.context.rightGutterPx <= 0 || !cam.valid || !(cam.tick > 0)) return;
     // Built for another frame (tick, rows or drag): ask the feed once per snapshot.
     const auto window = ladderWindow(cam.drawnMinPrice, cam.drawnMaxPrice, cam.tick);
@@ -209,7 +218,7 @@ void LadderLayer::rebuild(const ChartFrame& frame) {
 void LadderLayer::rebuildBadges(const ChartFrame& frame) {
     QElapsedTimer timer;
     timer.start();
-    badgeLayout_.layout(*current_, frame.context, key_.atlas);
+    badgeLayout_.layout(*current_, frame.context, key_.atlas, bottomInset_);
     commitVertices(badges_, badgeLayout_.writeGeometry(badges_->geometry()->vertexDataAsColoredPoint2D()),
                    badgeVertices_);
     ++dirtyMarks_;

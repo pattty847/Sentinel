@@ -54,6 +54,7 @@ QString symbolFromSegment(QString value) {
 
 void clampSettings(HeatmapChartSettings &s) {
     const HeatmapChartSettings d;
+    s.cvdStripPx = std::clamp(s.cvdStripPx, 0, 400);
     if (s.tickMode != TickMode::Auto && s.tickMode != TickMode::Manual) s.tickMode = TickMode::Auto;
     s.manualTick = presetAtLeast(double(std::clamp<int64_t>(s.manualTick, 1, 1'000'000'000'000LL)), 1);
     s.minRowPx = finiteClamp(s.minRowPx, 0.5, 32, d.minRowPx);
@@ -137,6 +138,8 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"candleWickColor", QString::fromStdString(s.candleWickColor)},
         {"candleBodyOpacity", s.candleBodyOpacity},
         {"candleWickWidth", s.candleWickWidth},
+        {"cvdStripPx", s.cvdStripPx}, {"cvdReset", QString::fromStdString(s.cvdReset)},
+        {"cvdStyle", QString::fromStdString(s.cvdStyle)},
         {"footprintSource", QString::fromStdString(s.footprintSource)},
         {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
         {"footprintHollowCandles", s.footprintHollowCandles}, {"footprintNumbers", s.footprintNumbers},
@@ -162,6 +165,10 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         if (integers.contains(key) && std::floor(v.toDouble()) != v.toDouble()) return "Expected an integer: " + key;
         if (key == "bubblePlacement" && v != "individual" && v != "auto" && v != "slot")
             return "bubblePlacement must be individual, auto or slot";
+        if (key == "cvdStripPx" && std::floor(v.toDouble()) != v.toDouble())
+            return "cvdStripPx must be an integer";
+        if (key == "cvdReset" && v != "visible" && v != "utcDay" && v != "tpoSession") return "cvdReset must be visible, utcDay or tpoSession";
+        if (key == "cvdStyle" && v != "line" && v != "area") return "cvdStyle must be line or area";
         if (key == "footprintSource" && v != "q16" && v != "cells") return "footprintSource must be q16 or cells";
         if (key == "footprintIntensity" && v != "bar" && v != "window") return "footprintIntensity must be bar or window";
         if (key == "tickMode" && v != "auto" && v != "manual") return "tickMode must be auto or manual";
@@ -203,6 +210,9 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.candleWickColor = merged["candleWickColor"].toString().toStdString();
     out.candleBodyOpacity = merged["candleBodyOpacity"].toDouble();
     out.candleWickWidth = merged["candleWickWidth"].toInt();
+    out.cvdStripPx = int(std::clamp(merged["cvdStripPx"].toDouble(), 0.0, 400.0));
+    out.cvdReset = merged["cvdReset"].toString().toStdString();
+    out.cvdStyle = merged["cvdStyle"].toString().toStdString();
     out.footprintSource = merged["footprintSource"].toString().toStdString();
     out.footprintIntensity = merged["footprintIntensity"].toString().toStdString();
     out.footprintHollowCandles = merged["footprintHollowCandles"].toBool();
@@ -239,6 +249,7 @@ HeatmapChartSettings HeatmapSettingsStore::loadAt(const QString &prefix, Heatmap
             if (value != "true" && value != "false") continue;
             decoded = value == "true";
         }
+        if (it.key() == "cvdReset" && decoded == "none") decoded = QStringLiteral("visible");
         auto check = defaults;
         if (applySettingsPatch(check, {{it.key(), decoded}}).isEmpty()) patch[it.key()] = decoded;
     }

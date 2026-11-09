@@ -4,10 +4,7 @@
 #include "chart/core/PublishedFrame.hpp"
 #include "chart/shell/LayerVisibility.hpp"
 #include "datasources/IGridDataSource.hpp"
-#include "datasources/RemoteGridDataSource.hpp"
-#include <QPointer>
 #include "render/GridViewState.hpp"
-#include <QDateTime>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -138,9 +135,7 @@ void FlowFeed::bind(ChartViewController& view, const PublishedFrame& published,
 }
 void FlowFeed::bindSource(IGridDataSource& source) {
     disconnect(sourceConnection_);
-    buffer_.clear();
-    const QPointer<RemoteGridDataSource> remote = qobject_cast<RemoteGridDataSource*>(&source);
-    sourceBuffer_ = [remote]() -> const FlowSeriesBuffer* { return remote ? &remote->flowBuffer() : nullptr; };
+    buffer_.bind(source);
     sourceConnection_ = connect(&source, &IGridDataSource::flowBarsReceived, this, &FlowFeed::receive);
     if (enabled_) publishRows();
 }
@@ -168,7 +163,7 @@ void FlowFeed::receive(SentinelStreamClient::FlowBatchPtr batch) {
     if (!enabled_ || lod_ == FootprintStage::Hidden) return;
     selectSymbol();
     if (!batch || batch->symbol != symbol_) return;
-    if (!sourceBuffer_ || !sourceBuffer_()) buffer_.apply(*batch, QDateTime::currentMSecsSinceEpoch());
+    buffer_.receive(*batch);
     onFrameChanged();
 }
 void FlowFeed::setEnabled(bool enabled) {
@@ -238,9 +233,7 @@ void FlowFeed::publishRows() {
     auto& out = mailbox_.back();
     out.valid = false; out.barCount = 0; out.cellCount = 0;
     out.skippedBars = 0; out.truncatedBars = 0; out.serial = ++serial_;
-    const auto* source = sourceBuffer_ ? sourceBuffer_() : nullptr;
-    const auto& buffer = source ? *source : buffer_;
-    const auto* series = buffer.symbol() == symbol_ ? buffer.series(frame.activeTimeframeMs) : nullptr;
+    const auto* series = buffer_.series(symbol_, frame.activeTimeframeMs);
     if (series) bin(out, *series, frame);
     report(out);
     post();
