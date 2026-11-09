@@ -30,7 +30,8 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 - **Fable plan** (no code): footprint, CVD, eaten/pulled, trade bubbles -> `../Sentinel-Private/research/2026-11-08-why-it-moved-plan.md` (Claude subagent, running).
 - `lt-claude/heatmap-seam` (worktree `/Volumes/T7/sentinel-worktrees/lt-claude-heatmap-seam`): seam left of the now column. Writer Claude Opus subagent; reviewer gpt-6-astra. HIGH. Owns HeatmapGpuLayer, HeatmapSourceController. Phase: writing.
-- `lt-astra/heatmap-saturation` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-heatmap-saturation`): size saturation (PEPE) + zoom-out smoothing setting (default off). Writer gpt-6-astra thread `01a1be15-f436-7d21-8eaa-b2a3cfe59f36`; reviewer Fable. HIGH; Metal evidence from the conductor. Owns palette, shaders, HeatmapLayer, settings. Phase: writing.
+- `lt-astra/heatmap-saturation` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-heatmap-saturation`): PARKED until the seam lands (needs HeatmapGpuLayer.cpp). Root cause: display size encoding clamps at code 32767 (~1.1M units; `RecordingCodec.hpp:30,45`, hard-coded scale at `HeatmapGpuLayer.cpp:246`), so PEPE sizes all read max. Resume thread `01a1be15-f436-7d21-8eaa-b2a3cfe59f36` with HeatmapGpuLayer, the label query and `HeatmapChartSettings.hpp` added to its files; the smoothing shader loop is capped at 4 cells per axis. Recording format must not change. Reviewer Fable; HIGH.
+- `lt-astra/axis-drag-snapback` (worktree `/Volumes/T7/sentinel-worktrees/lt-astra-axis-drag-snapback`): price-axis drag glides back mid-drag. Writer gpt-6-astra thread `01a1be17-f95b-7550-9718-9cd35f04fd45`; reviewer Claude Opus. MEDIUM; native chart GPU run from the conductor. Owns `libs/gui/chart/core/**`. Phase: writing.
 
 Lab branches that never land: `lt-astra/hmc2-rollup-lab`, `lt-claude/hmc2-layout-lab` (results in `/Volumes/T7/sentinel-datalab/hmc2-*`).
 
