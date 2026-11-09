@@ -29,7 +29,7 @@ struct HeatmapChartSettings {
     bool showTelemetry = false;
     bool showTrades = false;
     bool tradesAboveCandles = true;
-    double tradeMinNotional = 0; // quote units; 0 uses the visible median
+    double tradeMinNotional = -1; // -1 all, 0 visible median, >0 fixed quote minimum
     std::string bubblePlacement = "individual";
     // Liquidity labels (S7b, owner decision 1/2): on every coloured cell where the
     // text fits at labelMinPx plus padding, growing to at most labelMaxPx; USD

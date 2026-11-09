@@ -102,20 +102,21 @@ curl -s 'http://127.0.0.1:17100/api/v1/screenshot?name=wheel&target=heatmap&afte
 ## Trade bubbles (GPU chart)
 
 The toolbar gear menu has **Trades** (off by default) and **Minimum trade notional
-(quote)** presets: Auto (visible median), 100, 1,000, 10,000 and 100,000. Notional is
+(quote)** presets: All trades, Auto (visible median), 100, 1,000, 10,000 and 100,000. Notional is
 price times asset size, in the pair's quote currency (USD for BTC-USD, ETH-USD, etc.).
-The Chart settings tab exposes **Bubble placement** and an arbitrary minimum.
+The Chart settings tab exposes **Bubble placement** and All / Auto / Custom minimum controls.
 The same per-chart/named-layout settings are exposed in `heatmap/state` and accept:
 
 ```json
-{"showTrades":true,"bubblePlacement":"auto","tradeMinNotional":0,"persist":false}
+{"showTrades":true,"bubblePlacement":"auto","tradeMinNotional":-1,"persist":false}
 ```
 
 POST this to `/api/v1/heatmap/settings`; `persist` defaults to true, and the normal
 operation/render acknowledgement applies. `showTrades` is boolean;
-`tradeMinNotional` accepts finite numbers clamped to 0..1e12. Zero means automatic,
-not all sizes: hide marks below the visible median. A positive value overrides that
-minimum in quote currency. `bubblePlacement` accepts exactly:
+`tradeMinNotional` accepts finite numbers clamped to -1..1e12: -1 (default)
+shows all trades, 0 hides marks below the visible median, and a positive value
+sets a fixed minimum in quote currency. Persisted zero values written before
+this three-mode setting are read as All; a newly saved zero means Auto. `bubblePlacement` accepts exactly:
 
 - `individual` (default): exchange time and execution price, with sweep merging.
 - `slot`: one aggregate per epoch-aligned (bar, side), at the bar centre and side
@@ -131,6 +132,7 @@ reset with the Chart tab. Slot aggregation includes all retained trades in each
 bar overlapping the time window, including its offscreen portion; the aggregate
 and notable marks each pass the minimum independently. Notables also contribute
 to the aggregate; their extra marks identify large executions, not additional volume.
+A notable is omitted when it is the sole contributor to its side aggregate.
 
 In every mode, consecutive same-side trades with identical exchange timestamps
 (including sub-millisecond precision) and consecutive unsigned numeric IDs merge
@@ -138,16 +140,20 @@ into one sweep capsule. Its endpoints are the lowest and highest execution price
 its notional is summed, and `sweepLevels` counts distinct prices. Gaps, nonnumeric
 IDs, side changes and different timestamps break the run. Sweep merging precedes
 minimum filtering. A price change from the preceding retained trade gives full
-bubble opacity; same-price passive executions use 35% of that opacity. A sweep
+bubble opacity. The first execution without a predecessor is passive; same-price passive executions use 35% of that opacity. A sweep
 with any price change uses full bubble opacity.
 
-Sizing uses `radius = clamp(2, 18, 9 * sqrt(notional / ref))` in logical pixels,
-where `ref` is the nearest-rank p95 of individual trade notionals in the visible
-half-open **time** window (all prices). Auto minimum uses its lower median. The feed
-caches these statistics by window content at publication; render frames do not
-recompute quantiles. Capsule width is reduced to preserve the corresponding
-circle's area while spanning its price endpoints. The clamps limit area scaling
-at the smallest/largest sizes.
+Sizing uses `radius = clamp(2, 18, 9 * sqrt(notional / ref))` in logical pixels.
+Individual and notable marks use the p95 of individual trade notionals in the
+visible half-open **time** window. Side aggregates use the p95 of the side-bar
+aggregate notionals drawn in Slot mode. Auto minimum uses the visible lower median
+of individual trades. The p95 and median are quantised to quarter-octave steps;
+the active value changes only after a move of more than one step. The policy uses
+linear-time selection and recomputes at most every 250 ms as window contents
+change, or immediately when the visible time window shifts by more than 10%,
+placement mode, timeframe or minimum changes. Capsule half-width preserves circle area
+when possible, but is floored at 2 logical pixels for long sweeps, adding area
+when needed for visibility. The size clamps limit scaling at the extremes.
 
 **Trades above candles** defaults on (`settings.tradesAboveCandles: true`). Set it
 to false to draw below candles; both orders remain above the heatmap and below

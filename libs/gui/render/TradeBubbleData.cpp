@@ -69,14 +69,14 @@ uint64_t cellHash(uint32_t x, uint32_t y, AggressorSide side) {
     return h ^ (h >> 31);
 }
 }
-Layout::Layout() : points_(std::make_unique<Point[]>(Tape::Capacity * 2)),
+Layout::Layout() : points_(std::make_unique<Point[]>(PointCapacity)),
                    fineSlots_(std::make_unique<uint32_t[]>(FineSlots)) {}
 std::span<const Bubble> Layout::build(Samples trades, const TimeAxisMapping& map,
                                       const chart::bubbles::Options& options, double previousPrice) {
     count_ = scannedRows_ = 0;
     binSize_ = 0;
     hashProbes_ = coarseCellVisits_ = fineCellCount_ = 0;
-    if (!map.valid || !std::isfinite(options.minimum) || options.minimum < 0 ||
+    if (!map.valid || !std::isfinite(options.minimum) || options.minimum < -1 ||
         !std::isfinite(map.drawRect.width()) || !std::isfinite(map.drawRect.height()) ||
         map.drawRect.width() <= 0 || map.drawRect.height() <= 0) return {};
     const auto marks = policy_.build(PolicyRows{trades}, options, map.appendMs, previousPrice);
@@ -84,17 +84,19 @@ std::span<const Bubble> Layout::build(Samples trades, const TimeAxisMapping& map
     size_t pointCount = 0;
     double maxX = 0, maxY = 0;
     for (const auto& t : marks) {
+        if (options.mode != chart::bubbles::Mode::Slot &&
+            (t.timeMs < map.viewStartMs || t.timeMs >= map.viewEndMs)) continue;
         if (t.maxPrice < map.viewMinPrice || t.minPrice > map.viewMaxPrice) continue;
         const double x = map.timeToScreenX(t.timeMs), y = map.priceToScreenY(t.price);
         const double lowY = map.priceToScreenY(t.maxPrice), highY = map.priceToScreenY(t.minPrice);
         if (!std::isfinite(float(x)) || !std::isfinite(float(y)) || !std::isfinite(float(lowY)) || !std::isfinite(float(highY))) continue;
-        points_[pointCount++] = {x, y, t.notional, lowY, highY, t.moving ? 1.0 : 0.35, AggressorSide(t.side)};
+        points_[pointCount++] = {x, y, t.notional, lowY, highY, t.moving ? 1.0 : 0.35, t.aggregate, AggressorSide(t.side)};
         maxX = std::max(maxX, x-map.drawRect.x());
         maxY = std::max(maxY, y-map.drawRect.y());
     }
     const auto appendBubble = [&](const Point& p) {
-        bubbles_[count_++] = {float(p.x), float(p.y), float(radius(p.notional, options.reference.p95)), p.side,
-                             float(p.minY), float(p.maxY), float(p.opacity)};
+        bubbles_[count_++] = {float(p.x), float(p.y), float(radius(p.notional, p.aggregate ? options.reference.aggregateP95 : options.reference.p95)), p.side,
+                             float(p.minY), float(p.maxY), float(p.opacity), p.notional};
     };
     if (pointCount <= MaxBubbles) {
         for (size_t i = 0; i < pointCount; ++i) appendBubble(points_[i]);
@@ -116,6 +118,7 @@ std::span<const Bubble> Layout::build(Samples trades, const TimeAxisMapping& map
             dst.minY = dst.y - halfExtent;
             dst.maxY = dst.y + halfExtent;
             dst.opacity = std::max(dst.opacity, src.opacity);
+            dst.aggregate = dst.aggregate || src.aggregate;
             dst.notional = total;
         };
         for (size_t i = 0; i < pointCount; ++i) {

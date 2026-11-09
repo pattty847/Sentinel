@@ -73,11 +73,12 @@ struct Bubble {
     float x = 0, y = 0, radius = 0;
     AggressorSide side = AggressorSide::Unknown;
     float minY = 0, maxY = 0, opacity = 1;
+    double notional = 0;
 };
 class Layout {
 public:
     static constexpr size_t MaxBubbles = 4096;
-    static constexpr double MaxRadius = 18;
+    static constexpr double MaxRadius = chart::bubbles::MaxRadius;
     Layout();
     static double radius(double notional, double reference) { return chart::bubbles::radius(notional, reference); }
     std::span<const Bubble> build(Samples trades, const TimeAxisMapping& map, const chart::bubbles::Options& options, double previousPrice = 0);
@@ -90,11 +91,19 @@ private:
     struct Point {
         double x = 0, y = 0, notional = 0;
         double minY = 0, maxY = 0, opacity = 1;
+        bool aggregate = false;
         AggressorSide side = AggressorSide::Unknown;
         uint32_t cellX = 0, cellY = 0;
     };
-    static constexpr size_t FineSlots = 1u << 18; // <=200k marks, load <0.77
+    static constexpr size_t PointCapacity = chart::bubbles::BubblePlacement::MaxMarks;
+    static constexpr size_t FineSlots = 1u << 18; // <=150k marks, load <0.58
     chart::bubbles::BubblePlacement policy_;
+public:
+    static constexpr size_t scratchBytes() { return PointCapacity * sizeof(Point) +
+        FineSlots * sizeof(uint32_t) + MaxBubbles * sizeof(Point) +
+        MaxBubbles * sizeof(Bubble) + MaxBubbles * 2 * sizeof(uint16_t) +
+        chart::bubbles::BubblePlacement::storageBytes(); }
+private:
     std::unique_ptr<Point[]> points_; // raw projected rows, compacted in place to 6 px cells
     std::unique_ptr<uint32_t[]> fineSlots_;
     std::array<uint16_t, MaxBubbles * 2> coarseSlots_{};

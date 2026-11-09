@@ -67,7 +67,7 @@ void clampSettings(HeatmapChartSettings &s) {
     if (s.sensitivityMax <= s.sensitivityMin) s.sensitivityMax = s.sensitivityMin * 2;
     if (s.bubblePlacement != "individual" && s.bubblePlacement != "auto" && s.bubblePlacement != "slot")
         s.bubblePlacement = d.bubblePlacement;
-    s.tradeMinNotional = finiteClamp(s.tradeMinNotional, 0, 1e12, d.tradeMinNotional);
+    s.tradeMinNotional = finiteClamp(s.tradeMinNotional, -1, 1e12, d.tradeMinNotional);
     s.opacity = finiteClamp(s.opacity, 0, 1, d.opacity);
     s.gpuCapBytes = std::clamp<uint64_t>(s.gpuCapBytes, MiB, 4096 * MiB);
     s.uploadBudgetBytes = std::clamp<uint64_t>(s.uploadBudgetBytes, 1, std::min<uint64_t>(128 * MiB, s.gpuCapBytes));
@@ -230,6 +230,8 @@ HeatmapChartSettings HeatmapSettingsStore::loadAt(const QString &prefix, Heatmap
             if (value != "true" && value != "false") continue;
             decoded = value == "true";
         }
+        if (it.key() == "tradeMinNotional" && decoded.toDouble() == 0 &&
+            !settings_->contains(prefix + "tradeMinNotionalModeVersion")) decoded = -1;
         auto check = defaults;
         if (applySettingsPatch(check, {{it.key(), decoded}}).isEmpty()) patch[it.key()] = decoded;
     }
@@ -239,6 +241,7 @@ HeatmapChartSettings HeatmapSettingsStore::loadAt(const QString &prefix, Heatmap
 void HeatmapSettingsStore::saveAt(const QString &prefix, HeatmapChartSettings value) {
     clampSettings(value);
     const auto json = settingsJson(value);
+    settings_->setValue(prefix + "tradeMinNotionalModeVersion", 1);
     for (auto it = json.begin(); it != json.end(); ++it) {
         if (it.key() == "sensitivityMin" || it.key() == "sensitivityMax") {
             settings_->remove(prefix + it.key());

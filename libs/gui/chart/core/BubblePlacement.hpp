@@ -18,13 +18,13 @@ struct Execution {
     int64_t exchangeNs = 0;
 };
 struct Reference {
-    double median = 0, p95 = 1;
+    double median = 0, p95 = 1, aggregateP95 = 1;
     bool operator==(const Reference&) const = default;
 };
 struct Options {
     Mode mode = Mode::Individual;
     Reference reference;
-    double minimum = 0;
+    double minimum = -1;
     bool operator==(const Options&) const = default;
 };
 struct Mark {
@@ -47,40 +47,129 @@ public:
 private:
     bool initialized_ = false, slot_ = false;
 };
+inline constexpr double MinRadius = 2.0, MaxRadius = 18.0;
 inline double radius(double notional, double reference) {
     if (!(notional > 0) || !std::isfinite(notional) || !(reference > 0) || !std::isfinite(reference)) return 0;
-    return std::clamp(9 * std::sqrt(notional / reference), 2.0, 18.0);
+    return std::clamp(9 * std::sqrt(notional / reference), MinRadius, MaxRadius);
 }
+inline double capsuleHalfWidth(double equivalentRadius, double length) {
+    if (!(equivalentRadius > 0) || !std::isfinite(length) || length < 0) return 0;
+    constexpr double pi = 3.14159265358979323846;
+    const double area = pi * equivalentRadius * equivalentRadius;
+    const double preserving = area / (std::sqrt(length*length + pi*area) + length);
+    return std::max({1.5, MinRadius, preserving});
+}
+struct WindowStamp {
+    uint64_t first = 0, last = 0, slotFirst = 0, slotLast = 0;
+    size_t count = 0, slotCount = 0;
+    bool operator==(const WindowStamp&) const = default;
+};
+struct VisibleView { double startMs = 0, endMs = 0, tfMs = 0, minimum = -1; };
 class ReferenceStatistics {
 public:
     static constexpr size_t Capacity = 100000;
-    ReferenceStatistics() : scratch_(std::make_unique<double[]>(Capacity)) {}
+    ReferenceStatistics() : scratch_(std::make_unique<double[]>(Capacity)),
+                            aggregates_(std::make_unique<double[]>(Capacity)) {}
+    void reset() { initialized_ = false; active_ = {}; updates_ = 0; }
+    uint64_t updates() const { return updates_; }
+    static constexpr size_t storageBytes() { return 2 * Capacity * sizeof(double); }
+    template<class Rows, class SlotRows>
+    Reference update(const Rows& rows, const SlotRows& slotRows, WindowStamp stamp,
+                     VisibleView view, Mode mode, int64_t nowMs) {
+        const double width = lastView_.endMs - lastView_.startMs;
+        const bool shifted = initialized_ && width > 0 &&
+            (std::abs(view.startMs-lastView_.startMs) > .1*width ||
+             std::abs(view.endMs-lastView_.endMs) > .1*width);
+        const bool settingsChanged = mode != lastMode_ || view.tfMs != lastView_.tfMs ||
+                                     view.minimum != lastView_.minimum;
+        const bool changed = stamp != lastStamp_ || shifted || settingsChanged;
+        if (initialized_ && (!changed || (nowMs-lastUpdateMs_ < 250 && !shifted &&
+                             !settingsChanged))) return active_;
+        const Reference raw = reference(rows);
+        if (!initialized_) active_ = {0, 0, 0};
+        settle(active_.median, raw.median, true);
+        settle(active_.p95, raw.p95);
+        if (mode == Mode::Slot)
+            settle(active_.aggregateP95, aggregateReference(slotRows, view, active_.median));
+        initialized_ = true; lastStamp_ = stamp; lastView_ = view;
+        lastMode_ = mode; lastUpdateMs_ = nowMs; ++updates_;
+        return active_;
+    }
     template<class Rows> Reference reference(const Rows& rows) {
-        size_t n = 0;
-        for (size_t i = 0; i < rows.size() && n < Capacity; ++i) {
+        size_t count = 0;
+        for (size_t i = 0; i < rows.size() && count < Capacity; ++i) {
             const auto t = rows[i];
-            if (std::isfinite(t.price * t.size) && t.price > 0 && t.size > 0) scratch_[n++] = t.price * t.size;
+            const double n = t.price * t.size;
+            if (std::isfinite(n) && n > 0) scratch_[count++] = n;
         }
-        if (!n) return {};
-        std::sort(scratch_.get(), scratch_.get() + n);
-        return {scratch_[(n - 1) / 2], scratch_[size_t(std::ceil(.95 * double(n))) - 1]};
+        if (!count) return {};
+        return {select(scratch_.get(), count, (count-1)/2),
+                select(scratch_.get(), count, size_t(std::ceil(.95*double(count)))-1), 1};
     }
 private:
-    std::unique_ptr<double[]> scratch_;
+    static double select(double* values, size_t count, size_t rank) {
+        std::nth_element(values, values+rank, values+count);
+        return values[rank];
+    }
+    static void settle(double& active, double candidate, bool lower = false) {
+        if (!(candidate > 0) || !std::isfinite(candidate)) { active = candidate; return; }
+        const int next = lower ? int(std::floor(4 * std::log2(candidate))) :
+                                 int(std::llround(4 * std::log2(candidate)));
+        const int old = active > 0 ? int(std::llround(4 * std::log2(active))) : next;
+        if (!(active > 0) || std::abs(next-old) > 1) active = std::exp2(double(next)/4);
+    }
+    template<class Rows> size_t aggregate(const Rows& rows, double tfMs, double minimum) {
+        if (!(tfMs > 0)) return 0;
+        size_t count = 0;
+        double start = -1, sums[2] = {};
+        const auto flush = [&] {
+            for (double n : sums) if (n >= minimum && n > 0 && std::isfinite(n) && count < Capacity) aggregates_[count++] = n;
+            sums[0] = sums[1] = 0;
+        };
+        for (size_t i = 0; i < rows.size(); ++i) {
+            const auto t = rows[i];
+            if (t.side != 0 && t.side != 1) continue;
+            const double n = t.price * t.size;
+            if (!(n > 0) || !std::isfinite(n)) continue;
+            const double bar = std::floor(t.timeMs/tfMs)*tfMs;
+            if (start >= 0 && bar != start) flush();
+            start = bar;
+            sums[t.side] += n;
+        }
+        if (start >= 0) flush();
+        return count;
+    }
+    template<class Rows> double aggregateReference(const Rows& rows, VisibleView view, double median) {
+        const double minimum = view.minimum < 0 ? 0 :
+                               view.minimum > 0 ? view.minimum : median;
+        const size_t count = aggregate(rows, view.tfMs, minimum);
+        return count ? select(aggregates_.get(), count, size_t(std::ceil(.95*double(count)))-1) : 1;
+    }
+    std::unique_ptr<double[]> scratch_, aggregates_;
+    Reference active_;
+    WindowStamp lastStamp_;
+    VisibleView lastView_;
+    Mode lastMode_ = Mode::Individual;
+    int64_t lastUpdateMs_ = 0;
+    uint64_t updates_ = 0;
+    bool initialized_ = false;
 };
 // Scratch and output are allocated at construction, never while publishing or drawing.
 class BubblePlacement {
 public:
     static constexpr size_t Capacity = 100000;
+    static constexpr size_t MaxMarks = Capacity + Capacity / 2;
     static constexpr size_t NotableCount = 3; // Largest merged executions in each live bar.
-    BubblePlacement() : marks_(std::make_unique<Mark[]>(Capacity * 2)),
+    BubblePlacement() : marks_(std::make_unique<Mark[]>(Capacity + Capacity / 2)),
                         scratch_(std::make_unique<double[]>(Capacity)) {}
+    static constexpr size_t storageBytes() { return MaxMarks * sizeof(Mark) + Capacity * sizeof(double); }
     // Rows are event-time ordered and already windowed; options.mode is resolved by PlacementMode.
     template<class Rows> std::span<const Mark> build(const Rows& rows, const Options& options,
                                                     double tfMs, double previousPrice = 0) {
         count_ = 0;
         if (!std::isfinite(tfMs) || tfMs <= 0) return {};
-        const double minimum = options.minimum > 0 ? options.minimum : options.reference.median;
+        const double minimum = options.minimum < 0 ? 0 :
+                               options.minimum > 0 ? options.minimum : options.reference.median;
         Bar bar;
         for (size_t i = 0; i < rows.size() && i < Capacity;) {
             const auto first = rows[i];
@@ -103,7 +192,8 @@ private:
         bool used = false;
         std::array<Mark, 2> sides{};
         std::array<double, 2> sizes{};
-        std::array<Mark, NotableCount> notable{};
+        std::array<size_t, 2> counts{};
+        std::array<Mark, NotableCount + 2> notable{};
     };
     static bool valid(const Execution& t) {
         return std::isfinite(t.timeMs) && t.timeMs > 0 && std::isfinite(t.price * t.size) &&
@@ -125,6 +215,7 @@ private:
     template<class Rows> Mark sweep(const Rows& rows, size_t& i, double& previousPrice) {
         auto t = rows[i];
         Mark mark{t.timeMs, t.price, 0, t.price, t.price, t.side, 1, false};
+        bool hasPrevious = previousPrice > 0;
         double size = 0;
         size_t levels = 0;
         do {
@@ -134,7 +225,8 @@ private:
             size += t.size;
             mark.minPrice = std::min(mark.minPrice, t.price);
             mark.maxPrice = std::max(mark.maxPrice, t.price);
-            mark.moving = mark.moving || t.price != previousPrice;
+            mark.moving = mark.moving || (hasPrevious && t.price != previousPrice);
+            hasPrevious = true;
             previousPrice = t.price;
             scratch_[levels++] = t.price;
         } while (i < rows.size() && i < Capacity && joins(t, rows[i]));
@@ -150,16 +242,17 @@ private:
         side.side = mark.side;
         side.notional += mark.notional;
         bar.sizes[size_t(mark.side)] += mark.notional / mark.price;
+        ++bar.counts[size_t(mark.side)];
         side.moving = side.notional == mark.notional ? mark.moving : side.moving || mark.moving;
         for (auto& notable : bar.notable) {
             if (mark.notional <= notable.notional) continue;
             auto carry = mark;
-            for (auto* p = &notable; p != bar.notable.data() + NotableCount; ++p) std::swap(carry, *p);
+            for (auto* p = &notable; p != bar.notable.data() + bar.notable.size(); ++p) std::swap(carry, *p);
             break;
         }
     }
     void append(const Mark& mark) {
-        if (count_ < Capacity * 2 && std::isfinite(mark.notional) && std::isfinite(mark.price))
+        if (count_ < MaxMarks && std::isfinite(mark.notional) && std::isfinite(mark.price))
             marks_[count_++] = mark;
     }
     void flush(const Bar& bar, double minimum) {
@@ -171,8 +264,14 @@ private:
             mark.aggregate = true;
             append(mark);
         }
-        for (const auto& mark : bar.notable)
-            if (mark.notional > 0 && mark.notional >= minimum) append(mark);
+        size_t emitted = 0;
+        for (const auto& mark : bar.notable) {
+            if (mark.notional > 0 && mark.notional >= minimum &&
+                bar.counts[size_t(mark.side)] > 1) {
+                append(mark);
+                if (++emitted == NotableCount) break;
+            }
+        }
     }
     std::unique_ptr<Mark[]> marks_;
     std::unique_ptr<double[]> scratch_;

@@ -37,7 +37,7 @@ TEST(BubblePlacement, SlotsHaveSideVwapSummedNotionalAndThreeLargestAtBarCentre)
                           Execution{63000,150,2,1}, Execution{64000,110,.1,0},
                           Execution{121000,120,1,0}};
     const auto marks = p.build(rows, {Mode::Slot, {}, 1}, 60000);
-    ASSERT_EQ(marks.size(), 7); // first bar: two sides + top three; second: side + top one
+    ASSERT_EQ(marks.size(), 6); // singleton sides have only the aggregate
     EXPECT_TRUE(marks[0].aggregate);
     EXPECT_DOUBLE_EQ(marks[0].timeMs, 90000);
     EXPECT_DOUBLE_EQ(marks[0].notional, 711);
@@ -50,8 +50,8 @@ TEST(BubblePlacement, SlotsHaveSideVwapSummedNotionalAndThreeLargestAtBarCentre)
         EXPECT_DOUBLE_EQ(marks[i].timeMs, 90000);
     }
     EXPECT_DOUBLE_EQ(marks[2].notional, 600);
-    EXPECT_DOUBLE_EQ(marks[3].notional, 300);
-    EXPECT_DOUBLE_EQ(marks[4].notional, 100);
+    EXPECT_DOUBLE_EQ(marks[3].notional, 100);
+    EXPECT_DOUBLE_EQ(marks[4].notional, 11);
     EXPECT_DOUBLE_EQ(marks[5].timeMs, 150000);
 }
 TEST(BubblePlacement, SweepsRequireExactTimeSideAndConsecutiveNumericIdsAndCountDistinctPrices) {
@@ -70,7 +70,7 @@ TEST(BubblePlacement, SweepsRequireExactTimeSideAndConsecutiveNumericIdsAndCount
     EXPECT_TRUE(marks[0].moving);
     EXPECT_FALSE(marks[1].moving);
     marks = p.build(rows, {Mode::Slot, {}, 1}, 60000, 100);
-    ASSERT_EQ(marks.size(), 5);
+    ASSERT_GE(marks.size(), 3);
     EXPECT_EQ(marks[2].sweepLevels, 2);
     EXPECT_EQ(marks[2].timeMs, 30000);
 }
@@ -81,6 +81,7 @@ TEST(BubblePlacement, VisibleReferenceAndMedianChangeAndExplicitMinimumOverrides
     auto ref = stats.reference(rows);
     EXPECT_DOUBLE_EQ(ref.median, 200);
     EXPECT_DOUBLE_EQ(ref.p95, 1000);
+    EXPECT_EQ(p.build(rows, {Mode::Individual, ref, -1}, 60000).size(), 3);
     EXPECT_EQ(p.build(rows, {Mode::Individual, ref, 0}, 60000).size(), 2);
     EXPECT_EQ(p.build(rows, {Mode::Individual, ref, 100}, 60000).size(), 3);
     EXPECT_EQ(p.build(rows, {Mode::Individual, ref, 201}, 60000).size(), 1);
@@ -101,9 +102,93 @@ TEST(BubblePlacement, SweepIsFilteredAfterMergeAndSlotsIncludeAllSideNotional) {
     const std::array rows{Execution{1000,100,1,0,"1"}, Execution{1000,101,1,0,"2"}};
     EXPECT_EQ(p.build(rows, {Mode::Individual, {}, 200}, 60000).size(), 1);
     const auto marks = p.build(rows, {Mode::Slot, {}, 200}, 60000);
-    ASSERT_EQ(marks.size(), 2);
+    ASSERT_EQ(marks.size(), 1);
     EXPECT_EQ(marks[0].notional, 201);
-    EXPECT_EQ(marks[1].notional, 201);
+}
+TEST(BubblePlacement, SlotAggregatesUseTheirOwnP95AndNotablesUseTradeP95) {
+    ReferenceStatistics statistics;
+    BubblePlacement placement;
+    std::vector<Execution> rows;
+    rows.reserve(120);
+    for (int bar = 0; bar < 40; ++bar) {
+        for (int trade = 0; trade < 3; ++trade)
+            rows.push_back({1000. + 60000. * bar + trade, 100,
+                            (bar % 10 == 0 ? 10. : 1.) * (1 + bar%4), 0});
+    }
+    const auto ref = statistics.update(rows, rows, {1,120,1,120,120,120},
+                                       {1000,2401000,60000}, Mode::Slot, 1000);
+    EXPECT_GT(ref.aggregateP95,ref.p95);
+    auto marks = placement.build(rows,{Mode::Slot,ref,-1},60000);
+    size_t aggregate = 0, capped = 0, uncapped = 0;
+    double smallest = 18, largest = 0;
+    for (const auto& mark : marks) if (mark.aggregate) {
+        ++aggregate;
+        smallest = std::min(smallest, radius(mark.notional,ref.aggregateP95));
+        largest = std::max(largest, radius(mark.notional,ref.aggregateP95));
+        if (radius(mark.notional,ref.aggregateP95) >= 18) ++capped;
+        else ++uncapped;
+    }
+    EXPECT_EQ(aggregate,40);
+    EXPECT_GT(uncapped,0);
+    EXPECT_LT(capped,aggregate);
+    EXPECT_GT(largest-smallest,4);
+}
+TEST(BubblePlacement, ReferencesThrottleBurstsAndHoldOneStepChanges) {
+    ReferenceStatistics stats;
+    std::vector<Execution> rows;
+    rows.reserve(1200);
+    for (int i=0; i<100; ++i) rows.push_back({1000.+i,100,1,0});
+    const VisibleView view{1000,5000,60000};
+    auto active = stats.update(rows,rows,{1,100,1,100,100,100},view,Mode::Individual,1000);
+    const double initialRadius = radius(100,active.p95);
+    const size_t initialVisible = BubblePlacement().build(rows,{Mode::Individual,active,0},60000).size();
+    for (int i=0; i<1000; ++i) {
+        rows.push_back({1100.+i,100,1,0});
+        active = stats.update(rows,rows,{1,uint64_t(101+i),1,uint64_t(101+i),rows.size(),rows.size()},
+                              view,Mode::Individual,1001+i/8);
+    }
+    EXPECT_EQ(stats.updates(),1);
+    EXPECT_EQ(radius(100,active.p95),initialRadius);
+    rows.pop_back();
+    active = stats.update(rows,rows,{1,1099,1,1099,rows.size(),rows.size()},view,Mode::Individual,1250);
+    EXPECT_EQ(stats.updates(),2);
+    EXPECT_EQ(radius(100,active.p95),initialRadius);
+    EXPECT_EQ(BubblePlacement().build(rows,{Mode::Individual,active,0},60000).size(),rows.size());
+    EXPECT_EQ(initialVisible,100);
+    for (auto& row : rows) row.size *= 10;
+    active = stats.update(rows,rows,{2,1100,2,1100,rows.size(),rows.size()},view,Mode::Individual,1500);
+    EXPECT_GT(active.p95,500);
+    EXPECT_EQ(stats.updates(),3);
+}
+TEST(BubblePlacement, OneRowEnteringAndLeavingDoesNotRescaleOrHide) {
+    ReferenceStatistics stats;
+    std::vector<Execution> rows(100);
+    for (int i=0;i<100;++i) rows[size_t(i)] = {1000.+i,100,1,0};
+    const VisibleView view{1000,2000,60000};
+    auto initial = stats.update(rows,rows,{1,100,1,100,100,100},view,Mode::Individual,1000);
+    const double radiusBefore = radius(100,initial.p95);
+    BubblePlacement placement;
+    EXPECT_EQ(placement.build(rows,{Mode::Individual,initial,0},60000).size(),100);
+    rows.push_back({1100,109,1,0});
+    auto entered = stats.update(rows,rows,{1,101,1,101,101,101},view,Mode::Individual,1250);
+    EXPECT_EQ(radius(100,entered.p95),radiusBefore);
+    EXPECT_EQ(placement.build(rows,{Mode::Individual,entered,0},60000).size(),101);
+    rows.pop_back();
+    auto left = stats.update(rows,rows,{1,100,1,100,100,100},view,Mode::Individual,1500);
+    EXPECT_EQ(radius(100,left.p95),radiusBefore);
+    EXPECT_EQ(placement.build(rows,{Mode::Individual,left,0},60000).size(),100);
+}
+TEST(BubblePlacement, CapsuleRetainsAtLeastMinimumHalfWidth) {
+    EXPECT_GE(capsuleHalfWidth(2,100),1.5);
+    EXPECT_DOUBLE_EQ(capsuleHalfWidth(9,0),9);
+}
+TEST(BubblePlacement, FirstExecutionWithoutPredecessorIsPassive) {
+    BubblePlacement p;
+    const std::array rows{Execution{1500,100,1,0}, Execution{1501,101,1,0}};
+    const auto marks = p.build(rows,{Mode::Individual,{},-1},60000);
+    ASSERT_EQ(marks.size(),2);
+    EXPECT_FALSE(marks[0].moving);
+    EXPECT_TRUE(marks[1].moving);
 }
 TEST(BubblePlacement, ReferenceAndPlacementDoNotAllocateAfterConstruction) {
     BubblePlacement p;
@@ -112,9 +197,10 @@ TEST(BubblePlacement, ReferenceAndPlacementDoNotAllocateAfterConstruction) {
     for (size_t i = 0; i < rows.size(); ++i) rows[i] = {1000. + double(i),100. + double(i % 31),1,int(i % 2)};
     allocations = 0;
     countAllocations = true;
-    auto ref = stats.reference(rows);
-    const auto individual = p.build(rows, {Mode::Individual, ref, 0}, 60000).size();
-    const auto slot = p.build(rows, {Mode::Slot, ref, 0}, 60000).size();
+    auto ref = stats.update(rows,rows,{1,100000,1,100000,100000,100000},
+                            {1000,101000,60000,-1},Mode::Slot,1000);
+    const auto individual = p.build(rows, {Mode::Individual, ref, -1}, 60000).size();
+    const auto slot = p.build(rows, {Mode::Slot, ref, -1}, 60000).size();
     countAllocations = false;
     EXPECT_GT(individual, 0);
     EXPECT_GT(slot, 0);

@@ -50,6 +50,14 @@ TimeAxisMapping mapping(double width = 640, double height = 320) {
     return m;
 }
 }
+TEST(TradeBubbles, PreallocatedScratchStaysWithinPerChartBudget) {
+    const size_t scratch = Layout::scratchBytes() + chart::bubbles::ReferenceStatistics::storageBytes();
+    const size_t tape = sizeof(Tape);
+    const size_t vertices = Layout::MaxBubbles * 6 * 9 * sizeof(float);
+    std::cout << "BUBBLE_MEMORY tape=" << tape << " scratch=" << scratch
+              << " vertices=" << vertices << " total=" << tape+scratch+vertices << '\n';
+    EXPECT_LT(scratch,25u*1024*1024);
+}
 TEST(TradeBubbles, PlacementProjectsPolicyMarksAndCapsules) {
     Layout layout;
     auto m = mapping();
@@ -61,6 +69,69 @@ TEST(TradeBubbles, PlacementProjectsPolicyMarksAndCapsules) {
     EXPECT_FLOAT_EQ(b[0].maxY,180);
     EXPECT_FLOAT_EQ(b[0].radius,9);
     EXPECT_FLOAT_EQ(b[0].opacity,1);
+}
+TEST(TradeBubbles, PlacementUsesExchangeTimeAndPriceWithoutRingOffset) {
+    Layout layout;
+    auto m = mapping(); m.timeOffset = .75f;
+    const Sample trades[] = {{1250,175,2,AggressorSide::Buy}};
+    const chart::bubbles::Options opts{chart::bubbles::Mode::Individual,{0,350},-1};
+    const auto b = layout.build({trades,{}},m,opts);
+    ASSERT_EQ(b.size(),1);
+    EXPECT_FLOAT_EQ(b[0].x,170);
+    EXPECT_FLOAT_EQ(b[0].y,100);
+    m.viewStartMs += 100; m.viewEndMs += 100; m.srcRect.translate(1,0);
+    const auto p = layout.build({trades,{}},m,opts);
+    ASSERT_EQ(p.size(),1);
+    EXPECT_FLOAT_EQ(p[0].x,106);
+    EXPECT_FLOAT_EQ(p[0].y,100);
+}
+TEST(TradeBubbles, OverflowStartsWithFineBinsAndPreservesCentroids) {
+    auto tape = std::make_unique<Tape>();
+    auto m = mapping(1847,901);
+    for (int i = 0; i < 5000; ++i)
+        ASSERT_TRUE(tape->append({1500,m.screenYToPrice(22+(i%2)*7),1,AggressorSide::Buy}));
+    Layout layout;
+    const chart::bubbles::Options opts{chart::bubbles::Mode::Individual,{0,150},-1};
+    auto b = layout.build(tape->samples(),m,opts);
+    ASSERT_EQ(b.size(),2);
+    EXPECT_GE(layout.binSizePx(),6);
+    EXPECT_LE(layout.binSizePx(),8);
+    EXPECT_NEAR(std::min(b[0].y,b[1].y),22,1e-4);
+    EXPECT_NEAR(std::max(b[0].y,b[1].y),29,1e-4);
+    tape->clear();
+    for (int i=0; i<5000; ++i)
+        tape->append({1500+i%2,150,i%2 ? 3.0 : 1.0,AggressorSide::Buy});
+    b = layout.build(tape->samples(),mapping(6,6),opts);
+    ASSERT_EQ(b.size(),1);
+    EXPECT_NEAR(b[0].x,13.0045,1e-5);
+    EXPECT_DOUBLE_EQ(b[0].notional,1500000);
+}
+TEST(TradeBubbles, SpatialOverflowCoarsensAndPreservesNotional) {
+    auto tape = std::make_unique<Tape>();
+    const auto m = mapping(1847,901);
+    for (int x=0; x<128; ++x) for (int y=0; y<64; ++y)
+        tape->append({1000+x*7+3,199.0-y*1.5,0.001,AggressorSide::Buy});
+    Layout layout;
+    const auto b = layout.build(tape->samples(),m,{chart::bubbles::Mode::Individual,{0,1},-1});
+    EXPECT_LE(b.size(),Layout::MaxBubbles);
+    EXPECT_GT(b.size(),1000);
+    EXPECT_GT(layout.binSizePx(),8);
+    double expected=0, actual=0;
+    const auto rows=tape->samples();
+    for (size_t i=0;i<rows.size();++i) expected+=rows[i].price*rows[i].size;
+    for (const auto& circle:b) actual+=circle.notional;
+    EXPECT_NEAR(actual,expected,0.001);
+}
+TEST(TradeBubbles, SlotAggregateUsesAggregateReferenceWhileNotablesUseTradeReference) {
+    Layout layout;
+    auto m = mapping(); m.appendMs = 1000; m.srcRect.setWidth(1);
+    const Sample rows[] = {{1200,150,1,AggressorSide::Buy}, {1300,150,1,AggressorSide::Buy}};
+    const auto bubbles = layout.build({rows,{}},m,{chart::bubbles::Mode::Slot,{0,150,1200},-1});
+    ASSERT_EQ(bubbles.size(),3);
+    for (const auto& bubble : bubbles) {
+        if (bubble.notional == 300) EXPECT_FLOAT_EQ(bubble.radius,4.5f);
+        else EXPECT_FLOAT_EQ(bubble.radius,9.f);
+    }
 }
 TEST(TradeBubbles, SpatialOverflowRemainsBoundedAndReusesScratch) {
     auto tape = std::make_unique<Tape>();
@@ -87,7 +158,22 @@ TEST(TradeBubbles, OverflowWorkIsBoundedAndUsesFirstFittingGrid) {
                             i%2 ? AggressorSide::Buy : AggressorSide::Sell});
         std::stable_sort(rows.begin(), rows.end(), [](const Sample& a, const Sample& b) { return a.timeMs < b.timeMs; });
         Layout layout;
-        auto bubbles = layout.build({rows,{}},m,{chart::bubbles::Mode::Individual,{0,2},.0001});
+        const chart::bubbles::Options options{chart::bubbles::Mode::Individual,{0,2},.0001};
+        std::span<const Bubble> bubbles;
+        std::array<double,9> timings{};
+        for (int trial = 0; trial < (rect.width() < 2000 ? 11 : 1); ++trial) {
+            const auto start = std::chrono::steady_clock::now();
+            bubbles = layout.build({rows,{}},m,options);
+            const auto end = std::chrono::steady_clock::now();
+            if (trial >= 2) timings[size_t(trial-2)] = std::chrono::duration<double,std::milli>(end-start).count();
+        }
+        if (rect.width() < 2000) {
+            std::sort(timings.begin(),timings.end());
+            std::cout << "BUBBLE_LAYOUT rows=" << rows.size() << " median_ms=" << timings[4]
+                      << " max_ms=" << timings.back() << " probes=" << layout.hashProbes()
+                      << " cell_visits=" << layout.coarseCellVisits() << " bin_px=" << layout.binSizePx()
+                      << " bubbles=" << bubbles.size() << '\n';
+        }
         EXPECT_LE(layout.hashProbes(),32*rows.size());
         EXPECT_LE(layout.coarseCellVisits(),24*rows.size());
         EXPECT_EQ(layout.scannedRows(),rows.size());
@@ -157,7 +243,7 @@ TEST(TradeBubbles, PartialSlotsUseWholeBarAndTimeframeChangesInvalidateGeometry)
     node.sync(*tape,m,true,options,Qt::cyan,Qt::yellow);
     EXPECT_EQ(node.rebuildCount(), builds + 1);
 }
-TEST(TradeBubbles, CapsulesKeepAreaAndPassiveFlowUsesReducedOpacity) {
+TEST(TradeBubbles, CapsulesKeepMinimumWidthAndPassiveFlowUsesReducedOpacity) {
     auto tape = std::make_unique<Tape>();
     tape->append({1500,150,1,AggressorSide::Buy,"1"});
     tape->append({1500,175,1,AggressorSide::Buy,"2"});
@@ -168,9 +254,32 @@ TEST(TradeBubbles, CapsulesKeepAreaAndPassiveFlowUsesReducedOpacity) {
     const auto* v = static_cast<const float*>(node.geometry()->vertexData());
     const double radius = (v[9]-v[0])/2;
     constexpr double pi = 3.14159265358979323846;
-    EXPECT_NEAR(pi*radius*radius+2*80*radius,pi*81,.01);
+    EXPECT_GE(radius,1.5);
+    EXPECT_GT(pi*radius*radius+2*80*radius,pi*81);
     EXPECT_FLOAT_EQ(v[7],.6f);
     EXPECT_NEAR(v[6*9+7],.21f,1e-6);
+}
+TEST(TradeBubbles, LargerCirclesDrawFirstAcrossSidesAndNeighbouringCells) {
+    Layout layout;
+    const Sample rows[]={{1500,150,1,AggressorSide::Buy}, {1500,150,4,AggressorSide::Sell},
+                         {1501,150,2,AggressorSide::Buy}};
+    const chart::bubbles::Options options{chart::bubbles::Mode::Individual,{0,600},-1};
+    auto b=layout.build({rows,{}},mapping(),options);
+    ASSERT_EQ(b.size(),3);
+    EXPECT_EQ(b[0].side,AggressorSide::Sell);
+    EXPECT_GT(b[0].radius,b[1].radius);
+    EXPECT_GT(b[1].radius,b[2].radius);
+    auto tape=std::make_unique<Tape>();
+    for (int i=0;i<5000;++i) { auto row=rows[i%3]; row.size/=1000; tape->append(row); }
+    b=layout.build(tape->samples(),mapping(),options);
+    ASSERT_EQ(b.size(),2);
+    EXPECT_EQ(b[0].side,AggressorSide::Sell);
+    EXPECT_GT(b[0].radius,b[1].radius);
+    TradeBubbleNode node;
+    node.sync(*tape,mapping(),true,options,Qt::cyan,Qt::yellow);
+    const auto* v=static_cast<const float*>(node.geometry()->vertexData());
+    EXPECT_FLOAT_EQ(v[4],0.21f);
+    EXPECT_FLOAT_EQ(v[6],0);
 }
 TEST(TradeBubbles, OrderedRingBinarySearchBoundsScanAndPanReusesGeometry) {
     auto tape=std::make_unique<Tape>();
@@ -253,7 +362,7 @@ TEST(TradeBubbles, InvalidAndOffscreenRowsCannotReachGeometry) {
     Layout layout;
     const Sample rows[]={{999,150,1,AggressorSide::Buy},{2000,150,1,AggressorSide::Sell},
                          {1500,201,1,AggressorSide::Sell}};
-    EXPECT_TRUE(layout.build({std::span(rows).last(1),{}},mapping(),{}).empty());
+    EXPECT_TRUE(layout.build({rows,{}},mapping(),{}).empty());
 }
 TEST(TradeBubbles, TapeAndQsgCapacityNeverGrowAcrossFramesAndToggleClearsGeometry) {
     auto tape=std::make_unique<Tape>();
@@ -308,6 +417,18 @@ TEST(TradeBubbles, UnchangedFramesAndEmptyMeshesLeaveTheSceneGraphAlone) {
     node.clear();                                     // nothing drawn: no mark
     EXPECT_EQ(node.dirtyMarks(),2u);
 }
+TEST(TradeBubbles, LegacyZeroMinimumLoadsAsAllButNewZeroPersistsAuto) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    QSettings ini(dir.filePath("legacy.ini"),QSettings::IniFormat);
+    ini.setValue("heatmap/old/tradeMinNotional",0);
+    heatmap::HeatmapSettingsStore store(ini);
+    EXPECT_EQ(store.load("old",{}).tradeMinNotional,-1);
+    auto current = store.load("old",{});
+    ASSERT_TRUE(store.applyChartPatch("old",current,{{"tradeMinNotional",0}},true,{},"BTC-USD",60000).isEmpty());
+    ini.sync();
+    EXPECT_EQ(store.load("old",{}).tradeMinNotional,0);
+}
 TEST(TradeBubbles, SettingsRoundTripPerChartAndTransientPatchesStayTransient) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());
@@ -316,7 +437,7 @@ TEST(TradeBubbles, SettingsRoundTripPerChartAndTransientPatchesStayTransient) {
         QSettings ini(path,QSettings::IniFormat);
         heatmap::HeatmapSettingsStore store(ini);
         auto s=store.load("one",{});
-        EXPECT_FALSE(s.showTrades); EXPECT_EQ(s.tradeMinNotional,0);
+        EXPECT_FALSE(s.showTrades); EXPECT_EQ(s.tradeMinNotional,-1);
         EXPECT_EQ(s.bubblePlacement,"individual");
         ASSERT_TRUE(store.applyChartPatch("one",s,{{"showTrades",true},{"tradeMinNotional",1000},{"bubblePlacement","slot"}},true,{},"BTC-USD",60000).isEmpty());
         ASSERT_TRUE(store.applyChartPatch("one",s,{{"tradeMinNotional",100000},{"bubblePlacement","auto"}},false,{},"BTC-USD",60000).isEmpty());

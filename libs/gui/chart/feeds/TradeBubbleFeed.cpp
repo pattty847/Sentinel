@@ -1,5 +1,6 @@
 #include "chart/feeds/TradeBubbleFeed.hpp"
 #include "render/heatmap/HeatmapPalette.hpp"
+#include <chrono>
 namespace chart {
 bool TradeBubbleFeed::append(const Trade& trade) {
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count();
@@ -29,12 +30,16 @@ void TradeBubbleFeed::publish(const TimeAxisMapping& mapping) {
     frame_->options.mode = placement_.select(requested_, columnPx, mapping.appendMs);
     if (show_ && mapping.valid) {
         const auto window = tape_->visible(mapping.viewStartMs, mapping.viewEndMs);
-        if (!referenceReady_ || window.key() != referenceKey_) {
-            frame_->options.reference = statistics_.reference(trade_bubbles::PolicyRows{window.rows});
-            referenceKey_ = window.key();
-            referenceReady_ = true;
-            ++referenceUpdates_;
-        }
+        const bool slot = frame_->options.mode == bubbles::Mode::Slot && mapping.appendMs > 0;
+        const auto expanded = slot ? tape_->visible(std::floor(mapping.viewStartMs / mapping.appendMs) * mapping.appendMs,
+                                                     std::ceil(mapping.viewEndMs / mapping.appendMs) * mapping.appendMs)
+                                   : window;
+        const auto key = window.key(), slotKey = expanded.key();
+        const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        frame_->options.reference = statistics_.update(trade_bubbles::PolicyRows{window.rows},
+            trade_bubbles::PolicyRows{expanded.rows}, {key.first, key.last, slotKey.first, slotKey.last, key.count, slotKey.count},
+            {mapping.viewStartMs, mapping.viewEndMs, mapping.appendMs, minimum_}, frame_->options.mode, nowMs);
     }
     frame_->buy = buy_;
     frame_->sell = sell_;

@@ -104,10 +104,8 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
         const auto c = b.side == AggressorSide::Buy ? buy : sell;
         const float alpha = 0.60f * b.opacity;
         const double length = double(b.maxY) - b.minY;
-        constexpr float pi = 3.14159265358979323846f;
-        const float area = pi * b.radius * b.radius;
-        // Preserve the circle-equivalent area when stretching into a capsule.
-        const float radius = float(area / (std::sqrt(length * length + pi * area) + length));
+        const float radius = float(chart::bubbles::capsuleHalfWidth(b.radius, length));
+        if (!(radius > 0)) continue;
         const float halfLength = float(length / (2 * radius));
         if (!std::isfinite(halfLength)) continue;
         const float centreY = float((double(b.minY) + b.maxY) / 2);

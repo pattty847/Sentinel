@@ -101,6 +101,7 @@ private:
     // Chart (S7b labels: chart settings; candle style: renderer state)
     QCheckBox *m_showLabels = nullptr;
     QComboBox *m_bubblePlacement = nullptr;
+    QComboBox *m_tradeMinMode = nullptr;
     QDoubleSpinBox *m_tradeMinNotional = nullptr;
     QCheckBox *m_tradesAboveCandles = nullptr;
     QComboBox *m_labelCurrency = nullptr;

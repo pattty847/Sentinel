@@ -413,17 +413,29 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     connect(m_bubblePlacement, &QComboBox::currentIndexChanged, this, [this] {
         apply({{"bubblePlacement", m_bubblePlacement->currentData().toString()}});
     });
-    m_tradeMinNotional = doubleSpin(page, "tradeMinNotional", 0, 1e12, 100, 2);
-    m_tradeMinNotional->setSpecialValueText("Auto (visible median)");
-    form->addRow("Minimum trade notional (quote)", m_tradeMinNotional);
-    connect(m_tradeMinNotional, &QDoubleSpinBox::valueChanged, this, [this](double value) {
-        apply({{"tradeMinNotional", value}});
+    m_tradeMinMode = new QComboBox(page);
+    m_tradeMinMode->setObjectName("tradeMinNotionalMode");
+    m_tradeMinMode->addItem("All trades", -1);
+    m_tradeMinMode->addItem("Auto (visible median)", 0);
+    m_tradeMinMode->addItem("Custom minimum", 1);
+    form->addRow("Minimum trade notional (quote)", m_tradeMinMode);
+    m_tradeMinNotional = doubleSpin(page, "tradeMinNotional", 0.01, 1e12, 100, 2);
+    m_tradeMinNotional->setValue(100);
+    form->addRow("Custom minimum (quote)", m_tradeMinNotional);
+    connect(m_tradeMinMode, &QComboBox::currentIndexChanged, this, [this] {
+        const double mode = m_tradeMinMode->currentData().toDouble();
+        m_tradeMinNotional->setEnabled(mode > 0);
+        apply({{"tradeMinNotional", mode > 0 ? m_tradeMinNotional->value() : mode}});
     });
+    connect(m_tradeMinNotional, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        if (m_tradeMinMode->currentData().toDouble() > 0) apply({{"tradeMinNotional", value}});
+    });
+    describe(form, m_tradeMinMode, "All trades preserves the old visible set. Auto hides marks below "
+             "the visible median; Custom uses a fixed quote notional.");
     describe(form, m_bubblePlacement, "Individual uses exchange time. Slot groups each candle side at its VWAP, "
              "with the three largest executions at the candle centre. Auto switches near 40 pixels per candle; "
              "timeframes of one second or less stay individual.");
-    describe(form, m_tradeMinNotional, "Zero hides trades below the visible median. A positive value sets a fixed "
-             "minimum in quote currency. Sweep executions are combined before filtering.");
+    describe(form, m_tradeMinNotional, "Fixed minimum in quote currency. Sweep executions are combined before filtering.");
     auto *candles = new QGroupBox("Candles", page);
     auto *candleForm = new QFormLayout(candles);
     m_candleStyle = new QComboBox(candles);
@@ -825,7 +837,12 @@ void HeatmapSettingsDialog::refreshFromModel() {
         m_tradesAboveCandles->setChecked(s.tradesAboveCandles);
         m_labelCurrency->setCurrentIndex(std::max(0, m_labelCurrency->findData(QString::fromStdString(s.labelCurrency))));
     }
-    set(m_tradeMinNotional, s.tradeMinNotional);
+    {
+        const QSignalBlocker mode(m_tradeMinMode);
+        m_tradeMinMode->setCurrentIndex(s.tradeMinNotional < 0 ? 0 : s.tradeMinNotional == 0 ? 1 : 2);
+        m_tradeMinNotional->setEnabled(s.tradeMinNotional > 0);
+    }
+    if (s.tradeMinNotional > 0) set(m_tradeMinNotional, s.tradeMinNotional);
     set(m_labelMinPx, s.labelMinPx);
     set(m_labelMaxPx, s.labelMaxPx);
     auto swatch = [](QPushButton *button, const std::string &value) {
