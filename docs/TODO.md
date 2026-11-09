@@ -74,7 +74,6 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
 - W2d live GUI display and the Windows runtime are unverified.
 - Unverified since 2026-09-28 (owner's first look at recording mode): candles overlap the price axis when panned next to it (clip to the plot area); price-axis tick steps disagree with heatmap cell size; confirm the theme dropdown applies to recording mode.
 - Nightly backup of `/Volumes/T7/sentinel-data` (to the MacBook Pro over Tailscale needs Remote Login + an SSH key, or to the owner's new HDD); internal disk space.
-- Axis drag-scale glides back to the last allowed row size mid-drag (since the pan 'wave' fix).
 - Liq slider range carries over on symbol switch (ETH went very high).
 
 ## Feature ideas (unverified against current code since 2026-03; check before starting)
