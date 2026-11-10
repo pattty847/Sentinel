@@ -131,6 +131,7 @@ private:
     std::unique_ptr<net::thread_pool> m_historyWorkers;
     std::atomic_size_t m_pendingHistoryTasks{0};
     std::atomic_bool m_flowReplayBusy{false};
+    std::atomic_bool m_tradeHistoryBusy{false};
     std::stop_source m_flowReplayStop;
 
     std::mutex m_sessionsMutex;

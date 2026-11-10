@@ -9,6 +9,7 @@
 #include <map>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <deque>
 #include <shared_mutex>
@@ -74,6 +75,8 @@ public:
     struct TradeHistorySnapshot {
         std::vector<protocol::tradewire::Row> rows;
         int64_t retainedFromMs = 0;
+        size_t invalidRows = 0;
+        bool exceededLimit = false;
         recording::FlowStore* store = nullptr;
     };
     TradeHistorySnapshot tradeHistorySnapshot(const std::string& symbol, int64_t fromMs,
@@ -264,6 +267,8 @@ private:
     mutable std::mutex m_footprintTradeMutex;
     std::unordered_map<std::string, std::deque<FootprintTradeSample>> m_recentFootprintTrades;
     std::unordered_map<std::string, int64_t> m_tradeHistoryFloorMs;
+    std::unordered_set<std::string> m_tradeHistoryAwaitingResume;
+    std::unordered_set<std::string> m_tradeHistoryHasResumeBoundary;
     int64_t m_footprintTradeRetentionMs = 300'000;
     // Recording v2 (null when recording.enabled is false or no usable dir).
     std::shared_ptr<recording::LiveService> m_recordingLive;

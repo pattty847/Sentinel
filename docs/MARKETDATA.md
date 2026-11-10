@@ -701,16 +701,23 @@ History sources today:
 
 `trade_history_request` pages raw event-time executions from this RAM tape when
 the requested window is retained, and otherwise from RAWL2 through FlowStore's
-journal reader on the two-worker history pool. A window crossing the RAM floor
-uses a half-open journal prefix and RAM suffix, then sorts by exchange ms and
-deduplicates nonempty trade IDs. No footprint or candle aggregate is used to
-reconstruct trades. One job per client may be in flight. Its binary reply shares
-the bounded chunk write queue. The global history queue remains capped at eight
-jobs. Requests must name a configured
+journal reader on the two-worker history pool. Disconnects and book resyncs move
+the RAM floor to the first subsequent live trade; earlier data comes from the
+journal. A crossing window reads the journal through the floor's millisecond
+and RAM from that millisecond, then sorts by exchange ms and deduplicates
+nonempty trade IDs. No footprint or candle aggregate is used to reconstruct
+trades. One trade-history job is in flight server-wide, independently of the
+one-second flow replay gate, leaving the second history worker available for
+flow and candle history. Its binary reply shares the bounded chunk write queue.
+The global history queue remains capped at eight jobs. Requests must name a configured
 product and a half-open `[start_ms,end_ms)` window of at most 3,600,000 ms.
-More than 250,000 executions, an invalid request, or an unavailable worker
-returns `refused` with a `reason`. Journal gaps or unavailable early/late
-coverage return `partial`; a source still warming may return `building`.
+More than 250,000 candidate executions or an invalid request returns `refused`
+with a `reason`. An occupied trade-history job or full worker queue returns
+`refused` with `reason: "busy"`; clients may retry it. Journal gaps, changed
+journal sources, invalid live rows, or unavailable early/late coverage return
+`partial`; a changed journal source discards that journal portion. A source
+still warming may return `building`. Coverage never extends
+beyond the current exchange time even when `end_ms` is in the future.
 
 The request is JSON, for example
 `{"type":"trade_history_request","req":9,"symbol":"BTC-USD","start_ms":1000,"end_ms":2000}`.

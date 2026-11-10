@@ -1121,12 +1121,18 @@ FlowStore::TradeWindow FlowStore::readTrades(const std::string &symbol, int64_t 
         if (result.coveredFromMs >= to) { result.partial = true; return result; }
         const auto start = firstDurable(*catalog, std::max<int64_t>(0, from - TradeTail), stop);
         if (!start) { result.partial = true; return result; }
+        Sources sources;
+        try {
+            sources = snapshotSources(*catalog, to + TradeTail, sourcePath(*catalog, *start), stop);
+        } catch (const NotReady&) { result.partial = true; }
         roller::JournalReader reader(*catalog, *start);
         roller::JournalFeed feed(symbol);
-        std::unordered_set<std::string> ids;
-        ids.reserve(std::min(limit, size_t(250'000)));
+        std::optional<int64_t> firstGapMs;
         feed.onInvalid = [&](int64_t ms, const std::string&) {
-            if (ms > from && ms < to + TradeTail) result.partial = true;
+            if (ms > from && ms < to + TradeTail) {
+                result.partial = true;
+                if (ms < to) firstGapMs = std::min(firstGapMs.value_or(ms), ms);
+            }
         };
         feed.onTrade = [&](const Trade& trade) {
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1139,7 +1145,6 @@ FlowStore::TradeWindow FlowStore::readTrades(const std::string &symbol, int64_t 
                 result.partial = true;
                 return;
             }
-            if (!trade.trade_id.empty() && !ids.insert(trade.trade_id).second) return;
             if (result.rows.size() <= limit)
                 result.rows.push_back({trade.trade_id, ms, trade.price, trade.size, trade.side, 1});
         };
@@ -1155,8 +1160,16 @@ FlowStore::TradeWindow FlowStore::readTrades(const std::string &symbol, int64_t 
             if (result.rows.size() > limit) break;
         }
         checkStop(stop);
-        if (reader.damaged()) throw std::runtime_error("damaged journal in trade read");
+        bool sourceChanged = reader.damaged();
+        if (!sourceChanged && !sources.empty()) {
+            try { sourceChanged = !sourcesMatch(sources, *catalog, to + TradeTail, stop); }
+            catch (const fs::filesystem_error&) { sourceChanged = true; }
+        }
+        if (sourceChanged) { result.partial = true; result.rows.clear(); }
         result.coveredToMs = std::min(to, lastReceive);
+        if (firstGapMs) result.coveredToMs = std::min(result.coveredToMs, *firstGapMs);
+        if (sourceChanged) result.coveredToMs = result.coveredFromMs;
+        result.coveredToMs = std::max(result.coveredFromMs, result.coveredToMs);
         result.partial |= result.coveredFromMs > from || lastReceive < to + TradeTail;
         std::stable_sort(result.rows.begin(), result.rows.end(), [](const auto& a, const auto& b) {
             return a.exchangeMs < b.exchangeMs;

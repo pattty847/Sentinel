@@ -47,6 +47,7 @@ class SentinelStreamClient : public QObject {
     friend struct CandleDataSourceTest;
     friend struct SentinelStreamClientWriteTest;
     friend struct HeatmapChunkWireTest;
+    friend struct TradeHistoryWireClientTest;
     friend struct ServerFeedAdmissionTest;
     friend struct ScreenerErrorDispatchTest;
     Q_OBJECT
