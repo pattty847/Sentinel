@@ -40,8 +40,8 @@ Rgba barColour(const LadderSnapshot& s, uint8_t flags, uint8_t large, uint8_t ho
 
 double cvdInset(const CvdPresentation* cvd, const ChartFrame& frame) {
     const auto& cam = frame.context.raster;
-    if (!cvd || !cam.valid || !(cam.dpr > 0) || !cvd->drawable(frame.context.time.activeTimeframeMs)) return 0;
-    return std::clamp(double(cvd->stripPx), 0.0, std::max(0.0, frame.context.surfaceBounds.height()));
+    if (!cvd || !cam.valid || !(cam.dpr > 0) || !cvd->matches(frame.context.time.activeTimeframeMs)) return 0;
+    return cvd->bottomInset(frame.context.time.activeTimeframeMs, frame.context.surfaceBounds.height());
 }
 
 // A vertex-colour triangle node of a fixed capacity, drawing nothing yet.

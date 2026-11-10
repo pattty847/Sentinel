@@ -2777,8 +2777,8 @@ TEST(CvdKnobs, BothApiRoutesPersistAllThreeFields) {
     UnifiedGridRenderer renderer;
     HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
     for (const char* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
-        for (const char* body : {R"({"cvdStripPx":96,"cvdReset":"visible","cvdStyle":"area"})",
-                                R"({"cvdStripPx":0,"cvdReset":"utcDay","cvdStyle":"line"})",
+        for (const char* body : {R"({"flowFooter":true,"cvdStripPx":96,"cvdReset":"visible","cvdStyle":"area"})",
+                                R"({"flowFooter":false,"cvdStripPx":0,"cvdReset":"utcDay","cvdStyle":"line"})",
                                 R"({"cvdStripPx":64,"cvdReset":"tpoSession","cvdStyle":"line"})"}) {
             const auto validated = AgentApi::validateControl({"POST", path, {}, body}, std::nullopt);
             ASSERT_EQ(validated.status, 200);
@@ -2852,4 +2852,36 @@ TEST(CvdKnobs, RemovedResetIsRejectedByQmlAndNormalisedOnlyOnLoad) {
     ASSERT_TRUE(QQmlProperty::write(renderer.layers(), "cvdReset", "utcDay")); controls.syncNow();
     ASSERT_TRUE(QQmlProperty::write(renderer.layers(), "cvdReset", "none")); controls.syncNow();
     EXPECT_EQ(renderer.layers()->cvdReset(), "utcDay"); EXPECT_EQ(store.reload().cvdReset, "utcDay");
+}
+
+TEST(FlowFooterKnob, QmlPersistsAgentPatchIsReportedAndRestoreKeepsIt) {
+    TempStore store;
+    HeatmapSettingsModel model(store.store, "main", store.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
+    EXPECT_FALSE(renderer.layers()->flowFooter()); EXPECT_FALSE(store.reload().flowFooter);
+    ASSERT_TRUE(QQmlProperty::write(renderer.layers(), "flowFooter", true)); controls.syncNow();
+    EXPECT_TRUE(store.reload().flowFooter);
+    EXPECT_EQ(renderer.agentPort().footprintSettings()["flowFooter"], true);
+    ASSERT_TRUE(model.apply(ChartAgentPort::footprintPatch({{"flowFooter", false}}), false).isEmpty()); controls.syncNow();
+    EXPECT_FALSE(renderer.layers()->flowFooter()); EXPECT_TRUE(store.reload().flowFooter);
+    HeatmapSettingsModel restarted(store.store, "main", store.config);
+    UnifiedGridRenderer second;
+    HeatmapChartControls restored(&restarted); restored.setRenderer(&second);
+    EXPECT_TRUE(second.layers()->flowFooter());
+}
+
+TEST(FlowFooterKnob, FooterAloneExtendsHistoryAndResetChangesRequestHistory) {
+    UnifiedGridRenderer renderer;
+    auto* visibility = renderer.layers();
+    QSignalSpy history(visibility, &chart::LayerVisibility::cvdHistoryChanged);
+    visibility->setCvdReset("utcDay");
+    EXPECT_EQ(renderer.agentPort().cvdHistoryAnchor(3600000, 1000), -1);
+    visibility->setFlowFooter(true);
+    EXPECT_EQ(history.count(), 1);
+    EXPECT_EQ(renderer.agentPort().cvdHistoryAnchor(3600000, 1000), 0);
+    visibility->setCvdReset("tpoSession"); EXPECT_EQ(history.count(), 2);
+    visibility->refreshCvdSessionHistory(); EXPECT_EQ(history.count(), 3);
+    visibility->setFlowFooter(false);
+    EXPECT_EQ(renderer.agentPort().cvdHistoryAnchor(3600000, 1000), -1);
 }

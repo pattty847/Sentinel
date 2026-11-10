@@ -9,6 +9,7 @@
 namespace chart {
 class LayerVisibility : public QObject {
     Q_OBJECT
+    Q_PROPERTY(bool flowFooter READ flowFooter WRITE writeFlowFooter NOTIFY layerVisibilityChanged)
     Q_PROPERTY(int cvdStripPx READ cvdStripPx WRITE writeCvdStripPx NOTIFY layerVisibilityChanged)
     Q_PROPERTY(QString cvdReset READ cvdReset WRITE writeCvdReset NOTIFY layerVisibilityChanged)
     Q_PROPERTY(QString cvdStyle READ cvdStyle WRITE writeCvdStyle NOTIFY layerVisibilityChanged)
@@ -35,6 +36,17 @@ public:
     std::function<void(std::string_view, bool, bool)> report;
     std::function<void()> requestUpdate;
 
+    bool flowFooter() const { return flowFooter_; }
+    void setFlowFooter(bool enabled) {
+        if (flowFooter_ == enabled) return;
+        flowFooter_ = enabled;
+        changed("flowFooter", enabled);
+        emit cvdHistoryChanged();
+    }
+    void writeFlowFooter(bool enabled) {
+        setFlowFooter(enabled);
+        emit footprintSettingsRequested({{"flowFooter", enabled}});
+    }
     int cvdStripPx() const { return cvdStrip_; }
     CvdReset cvdResetRule() const { return cvdReset_; }
     QString cvdReset() const {
@@ -54,10 +66,10 @@ public:
         const auto reset = value == "visible" ? CvdReset::Visible : value == "utcDay" ? CvdReset::UtcDay : CvdReset::TpoSession;
         if (cvdReset_ == reset) return;
         cvdReset_ = reset; changed("cvdReset", true);
-        if (cvdStrip_ > 0) emit cvdHistoryChanged();
+        if (cvdStrip_ > 0 || flowFooter_) emit cvdHistoryChanged();
     }
     void refreshCvdSessionHistory() {
-        if (cvdStrip_ > 0 && cvdReset_ == CvdReset::TpoSession) emit cvdHistoryChanged();
+        if ((cvdStrip_ > 0 || flowFooter_) && cvdReset_ == CvdReset::TpoSession) emit cvdHistoryChanged();
     }
     void setCvdStyle(const QString& value) {
         if (value != "line" && value != "area") return;
@@ -268,6 +280,7 @@ private:
         option = value;
         changed(name, value);
     }
+    bool flowFooter_ = false;
     int cvdStrip_ = 0;
     CvdReset cvdReset_ = CvdReset::Visible;
     bool cvdArea_ = false;

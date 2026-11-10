@@ -730,3 +730,155 @@ TEST(CvdFeed, VisibleStartsInsideDrawnWindowAndReanchorsOnPan) {
     chart::CvdFeed::build(panned, source, frame, chart::CvdReset::Visible, 4);
     ASSERT_EQ(panned.series.count, 3); EXPECT_EQ(panned.series.points[2].value, 4);
 }
+
+TEST(FlowFooter, TotalsAndCumulativeShareEveryResetAndIgnoreMissingBars) {
+    auto source = footprintSeries();
+    const auto original = source.bars.at(0);
+    source.bars.clear();
+    constexpr int64_t open = 13 * 3600000;
+    for (int i : {-1, 0, 2}) {
+        auto record = original;
+        record.bar.startMs = open + i * 1000;
+        record.bar.baseScale = 100; record.bar.sellVol = 100;
+        record.bar.buyVol = i == 2 ? 50 : 400;
+        record.bar.delta = record.bar.buyVol - record.bar.sellVol;
+        source.bars[record.bar.startMs] = record;
+    }
+    auto frame = footprintFrame();
+    frame.raster.drawnStartMs = open; frame.raster.drawnEndMs = open + 3000;
+    chart::CvdLayer cvd;
+    cvd.presentation().flowFooter = true;
+    for (const auto reset : {chart::CvdReset::Visible, chart::CvdReset::UtcDay, chart::CvdReset::TpoSession}) {
+        cvd.presentation().reset = reset;
+        chart::CvdFeed::build(cvd.mailbox().back(), source, frame, reset, 0);
+        cvd.mailbox().post(); cvd.sync(footprintChartFrame());
+        const auto& s = cvd.current();
+        ASSERT_EQ(s.series.count, 2);
+        EXPECT_EQ(s.series.points[0].timeMs, open); EXPECT_EQ(s.series.points[1].timeMs, open + 2000);
+        EXPECT_TRUE(s.totals[0].valid); EXPECT_TRUE(s.totals[1].valid);
+        EXPECT_EQ(s.totals[0].delta, 3); EXPECT_EQ(s.totals[0].volume, 5);
+        EXPECT_EQ(s.totals[1].delta, -.5); EXPECT_EQ(s.totals[1].volume, 1.5);
+        const double anchor = reset == chart::CvdReset::Visible ? 0 : reset == chart::CvdReset::UtcDay ? 6 : 3;
+        EXPECT_EQ(s.series.points[0].value, anchor); EXPECT_EQ(s.series.points[1].value, anchor - .5);
+    }
+}
+
+TEST(FlowFooter, DefaultNodesAreIdenticalAndEnabledNodesAreLazyBeforeText) {
+    chart::ChartLayers layers;
+    layers.heatmap.initialize();
+    QSGNode root;
+    layers.registry.onRootRebuilt(&root);
+    auto* textRoot = root.lastChild();
+    auto frame = footprintChartFrame(); frame.context.surfaceBounds.setHeight(200);
+    ChartTextRenderer text; ChartTextAtlas atlas;
+    chart::LayerNodeContext context{nullptr, &root, text, atlas, false};
+    layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
+    EXPECT_EQ(root.childCount(), 7); EXPECT_EQ(layers.flowFooter.createContainer(), nullptr);
+    layers.cvd.presentation().flowFooter = true;
+    chart::CvdFeed::build(layers.cvd.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
+    layers.cvd.mailbox().post(); layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
+    EXPECT_EQ(root.childCount(), 8); EXPECT_EQ(root.lastChild(), textRoot);
+    EXPECT_TRUE(layers.flowFooter.drawing()); EXPECT_FALSE(layers.cvd.drawing());
+    layers.cvd.presentation().stripPx = 60;
+    layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
+    EXPECT_EQ(root.childCount(), 9);
+    EXPECT_EQ(layers.flowFooter.bounds().bottom(), layers.cvd.strip().top());
+    EXPECT_EQ(layers.flowFooter.bounds().top(), 85);
+    EXPECT_EQ(layers.cvd.presentation().bottomInset(1000, 200), 115);
+    layers.cvd.presentation().flowFooter = false;
+    layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
+    EXPECT_FALSE(layers.flowFooter.drawing());
+    EXPECT_EQ(static_cast<QSGOpacityNode*>(root.childAtIndex(7))->opacity(), 0);
+}
+
+TEST(FlowFooter, FreshDataPanAndLabelsAllocateNothingAfterWarmup) {
+    QTemporaryDir cache;
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
+    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
+    ChartTextAtlas atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 64; params.charset = " 0123456789.+-<>kMBDELTACUMVO";
+    ASSERT_TRUE(atlas.build(params));
+    chart::CvdLayer cvd;
+    chart::FlowFooterLayer footer(cvd);
+    cvd.presentation().flowFooter = true; cvd.presentation().stripPx = 60;
+    auto frame = footprintChartFrame(); frame.context.surfaceBounds = {0, 0, 400, 220};
+    auto source = footprintSeries();
+    for (int i = 1; i < 4; ++i) { source.bars[i * 1000] = source.bars[0]; source.bars[i * 1000].bar.startMs = i * 1000; }
+    auto feedFrame = footprintFrame(); feedFrame.raster.drawnEndMs = 4000;
+    chart::CvdFeed::build(cvd.mailbox().back(), source, feedFrame, chart::CvdReset::Visible, 4);
+    cvd.mailbox().post(); cvd.sync(frame); footer.sync(frame);
+    std::unique_ptr<QSGNode> root(footer.createContainer());
+    ChartTextRenderer text;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
+    text.beginFrame(root.get(), nullptr, atlas);
+    footer.updateNodes(frame, context); footer.submitLabels(frame, context);
+    ASSERT_EQ(footer.columnCount(), 3); ASSERT_FALSE(footer.glyphs().empty());
+    std::string rendered;
+    for (const auto& glyph : footer.glyphs()) {
+        for (const auto c : params.charset) {
+            if (atlas.glyph(c).uv == glyph.uv) { rendered += c.toLatin1(); break; }
+        }
+    }
+    EXPECT_EQ(rendered, "+3.00+3.0011.2+3.00+6.0011.2+3.00+9.0011.2DELTACUMVOL");
+    for (const auto& glyph : footer.glyphs()) {
+        EXPECT_GE(glyph.rect.left(), frame.context.surfaceBounds.left());
+        EXPECT_LE(glyph.rect.right(), frame.context.surfaceBounds.right());
+        EXPECT_GE(glyph.rect.top(), footer.bounds().top());
+        EXPECT_LE(glyph.rect.bottom(), footer.bounds().bottom());
+    }
+    for (int i = 0; i < 4; ++i) {
+        source.bars[1000].bar.delta += 10;
+        chart::CvdFeed::build(cvd.mailbox().back(), source, feedFrame, chart::CvdReset::Visible, 4);
+        cvd.mailbox().post(); frame.context.raster.leftF += .1;
+        footprintAllocations = 0; footprintCounting = true;
+        text.beginFrame(root.get(), nullptr, atlas);
+        cvd.sync(frame); footer.sync(frame); footer.updateNodes(frame, context); footer.submitLabels(frame, context);
+        footprintCounting = false;
+        EXPECT_EQ(footprintAllocations.load(), 0u);
+    }
+    cvd.mailbox().back().series.clear(); cvd.mailbox().post();
+    cvd.sync(frame); footer.sync(frame); footer.updateNodes(frame, context);
+    EXPECT_FALSE(footer.drawing()); EXPECT_EQ(footer.columnCount(), 0); EXPECT_TRUE(footer.glyphs().empty());
+
+    chart::FootprintCellsLayer cells;
+    cells.presentation().enabled = true; cells.presentation().cellsSource = true; cells.presentation().dustNotional = 0;
+    ASSERT_TRUE(chart::FlowFeed::bin(cells.mailbox().back(), footprintSeries(), footprintFrame()));
+    cells.mailbox().post(); cells.sync(frame);
+    std::unique_ptr<QSGNode> cellsRoot(cells.createContainer());
+    cells.updateNodes(frame, context); cells.submitLabels(frame, context);
+    const auto fullCount = cells.glyphCount(); ASSERT_GT(fullCount, 0u);
+    const double inset = cvd.presentation().stripPx + chart::FlowFooterLayout::height;
+    cells.submitLabels(frame, context, inset);
+    for (const auto& glyph : cells.glyphs()) EXPECT_LE(glyph.rect.bottom(), frame.context.surfaceBounds.bottom() - inset);
+    cells.submitLabels(frame, context, frame.context.surfaceBounds.height());
+    EXPECT_EQ(cells.glyphCount(), 0u);
+    cells.submitLabels(frame, context);
+    EXPECT_EQ(cells.glyphCount(), fullCount);
+}
+
+TEST(FlowFooter, FooterOnlyPublishesRetainedFlowWithTheSelectedCvdAnchor) {
+    chart::CvdLayer cvd;
+    chart::CvdFeed feed(cvd.mailbox(), cvd.presentation());
+    auto frame = footprintFrame(); frame.raster.drawnStartMs = 1000;
+    feed.setPorts({[&] { return frame; }, [] { return QStringLiteral("BTC-USD"); }, [] { return 4; }, [] {}});
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = "BTC-USD"; batch->timeframeMs = 1000;
+    for (int i = 0; i < 2; ++i) {
+        auto& bar = batch->bars.emplace_back().bar;
+        bar.startMs = i * 1000; bar.timeframeMs = 1000; bar.baseScale = 100;
+        bar.sellVol = 100; bar.buyVol = 300; bar.delta = 200;
+    }
+    feed.receive(batch);
+    cvd.presentation().flowFooter = true;
+    for (auto reset : {chart::CvdReset::Visible, chart::CvdReset::UtcDay, chart::CvdReset::TpoSession}) {
+        cvd.presentation().reset = reset; feed.publish(); cvd.sync(footprintChartFrame());
+        const auto& data = cvd.current();
+        ASSERT_EQ(data.series.count, 1);
+        EXPECT_EQ(data.series.points[0].value, reset == chart::CvdReset::Visible ? 0 : 4);
+        EXPECT_EQ(data.totals[0].delta, 2); EXPECT_EQ(data.totals[0].volume, 4);
+        EXPECT_FALSE(cvd.drawing());
+    }
+}

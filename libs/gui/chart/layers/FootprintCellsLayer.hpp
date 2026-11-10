@@ -17,7 +17,7 @@ public:
     QSGNode* createContainer() override;
     void sync(const ChartFrame&) override;
     void updateNodes(const ChartFrame&, LayerNodeContext&) override;
-    void submitLabels(const ChartFrame&, LayerNodeContext&);
+    void submitLabels(const ChartFrame&, LayerNodeContext&, double bottomInset = 0);
     FlowMailbox& mailbox() { return mailbox_; }
     FootprintPresentation& presentation() { return presentation_; }
     FootprintStage stage() const { return stage_; }
@@ -38,7 +38,7 @@ private:
     static constexpr int kMaxGlyphs = 32000;
     void cells(const ChartFrame&);
     double windowMaximum(const ChartFrame&) const;
-    void labels(const ChartFrame&, const ChartTextAtlas&);
+    void labels(const ChartFrame&, const ChartTextAtlas&, double bottomInset);
     struct Number { double volume, price, maximum; QRectF box; bool bid; };
     void number(const Number&, const ChartTextAtlas&);
     QRectF cardRect(const ChartFrame&, const FlowColumn&) const;
@@ -54,6 +54,7 @@ private:
     bool drawing_ = false, reserved_ = false, built_ = false, labelsDirty_ = true;
     Key key_;
     qint64 atlasKey_ = 0;
+    double labelBottomInset_ = 0;
     std::vector<ChartGlyphInstance> glyphs_;
     std::array<QRectF, FlowSnapshot::kMaxBars> cards_{};
     size_t cardCount_ = 0;

@@ -8,6 +8,7 @@ void registerChartLayers(LayerRegistry& registry, ChartLayers& owned) {
     registry.add(owned.tpo, FrameProfiler::Overlays);
     registry.add(owned.ladder, FrameProfiler::Overlays);
     registry.add(owned.cvd, FrameProfiler::Overlays);
+    registry.add(owned.flowFooter, FrameProfiler::Overlays);
     registry.add(owned.text, FrameProfiler::TextEnd);
 }
 } // namespace chart

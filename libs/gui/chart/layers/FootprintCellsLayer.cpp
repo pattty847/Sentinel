@@ -167,7 +167,9 @@ void FootprintCellsLayer::number(const Number& value, const ChartTextAtlas& atla
         pen += g.advance * scale;
     }
 }
-void FootprintCellsLayer::labels(const ChartFrame& frame, const ChartTextAtlas& atlas) {
+void FootprintCellsLayer::labels(const ChartFrame& frame, const ChartTextAtlas& atlas, double bottomInset) {
+    auto textBounds = frame.context.surfaceBounds;
+    textBounds.setBottom(textBounds.bottom() - bottomInset);
     for (int b = 0; b < current_->barCount; ++b) {
         const auto& bar = current_->bars[size_t(b)];
         for (int i = bar.firstCell; i < bar.firstCell + bar.cellCount; ++i) {
@@ -182,12 +184,12 @@ void FootprintCellsLayer::labels(const ChartFrame& frame, const ChartTextAtlas& 
             const double maximum = double(bar.maxSideVol) / bar.baseScale;
             const QRectF bid(left + kFootprintCandleSpace + 1, rect.top(), mid - left - kFootprintCandleSpace - 3, rect.height());
             const QRectF ask(mid + 2, rect.top(), right - mid - 3, rect.height());
-            if (frame.context.surfaceBounds.contains(bid)) number({double(cell.bidVol) / bar.baseScale, price, maximum, bid, true}, atlas);
-            if (frame.context.surfaceBounds.contains(ask)) number({double(cell.askVol) / bar.baseScale, price, maximum, ask, false}, atlas);
+            if (textBounds.contains(bid)) number({double(cell.bidVol) / bar.baseScale, price, maximum, bid, true}, atlas);
+            if (textBounds.contains(ask)) number({double(cell.askVol) / bar.baseScale, price, maximum, ask, false}, atlas);
         }
     }
 }
-void FootprintCellsLayer::submitLabels(const ChartFrame& frame, LayerNodeContext& context) {
+void FootprintCellsLayer::submitLabels(const ChartFrame& frame, LayerNodeContext& context, double bottomInset) {
     if (!drawing_ || !context.atlasReady) {
         glyphs_.clear(); labelsDirty_ = true;
         return;
@@ -204,8 +206,9 @@ void FootprintCellsLayer::submitLabels(const ChartFrame& frame, LayerNodeContext
         return;
     }
     const auto atlasKey = context.atlas.image().cacheKey();
-    if (labelsDirty_ || atlasKey_ != atlasKey) {
-        glyphs_.clear(); labels(frame, context.atlas);
+    if (labelsDirty_ || atlasKey_ != atlasKey || labelBottomInset_ != bottomInset) {
+        glyphs_.clear(); labels(frame, context.atlas, bottomInset);
+        labelBottomInset_ = bottomInset;
         atlasKey_ = atlasKey; labelsDirty_ = false;
     }
     context.text.submitGlyphs(glyphs_, ChartTextRenderer::Priority::Low);

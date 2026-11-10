@@ -15,7 +15,9 @@ public:
     void updateNodes(const ChartFrame&, LayerNodeContext&) override;
     void submitLabels(const ChartFrame&, LayerNodeContext&);
     CvdMailbox& mailbox() { return mailbox_; }
+    const CvdPresentation& presentation() const { return presentation_; }
     CvdPresentation& presentation() { return presentation_; }
+    uint64_t snapshotRevision() const { return revision_; }
     bool drawing() const { return drawing_; }
     int vertexCount() const { return vertices_; }
     const CvdSnapshot& current() const { return *current_; }
@@ -38,6 +40,7 @@ private:
     CvdScale scale_;
     bool drawing_ = false, reserved_ = false, dirty_ = true;
     Key key_;
+    uint64_t revision_ = 0;
     int vertices_ = 0;
     std::vector<ChartGlyphInstance> glyphs_;
 };

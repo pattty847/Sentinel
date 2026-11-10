@@ -305,7 +305,7 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
     if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelMinPx", "labelMaxPx",
                                 "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleWickWidth", "footprintSource", "footprintIntensity", "footprintCandle", "footprintNumbers",
-                                "footprintDustNotional", "cvdStripPx", "cvdReset", "cvdStyle"};
+                                "footprintDustNotional", "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
         return {"palettePreset", "bidGradient", "askGradient", "opacity",
@@ -802,7 +802,11 @@ void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
     describe(rows, dust, "Side volume times its row price below this quote amount gets faint text and no volume fill.");
     connect(dust, &QDoubleSpinBox::valueChanged, this, [this](double value) { apply({{"footprintDustNotional", value}}); });
     form->addRow(footprint);
-    auto* cvd = new QGroupBox("CVD", page); rows = new QFormLayout(cvd);
+    auto* cvd = new QGroupBox("Order flow", page); rows = new QFormLayout(cvd);
+    auto* footer = new QCheckBox("Show flow footer", cvd); footer->setObjectName("flowFooter");
+    rows->addRow(footer);
+    describe(rows, footer, "Show per-bar delta, cumulative delta and volume above the CVD strip.");
+    connect(footer, &QCheckBox::toggled, this, [this](bool on) { apply({{"flowFooter", on}}); });
     auto* height = new QSpinBox(cvd); height->setObjectName("cvdStripPx"); height->setRange(0, 400);
     height->setSuffix(" px"); height->setSpecialValueText("Off"); rows->addRow("Strip height", height);
     describe(rows, height, "Cumulative volume delta strip height in pixels. Zero hides the strip.");
@@ -817,6 +821,8 @@ void HeatmapSettingsDialog::refreshFlowControls() {
         auto* control = findChild<QComboBox*>(key); const QSignalBlocker block(control);
         control->setCurrentIndex(control->findData(values[key].toString()));
     }
+    auto* footer = findChild<QCheckBox*>("flowFooter"); const QSignalBlocker d(footer);
+    footer->setChecked(values["flowFooter"].toBool());
     auto* numbers = findChild<QCheckBox*>("footprintNumbers"); const QSignalBlocker a(numbers);
     numbers->setChecked(values["footprintNumbers"].toBool());
     auto* dust = findChild<QDoubleSpinBox*>("footprintDustNotional"); const QSignalBlocker b(dust);

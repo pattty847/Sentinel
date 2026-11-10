@@ -67,7 +67,7 @@ QSGNode* CvdLayer::createContainer() {
 }
 void CvdLayer::sync(const ChartFrame& frame) {
     captured_ = presentation_;
-    if (mailbox_.take(current_)) dirty_ = true;
+    if (mailbox_.take(current_)) { dirty_ = true; ++revision_; }
     drawing_ = captured_.stripPx > 0 && frame.context.raster.valid && frame.context.raster.dpr > 0 &&
         current_->timeframeMs == std::max<int64_t>(1000, frame.context.time.activeTimeframeMs) && current_->reset == captured_.reset &&
         current_->series.count > 0;
