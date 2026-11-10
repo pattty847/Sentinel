@@ -21,6 +21,7 @@ The conductor pulls the next wave item into `docs/STATUS.md` Next. Detail goes i
    - history requests may ask 1,000+ bars; the server answers from cache or fans out 350-bar Coinbase pages within the rate limit;
    - change-driven live publishing with a per-client max update rate;
    - EATEN vs PULLED liquidity, ABSORPTION, REPLENISHMENT at sub-minute resolution from the raw journal (a 1-minute TWAP column cannot show event order).
+   - Owner 2026-11-10: talk feasibility with the owner first (trade/book ordering, partial fills, refills, sequence gaps, live = journal parity) before any Fable plan or code; candidate Fable 5.2 planning task.
 2. **Order book widget pass** (owner reports 2026-10-06): following cannot keep the mid centred in a fast dump (`OrderBookDock.cpp` follow/recenter; DECISIONS 2026-10-03, 67 ms over a 2001-tick window); BTC rows under the best bid looked empty at 0.1 tick (thin book or display bug, unverified).
 3. **GUI polish** (owner, 2026-10-06):
    - put explanatory hover tooltips behind a "learning mode" setting (an order book tooltip covers the chart);
