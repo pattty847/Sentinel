@@ -648,3 +648,44 @@ TEST(FlowSeriesBuffer, RetentionKeepsCoverageCrossingAnAnchor) {
     EXPECT_EQ(series->coverage.begin()->second.fromMs, 1800000);
     EXPECT_EQ(series->coverage.begin()->second.toMs, 3600000);
 }
+
+// The retention warning counts the buckets a window touches with the backfill's own
+// endpoints, so it fires exactly when the backfill window drops the oldest bucket.
+TEST(FlowSeriesBufferCapacity, TouchedBucketsMatchWhatBackfillRetains) {
+    constexpr int64_t tf = 60000, cap = int64_t(FlowSeriesBuffer::kMaxBuckets);
+    EXPECT_EQ(FlowSeriesBuffer::bucketsTouching(0, cap * tf, tf), cap);
+    EXPECT_EQ(FlowSeriesBuffer::bucketsTouching(0, cap * tf + 1, tf), cap + 1);
+    EXPECT_EQ(FlowSeriesBuffer::bucketsTouching(0, cap * tf + tf / 2, tf), cap + 1) << "aligned start, 8194.5 tf";
+    EXPECT_EQ(FlowSeriesBuffer::bucketsTouching(tf / 2, cap * tf + tf / 2, tf), cap + 1) << "fractional both ends";
+    EXPECT_EQ(FlowSeriesBuffer::bucketsTouching(tf / 2, (cap - 1) * tf + tf / 2, tf), cap);
+    EXPECT_EQ(FlowSeriesBuffer::bucketsTouching(-tf / 2, tf / 2, tf), 2) << "floor below zero";
+    EXPECT_EQ(FlowSeriesBuffer::bucketsTouching(5, 5, tf), 0);
+    struct Window { int64_t start, end; };
+    const int64_t base = 1000 * tf;
+    for (const auto& w : {Window{base, base + cap * tf}, Window{base, base + cap * tf + 1},
+                          Window{base, base + cap * tf + tf / 2}, Window{base + tf / 2, base + cap * tf + tf / 2},
+                          Window{base + tf / 2, base + (cap - 1) * tf + tf / 2}, Window{base, base + (cap - 1) * tf}}) {
+        // The real path: the backfill window, then a page of every touched bucket into
+        // the buffer, which retains that window and evicts beyond kMaxBuckets.
+        FlowBackfillState backfill;
+        backfill.select("BTC-USD", tf);
+        backfill.setWindow(w.start, w.end);
+        FlowSeriesBuffer buffer;
+        buffer.retainWindow(tf, backfill.windowStartMs(), backfill.windowEndMs());
+        FlowSeriesBuffer::Batch batch;
+        batch.symbol = "BTC-USD"; batch.timeframeMs = tf; batch.history = true;
+        for (int64_t t = w.start / tf * tf; t < w.end; t += tf) {
+            auto& record = batch.bars.emplace_back();
+            record.bar.startMs = t; record.bar.timeframeMs = tf; record.bar.baseScale = 1; record.complete = true;
+            record.source = SentinelStreamClient::FlowSource::Store;
+        }
+        buffer.apply(batch, 0);
+        const auto* series = buffer.series(tf);
+        ASSERT_NE(series, nullptr);
+        int64_t retained = 0;
+        for (const auto& [start, record] : series->bars) retained += start + tf > w.start && start < w.end;
+        const int64_t touched = FlowSeriesBuffer::bucketsTouching(w.start, w.end, tf);
+        EXPECT_EQ(retained, std::min(touched, cap)) << w.start << ' ' << w.end;
+        EXPECT_EQ(touched > cap, retained < touched) << "warn exactly when buckets are dropped";
+    }
+}

@@ -15,6 +15,13 @@ public:
     static constexpr int64_t kRefetchIntervalMs = 30'000;
     // Every bar of the widest allowed view (retention and backfill share it).
     static constexpr size_t kMaxBuckets = heatmap::kMaxChartSurfaceBars;
+    // Buckets of tf that [start, end) touches: floor(start / tf) .. floor((end - 1) / tf),
+    // the endpoints FlowBackfillState::setWindow uses.
+    static int64_t bucketsTouching(int64_t start, int64_t end, int64_t tf) {
+        if (tf <= 0 || end <= start) return 0;
+        const auto floorDiv = [tf](int64_t v) { return v / tf - (v % tf < 0 ? 1 : 0); };
+        return floorDiv(end - 1) - floorDiv(start) + 1;
+    }
     struct Series {
         std::map<int64_t, Record> bars;
         std::map<int64_t, Range> coverage;

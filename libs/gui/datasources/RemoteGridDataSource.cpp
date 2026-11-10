@@ -718,12 +718,13 @@ void RemoteGridDataSource::unsubscribeFlowLive() {
 
 void RemoteGridDataSource::requestFlowHistory(const QString& symbol, int64_t tf, int64_t start, int64_t end, int64_t resetAnchor) {
     if (!m_flowSubscription || symbol != m_flowSymbol || tf != m_flowTimeframeMs || end <= start) return;
-    if ((end - start) / tf > int64_t(FlowSeriesBuffer::kMaxBuckets)) {
-        // Only a surface wider than the supported one: retention keeps the newest bars.
+    if (const auto buckets = FlowSeriesBuffer::bucketsTouching(start, end, tf);
+        buckets > int64_t(FlowSeriesBuffer::kMaxBuckets)) {
+        // A view over the supported column count: retention keeps the newest bars.
         static sentinel::log_throttle::Site warning;
         uint32_t suppressed = 0;
         if (warning.admit(5000, sentinel::log_throttle::nowMs(), suppressed))
-            sLog_Warning("Flow view exceeds retention: symbol=" << symbol << " tf=" << tf << " bars=" << (end - start) / tf
+            sLog_Warning("Flow view exceeds retention: symbol=" << symbol << " tf=" << tf << " bars=" << buckets
                          << " kept=" << FlowSeriesBuffer::kMaxBuckets << sentinel::log_throttle::Suppressed{suppressed});
     }
     const auto marginStart = std::max<int64_t>(0, start - (end - start));
