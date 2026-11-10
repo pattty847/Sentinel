@@ -288,7 +288,7 @@ TEST(AgentHostModeSources, NoNativeFormatQSettingsInTheGui) {
 TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
     // The legacy heatmap requests (heatmap history, recording view and history) went in S8a.
     const QSet<QString> guarded{"subscribe", "requestFootprintHistory", "requestCandleHistory",
-                                "requestTpoHistory", "subscribeFlowLive", "requestFlowHistory",
+                                "requestTpoHistory", "subscribeFlowLive", "requestFlowHistory", "requestTradeHistory",
                                 "sendTradeCommand", "sendAlgoCommand"};
     // Connection management, releases, cancels and the local generation lookup:
     // they name no new symbol to the server or carry no request.
