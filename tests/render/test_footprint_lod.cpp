@@ -73,6 +73,34 @@ TEST(FootprintLod, BandRowsAreTheSmallestFactorReachingTheStageMinimum) {
         }
     }
 }
+TEST(FootprintLod, BandRowsHoldAcrossZoomUntilTheSmallerBandClearsTheMargin) {
+    using chart::footprintBandRows;
+    const auto cells = FootprintStage::Cells;
+    EXPECT_EQ(footprintBandRows(5.9, cells, 1), 2) << "growing to reach the minimum is immediate";
+    EXPECT_EQ(footprintBandRows(6, cells, 2), 2) << "k = 1 reaches 6 px but not 6 + 1";
+    EXPECT_EQ(footprintBandRows(6.9, cells, 2), 2);
+    EXPECT_EQ(footprintBandRows(7, cells, 2), 1);
+    EXPECT_EQ(footprintBandRows(6, cells, 0), 1) << "no history: plain minimum";
+    EXPECT_EQ(footprintBandRows(1, cells, 40), 7) << "a held k never exceeds the margin's k";
+    // Zoom sweep in and out near a boundary: k changes at most once per direction.
+    int64_t k = 0, changes = 0;
+    for (double row : {5.8, 5.95, 6.05, 6.3, 6.05, 5.95, 6.3, 6.6, 6.4}) {
+        const auto next = footprintBandRows(row, cells, k);
+        changes += k && next != k; k = next;
+    }
+    EXPECT_EQ(changes, 0);
+}
+TEST(FootprintLod, BudgetBandRowsFitTheWorstCaseVisibleCells) {
+    using chart::footprintBudgetBandRows;
+    EXPECT_EQ(footprintBudgetBandRows(2049, 1001, 65536), 34);
+    EXPECT_EQ(footprintBudgetBandRows(3, 11, 65536), 1);
+    EXPECT_EQ(footprintBudgetBandRows(0, 11, 65536), 1);
+    for (int64_t bars : {1, 7, 300, 2049})
+        for (int64_t rows : {1, 50, 1001, 100000}) {
+            const auto k = footprintBudgetBandRows(bars, rows, 65536);
+            EXPECT_LE(bars * ((rows + k - 1) / k + 1), 65536) << bars << ' ' << rows;
+        }
+}
 TEST(FootprintLod, BandsAnchorToTheAbsoluteRowGrid) {
     using chart::footprintBandStart;
     EXPECT_EQ(footprintBandStart(-1, 3), -3);

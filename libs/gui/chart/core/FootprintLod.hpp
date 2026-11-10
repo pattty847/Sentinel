@@ -25,8 +25,8 @@ inline constexpr double kFootprintStageHysteresis = 2;
 inline constexpr double kFootprintStripHysteresis = 0.5;
 // Minimum logical height of one drawn band; thinner rows merge into bands.
 inline constexpr double kFootprintBandMinRow = 6;
-// Widest surface at 2 px columns (4096 logical px) fits every visible bar.
-inline constexpr int kFootprintMaxBars = 2048;
+// Widest surface at 2 px columns (4096 logical px): 2048 columns plus two partial edge bars.
+inline constexpr int kFootprintMaxBars = 2050;
 // Rows merge into bands, so stages depend on the column width only.
 inline FootprintStage footprintLod(double column, double row, FootprintStage previous = FootprintStage::Hidden) {
     if (!std::isfinite(column) || !std::isfinite(row) || column <= 0 || row <= 0) return FootprintStage::Hidden;
@@ -36,11 +36,25 @@ inline FootprintStage footprintLod(double column, double row, FootprintStage pre
     return column >= kFootprintNumbersColumn - held(FootprintStage::Numbers, kFootprintStageHysteresis)
         ? FootprintStage::Numbers : FootprintStage::Cells;
 }
-// Drawn rows per band: the smallest k with k * row >= the stage's minimum band height.
-inline int64_t footprintBandRows(double row, FootprintStage stage) {
+// A band shrinks back only once the smaller band clears its minimum by this much.
+inline constexpr double kFootprintBandHysteresis = 1;
+inline int64_t footprintRowsFor(double minimum, double row) {
+    return int64_t(std::clamp(std::ceil(minimum / row - 1e-9), 1.0, 1048576.0));
+}
+// Drawn rows per band: the smallest k with k * row >= the stage's minimum band height,
+// holding the previous k across zoom until a smaller k clears the minimum by the margin.
+inline int64_t footprintBandRows(double row, FootprintStage stage, int64_t previous = 0) {
     if (stage == FootprintStage::Hidden || !std::isfinite(row) || row <= 0) return 1;
     const double minimum = stage == FootprintStage::Numbers ? kFootprintNumbersRow : kFootprintBandMinRow;
-    return int64_t(std::clamp(std::ceil(minimum / row - 1e-9), 1.0, 1048576.0));
+    return std::max(footprintRowsFor(minimum, row),
+                    std::min(previous, footprintRowsFor(minimum + kFootprintBandHysteresis, row)));
+}
+// Smallest k whose worst case fits the cell budget: a run of rows spans at most
+// ceil(rows / k) + 1 bands in each visible bar.
+inline int64_t footprintBudgetBandRows(int64_t visibleBars, int64_t visibleRows, int64_t maxCells) {
+    if (visibleBars <= 0 || visibleRows <= 0) return 1;
+    const int64_t perBar = std::max<int64_t>(1, maxCells / visibleBars - 1);
+    return std::max<int64_t>(1, (visibleRows + perBar - 1) / perBar);
 }
 // Bands sit on the absolute drawn-row grid, so a pan never re-partitions them.
 inline int64_t footprintBandStart(int64_t row, int64_t rows) {

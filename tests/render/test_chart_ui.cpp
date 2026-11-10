@@ -2733,6 +2733,43 @@ TEST(FootprintFlowFeed, PublicationWakesCandlesOnCoverageTransitionsIncludingRee
     }
 }
 
+TEST(FootprintFlowFeed, BandsFollowTheNumbersSettingAndRepublishWhenItChanges) {
+    UnifiedGridRenderer renderer;
+    renderer.view()->controller().session().setSymbol("BTC-USD");
+    chart::PublishedFrame published;
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000;
+    auto& r = frame.raster;
+    r.valid = true; r.dpr = 1; r.tick = 1; r.tfMs = 1000; r.colPxF = 100; r.rowPxF = 7;
+    r.drawnStartMs = 1000; r.drawnEndMs = 3000; r.drawnMinPrice = 95; r.drawnMaxPrice = 105;
+    published.publish(frame);
+    chart::FootprintCellsLayer layer;
+    chart::FlowFeed feed(layer.mailbox());
+    feed.bind(renderer.view()->controller(), published, *renderer.layers(), layer.presentation());
+    renderer.layers()->setFootprintNumbers(false);
+    renderer.layers()->setFootprintEnabled(true); renderer.layers()->setFootprintSource("cells");
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = "BTC-USD"; batch->timeframeMs = 1000;
+    auto& bar = batch->bars.emplace_back().bar;
+    bar.startMs = 1000; bar.timeframeMs = 1000; bar.nativeTick = 1; bar.baseScale = 1;
+    bar.lowRow = 99; bar.rows = {{0, 10, 20}, {1, 11, 21}, {2, 12, 22}};
+    auto current = std::make_unique<chart::FlowSnapshot>();
+    feed.receive(batch); feed.publishRows();
+    ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_TRUE(current->valid);
+    EXPECT_EQ(current->bandRows, 1) << "numbers off: Cells bands at 7 px rows";
+    EXPECT_EQ(current->cellCount, 3);
+    QTest::qWait(150); layer.mailbox().take(current);
+    ASSERT_FALSE(feed.pending());
+    for (bool numbers : {true, false}) {
+        renderer.layers()->setFootprintNumbers(numbers);
+        EXPECT_TRUE(feed.pending()) << "the setting change republishes";
+        QTest::qWait(150);
+        ASSERT_TRUE(layer.mailbox().take(current));
+        EXPECT_EQ(current->bandRows, numbers ? 3 : 1);
+        EXPECT_EQ(current->cellCount, numbers ? 1 : 3);
+    }
+}
+
 #include "test_chart_ui.moc"
 
 TEST(CvdKnobs, QmlAndAgentPortPersistAndProcessOnlyChangesStayLocal) {

@@ -33,6 +33,7 @@ struct FlowSnapshot {
     double tick = 0, fromMs = 0, toMs = 0, low = 0, high = 0, maxRowVolume = 0;
     int barCount = 0, cellCount = 0;
     int skippedBars = 0, truncatedBars = 0;
+    int64_t bandRows = 1; // drawn rows per band in this snapshot
     std::array<FlowColumn, kMaxBars> bars{};
     std::array<FlowCell, kMaxCells> cells{};
 };
@@ -68,7 +69,8 @@ public:
     bool pending() const { return timer_.isActive(); }
     // Deterministic GUI-side binning; also usable by a later consumer of bar totals.
     // Rows merge into price bands sized for the stage (footprintBandRows).
-    static bool bin(FlowSnapshot&, const FlowSeriesBuffer::Series&, const MappingFrameContext&, FootprintStage);
+    static bool bin(FlowSnapshot&, const FlowSeriesBuffer::Series&, const MappingFrameContext&, FootprintStage,
+                    int64_t previousBand = 0);
     static bool bin(FlowSnapshot&, const FlowSeriesBuffer::Series&, const MappingFrameContext&);
 private:
     void selectSymbol();
@@ -86,5 +88,7 @@ private:
     uint64_t serial_ = 0;
     bool enabled_ = false;
     FootprintStage lod_ = FootprintStage::Hidden;
+    int64_t band_ = 0;
+    bool numbers_ = true;
 };
 } // namespace chart

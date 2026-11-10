@@ -311,13 +311,13 @@ TEST(FootprintCells, CapacityRetainsNearestBarsAndNeverPartialBarCells) {
     ASSERT_TRUE(chart::FlowFeed::bin(*out, series, frame));
     EXPECT_TRUE(out->valid); EXPECT_EQ(out->barCount, chart::FlowSnapshot::kMaxBars);
     EXPECT_GT(out->truncatedBars, 0);
-    EXPECT_EQ(out->bars[0].startMs, 476000);
-    EXPECT_EQ(out->bars[size_t(out->barCount - 1)].startMs, 2523000) << "one contiguous run around the centre";
+    EXPECT_EQ(out->bars[0].startMs, 950000) << "the far past is trimmed";
+    EXPECT_EQ(out->bars[size_t(out->barCount - 1)].startMs, 2999000) << "never the newest edge";
     // A view that fits the cap shrinks its overscan instead of truncating.
     frame.raster.drawnEndMs = 1500000;
     ASSERT_TRUE(chart::FlowFeed::bin(*out, series, frame));
     EXPECT_EQ(out->truncatedBars, 0);
-    EXPECT_EQ(out->fromMs, -273000); EXPECT_EQ(out->toMs, 1773000);
+    EXPECT_EQ(out->fromMs, -274000); EXPECT_EQ(out->toMs, 1774000);
     EXPECT_EQ(out->barCount, chart::FlowSnapshot::kMaxBars - 2);
     // The nearest oversized bar cannot corrupt the following small bar's cells.
     series = footprintSeries();
@@ -393,6 +393,49 @@ TEST(FootprintBands, WidestStripViewFitsEveryVisibleBarAndTheCellBudget) {
     EXPECT_EQ(out->barCount, 2048); EXPECT_EQ(out->truncatedBars, 0);
     EXPECT_LE(out->cellCount, chart::FlowSnapshot::kMaxCells);
     EXPECT_EQ(out->bars[0].cellCount, 9) << "200 rows in 24-row bands from row 96";
+}
+// 4096 px of 2 px columns, 800 native rows per bar under 0.25 px rows, prices 0..1000.
+FlowSeriesBuffer::Series denseSeries(int first, int last) {
+    auto series = ladderSeries(800);
+    for (int i = first; i < last; ++i) { series.bars[i * 1000] = series.bars[0]; series.bars[i * 1000].bar.startMs = i * 1000; }
+    return series;
+}
+MappingFrameContext denseFrame() {
+    auto frame = stripFrame(.25);
+    auto& r = frame.raster;
+    r.colPxF = 2; r.drawnStartMs = 0; r.drawnEndMs = 2048000; r.drawnMinPrice = 0; r.drawnMaxPrice = 1000;
+    return frame;
+}
+int visibleBars(const chart::FlowSnapshot& out, const MappingFrameContext& frame) {
+    int count = 0;
+    for (int i = 0; i < out.barCount; ++i)
+        count += double(out.bars[size_t(i)].startMs) + 1000 > frame.raster.drawnStartMs &&
+                 double(out.bars[size_t(i)].startMs) < frame.raster.drawnEndMs;
+    return count;
+}
+TEST(FootprintBands, DenseViewCoarsensBandsInsteadOfDroppingVisibleBars) {
+    auto out = std::make_unique<chart::FlowSnapshot>();
+    const auto frame = denseFrame();
+    ASSERT_TRUE(chart::FlowFeed::bin(*out, denseSeries(0, 2048), frame));
+    EXPECT_EQ(out->bandRows, 34) << "24 rows reach 6 px; 34 fit 2049 visible bars x 1001 rows";
+    EXPECT_EQ(out->barCount, 2048); EXPECT_EQ(out->truncatedBars, 0);
+    EXPECT_EQ(out->bars[2047].startMs, 2047000);
+    EXPECT_LE(out->cellCount, chart::FlowSnapshot::kMaxCells);
+}
+TEST(FootprintBands, PanNeverDropsAVisibleBarOrFlipsTheBandFactor) {
+    auto out = std::make_unique<chart::FlowSnapshot>();
+    const auto series = denseSeries(-200, 2300);
+    for (double shift : {0., 300., 500., 1700., 2500.5, -999.}) {
+        auto frame = denseFrame();
+        auto& r = frame.raster;
+        r.drawnStartMs += shift; r.drawnEndMs += shift; r.leftF += shift / 500;
+        r.drawnMinPrice += shift / 1000; r.drawnMaxPrice += shift / 1000;
+        ASSERT_TRUE(chart::FlowFeed::bin(*out, series, frame, chart::FootprintStage::Strip, 34));
+        EXPECT_EQ(out->bandRows, 34) << shift;
+        const int expected = int(std::ceil(r.drawnEndMs / 1000) - std::floor(r.drawnStartMs / 1000));
+        EXPECT_EQ(visibleBars(*out, frame), expected) << shift;
+        EXPECT_LE(out->cellCount, chart::FlowSnapshot::kMaxCells);
+    }
 }
 TEST(FootprintBands, StripDrawsOneTintedCellPerBandWithoutCardOrSpine) {
     chart::FootprintCellsLayer layer;

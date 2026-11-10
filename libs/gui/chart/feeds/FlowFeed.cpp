@@ -86,17 +86,51 @@ Added addBar(FlowSnapshot& out, const sentinel::flow::FlowBar& bar, FlatRows& ro
 }
 bool validWindow(const FlowSnapshot& out, const chart_raster::RasterCamera& cam, double width, double height) {
     return cam.valid && std::isfinite(cam.tick) && cam.tick > 0 && out.timeframeMs >= 1000 &&
-        width > 0 && height > 0 && std::isfinite(out.fromMs) && std::isfinite(out.toMs) &&
-        std::isfinite(out.low) && std::isfinite(out.high);
+        std::isfinite(cam.drawnStartMs) && std::isfinite(cam.drawnMinPrice) &&
+        std::isfinite(width) && std::isfinite(height) && width > 0 && height > 0;
 }
-// Visit nearest bar centres first so a bounded snapshot retains the visible
-// centre before the distant overscan edges. No candidate or per-bar tree allocation.
-using BarIterator = decltype(FlowSeriesBuffer::Series::bars)::const_iterator;
-const sentinel::flow::FlowBar& nearest(const FlowSeriesBuffer::Series& series,
-    BarIterator& left, BarIterator& right, double centre) {
-    if (right == series.bars.end() || (left != series.bars.begin() &&
-        centre - double(std::prev(left)->first) <= double(right->first) - centre)) return (--left)->second.bar;
-    return (right++)->second.bar;
+struct Budget { int64_t band = 1; double padMs = 0, padPrice = 0; };
+// Bands coarsen until every visible bar's worst case fits kMaxCells; only overscan
+// shrinks to fit. Visible bar and row counts depend on the view size, not the pan.
+Budget budget(const FlowSnapshot& out, const chart_raster::RasterCamera& cam, double width, double height,
+              FootprintStage stage, int64_t previous) {
+    const double tf = double(out.timeframeMs);
+    const double bars = std::min(std::ceil(width / tf) + 1, 1e12), rows = std::min(std::ceil(height / cam.tick) + 1, 1e12);
+    Budget plan;
+    plan.band = std::max(footprintBandRows(cam.rowPxF / cam.dpr, stage, previous),
+                         footprintBudgetBandRows(int64_t(bars), int64_t(rows), FlowSnapshot::kMaxCells));
+    const double perBar = double(std::max<int64_t>(1, FlowSnapshot::kMaxCells / int64_t(bars) - 1));
+    plan.padPrice = std::clamp((perBar * double(plan.band) - rows) * 0.5, 0.0, height / cam.tick) * cam.tick;
+    plan.padMs = std::clamp(((FlowSnapshot::kMaxBars - 2) * tf - width) * 0.5, 0.0, width);
+    return plan;
+}
+Added visit(FlowSnapshot& out, const sentinel::flow::FlowBar& bar, FlatRows& rows,
+            const chart_raster::RasterCamera& cam, int64_t band) {
+    const auto result = bar.timeframeMs == out.timeframeMs ? addBar(out, bar, rows, cam, band) : Added::Invalid;
+    if (result == Added::Invalid) ++out.skippedBars;
+    if (result == Added::Oversized || result == Added::Full) ++out.truncatedBars;
+    return result;
+}
+int64_t barKey(double ms) { return int64_t(std::clamp(ms, -9e15, 9e15)); }
+// Visible bars newest first, so a full snapshot trims the far past and never the live
+// edge; then overscan outward from the nearer view edge. No candidate allocation.
+void collect(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, FlatRows& rows,
+             const chart_raster::RasterCamera& cam, int64_t band) {
+    const double tf = double(out.timeframeMs);
+    const auto lo = series.bars.upper_bound(barKey(std::floor(cam.drawnStartMs - tf)));
+    const auto hi = series.bars.lower_bound(barKey(std::ceil(cam.drawnEndMs)));
+    for (auto it = hi; it != lo;)
+        if (visit(out, (--it)->second.bar, rows, cam, band) == Added::Full) return;
+    auto left = lo, right = hi;
+    for (;;) {
+        const bool leftOk = left != series.bars.begin() && double(std::prev(left)->first) + tf > out.fromMs;
+        const bool rightOk = right != series.bars.end() && double(right->first) < out.toMs;
+        if (!leftOk && !rightOk) return;
+        const bool takeLeft = leftOk && (!rightOk ||
+            cam.drawnStartMs - tf - double(std::prev(left)->first) <= double(right->first) - cam.drawnEndMs);
+        const auto& bar = takeLeft ? (--left)->second.bar : (right++)->second.bar;
+        if (visit(out, bar, rows, cam, band) == Added::Full) return;
+    }
 }
 } // namespace
 FlowMailbox::FlowMailbox(FootprintCoverage* coverage) : coverage_(coverage), back_(std::make_unique<FlowSnapshot>()), pending_(std::make_unique<FlowSnapshot>()) {}
@@ -146,10 +180,13 @@ void FlowFeed::bind(ChartViewController& view, const PublishedFrame& published,
         presentation.enabled = visibility.footprintEnabled();
         presentation.cellsSource = visibility.footprintSource() == "cells";
         presentation.numbers = visibility.footprintNumbers();
+        const bool numbersChanged = numbers_ != presentation.numbers;
+        numbers_ = presentation.numbers;
         presentation.spineCandles = visibility.footprintCandle() == "spine";
         presentation.dustNotional = visibility.footprintDustNotional();
         presentation.windowIntensity = visibility.footprintIntensity() == "window";
         setEnabled(presentation.enabled && presentation.cellsSource);
+        if (numbersChanged) onFrameChanged(); // band height follows the numbers setting
     };
     connect(&visibility, &LayerVisibility::layerVisibilityChanged, this, apply);
     apply();
@@ -215,31 +252,20 @@ bool FlowFeed::bin(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, co
     return bin(out, series, frame, cam.dpr > 0 ? footprintLod(cam.colPxF / cam.dpr, cam.rowPxF / cam.dpr) : FootprintStage::Hidden);
 }
 bool FlowFeed::bin(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, const MappingFrameContext& frame,
-                   FootprintStage stage) {
+                   FootprintStage stage, int64_t previousBand) {
     const auto& cam = frame.raster;
     out.valid = false; out.barCount = 0; out.cellCount = 0; out.maxRowVolume = 0;
-    out.skippedBars = 0; out.truncatedBars = 0;
+    out.skippedBars = 0; out.truncatedBars = 0; out.bandRows = 1;
     out.tick = cam.tick; out.timeframeMs = frame.activeTimeframeMs;
     const double width = cam.drawnEndMs - cam.drawnStartMs, height = cam.drawnMaxPrice - cam.drawnMinPrice;
-    // Overscan one view each side, shrunk so the whole window fits kMaxBars (narrow columns).
-    const double pad = std::clamp(((FlowSnapshot::kMaxBars - 2) * double(out.timeframeMs) - width) * 0.5, 0.0, width);
-    out.fromMs = cam.drawnStartMs - pad; out.toMs = cam.drawnEndMs + pad;
-    out.low = cam.drawnMinPrice - height; out.high = cam.drawnMaxPrice + height;
     if (!validWindow(out, cam, width, height)) return false;
+    const auto plan = budget(out, cam, width, height, stage, previousBand);
+    out.bandRows = plan.band;
+    out.fromMs = cam.drawnStartMs - plan.padMs; out.toMs = cam.drawnEndMs + plan.padMs;
+    out.low = cam.drawnMinPrice - plan.padPrice; out.high = cam.drawnMaxPrice + plan.padPrice;
     // Reused on the GUI thread; fixed storage also bounds malformed/oversized bars.
     thread_local FlatRows rows;
-    const int64_t band = footprintBandRows(cam.rowPxF / cam.dpr, stage);
-    const double centre = cam.drawnStartMs + width * 0.5 - out.timeframeMs * 0.5;
-    auto right = series.bars.lower_bound(int64_t(std::clamp(centre, -9e15, 9e15))), left = right;
-    while (left != series.bars.begin() || right != series.bars.end()) {
-        const auto& bar = nearest(series, left, right, centre);
-        if (double(bar.startMs) >= out.toMs || double(bar.startMs) + bar.timeframeMs <= out.fromMs) continue;
-        const auto result = bar.timeframeMs == out.timeframeMs ? addBar(out, bar, rows, cam, band) : Added::Invalid;
-        if (result == Added::Invalid) ++out.skippedBars;
-        if (result == Added::Oversized || result == Added::Full) ++out.truncatedBars;
-        // Nearest-first: a full snapshot keeps one contiguous run around the centre, no holes.
-        if (result == Added::Full) break;
-    }
+    collect(out, series, rows, cam, plan.band);
     std::sort(out.bars.begin(), out.bars.begin() + out.barCount,
               [](const auto& a, const auto& b) { return a.startMs < b.startMs; });
     out.valid = true;
@@ -264,7 +290,9 @@ void FlowFeed::publishRows() {
     out.valid = false; out.barCount = 0; out.cellCount = 0;
     out.skippedBars = 0; out.truncatedBars = 0; out.serial = ++serial_;
     const auto* series = buffer_.series(symbol_, frame.activeTimeframeMs);
-    if (series) bin(out, *series, frame, lod_);
+    // Numbers off caps the stage at Cells, as the layer does, so bands stay at the Cells height.
+    const auto stage = !numbers_ && lod_ == FootprintStage::Numbers ? FootprintStage::Cells : lod_;
+    if (series && bin(out, *series, frame, stage, band_)) band_ = out.bandRows;
     report(out);
     post();
     if (ports_.update) ports_.update();
