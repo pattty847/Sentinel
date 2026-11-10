@@ -2307,6 +2307,7 @@ TEST(FootprintFlowFeed, CoalescesRearmsAndWithdrawsOnSymbolSwitch) {
     frame.activeTimeframeMs = 1000;
     frame.raster.valid = true; frame.raster.tick = 1;
     frame.raster.dpr = 1; frame.raster.tfMs = 1000; frame.raster.colPxF = 56; frame.raster.rowPxF = 12;
+    frame.raster.widthDev = 56; frame.raster.heightDev = 120;
     frame.raster.drawnStartMs = 0; frame.raster.drawnEndMs = 1000;
     frame.raster.drawnMinPrice = 95; frame.raster.drawnMaxPrice = 105;
     QString symbol = "BTC-USD";
@@ -2616,7 +2617,7 @@ TEST(FootprintFlowFeed, HiddenLodDoesNotArmOrPublishAndResumesFromSourceBuffer) 
     MappingFrameContext frame;
     frame.activeTimeframeMs = 1000;
     frame.raster.valid = true; frame.raster.dpr = 1; frame.raster.tick = 1; frame.raster.tfMs = 1000;
-    frame.raster.colPxF = 10; frame.raster.rowPxF = 3;
+    frame.raster.colPxF = 1; frame.raster.rowPxF = 3;
     int updates = 0;
     feed.setPorts({[&] { return frame; }, [] { return QString("BTC-USD"); }, [&] { ++updates; }});
     feed.setEnabled(true);
@@ -2625,7 +2626,11 @@ TEST(FootprintFlowFeed, HiddenLodDoesNotArmOrPublishAndResumesFromSourceBuffer) 
     feed.publishRows(); EXPECT_EQ(updates, 0);
     frame.raster.colPxF = 24; frame.raster.rowPxF = 6;
     feed.onFrameChanged(); EXPECT_TRUE(feed.pending());
-    frame.raster.colPxF = 21; frame.raster.rowPxF = 3;
+    frame.raster.colPxF = 1.4; frame.raster.rowPxF = .5;
+    feed.onFrameChanged(); EXPECT_FALSE(feed.pending());
+    frame.raster.colPxF = 2;
+    feed.onFrameChanged(); EXPECT_TRUE(feed.pending()) << "Strip arms at 2 px columns with sub-pixel rows";
+    frame.raster.colPxF = 1.4;
     feed.onFrameChanged(); EXPECT_FALSE(feed.pending());
     QTest::qWait(100); EXPECT_EQ(updates, 0);
 }
@@ -2660,7 +2665,7 @@ TEST(FootprintFlowFeed, EarlyNewSymbolHistorySurvivesSelectionAndHiddenLod) {
     ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_TRUE(current->valid);
     EXPECT_EQ(current->cellCount, 1); EXPECT_EQ(layer.presentation().coverage.barCount, 1);
     // Hidden/source-off callbacks do no merging; authoritative remote history remains available.
-    frame.raster.colPxF = 10; feed.onFrameChanged();
+    frame.raster.colPxF = 1; feed.onFrameChanged();
     bar.rows[0].bidVol = 40; FlowDataSourceTest::deliver(source, batch);
     frame.raster.colPxF = 56; feed.onFrameChanged(); feed.publishRows();
     ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->cells[0].bidVol, 40);
@@ -2727,6 +2732,51 @@ TEST(FootprintFlowFeed, PublicationWakesCandlesOnCoverageTransitionsIncludingRee
         EXPECT_FALSE(layer.presentation().spine(frame.raster));
         renderer.layers()->setFootprintSource("cells");
     }
+}
+
+TEST(FootprintFlowFeed, BandsFollowTheNumbersSettingAndRepublishWhenItChanges) {
+    UnifiedGridRenderer renderer;
+    renderer.view()->controller().session().setSymbol("BTC-USD");
+    chart::PublishedFrame published;
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000;
+    auto& r = frame.raster;
+    r.valid = true; r.dpr = 1; r.tick = 1; r.tfMs = 1000; r.colPxF = 100; r.rowPxF = 7;
+    r.widthDev = 200; r.heightDev = 70;
+    r.drawnStartMs = 1000; r.drawnEndMs = 3000; r.drawnMinPrice = 95; r.drawnMaxPrice = 105;
+    published.publish(frame);
+    chart::FootprintCellsLayer layer;
+    chart::FlowFeed feed(layer.mailbox());
+    feed.bind(renderer.view()->controller(), published, *renderer.layers(), layer.presentation());
+    renderer.layers()->setFootprintNumbers(false);
+    renderer.layers()->setFootprintEnabled(true); renderer.layers()->setFootprintSource("cells");
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = "BTC-USD"; batch->timeframeMs = 1000;
+    auto& bar = batch->bars.emplace_back().bar;
+    bar.startMs = 1000; bar.timeframeMs = 1000; bar.nativeTick = 1; bar.baseScale = 1;
+    bar.lowRow = 99; bar.rows = {{0, 10, 20}, {1, 11, 21}, {2, 12, 22}};
+    auto current = std::make_unique<chart::FlowSnapshot>();
+    feed.receive(batch); feed.publishRows();
+    ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_TRUE(current->valid);
+    EXPECT_EQ(current->bandRows, 1) << "numbers off: Cells bands at 7 px rows";
+    EXPECT_EQ(current->cellCount, 3);
+    QTest::qWait(150); layer.mailbox().take(current);
+    ASSERT_FALSE(feed.pending());
+    for (bool numbers : {true, false}) {
+        renderer.layers()->setFootprintNumbers(numbers);
+        EXPECT_TRUE(feed.pending()) << "the setting change republishes";
+        QTest::qWait(150);
+        ASSERT_TRUE(layer.mailbox().take(current));
+        EXPECT_EQ(current->bandRows, numbers ? 3 : 1);
+        EXPECT_EQ(current->cellCount, numbers ? 1 : 3);
+    }
+    // At exactly 6 px rows, numbers off after Numbers keeps k = 2 (1 px band hysteresis):
+    // k = 1 reaches the 6 px minimum but not 6 + 1.
+    r.rowPxF = 6; published.publish(frame);
+    renderer.layers()->setFootprintNumbers(true); QTest::qWait(150);
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->bandRows, 3);
+    renderer.layers()->setFootprintNumbers(false); QTest::qWait(150);
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->bandRows, 2);
 }
 
 #include "test_chart_ui.moc"

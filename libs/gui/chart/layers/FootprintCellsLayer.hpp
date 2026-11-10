@@ -33,6 +33,7 @@ private:
         QRectF bounds;
         bool window = false;
         double dust = 0;
+        FootprintStage stage = FootprintStage::Hidden;
         bool operator==(const Key&) const = default;
     };
     static constexpr int kMaxGlyphs = 32000;
@@ -43,6 +44,7 @@ private:
     void number(const Number&, const ChartTextAtlas&);
     QRectF cardRect(const ChartFrame&, const FlowColumn&) const;
     void rowGeometry(QSGGeometry::ColoredPoint2D*, int&, const ChartFrame&, const FlowColumn&, const FlowCell&);
+    void stripGeometry(QSGGeometry::ColoredPoint2D*, int&, const ChartFrame&, const FlowColumn&, const FlowCell&);
     QRectF cellRect(const ChartFrame&, const FlowColumn&, const FlowCell&) const;
     FootprintPresentation presentation_;
     FlowMailbox mailbox_{&presentation_.coverage};

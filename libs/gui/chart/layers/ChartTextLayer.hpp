@@ -1,5 +1,6 @@
 #pragma once
 #include "chart/layers/IChartLayer.hpp"
+#include "chart/core/FootprintLod.hpp"
 #include "render/ChartTextRenderer.hpp"
 #include "render/AxisTextService.hpp"
 #include <memory>
@@ -27,7 +28,7 @@ public:
     std::unique_ptr<AxisTextService> axes;
 private:
     void submitOverlayLabels(const ChartFrame&, LayerNodeContext&);
-    std::array<QRectF, 513> occlusion_{};
+    std::array<QRectF, kFootprintMaxBars + 1> occlusion_{};
     HeatmapLayer& heatmap_;
     LadderLayer& ladder_;
     FootprintCellsLayer& footprint_;

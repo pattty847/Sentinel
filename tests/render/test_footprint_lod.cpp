@@ -9,7 +9,7 @@ TEST(FootprintLod, ThresholdDerivedFromThirteenPixelMagnitudeWidth) {
     const auto height = chart::kFootprintNumbersRow;
     EXPECT_EQ(chart::kFootprintTextPx, 13);
     EXPECT_EQ(width, 2 * 5 * (1229.0 / 2048) * 13 + 18);
-    EXPECT_EQ(footprintLod(23, 6), FootprintStage::Hidden);
+    EXPECT_EQ(footprintLod(23, 6), FootprintStage::Strip);
     EXPECT_EQ(footprintLod(24, 6), FootprintStage::Cells);
     EXPECT_EQ(footprintLod(width - .1, height), FootprintStage::Cells);
     auto stage = footprintLod(width, height);
@@ -19,8 +19,110 @@ TEST(FootprintLod, ThresholdDerivedFromThirteenPixelMagnitudeWidth) {
         EXPECT_EQ(stage, FootprintStage::Numbers);
     }
     EXPECT_EQ(footprintLod(width - 2.1, height, stage), FootprintStage::Cells);
-    EXPECT_EQ(footprintLod(width, height - 2.1, stage), FootprintStage::Cells);
+    EXPECT_EQ(footprintLod(width, 1, stage), FootprintStage::Numbers) << "merged bands reach the numbers height";
     EXPECT_EQ(footprintLod(std::numeric_limits<double>::quiet_NaN(), height), FootprintStage::Hidden);
+}
+TEST(FootprintLod, StripKeepsFootprintAtEveryDrawableColumn) {
+    EXPECT_EQ(chart::kFootprintStripColumn, 2);
+    EXPECT_EQ(chart::kFootprintCellsColumn, 24);
+    EXPECT_EQ(footprintLod(1.99, 6), FootprintStage::Hidden);
+    EXPECT_EQ(footprintLod(2, 6), FootprintStage::Strip);
+    EXPECT_EQ(footprintLod(2, .01), FootprintStage::Strip) << "thin rows merge; they never hide";
+    EXPECT_EQ(footprintLod(23.99, 1), FootprintStage::Strip);
+    EXPECT_EQ(footprintLod(24, .5), FootprintStage::Cells);
+    EXPECT_EQ(footprintLod(chart::kFootprintNumbersColumn, .5), FootprintStage::Numbers);
+    EXPECT_EQ(footprintLod(10, 0), FootprintStage::Hidden);
+    for (auto previous : {FootprintStage::Hidden, FootprintStage::Strip, FootprintStage::Cells, FootprintStage::Numbers})
+        for (double row : {.01, 1., 6., 100.})
+            for (double column = 2; column < 400; column += .25)
+                ASSERT_NE(footprintLod(column, row, previous), FootprintStage::Hidden) << column << ' ' << row;
+}
+TEST(FootprintLod, HysteresisAtEveryBoundary) {
+    const auto numbers = chart::kFootprintNumbersColumn;
+    // Strip <-> Hidden: enters at 2, held to 1.5.
+    EXPECT_EQ(footprintLod(1.6, 6, FootprintStage::Strip), FootprintStage::Strip);
+    EXPECT_EQ(footprintLod(1.6, 6, FootprintStage::Cells), FootprintStage::Strip);
+    EXPECT_EQ(footprintLod(1.4, 6, FootprintStage::Strip), FootprintStage::Hidden);
+    EXPECT_EQ(footprintLod(1.9, 6, FootprintStage::Hidden), FootprintStage::Hidden);
+    // Cells <-> Strip: enters at 24, held to 22.
+    EXPECT_EQ(footprintLod(22.1, 6, FootprintStage::Cells), FootprintStage::Cells);
+    EXPECT_EQ(footprintLod(22.1, 6, FootprintStage::Numbers), FootprintStage::Cells);
+    EXPECT_EQ(footprintLod(21.9, 6, FootprintStage::Cells), FootprintStage::Strip);
+    EXPECT_EQ(footprintLod(23.9, 6, FootprintStage::Strip), FootprintStage::Strip);
+    // Numbers <-> Cells: enters at kFootprintNumbersColumn, held 2 px below.
+    EXPECT_EQ(footprintLod(numbers - 1.9, 6, FootprintStage::Numbers), FootprintStage::Numbers);
+    EXPECT_EQ(footprintLod(numbers - 2.1, 6, FootprintStage::Numbers), FootprintStage::Cells);
+    EXPECT_EQ(footprintLod(numbers - .1, 6, FootprintStage::Cells), FootprintStage::Cells);
+}
+TEST(FootprintLod, BandRowsAreTheSmallestFactorReachingTheStageMinimum) {
+    using chart::footprintBandRows;
+    EXPECT_EQ(footprintBandRows(6, FootprintStage::Strip), 1);
+    EXPECT_EQ(footprintBandRows(5.9, FootprintStage::Strip), 2);
+    EXPECT_EQ(footprintBandRows(2, FootprintStage::Cells), 3);
+    EXPECT_EQ(footprintBandRows(.5, FootprintStage::Cells), 12);
+    EXPECT_EQ(footprintBandRows(chart::kFootprintNumbersRow, FootprintStage::Numbers), 1);
+    EXPECT_EQ(footprintBandRows(chart::kFootprintNumbersRow - .1, FootprintStage::Numbers), 2);
+    EXPECT_EQ(footprintBandRows(1, FootprintStage::Hidden), 1);
+    EXPECT_EQ(footprintBandRows(std::numeric_limits<double>::quiet_NaN(), FootprintStage::Strip), 1);
+    for (auto stage : {FootprintStage::Strip, FootprintStage::Cells, FootprintStage::Numbers}) {
+        const double minimum = stage == FootprintStage::Numbers ? chart::kFootprintNumbersRow : chart::kFootprintBandMinRow;
+        for (double row = .05; row < 40; row *= 1.07) {
+            const auto k = footprintBandRows(row, stage);
+            EXPECT_GE(k * row, minimum - 1e-9) << row;
+            EXPECT_LT((k - 1) * row, minimum) << row;
+        }
+    }
+}
+TEST(FootprintLod, BandRowsHoldAcrossZoomUntilTheSmallerBandClearsTheMargin) {
+    using chart::footprintBandRows;
+    const auto cells = FootprintStage::Cells;
+    EXPECT_EQ(footprintBandRows(5.9, cells, 1), 2) << "growing to reach the minimum is immediate";
+    EXPECT_EQ(footprintBandRows(6, cells, 2), 2) << "k = 1 reaches 6 px but not 6 + 1";
+    EXPECT_EQ(footprintBandRows(6.9, cells, 2), 2);
+    EXPECT_EQ(footprintBandRows(7, cells, 2), 1);
+    EXPECT_EQ(footprintBandRows(6, cells, 0), 1) << "no history: plain minimum";
+    EXPECT_EQ(footprintBandRows(1, cells, 40), 7) << "a held k never exceeds the margin's k";
+    // Zoom sweep in and out near a boundary: k changes at most once per direction.
+    int64_t k = 0, changes = 0;
+    for (double row : {5.8, 5.95, 6.05, 6.3, 6.05, 5.95, 6.3, 6.6, 6.4}) {
+        const auto next = footprintBandRows(row, cells, k);
+        changes += k && next != k; k = next;
+    }
+    EXPECT_EQ(changes, 0);
+}
+TEST(FootprintLod, BudgetBandRowsFitTheWorstCaseVisibleCells) {
+    using chart::footprintBudgetBandRows;
+    EXPECT_EQ(footprintBudgetBandRows(2049, 1001, 65536), 34);
+    EXPECT_EQ(footprintBudgetBandRows(3, 11, 65536), 1);
+    EXPECT_EQ(footprintBudgetBandRows(0, 11, 65536), 1);
+    for (int64_t bars : {1, 7, 300, 2049})
+        for (int64_t rows : {1, 50, 1001, 100000}) {
+            const auto k = footprintBudgetBandRows(bars, rows, 65536);
+            EXPECT_LE(bars * ((rows + k - 1) / k + 1), 65536) << bars << ' ' << rows;
+        }
+}
+TEST(FootprintLod, SpanCountIsConservativeAndIgnoresRoundingNoise) {
+    using chart::footprintSpanCount;
+    EXPECT_EQ(footprintSpanCount(2048), 2049);
+    EXPECT_EQ(footprintSpanCount(2048 + 1e-12), 2049);
+    EXPECT_EQ(footprintSpanCount(2048 - 1e-12), 2049);
+    EXPECT_EQ(footprintSpanCount(299.5), 301);
+    EXPECT_EQ(footprintSpanCount(0), 1);
+    EXPECT_EQ(footprintSpanCount(std::numeric_limits<double>::infinity()), 1);
+}
+TEST(FootprintLod, BandsAnchorToTheAbsoluteRowGrid) {
+    using chart::footprintBandStart;
+    EXPECT_EQ(footprintBandStart(-1, 3), -3);
+    EXPECT_EQ(footprintBandStart(5, 3), 3);
+    EXPECT_EQ(footprintBandStart(6, 3), 6);
+    EXPECT_EQ(footprintBandStart(7, 1), 7);
+    for (int64_t k = 1; k < 8; ++k)
+        for (int64_t row = -50; row < 50; ++row) {
+            const auto start = footprintBandStart(row, k);
+            EXPECT_EQ(start % k, 0); EXPECT_LE(start, row); EXPECT_GT(start + k, row);
+            // Neighbours in one band share its start, whichever row a pan brings on screen first.
+            EXPECT_EQ(footprintBandStart(start + k - 1, k), start);
+        }
 }
 TEST(FootprintLod, FormatsBaseUnitsWithoutZerosOrScientificNotation) {
     struct Case { double value; const char* text; };
@@ -62,6 +164,10 @@ TEST(FootprintLod, SpineOnlyForCoveredBarAndMatchingFrame) {
     look.coverage.barCount = 1; look.coverage.bars[0] = {0,1000,99,103};
     EXPECT_TRUE(look.spineBar(raster, 0)); EXPECT_FALSE(look.spineBar(raster, 1000));
     raster.tick = 2; EXPECT_FALSE(look.spineBar(raster, 0)); raster.tick = 1;
+    raster.colPxF = 10;
+    EXPECT_EQ(look.stage(raster), FootprintStage::Strip);
+    EXPECT_FALSE(look.spine(raster)) << "Strip keeps the normal full candle";
+    raster.colPxF = 100;
     look.spineCandles = false; EXPECT_FALSE(look.spine(raster));
     look.numbers = false; EXPECT_EQ(look.stage(raster), FootprintStage::Cells);
     look.enabled = false; EXPECT_EQ(look.stage(raster), FootprintStage::Hidden);
