@@ -47,12 +47,6 @@ void FootprintCellsLayer::sync(const ChartFrame& frame) {
     drawing_ = frame.context.overlays.footprint && stage_ != FootprintStage::Hidden && data.valid &&
         data.cellCount > 0 && data.tick == cam.tick && data.timeframeMs == frame.context.time.activeTimeframeMs;
 }
-double FootprintCellsLayer::intensity(const FlowColumn& bar, const FlowCell& cell,
-                                      const FlowSnapshot& snapshot, bool window) {
-    const double volume = double(cell.bidVol + cell.askVol);
-    const double denominator = window ? snapshot.maxRowVolume * double(bar.baseScale) : double(bar.maxRowVol);
-    return denominator > 0 ? std::clamp(volume / denominator, 0.0, 1.0) : 0;
-}
 QRectF FootprintCellsLayer::cellRect(const ChartFrame& frame, const FlowColumn& bar, const FlowCell& cell) const {
     const auto& f = frame.context;
     const auto& cam = f.raster;
@@ -62,9 +56,34 @@ QRectF FootprintCellsLayer::cellRect(const ChartFrame& frame, const FlowColumn& 
     const double bottom = f.surfaceBounds.top() + cam.yDev(double(cell.row) * cam.tick) / cam.dpr;
     return QRectF(QPointF(left, top), QPointF(right, bottom)).intersected(f.surfaceBounds);
 }
+QRectF FootprintCellsLayer::cardRect(const ChartFrame& frame, const FlowColumn& bar) const {
+    return cellRect(frame, bar, {bar.lowRow, bar.highRow - bar.lowRow, 0, 0});
+}
+void FootprintCellsLayer::rowGeometry(QSGGeometry::ColoredPoint2D* vertices, int& used,
+    const ChartFrame& frame, const FlowColumn& bar, const FlowCell& cell) {
+    const auto rect = cellRect(frame, bar, cell);
+    if (rect.isEmpty()) return;
+    const auto& cam = frame.context.raster;
+    const double left = frame.context.surfaceBounds.left() + cam.xDev(double(bar.startMs)) / cam.dpr;
+    const double width = cam.colPxF / cam.dpr;
+    const double mid = left + (width + kFootprintCandleSpace) * .5;
+    const double half = std::max(0.0, (width - kFootprintCandleSpace) * .5 - 1);
+    const double normaliser = presentation_.windowIntensity ? current_->maxRowVolume : double(bar.maxSideVol) / bar.baseScale;
+    const double price = (double(cell.row) + cell.span * .5) * cam.tick;
+    for (bool bid : {true, false}) {
+        const double volume = double(bid ? cell.bidVol : cell.askVol) / bar.baseScale;
+        const auto tier = flowTier(volume, price, double(bar.maxSideVol) / bar.baseScale, presentation_.dustNotional);
+        if (tier == FlowTier::Empty || tier == FlowTier::Dust) continue;
+        const double length = half * std::clamp(volume / normaliser, 0.0, 1.0);
+        const QRectF fill(bid ? mid - .5 - length : mid + .5, rect.top(), length, rect.height());
+        rectangle(vertices + used, fill.intersected(frame.context.surfaceBounds),
+                  bid ? ChartLookSettings::footprintBid() : ChartLookSettings::footprintAsk(), 1);
+        used += 6;
+    }
+}
 void FootprintCellsLayer::cells(const ChartFrame& frame) {
     auto* geometry = node_->geometry();
-    const int needed = current_->cellCount * 12;
+    const int needed = current_->cellCount * 12 + current_->barCount * 12;
     if (needed > capacity_) {
         capacity_ = candle_pixels::capacityFor(capacity_, needed);
         geometry->allocate(capacity_);
@@ -72,25 +91,20 @@ void FootprintCellsLayer::cells(const ChartFrame& frame) {
     }
     auto* vertices = geometry->vertexDataAsColoredPoint2D();
     int used = 0;
+    cardCount_ = 0;
     for (int b = 0; b < current_->barCount; ++b) {
         const auto& bar = current_->bars[size_t(b)];
-        for (int i = bar.firstCell; i < bar.firstCell + bar.cellCount; ++i) {
-            const auto& cell = current_->cells[size_t(i)];
-            const auto rect = cellRect(frame, bar, cell);
-            if (rect.isEmpty()) continue;
-            const double mid = frame.context.surfaceBounds.left() + frame.context.raster.xDev(
-                double(bar.startMs) + current_->timeframeMs * 0.5) / frame.context.raster.dpr;
-            const double fill = intensity(bar, cell, *current_, presentation_.windowIntensity);
-            if (cell.bidVol > 0) {
-                const QRectF half(rect.left(), rect.top(), std::max(0.0, std::min(mid, rect.right()) - rect.left()), rect.height());
-                rectangle(vertices + used, half, ChartLookSettings::footprintBid(), fill); used += 6;
-            }
-            if (cell.askVol > 0) {
-                const double left = std::max(rect.left(), mid);
-                rectangle(vertices + used, QRectF(left, rect.top(), std::max(0.0, rect.right() - left), rect.height()),
-                          ChartLookSettings::footprintAsk(), fill); used += 6;
-            }
-        }
+        const auto card = cardRect(frame, bar);
+        if (!bar.cellCount || card.isEmpty()) continue;
+        cards_[cardCount_++] = card;
+        rectangle(vertices + used, card, ChartLookSettings::chartBackground(), 1); used += 6;
+        const auto& cam = frame.context.raster;
+        const double left = frame.context.surfaceBounds.left() + cam.xDev(double(bar.startMs)) / cam.dpr;
+        const double mid = left + (cam.colPxF / cam.dpr + kFootprintCandleSpace) * .5;
+        rectangle(vertices + used, QRectF(mid - .5, card.top(), 1, card.height()).intersected(card),
+                  ChartLookSettings::footprintText(), .22); used += 6;
+        for (int i = bar.firstCell; i < bar.firstCell + bar.cellCount; ++i)
+            rowGeometry(vertices, used, frame, bar, current_->cells[size_t(i)]);
     }
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
     geometry->setVertexCount(used);
@@ -107,7 +121,7 @@ double FootprintCellsLayer::windowMaximum(const ChartFrame& frame) const {
         for (int i = bar.firstCell; i < bar.firstCell + bar.cellCount; ++i) {
             const auto& cell = current_->cells[size_t(i)];
             if (!cellRect(frame, bar, cell).isEmpty())
-                maximum = std::max(maximum, double(cell.bidVol + cell.askVol) / bar.baseScale);
+                maximum = std::max(maximum, double(std::max(cell.bidVol, cell.askVol)) / bar.baseScale);
         }
     }
     return maximum;
@@ -118,28 +132,37 @@ void FootprintCellsLayer::updateNodes(const ChartFrame& frame, LayerNodeContext&
     if (!drawing_) return;
     const auto& cam = frame.context.raster;
     const Key key{cam.topF, cam.leftF, cam.rowPxF, cam.colPxF, cam.tick, cam.dpr,
-                  frame.context.surfaceBounds, presentation_.windowIntensity};
+                  frame.context.surfaceBounds, presentation_.windowIntensity, presentation_.dustNotional};
     if (built_ && key == key_) return;
     key_ = key; built_ = true; labelsDirty_ = true;
     if (presentation_.windowIntensity) current_->maxRowVolume = windowMaximum(frame);
     cells(frame);
 }
-void FootprintCellsLayer::number(double value, const QRectF& box, const ChartTextAtlas& atlas) {
+void FootprintCellsLayer::number(const Number& value, const ChartTextAtlas& atlas) {
+    const auto& box = value.box;
+    const auto tier = flowTier(value.volume, value.price, value.maximum, presentation_.dustNotional);
+    if (tier == FlowTier::Empty) return;
+    auto colour = ChartLookSettings::footprintText(); colour.setAlpha(int(std::lround(flowTextAlpha(tier) * 255)));
     char text[24];
-    const int length = std::min(23, footprintNumber(value, text));
-    const double scale = ChartLookSettings::kFootprintTextPx / atlas.fontPx();
-    double width = 0;
-    for (int i = 0; i < length; ++i) width += atlas.glyph(QChar(text[i])).advance * scale;
-    const double height = (atlas.glyphBottomPx() - atlas.glyphTopPx()) * scale;
+    const int length = std::min(23, flowNumber(value.volume, text));
+    const double scale = kFootprintTextPx / atlas.fontPx();
+    double width = 0, top = 0, bottom = 0;
+    for (int i = 0; i < length; ++i) {
+        const auto& glyph = atlas.glyph(QChar(text[i]));
+        width += glyph.advance * scale;
+        top = std::min(top, glyph.bounds.top() * scale);
+        bottom = std::max(bottom, glyph.bounds.bottom() * scale);
+    }
+    const double height = bottom - top;
     if (width > box.width() || height > box.height() || glyphs_.size() + size_t(length) > kMaxGlyphs) return;
-    double pen = box.center().x() - width * 0.5;
-    const double baseline = box.center().y() - height * 0.5 - atlas.glyphTopPx() * scale;
+    double pen = value.bid ? box.right() - width : box.left();
+    const double baseline = box.center().y() - height * 0.5 - top;
     for (int i = 0; i < length; ++i) {
         const auto& g = atlas.glyph(QChar(text[i]));
         ChartGlyphInstance glyph;
         glyph.rect = QRectF(pen + g.bounds.left() * scale, baseline + g.bounds.top() * scale,
                             g.bounds.width() * scale, g.bounds.height() * scale);
-        glyph.uv = g.uv; glyph.color = ChartLookSettings::footprintText();
+        glyph.uv = g.uv; glyph.color = colour;
         glyphs_.push_back(glyph);
         pen += g.advance * scale;
     }
@@ -151,10 +174,16 @@ void FootprintCellsLayer::labels(const ChartFrame& frame, const ChartTextAtlas& 
             const auto& cell = current_->cells[size_t(i)];
             const auto rect = cellRect(frame, bar, cell);
             if (rect.isEmpty()) continue;
-            const double mid = std::clamp(frame.context.surfaceBounds.left() + frame.context.raster.xDev(
-                double(bar.startMs) + current_->timeframeMs * 0.5) / frame.context.raster.dpr, rect.left(), rect.right());
-            number(double(cell.bidVol) / bar.baseScale, QRectF(rect.left(), rect.top(), mid - rect.left(), rect.height()), atlas);
-            number(double(cell.askVol) / bar.baseScale, QRectF(mid, rect.top(), rect.right() - mid, rect.height()), atlas);
+            const auto& cam = frame.context.raster;
+            const double left = frame.context.surfaceBounds.left() + cam.xDev(double(bar.startMs)) / cam.dpr;
+            const double right = left + cam.colPxF / cam.dpr;
+            const double mid = (left + right + kFootprintCandleSpace) * .5;
+            const double price = (double(cell.row) + cell.span * .5) * cam.tick;
+            const double maximum = double(bar.maxSideVol) / bar.baseScale;
+            const QRectF bid(left + kFootprintCandleSpace + 1, rect.top(), mid - left - kFootprintCandleSpace - 3, rect.height());
+            const QRectF ask(mid + 2, rect.top(), right - mid - 3, rect.height());
+            if (frame.context.surfaceBounds.contains(bid)) number({double(cell.bidVol) / bar.baseScale, price, maximum, bid, true}, atlas);
+            if (frame.context.surfaceBounds.contains(ask)) number({double(cell.askVol) / bar.baseScale, price, maximum, ask, false}, atlas);
         }
     }
 }
@@ -163,7 +192,13 @@ void FootprintCellsLayer::submitLabels(const ChartFrame& frame, LayerNodeContext
         glyphs_.clear(); labelsDirty_ = true;
         return;
     }
-    if (!reserved_) reserved_ = context.text.reserve(ChartLookSettings::footprintText(), kMaxGlyphs);
+    if (!reserved_) {
+        reserved_ = true;
+        for (auto tier : {FlowTier::Dust, FlowTier::Normal, FlowTier::Heavy}) {
+            auto colour = ChartLookSettings::footprintText(); colour.setAlpha(int(std::lround(flowTextAlpha(tier) * 255)));
+            reserved_ = context.text.reserve(colour, kMaxGlyphs) && reserved_;
+        }
+    }
     if (stage_ != FootprintStage::Numbers || context.atlas.fontPx() <= 0) {
         glyphs_.clear(); labelsDirty_ = true;
         return;

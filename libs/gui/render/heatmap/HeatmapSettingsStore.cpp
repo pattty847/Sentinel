@@ -142,7 +142,7 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"cvdStyle", QString::fromStdString(s.cvdStyle)},
         {"footprintSource", QString::fromStdString(s.footprintSource)},
         {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
-        {"footprintHollowCandles", s.footprintHollowCandles}, {"footprintNumbers", s.footprintNumbers},
+        {"footprintCandle", QString::fromStdString(s.footprintCandle)}, {"footprintDustNotional", s.footprintDustNotional}, {"footprintNumbers", s.footprintNumbers},
         {"showLadder", s.showLadder},
         {"ladderWidthPx", s.ladderWidthPx},
         {"showWallRadar", s.showWallRadar},
@@ -170,6 +170,8 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         if (key == "cvdReset" && v != "visible" && v != "utcDay" && v != "tpoSession") return "cvdReset must be visible, utcDay or tpoSession";
         if (key == "cvdStyle" && v != "line" && v != "area") return "cvdStyle must be line or area";
         if (key == "footprintSource" && v != "q16" && v != "cells") return "footprintSource must be q16 or cells";
+        if (key == "footprintCandle" && v != "spine" && v != "full") return "footprintCandle must be spine or full";
+        if (key == "footprintDustNotional" && v.toDouble() < 0) return "footprintDustNotional must be nonnegative";
         if (key == "footprintIntensity" && v != "bar" && v != "window") return "footprintIntensity must be bar or window";
         if (key == "tickMode" && v != "auto" && v != "manual") return "tickMode must be auto or manual";
         if (key == "palettePreset" && !palettes.contains(v.toString())) return "Unknown palettePreset";
@@ -215,7 +217,8 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.cvdStyle = merged["cvdStyle"].toString().toStdString();
     out.footprintSource = merged["footprintSource"].toString().toStdString();
     out.footprintIntensity = merged["footprintIntensity"].toString().toStdString();
-    out.footprintHollowCandles = merged["footprintHollowCandles"].toBool();
+    out.footprintCandle = merged["footprintCandle"].toString().toStdString();
+    out.footprintDustNotional = merged["footprintDustNotional"].toDouble();
     out.footprintNumbers = merged["footprintNumbers"].toBool();
     out.showLadder = merged["showLadder"].toBool();
     out.ladderWidthPx = int(std::clamp(merged["ladderWidthPx"].toDouble(), -2147483647.0, 2147483647.0));

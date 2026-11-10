@@ -101,37 +101,53 @@ curl -s 'http://127.0.0.1:17100/api/v1/screenshot?name=wheel&target=heatmap&afte
 
 ## Footprint source and cells
 
-`POST /api/v1/layers` accepts `footprintSource` (`"q16"` default, or `"cells"`),
-`footprintIntensity` (`"bar"` default, or `"window"`),
-`footprintHollowCandles` (boolean, default true), and `footprintNumbers` (boolean,
-default true). These variants persist through the chart settings model; the response
-and `GET /api/v1/state` report them in `layers`. The same four keys work in
-`POST /api/v1/heatmap/settings`, including its `persist:false` process-only option.
-QML paths are `unifiedGridRenderer.layers.footprintSource`, `.footprintIntensity`,
-`.footprintHollowCandles`, and `.footprintNumbers` (writes persist through the same chart settings model).
+`POST /api/v1/layers` accepts the following persistent chart settings. The same
+keys work in `POST /api/v1/heatmap/settings` (including `persist:false`) and appear
+in `GET /api/v1/state` under `layers`. QML exposes them on
+`unifiedGridRenderer.layers.<key>`.
 
-`footprint:true` shows the selected source. `q16` retains the existing footprint
-and candle appearance. `cells` selects flow-backed bid-left/ask-right cells;
-the GUI flow feed is inactive unless both cells and footprint are selected. The cell stage enters
-at 24 logical pixels per column and 6 per drawn row; numbers enter at 56/12, with
-a 2 px retention band on zoom-out. Labels use a 12 px font, abbreviate thousands
-and millions, and omit a value when it cannot fit. `footprintNumbers:false` caps
-the stage at Cells. `footprintHollowCandles:true` outlines both up/down bodies
-and uses 1 device px wicks in Cells/Numbers only with source `cells` and flow bars covering the visible window; missing/partial history keeps the chosen candle look. False also restores that look.
-`bar` divides row volume by that bar's maximum binned row volume; `window` divides
-by the maximum visible row volume. Native bins wider than the drawn tick span
-those rows without inventing a distribution. Snapshots include one viewport of overscan on each side and retained cells continue drawing during camera motion. Incompatible bars are skipped; capacity keeps the nearest bars, with a throttled warning and `footprint.feed` probe. No data or sub-second chart timeframes draw no cells. Hidden LOD performs no feed binning.
+| Key | Values / default | Settings → Chart |
+| --- | --- | --- |
+| `footprintSource` | `q16` (default), `cells` | Footprint → Source |
+| `footprintIntensity` | `bar` (default), `window` | Footprint → Volume scale |
+| `footprintCandle` | `spine` (default), `full` | Footprint → Candle |
+| `footprintNumbers` | boolean, true | Footprint → Show numbers |
+| `footprintDustNotional` | finite nonnegative quote amount, 2500 | Footprint → Dust threshold (quote currency) |
+| `cvdStripPx` | integer 0..400, 0 | CVD → Strip height |
+| `cvdReset` | `visible` (default), `utcDay`, `tpoSession` | CVD → Reset |
+| `cvdStyle` | `line` (default), `area` | CVD → Style |
 
-On an isolated lab instance at port 17115:
+`footprint:true` shows the selected source. `q16` preserves the default picture.
+The cells feed runs only when footprint is visible and source is `cells`.
+Cells enter at 24 logical px per column and 6 per row. Numbers enter at 96.013/17,
+calculated from two maximum-width five-glyph labels at 13 px, their centre gaps,
+and the candle space, plus the retention margin. Both stages retain a 2 px
+zoom-out hysteresis band. Numbers exit at the fit boundary (94.013/15), so the
+widest labels fit throughout the retained stage.
+
+A card covers the heatmap across the bar's low-to-high rows, including gaps;
+intersecting heatmap label boxes are omitted. Bid fills extend left from the
+centre spine, ask fills right. Length uses the maximum single-side cell volume
+of the bar or visible window. Numbers align toward the centre. Zero sides are
+blank; positive magnitudes below .01 use `<.01`; other base-unit values use
+magnitude-dependent decimals and k/M/B (at most five characters, never scientific
+notation). Values round decimal half-up with carries across magnitude and suffix boundaries.
+Suffixed values use three significant digits and trim trailing fractional zeros
+(including carries such as `999.6 → 1k`). Magnitudes rounding to one trillion or
+above use `>999B` to retain the width bound without understating the value.
+CVD extrema share this formatter, with a minus sign for negative values and `0`
+for exact zero or magnitudes below .01.
+
+Dust sides (below the quote threshold or below .01 base units) have no fill and
+22% text alpha. Other text is muted, or bright above 55% of the bar's maximum
+single-side cell volume. `footprintNumbers:false` keeps the Cells stage.
+`footprintCandle:spine` draws a left 6 px body pill and 1.5 px wick on covered bars;
+`full` retains the chosen candle style. Bars without flow retain normal candles.
+The removed hollow-candle setting is rejected by the API.
 
 ```sh
-curl -s -H 'Content-Type: application/json' -d '{"footprint":true,"footprintSource":"cells","footprintIntensity":"bar","footprintHollowCandles":true,"footprintNumbers":true}' http://127.0.0.1:17115/api/v1/layers
-curl -s -H 'Content-Type: application/json' -d '{"footprintIntensity":"window"}' http://127.0.0.1:17115/api/v1/layers
-curl -s -H 'Content-Type: application/json' -d '{"footprintHollowCandles":false,"footprintNumbers":false}' http://127.0.0.1:17115/api/v1/layers
+curl -s -H 'Content-Type: application/json' -d '{"footprint":true,"footprintSource":"cells","footprintIntensity":"bar","footprintCandle":"spine","footprintNumbers":true,"footprintDustNotional":2500}' http://127.0.0.1:17115/api/v1/layers
 ```
-
-To return to the default source, post `{"footprintSource":"q16"}` to the same route.
-The cells look knobs remain stored while q16 is selected.
 
 ## Cumulative volume delta strip
 

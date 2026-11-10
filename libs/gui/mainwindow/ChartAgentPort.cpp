@@ -87,7 +87,7 @@ QJsonObject ChartAgentPort::footprintSettings() const {
     if (!layers_) return {};
     return {{"cvdStripPx", layers_->cvdStripPx()}, {"cvdReset", layers_->cvdReset()}, {"cvdStyle", layers_->cvdStyle()},
             {"footprintSource", layers_->footprintSource()}, {"footprintIntensity", layers_->footprintIntensity()},
-            {"footprintHollowCandles", layers_->footprintHollowCandles()}, {"footprintNumbers", layers_->footprintNumbers()}};
+            {"footprintDustNotional", layers_->footprintDustNotional()}, {"footprintCandle", layers_->footprintCandle()}, {"footprintNumbers", layers_->footprintNumbers()}};
 }
 void ChartAgentPort::applyFootprintSettings(const QJsonObject& patch) const {
     if (!layers_) return;
@@ -96,13 +96,14 @@ void ChartAgentPort::applyFootprintSettings(const QJsonObject& patch) const {
     if (patch.contains("cvdStyle")) layers_->setCvdStyle(patch["cvdStyle"].toString());
     if (patch.contains("footprintSource")) layers_->setFootprintSource(patch["footprintSource"].toString());
     if (patch.contains("footprintIntensity")) layers_->setFootprintIntensity(patch["footprintIntensity"].toString());
-    if (patch.contains("footprintHollowCandles")) layers_->setFootprintHollowCandles(patch["footprintHollowCandles"].toBool());
+    if (patch.contains("footprintCandle")) layers_->setFootprintCandle(patch["footprintCandle"].toString());
+    if (patch.contains("footprintDustNotional")) layers_->setFootprintDustNotional(patch["footprintDustNotional"].toDouble());
     if (patch.contains("footprintNumbers")) layers_->setFootprintNumbers(patch["footprintNumbers"].toBool());
 }
 
 QJsonObject ChartAgentPort::footprintPatch(const QJsonObject& patch) {
     QJsonObject out;
-    for (const auto& key : {"cvdStripPx", "cvdReset", "cvdStyle", "footprintSource", "footprintIntensity", "footprintHollowCandles", "footprintNumbers"})
+    for (const auto& key : {"cvdStripPx", "cvdReset", "cvdStyle", "footprintSource", "footprintIntensity", "footprintCandle", "footprintDustNotional", "footprintNumbers"})
         if (patch.contains(key)) out[key] = patch[key];
     return out;
 }

@@ -23,6 +23,7 @@ struct FlowColumn {
     int64_t bidVol = 0, askVol = 0, delta = 0; // whole-bar totals, including offscreen rows
     int64_t maxRowVol = 0;
     int firstCell = 0, cellCount = 0;
+    int64_t maxSideVol = 0, lowRow = 0, highRow = 0;
 };
 struct FlowSnapshot {
     static constexpr int kMaxBars = 512, kMaxCells = 16384;
@@ -40,8 +41,7 @@ class FlowMailbox {
 public:
     explicit FlowMailbox(FootprintCoverage* coverage = nullptr);
     FlowSnapshot& back() { return *back_; }
-    void post();
-    bool covers(const chart_raster::RasterCamera& cam) const { return coverage_ && coverage_->covers(cam); }
+    bool post();
     bool take(std::unique_ptr<FlowSnapshot>& current);
 private:
     FootprintCoverage* coverage_;

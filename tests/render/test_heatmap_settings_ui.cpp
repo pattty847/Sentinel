@@ -34,6 +34,7 @@
 #include <QDoubleSpinBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QElapsedTimer>
 #include <QJsonArray>
 #include <QPushButton>
@@ -1026,6 +1027,34 @@ TEST(CandleStyleTest, SettingsValidateAndRoundTripPerChart) {
     }
     ASSERT_TRUE(main.apply({{"candleWickColor", "auto"}}).isEmpty());
     EXPECT_EQ(t.reload().candleWickColor, "auto");
+}
+
+TEST(FlowSettingsDialog, EveryControlAppliesPersistsAndResets) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    const QJsonObject patch{{"footprintSource", "cells"}, {"footprintIntensity", "window"},
+        {"footprintCandle", "full"}, {"footprintNumbers", false}, {"footprintDustNotional", 123.45},
+        {"cvdStripPx", 128}, {"cvdReset", "utcDay"}, {"cvdStyle", "area"}};
+    for (auto it = patch.begin(); it != patch.end(); ++it) {
+        const auto name = it.key().toUtf8();
+        if (it->isString()) {
+            auto* control = child<QComboBox>(dialog, name.constData());
+            control->setCurrentIndex(control->findData(it->toString()));
+        } else if (it->isBool()) child<QCheckBox>(dialog, name.constData())->setChecked(it->toBool());
+        else if (it.key() == "cvdStripPx") child<QSpinBox>(dialog, name.constData())->setValue(it->toInt());
+        else child<QDoubleSpinBox>(dialog, name.constData())->setValue(it->toDouble());
+    }
+    const auto saved = heatmap::settingsJson(t.reload());
+    for (auto it = patch.begin(); it != patch.end(); ++it) EXPECT_EQ(saved[it.key()], it.value()) << it.key().toStdString();
+    EXPECT_EQ(dialog.findChildren<QGroupBox*>().size() >= 2, true);
+    child<QPushButton>(dialog, "resetChart")->click();
+    const auto defaults = heatmap::settingsJson(model.defaultSettings());
+    const auto reset = heatmap::settingsJson(t.reload());
+    for (auto it = patch.begin(); it != patch.end(); ++it) EXPECT_EQ(reset[it.key()], defaults[it.key()]);
+    ASSERT_TRUE(model.apply({{"footprintDustNotional", 5000}, {"footprintCandle", "full"}}).isEmpty());
+    EXPECT_EQ(child<QDoubleSpinBox>(dialog, "footprintDustNotional")->value(), 5000);
+    EXPECT_EQ(child<QComboBox>(dialog, "footprintCandle")->currentData(), "full");
 }
 
 TEST(CandleStyleTest, ChartControlsApplyLiveAndReset) {

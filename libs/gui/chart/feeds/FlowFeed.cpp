@@ -55,8 +55,10 @@ Added addBar(FlowSnapshot& out, const sentinel::flow::FlowBar& bar, FlatRows& ro
     if (count == -2) return Added::Full;
     if (count < 0 || (count = mergeRows(rows, count)) < 0) return Added::Invalid;
     FlowColumn column{bar.startMs, bar.baseScale, bar.sellVol, bar.buyVol, bar.delta, 0, out.cellCount, 0};
+    if (count) { column.lowRow = rows[0].row; column.highRow = rows[size_t(count - 1)].row + rows[size_t(count - 1)].span; }
     for (int i = 0; i < count; ++i) {
         const auto& cell = rows[size_t(i)];
+        column.maxSideVol = std::max({column.maxSideVol, cell.bidVol, cell.askVol});
         column.maxRowVol = std::max(column.maxRowVol, cell.bidVol + cell.askVol);
         if (inPrice(cell, out.tick, out.low, out.high)) ++column.cellCount;
     }
@@ -89,19 +91,30 @@ const sentinel::flow::FlowBar& nearest(const FlowSeriesBuffer::Series& series,
 }
 } // namespace
 FlowMailbox::FlowMailbox(FootprintCoverage* coverage) : coverage_(coverage), back_(std::make_unique<FlowSnapshot>()), pending_(std::make_unique<FlowSnapshot>()) {}
-void FlowMailbox::post() {
+bool FlowMailbox::post() {
+    bool changed = false;
     if (coverage_) {
-        coverage_->count = 0;
+        changed = coverage_->tick != back_->tick || coverage_->timeframeMs != back_->timeframeMs;
+        const int oldCount = coverage_->barCount;
+        coverage_->barCount = 0;
         coverage_->tick = back_->tick; coverage_->timeframeMs = back_->timeframeMs;
-        coverage_->low = back_->low; coverage_->high = back_->high;
         if (back_->valid) for (int i = 0; i < back_->barCount; ++i) {
             const auto& bar = back_->bars[size_t(i)];
-            if (bar.cellCount) coverage_->add(double(bar.startMs), double(bar.startMs) + back_->timeframeMs);
+            if (bar.cellCount) {
+                const FootprintCoverage::Bar next{double(bar.startMs), double(bar.startMs) + back_->timeframeMs,
+                    bar.lowRow * back_->tick, bar.highRow * back_->tick};
+                auto& previous = coverage_->bars[size_t(coverage_->barCount++)];
+                changed = changed || previous != next;
+                previous = next;
+            }
         }
+        changed = changed || oldCount != coverage_->barCount;
+        if (changed) ++coverage_->revision;
     }
     std::lock_guard lock(mutex_);
     back_.swap(pending_);
     fresh_ = true;
+    return changed;
 }
 bool FlowMailbox::take(std::unique_ptr<FlowSnapshot>& current) {
     std::lock_guard lock(mutex_);
@@ -124,7 +137,8 @@ void FlowFeed::bind(ChartViewController& view, const PublishedFrame& published,
         presentation.enabled = visibility.footprintEnabled();
         presentation.cellsSource = visibility.footprintSource() == "cells";
         presentation.numbers = visibility.footprintNumbers();
-        presentation.hollowCandles = visibility.footprintHollowCandles();
+        presentation.spineCandles = visibility.footprintCandle() == "spine";
+        presentation.dustNotional = visibility.footprintDustNotional();
         presentation.windowIntensity = visibility.footprintIntensity() == "window";
         setEnabled(presentation.enabled && presentation.cellsSource);
     };
@@ -147,12 +161,9 @@ void FlowFeed::selectSymbol() {
     withdraw();
 }
 void FlowFeed::post() {
-    const auto frame = coverageChanged_ && ports_.frame ? ports_.frame() : MappingFrameContext{};
-    const bool before = mailbox_.covers(frame.raster);
-    mailbox_.post();
-    // Wake sibling candles when posted coverage changes their look on this frame,
-    // independent of source toggles, camera motion or the previous publication.
-    if (coverageChanged_ && before != mailbox_.covers(frame.raster)) coverageChanged_();
+    // Partial history can change one candle even when the viewport as a whole
+    // remains uncovered. Notify only when per-bar coverage actually changes.
+    if (mailbox_.post() && coverageChanged_) coverageChanged_();
 }
 void FlowFeed::withdraw() {
     auto& out = mailbox_.back();

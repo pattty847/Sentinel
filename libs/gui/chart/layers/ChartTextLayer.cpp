@@ -46,7 +46,7 @@ void ChartTextLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& cont
         [&] { if (axes) axes->submitAxisText(context.text, context.atlas, frame.context.itemBounds.width(),
                                             frame.context.itemBounds.height(), frame.context.rightGutterPx); },
         [&] {
-            heatmap_.submitLabels(frame, context);
+            heatmap_.submitLabels(frame, context, footprint_.cards());
             footprint_.submitLabels(frame, context);
             cvd_.submitLabels(frame, context);
             ladder_.submitLabels(frame, context);
@@ -66,7 +66,7 @@ void ChartTextLayer::buildMsdfAtlas() {
   params.fontPx = 64;
   params.pxRange = 4.0f;
   params.charset = QStringLiteral(
-      " 0123456789.+-,:/"
+      " 0123456789.+-,:/<>"
       "$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
   params.resourceFont =
       QStringLiteral(":/fonts/RobotoMono/RobotoMono-Regular.ttf");

@@ -190,9 +190,10 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | (settings only) `candleBodyOpacity` | 1 | 0..1; 1 is fully opaque. |
 | (settings only) `candleWickWidth` | 1 | Integer 1..3 device pixels, independent of zoom and display scale. |
 | (settings only) `footprintSource` | `q16` | Selects the existing q16 footprint or flow-backed `cells`. Only the selected source draws when footprint is on. |
-| (settings only) `footprintIntensity` | `bar` | `bar` normalises flow row volume to its bar maximum; `window` uses the visible-window maximum. Also writable through the layer API. |
-| (settings only) `footprintHollowCandles` | true | Hollow up/down candle bodies and 1 device px wicks in footprint Cells/Numbers stages with source `cells` and flow bars covering the visible window; false restores the chosen candle appearance. |
-| (settings only) `footprintNumbers` | true | Allows the Numbers stage (56/12 logical px column/row, 2 px retention band); false caps footprint LOD at Cells. |
+| (settings only) `footprintIntensity` | `bar` | `bar` normalises each side volume to the bar maximum single-side cell volume; `window` uses the visible-window maximum. Also writable through the layer API. |
+| (settings only) `footprintCandle` | spine | `spine`: left 6 px body pill and 1.5 px wick on cells-covered bars; `full`: chosen candle appearance. |
+| (settings only) `footprintDustNotional` | 2500 | Quote-currency side threshold: below it, no volume fill and 22% text alpha. |
+| (settings only) `footprintNumbers` | true | Allows the Numbers stage (96.013/17 logical px column/row, 2 px retention band); false caps footprint LOD at Cells. |
 | (settings only) `showLadder` | false | Boolean; the chart-edge book ladder strip (chart menu "Order book ladder"). |
 | (settings only) `ladderWidthPx` | 120 | Integer 60..240 logical px; the strip width while the ladder is on (chart menu "Ladder width"). |
 | (settings only) `showWallRadar` | false | Boolean; wall marks on the ladder (chart menu "Wall radar"; turning it on there also turns the ladder on). |

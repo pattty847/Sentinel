@@ -198,14 +198,14 @@ namespace {
 MappingFrameContext footprintFrame() {
     MappingFrameContext f;
     f.activeTimeframeMs = 1000;
-    f.surfaceBounds = {0, 0, 112, 120};
+    f.surfaceBounds = {0, 0, 200, 180};
     f.surfaceDpr = 1;
     f.viewportValid = true;
     auto& r = f.raster;
     r.valid = true; r.dpr = 1; r.tick = 1; r.tfMs = 1000;
-    r.rowPx = 12; r.rowPxF = 12; r.colPx = 56; r.colPxF = 56;
+    r.rowPx = 18; r.rowPxF = 18; r.colPx = 100; r.colPxF = 100;
     r.drawnStartMs = 0; r.drawnEndMs = 2000; r.drawnMinPrice = 95; r.drawnMaxPrice = 105;
-    r.topF = 1260; r.topRowIndex = 1260; r.heightDev = 120; r.widthDev = 112;
+    r.topF = 1890; r.topRowIndex = 1890; r.heightDev = 180; r.widthDev = 200;
     return f;
 }
 FlowSeriesBuffer::Series footprintSeries(double nativeTick = 0.5) {
@@ -264,11 +264,10 @@ TEST(FootprintCells, WindowNormalisationAccountsForEachBarsScale) {
     second.bar.startMs = 1000; second.bar.baseScale = 50;
     series.bars[1000] = second;
     ASSERT_TRUE(chart::FlowFeed::bin(*out, series, footprintFrame()));
-    EXPECT_DOUBLE_EQ(chart::FootprintCellsLayer::intensity(out->bars[0], out->cells[0], *out, false), 1);
-    EXPECT_DOUBLE_EQ(chart::FootprintCellsLayer::intensity(out->bars[0], out->cells[0], *out, true), 0.5);
-    EXPECT_DOUBLE_EQ(chart::FootprintCellsLayer::intensity(out->bars[1], out->cells[2], *out, true), 1);
+    EXPECT_EQ(out->bars[0].maxSideVol, 440);
     chart::FootprintCellsLayer layer;
     layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    layer.presentation().dustNotional = 0;
     layer.mailbox().back() = *out; layer.mailbox().post();
     std::unique_ptr<QSGNode> root(layer.createContainer());
     ChartTextRenderer text; ChartTextAtlas atlas;
@@ -276,11 +275,19 @@ TEST(FootprintCells, WindowNormalisationAccountsForEachBarsScale) {
     auto frame = footprintChartFrame();
     layer.sync(frame); layer.updateNodes(frame, context);
     auto* geometry = static_cast<QSGGeometryNode*>(root->firstChild())->geometry();
-    const auto before = geometry->vertexDataAsColoredPoint2D()[0].a;
+    auto* v = geometry->vertexDataAsColoredPoint2D();
+    EXPECT_EQ(v[0].a, 255) << "opaque card covers heatmap";
+    EXPECT_FLOAT_EQ(v[0].x, 0); EXPECT_FLOAT_EQ(v[2].x, 100);
+    const double bidLength = v[14].x - v[12].x, askLength = v[20].x - v[18].x;
+    EXPECT_NEAR(bidLength / askLength, 240.0 / 440, 1e-6);
+    EXPECT_FLOAT_EQ(v[14].x, 54.5); EXPECT_FLOAT_EQ(v[18].x, 55.5);
+    EXPECT_DOUBLE_EQ(layer.cards().size(), 2);
     layer.presentation().windowIntensity = true;
     layer.sync(frame); layer.updateNodes(frame, context);
-    EXPECT_EQ(before, 230);
-    EXPECT_EQ(geometry->vertexDataAsColoredPoint2D()[0].a, 115);
+    v = geometry->vertexDataAsColoredPoint2D();
+    EXPECT_NEAR(v[14].x - v[12].x, bidLength / 2, 1e-5);
+    EXPECT_NEAR(v[20].x - v[18].x, askLength / 2, 1e-5);
+    EXPECT_EQ(v[0].a, 255);
 }
 TEST(FootprintCells, InvalidBarDoesNotWithdrawCompatibleBars) {
     auto out = std::make_unique<chart::FlowSnapshot>();
@@ -337,9 +344,10 @@ TEST(FootprintCells, TwoFramesAfterDataAndChangedSnapshotAllocateNothing) {
     ChartTextRenderer text; ChartTextAtlas atlas;
     chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
     layer.sync(frame); layer.updateNodes(frame, context);
-    ASSERT_TRUE(layer.drawing()); ASSERT_EQ(layer.vertexCount(), 24);
+    ASSERT_TRUE(layer.drawing()); ASSERT_EQ(layer.vertexCount(), 12);
     EXPECT_EQ(layer.stage(), chart::FootprintStage::Numbers);
-    EXPECT_FALSE(layer.presentation().hollow(frame.context.raster)) << "only half of the window has flow history";
+    EXPECT_TRUE(layer.presentation().spineBar(frame.context.raster, 0));
+    EXPECT_FALSE(layer.presentation().spineBar(frame.context.raster, 1000));
     // Fresh data and geometry every frame, not just a cache hit.
     for (int i = 0; i < 2; ++i) {
         ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), footprintFrame()));
@@ -351,7 +359,7 @@ TEST(FootprintCells, TwoFramesAfterDataAndChangedSnapshotAllocateNothing) {
     }
     auto* geometry = static_cast<QSGGeometryNode*>(root->firstChild())->geometry();
     auto* vertices = geometry->vertexDataAsColoredPoint2D();
-    EXPECT_FLOAT_EQ(vertices[0].x, 0); EXPECT_FLOAT_EQ(vertices[2].x, 28);
+    EXPECT_FLOAT_EQ(vertices[0].x, 0); EXPECT_FLOAT_EQ(vertices[2].x, 100);
     layer.presentation().numbers = false; layer.sync(frame);
     EXPECT_EQ(layer.stage(), chart::FootprintStage::Cells);
     frame.context.raster.tick = 2; layer.sync(frame);
@@ -364,12 +372,12 @@ TEST(FootprintCells, SettingsPersistAndRejectInvalidVariantsAtomically) {
     heatmap::HeatmapChartSettings value;
     EXPECT_EQ(value.footprintSource, "q16");
     EXPECT_TRUE(heatmap::applySettingsPatch(value, {{"footprintSource", "cells"}, {"footprintIntensity", "window"},
-        {"footprintHollowCandles", false}, {"footprintNumbers", false}}).isEmpty());
+        {"footprintCandle", "full"}, {"footprintNumbers", false}}).isEmpty());
     store.save("test", value);
     auto loaded = store.load("test", ClientHeatmapConfig{});
     EXPECT_EQ(loaded.footprintSource, "cells");
     EXPECT_EQ(loaded.footprintIntensity, "window");
-    EXPECT_FALSE(loaded.footprintHollowCandles); EXPECT_FALSE(loaded.footprintNumbers);
+    EXPECT_EQ(loaded.footprintCandle, "full"); EXPECT_FALSE(loaded.footprintNumbers);
     EXPECT_FALSE(heatmap::applySettingsPatch(loaded, {{"footprintIntensity", "bad"}, {"footprintNumbers", true}}).isEmpty());
     EXPECT_EQ(loaded.footprintSource, "cells");
     EXPECT_EQ(loaded.footprintIntensity, "window"); EXPECT_FALSE(loaded.footprintNumbers);
@@ -381,9 +389,9 @@ TEST(FootprintCells, SettingsPersistAndRejectInvalidVariantsAtomically) {
     EXPECT_EQ(loaded.footprintSource, "cells");
     EXPECT_TRUE(visibility.setProperty("footprintIntensity", "window"));
     EXPECT_TRUE(visibility.setProperty("footprintNumbers", false));
-    EXPECT_TRUE(visibility.setProperty("footprintHollowCandles", false));
+    EXPECT_TRUE(visibility.setProperty("footprintCandle", "full"));
     EXPECT_EQ(visibility.footprintIntensity(), "window");
-    EXPECT_FALSE(visibility.footprintNumbers()); EXPECT_FALSE(visibility.footprintHollowCandles());
+    EXPECT_FALSE(visibility.footprintNumbers()); EXPECT_EQ(visibility.footprintCandle(), "full");
 }
 } // namespace
 
@@ -396,8 +404,10 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
-    params.fontPx = 64; params.charset = "0123456789.kMe+-";
+    params.fontPx = 64; params.charset = " 0123456789.+-,:/<>$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     ASSERT_TRUE(atlas.build(params));
+    const double widest = chart::kFlowMagnitudeGlyphs * atlas.glyph(QChar('8')).advance * chart::kFootprintTextPx / atlas.fontPx();
+    EXPECT_LE(widest, (chart::kFootprintNumbersFitColumn - chart::kFootprintCandleSpace) / 2 - 3);
     chart::FootprintCellsLayer layer;
     layer.presentation().enabled = true; layer.presentation().cellsSource = true;
     auto frame = footprintChartFrame();
@@ -414,6 +424,46 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
         footprintCounting = false;
         EXPECT_EQ(footprintAllocations.load(), 0u);
     }
+    // Zero side is absent, while the other side keeps its full formatted run.
+    auto& next = layer.mailbox().back();
+    next = layer.current();
+    next.bars[0].cellCount = 1; next.cellCount = 1;
+    next.cells[0].bidVol = 0; next.cells[0].askVol = 245;
+    layer.mailbox().post();
+    layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+    ASSERT_EQ(layer.glyphCount(), 4u); // 2.45, no zero-side glyph
+    frame.context.raster.rowPxF = chart::kFootprintNumbersRow;
+    frame.context.raster.topF = 105 * chart::kFootprintNumbersRow;
+    layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+    EXPECT_EQ(layer.glyphCount(), 4u) << "13 px numbers fit at the row entry threshold with the full chart atlas";
+    for (const auto& glyph : layer.glyphs()) EXPECT_NEAR(glyph.color.alphaF(), .22, .005);
+    layer.presentation().dustNotional = 0;
+    layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+    for (const auto& glyph : layer.glyphs()) EXPECT_DOUBLE_EQ(glyph.color.alphaF(), 1);
+    // Rebuild warmed geometry and label runs, not merely a cache hit.
+    for (int i = 0; i < 3; ++i) {
+        auto& changed = layer.mailbox().back(); changed = layer.current();
+        changed.cells[0].askVol = 250 + i;
+        layer.mailbox().post();
+        footprintAllocations = 0; footprintCounting = true;
+        layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+        footprintCounting = false;
+        EXPECT_EQ(footprintAllocations.load(), 0u);
+    }
+    auto& widestRow = layer.mailbox().back(); widestRow = layer.current();
+    widestRow.cells[0].bidVol = 123400; widestRow.cells[0].askVol = 123400;
+    layer.mailbox().post();
+    frame.context.raster.colPxF = chart::kFootprintNumbersColumn;
+    frame.context.raster.rowPxF = chart::kFootprintNumbersRow;
+    frame.context.raster.topF = 105 * frame.context.raster.rowPxF;
+    layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+    ASSERT_EQ(layer.glyphCount(), 10u); // 1.23k on both sides
+    frame.context.raster.colPxF = chart::kFootprintNumbersFitColumn;
+    frame.context.raster.rowPxF = chart::kFootprintNumbersFitRow;
+    frame.context.raster.topF = 105 * frame.context.raster.rowPxF;
+    layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+    EXPECT_EQ(layer.stage(), chart::FootprintStage::Numbers);
+    EXPECT_EQ(layer.glyphCount(), 10u) << "widest labels survive at the hysteresis exit edge";
     layer.presentation().numbers = false;
     layer.sync(frame); layer.submitLabels(frame, context);
     EXPECT_EQ(layer.glyphCount(), 0u);
@@ -432,12 +482,13 @@ TEST(FootprintSource, RegistryDefaultsToQ16AndSwitchesExclusively) {
     layers.footprintCells.sync(frame);
     EXPECT_TRUE(layers.footprint.selected(frame));
     EXPECT_FALSE(layers.footprintCells.drawing()) << "q16 is the default even when cells have data";
-    EXPECT_FALSE(look.hollow(frame.context.raster));
+    EXPECT_FALSE(look.spine(frame.context.raster));
     look.cellsSource = true;
     layers.footprintCells.sync(frame);
     EXPECT_FALSE(layers.footprint.selected(frame));
     EXPECT_TRUE(layers.footprintCells.drawing());
-    EXPECT_FALSE(look.hollow(frame.context.raster)) << "partial history keeps normal candles";
+    EXPECT_TRUE(look.spineBar(frame.context.raster, 0));
+    EXPECT_FALSE(look.spineBar(frame.context.raster, 1000));
     frame.context.overlays.footprint = false;
     layers.footprintCells.sync(frame);
     EXPECT_FALSE(layers.footprint.selected(frame));
@@ -462,19 +513,19 @@ TEST(FootprintMotion, OverscanRetainsVisibleRowsAcrossPanAndFollowLiveWithoutAll
     chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
     auto frame = footprintChartFrame();
     layer.sync(frame); layer.updateNodes(frame, context);
-    ASSERT_TRUE(layer.presentation().hollow(frame.context.raster));
+    ASSERT_TRUE(layer.presentation().spine(frame.context.raster));
     // 1 px, quarter viewport, follow-live column, and beyond overscan containment.
     for (double dx : {1., 28., 56., 168.}) {
         frame = footprintChartFrame();
         auto& r = frame.context.raster;
-        r.leftF += dx; r.drawnStartMs += dx / 56 * 1000; r.drawnEndMs += dx / 56 * 1000;
-        r.topF += 1; r.drawnMinPrice += 1. / 12; r.drawnMaxPrice += 1. / 12;
+        r.leftF += dx; r.drawnStartMs += dx / 100 * 1000; r.drawnEndMs += dx / 100 * 1000;
+        r.topF += 1; r.drawnMinPrice += 1. / 16; r.drawnMaxPrice += 1. / 16;
         footprintAllocations = 0; footprintCounting = true;
         layer.sync(frame); layer.updateNodes(frame, context);
         footprintCounting = false;
         EXPECT_EQ(footprintAllocations.load(), 0u);
         EXPECT_TRUE(layer.drawing()); EXPECT_GT(layer.vertexCount(), 0);
-        EXPECT_EQ(layer.presentation().hollow(r), dx < 168);
+        EXPECT_TRUE(layer.presentation().spineBar(r, 1000));
     }
 }
 TEST(FootprintCells, FlatBinningReusesStorageAndWindowMaximumExcludesOverscan) {
@@ -600,13 +651,17 @@ TEST(CvdLayer, LabelsAreBoundedAndFreshDataFramesAllocateNothing) {
     chart::CvdLayer layer;
     layer.presentation().stripPx = 80;
     auto frame = footprintChartFrame(); frame.context.surfaceBounds.setWidth(400);
-    chart::CvdFeed::build(layer.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
+    auto labelledSeries = footprintSeries();
+    labelledSeries.bars[1000] = labelledSeries.bars[0];
+    labelledSeries.bars[1000].bar.startMs = 1000;
+    chart::CvdFeed::build(layer.mailbox().back(), labelledSeries, footprintFrame(), chart::CvdReset::Visible, 4);
     layer.mailbox().post(); layer.sync(frame);
     std::unique_ptr<QSGNode> root(layer.createContainer());
     ChartTextRenderer text;
     chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
     layer.updateNodes(frame, context); layer.submitLabels(frame, context);
-    ASSERT_GT(text.submittedGlyphs(), 0);
+    ASSERT_EQ(text.submittedGlyphs(), int(std::strlen(layer.current().label.data())) + 5)
+        << "3.00 maximum and exact zero minimum must both have glyphs";
     for (int i = 0; i < 2; ++i) {
         auto series = footprintSeries(); series.bars[0].bar.delta += i + 1;
         chart::CvdFeed::build(layer.mailbox().back(), series, footprintFrame(), chart::CvdReset::Visible, 4);

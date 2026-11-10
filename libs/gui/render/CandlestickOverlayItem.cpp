@@ -54,7 +54,8 @@ public:
     QSGVertexColorMaterial* bodyMaterial = nullptr;
     int wickCapacity = 0, bodyCapacity = 0;
     candle_pixels::AxisSnap snap;
-    bool footprintHollow = false;
+    bool footprintSpine = false;
+    uint64_t footprintRevision = 0;
     double surfaceDpr = 0;
     void setCounts(int wickCount, int bodyCount) {
         candle_pixels::setGeometryCount(*wickGeometry, wickCapacity, wickCount);
@@ -372,9 +373,11 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     const TimeAxisMapping mapping = frame.mapping;
     const auto snap = candle_pixels::axisSnap(frame.raster);
     auto* footprint = m_mappingProvider->footprintPresentation();
-    const bool footprintHollow = footprint && footprint->hollow(frame.raster);
-    if (root->footprintHollow != footprintHollow) {
-        root->footprintHollow = footprintHollow;
+    const bool footprintSpine = footprint && footprint->spine(frame.raster);
+    const auto footprintRevision = footprint ? footprint->coverage.revision : 0;
+    if (root->footprintSpine != footprintSpine || root->footprintRevision != footprintRevision) {
+        root->footprintRevision = footprintRevision;
+        root->footprintSpine = footprintSpine;
         m_geometryDirty = true;
     }
     if (mappingChanged(mapping, m_lastMapping) || root->snap != snap ||
@@ -556,9 +559,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         return root;
     }
 
-    const bool isHollow = footprintHollow || (m_candleStyle == 1);
-    const int wickWidth = footprintHollow ? 1 : m_wickWidth;
-    const bool isLine   = !footprintHollow && (m_candleStyle == 2);
+    const bool isHollow = m_candleStyle == 1;
+    const int wickWidth = m_wickWidth;
+    const bool isLine   = !footprintSpine && (m_candleStyle == 2);
 
     const uchar bullR = uchar(m_upColor.red()), bullG = uchar(m_upColor.green()), bullB = uchar(m_upColor.blue());
     const uchar bearR = uchar(m_downColor.red()), bearG = uchar(m_downColor.green()), bearB = uchar(m_downColor.blue());
@@ -609,7 +612,8 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
 
     // ── Candle / Hollow mode ───────────────────────────────────────────────────
     // Hollow bullish bodies need 4 border quads (24 verts) instead of 1 filled (6 verts)
-    root->setCounts(visibleCount * 6, isHollow ? visibleCount * 24 : visibleCount * 6);
+    const int bodyVertices = footprintSpine ? 42 : isHollow ? 24 : 6;
+    root->setCounts(visibleCount * 6, visibleCount * bodyVertices);
     auto* wickVerts = root->wickGeometry->vertexDataAsColoredPoint2D();
     auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
 
@@ -620,7 +624,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         const double xEnd = mapping.timeToScreenX(static_cast<double>(c.timeStartMs) + mapping.appendMs);
         const double yOpen = mapping.priceToScreenY(c.open);
         const double yClose = mapping.priceToScreenY(c.close);
-        const auto body = candle_pixels::body(x, xEnd, yOpen, yClose, dpr, snap.x, snap.y);
+        const bool spine = footprintSpine && footprint->spineBar(frame.raster, double(c.timeStartMs));
+        auto body = candle_pixels::body(x, xEnd, yOpen, yClose, dpr, snap.x, snap.y);
+        if (spine) body.x = {float(x + 2), float(x + 8)};
         const float bodyX0 = body.x.lo, bodyX1 = body.x.hi;
         const float bodyY0 = body.y.lo, bodyY1 = body.y.hi;
         const float bodyWidth = bodyX1 - bodyX0;
@@ -628,7 +634,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
 
         // An even body and odd wick cannot share an exact device-pixel
         // centre. stroke() resolves that half-pixel tie to the right.
-        const auto wickSpan = !snap.x
+        const auto wickSpan = spine ? candle_pixels::Span{float(centerX - .75), float(centerX + .75)} : !snap.x
             ? candle_pixels::Span{float(centerX - wickWidth * 0.5 / dpr),
                                   float(centerX + wickWidth * 0.5 / dpr)}
             : candle_pixels::stroke(centerX, wickWidth, dpr);
@@ -647,9 +653,24 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
 
         addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wr, wg, wb, 255);
 
-        if (isHollow && (footprintHollow || bullish) && c.open != c.close) {
+        auto* bodyStart = bodyVerts;
+        if (spine) {
+            const float radius = std::min(3.f, (bodyY1 - bodyY0) * .5f);
+            addQuad(bodyVerts, bodyX0, bodyY0 + radius, bodyX1, bodyY1 - radius, br, bg, bb, ba);
+            for (int end = 0; end < 2; ++end) {
+                const float cy = end ? bodyY1 - radius : bodyY0 + radius;
+                for (int step = 0; step < 6; ++step) {
+                    const double a = (end ? 0 : 3.141592653589793) + step * 3.141592653589793 / 6;
+                    const double z = a + 3.141592653589793 / 6;
+                    bodyVerts[0].set(float(centerX), cy, br, bg, bb, ba);
+                    bodyVerts[1].set(float(centerX + 3 * std::cos(a)), cy + radius * float(std::sin(a)), br, bg, bb, ba);
+                    bodyVerts[2].set(float(centerX + 3 * std::cos(z)), cy + radius * float(std::sin(z)), br, bg, bb, ba);
+                    bodyVerts += 3;
+                }
+            }
+        } else if (isHollow && bullish && c.open != c.close) {
             // Hollow bullish: border outline only (4 quads)
-            const float bw = footprintHollow ? float(1.0 / dpr) : std::max(1.0f, bodyWidth * 0.12f);
+            const float bw = std::max(1.0f, bodyWidth * 0.12f);
             addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY0 + bw, br, bg, bb, ba); // top
             addQuad(bodyVerts, bodyX0, bodyY1 - bw, bodyX1, bodyY1, br, bg, bb, ba); // bottom
             addQuad(bodyVerts, bodyX0, bodyY0, bodyX0 + bw, bodyY1, br, bg, bb, ba); // left
@@ -663,6 +684,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
                 addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
                 addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
             }
+        }
+        while (bodyVerts - bodyStart < bodyVertices) {
+            bodyVerts->set(0, 0, 0, 0, 0, 0); ++bodyVerts;
         }
     }
 

@@ -1,4 +1,5 @@
 #include "chart/layers/CvdLayer.hpp"
+#include "chart/core/FlowNumberFormat.hpp"
 #include "chart/core/ChartFrame.hpp"
 #include "chart/shell/ChartLookSettings.hpp"
 #include "render/ChartTextRenderer.hpp"
@@ -138,12 +139,12 @@ void CvdLayer::submitLabels(const ChartFrame&, LayerNodeContext& context) {
     glyphs_.clear();
     const char* label = current_->label.data();
     addLabel(label, {strip_.left() + 4, strip_.top() + 2, std::max(0.0, strip_.width() - 110), strip_.height() - 4}, context.atlas);
-    char value[32];
+    char value[24];
     const double width = std::min(100.0, strip_.width() - 8);
     const double left = strip_.right() - width - 4;
-    std::snprintf(value, sizeof(value), "%.6g", scale_.max);
+    flowNumber(scale_.max, value, FlowNumberContext::SignedLabel);
     addLabel(value, {left, strip_.top() + 2, width, strip_.height() - 4}, context.atlas);
-    std::snprintf(value, sizeof(value), "%.6g", scale_.min);
+    flowNumber(scale_.min, value, FlowNumberContext::SignedLabel);
     if (strip_.height() >= 32) addLabel(value, {left, strip_.bottom() - 15, width, 13}, context.atlas);
     context.text.submitGlyphs(glyphs_, ChartTextRenderer::Priority::High);
 }

@@ -2362,7 +2362,7 @@ class FootprintCandleFixture : public CandlestickOverlayItem {
 public:
     QSGNode* paint(QSGNode* old) { return updatePaintNode(old, nullptr); }
 };
-TEST(FootprintCandles, BothDirectionsUseSharedStageAndOnePixelWicks) {
+TEST(FootprintCandles, BothDirectionsUseLeftSpineAndFullFallback) {
     chart::FootprintCellsLayer layer;
     layer.presentation().enabled = true; layer.presentation().cellsSource = true;
     FootprintMappingFixture provider;
@@ -2370,8 +2370,8 @@ TEST(FootprintCandles, BothDirectionsUseSharedStageAndOnePixelWicks) {
     auto& f = provider.frame;
     f.activeTimeframeMs = 1000; f.viewportValid = true;
     f.viewportTimeStart = 1000; f.viewportTimeEnd = 3000;
-    f.surfaceBounds = {0, 0, 112, 120};
-    f.raster = chart_raster::computeRaster({1000, 3000, 95, 105, {}, 1000, 1, 112, 120, 1}, {});
+    f.surfaceBounds = {0, 0, 200, 180};
+    f.raster = chart_raster::computeRaster({1000, 3000, 95, 105, {}, 1000, 1, 200, 180, 1}, {});
     f.mapping = chart_raster::toMapping(f.raster);
     FlowSeriesBuffer::Series flow;
     for (int start : {1000, 2000}) {
@@ -2384,17 +2384,18 @@ TEST(FootprintCandles, BothDirectionsUseSharedStageAndOnePixelWicks) {
     CandleSeriesBuffer buffer;
     buffer.applyHistory("BTC-USD", 1000, {{1000, 2000, 99, 103, 98, 102, 1}, {2000, 3000, 102, 103, 98, 99, 1}});
     FootprintCandleFixture candle;
-    candle.setSize({112, 120}); candle.setSymbol("BTC-USD"); candle.setTimeframeMs(1000);
+    candle.setSize({200, 180}); candle.setSymbol("BTC-USD"); candle.setTimeframeMs(1000);
     candle.setCandleBuffer(&buffer); candle.setMappingProvider(&provider); candle.setWickWidth(3);
     std::unique_ptr<QSGNode> root(candle.paint(nullptr));
     auto* body = static_cast<QSGGeometryNode*>(root->childAtIndex(1))->geometry();
     auto* wick = static_cast<QSGGeometryNode*>(root->childAtIndex(0))->geometry();
-    ASSERT_EQ(body->vertexCount(), 48);
+    ASSERT_EQ(body->vertexCount(), 84);
     const auto* b = body->vertexDataAsColoredPoint2D();
-    EXPECT_GT(b[26].x - b[24].x, 0) << "bearish border also draws";
-    EXPECT_FLOAT_EQ(b[25].y - b[24].y, 1) << "bearish body is an outline, not a filled quad";
+    EXPECT_FLOAT_EQ(b[2].x - b[0].x, 6);
+    EXPECT_FLOAT_EQ(b[0].x, 2);
+    EXPECT_FLOAT_EQ(b[42].x, 102);
     const auto* w = wick->vertexDataAsColoredPoint2D();
-    EXPECT_FLOAT_EQ(w[2].x - w[0].x, 1);
+    EXPECT_FLOAT_EQ(w[2].x - w[0].x, 1.5);
     chart::ChartFrame layerFrame;
     layerFrame.context.raster = f.raster;
     layer.sync(layerFrame);
@@ -2403,15 +2404,15 @@ TEST(FootprintCandles, BothDirectionsUseSharedStageAndOnePixelWicks) {
     layer.sync(layerFrame);
     EXPECT_EQ(layer.stage(), chart::FootprintStage::Cells);
     EXPECT_EQ(candle.paint(root.get()), root.get());
-    EXPECT_EQ(body->vertexCount(), 48);
-    provider.look->hollowCandles = false;
+    EXPECT_EQ(body->vertexCount(), 84);
+    provider.look->spineCandles = false;
     EXPECT_EQ(candle.paint(root.get()), root.get());
     EXPECT_EQ(body->vertexCount(), 12);
     EXPECT_FLOAT_EQ(wick->vertexDataAsColoredPoint2D()[2].x - wick->vertexDataAsColoredPoint2D()[0].x, 3);
-    provider.look->hollowCandles = true;
+    provider.look->spineCandles = true;
     candle.setCandleStyle(2);
     candle.paint(root.get());
-    EXPECT_EQ(body->vertexCount(), 48) << "footprint look overrides line mode too";
+    EXPECT_EQ(body->vertexCount(), 84) << "footprint look overrides line mode too";
     candle.setMappingProvider(nullptr);
 }
 
@@ -2421,18 +2422,18 @@ TEST(FootprintKnobs, ChartAgentPortUpdatesSharedRenderLook) {
     auto port = renderer.agentPort();
     EXPECT_EQ(port.footprintSettings()["footprintSource"], "q16");
     EXPECT_FALSE(renderer.footprintPresentation()->cellsSource);
-    port.applyFootprintSettings({{"footprintSource", "cells"}, {"footprintIntensity", "window"}, {"footprintHollowCandles", false}, {"footprintNumbers", false}});
+    port.applyFootprintSettings({{"footprintSource", "cells"}, {"footprintIntensity", "window"}, {"footprintCandle", "full"}, {"footprintNumbers", false}});
     const auto state = port.footprintSettings();
     EXPECT_EQ(state["footprintSource"], "cells");
     EXPECT_TRUE(renderer.footprintPresentation()->cellsSource);
     EXPECT_EQ(state["footprintIntensity"], "window");
-    EXPECT_EQ(state["footprintHollowCandles"], false);
+    EXPECT_EQ(state["footprintCandle"], "full");
     EXPECT_EQ(state["footprintNumbers"], false);
     const auto* look = renderer.footprintPresentation();
     ASSERT_TRUE(look); EXPECT_TRUE(look->enabled); EXPECT_TRUE(look->windowIntensity);
-    EXPECT_FALSE(look->hollowCandles); EXPECT_FALSE(look->numbers);
-    port.applyFootprintSettings({{"footprintIntensity", "bar"}, {"footprintHollowCandles", true}, {"footprintNumbers", true}});
-    EXPECT_FALSE(look->windowIntensity); EXPECT_TRUE(look->hollowCandles); EXPECT_TRUE(look->numbers);
+    EXPECT_FALSE(look->spineCandles); EXPECT_FALSE(look->numbers);
+    port.applyFootprintSettings({{"footprintIntensity", "bar"}, {"footprintCandle", "spine"}, {"footprintNumbers", true}});
+    EXPECT_FALSE(look->windowIntensity); EXPECT_TRUE(look->spineCandles); EXPECT_TRUE(look->numbers);
 }
 
 
@@ -2481,7 +2482,7 @@ TEST(FootprintCandles, Q16MatchesOriginalGeometryAcrossStylesAndAfterCells) {
     chart::FootprintPresentation look;
     look.enabled = true;
     look.coverage.tick = 1; look.coverage.timeframeMs = 1000;
-    look.coverage.low = 85; look.coverage.high = 115; look.coverage.add(1000, 3000);
+    look.coverage.barCount = 2; look.coverage.bars[0] = {1000, 2000, 98, 104}; look.coverage.bars[1] = {2000, 3000, 98, 104};
     selected.look = &look; // original provider has no footprint presentation
     CandleSeriesBuffer buffer;
     buffer.applyHistory("BTC-USD", 1000, {{1000, 2000, 99, 103, 98, 102, 1}, {2000, 3000, 102, 103, 98, 99, 1}});
@@ -2508,12 +2509,14 @@ TEST(FootprintCandles, Q16MatchesOriginalGeometryAcrossStylesAndAfterCells) {
         candidate.paint(actual.get());
         for (int node : {0, 1}) EXPECT_EQ(bytes(expected.get(), node), bytes(actual.get(), node));
     }
-    look.cellsSource = true; look.coverage.count = 0;
+    look.cellsSource = true; look.coverage.barCount = 0; ++look.coverage.revision;
     candidate.paint(actual.get());
     for (int node : {0, 1}) EXPECT_EQ(bytes(expected.get(), node), bytes(actual.get(), node)) << "no flow keeps the original look";
-    look.coverage.add(1000, 2000);
+    look.coverage.barCount = 1; ++look.coverage.revision;
     candidate.paint(actual.get());
-    for (int node : {0, 1}) EXPECT_EQ(bytes(expected.get(), node), bytes(actual.get(), node)) << "partial history keeps the original look";
+    auto* wicks = static_cast<QSGGeometryNode*>(actual->childAtIndex(0))->geometry()->vertexDataAsColoredPoint2D();
+    EXPECT_FLOAT_EQ(wicks[2].x - wicks[0].x, 1.5);
+    EXPECT_FLOAT_EQ(wicks[8].x - wicks[6].x, 3) << "missing bar keeps its full wick";
     baseline.setMappingProvider(nullptr); candidate.setMappingProvider(nullptr);
 }
 
@@ -2638,7 +2641,7 @@ TEST(FootprintFlowFeed, EarlyNewSymbolHistorySurvivesSelectionAndHiddenLod) {
     ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
     symbol = "ETH-USD"; feed.onFrameChanged(); feed.publishRows();
     ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_TRUE(current->valid);
-    EXPECT_EQ(current->cellCount, 1); EXPECT_TRUE(layer.presentation().coverage.covers(frame.raster));
+    EXPECT_EQ(current->cellCount, 1); EXPECT_EQ(layer.presentation().coverage.barCount, 1);
     // Hidden/source-off callbacks do no merging; authoritative remote history remains available.
     frame.raster.colPxF = 10; feed.onFrameChanged();
     bar.rows[0].bidVol = 40; FlowDataSourceTest::deliver(source, batch);
@@ -2648,7 +2651,7 @@ TEST(FootprintFlowFeed, EarlyNewSymbolHistorySurvivesSelectionAndHiddenLod) {
     feed.setEnabled(true); feed.publishRows();
     ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->cells[0].bidVol, 50);
     symbol = "SOL-USD"; feed.onFrameChanged();
-    EXPECT_EQ(layer.presentation().coverage.count, 0);
+    EXPECT_EQ(layer.presentation().coverage.barCount, 0);
     feed.publishRows(); ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
 }
 
@@ -2662,11 +2665,11 @@ TEST(FootprintKnobs, QmlWritesPersistAndProcessOnlyModelApplicationDoesNot) {
     ASSERT_TRUE(QQmlProperty::write(layers, "footprintSource", "cells"));
     ASSERT_TRUE(QQmlProperty::write(layers, "footprintIntensity", "window"));
     ASSERT_TRUE(QQmlProperty::write(layers, "footprintNumbers", false));
-    ASSERT_TRUE(QQmlProperty::write(layers, "footprintHollowCandles", false));
+    ASSERT_TRUE(QQmlProperty::write(layers, "footprintCandle", "full"));
     controls.syncNow();
     const auto saved = store.reload();
     EXPECT_EQ(saved.footprintSource, "cells"); EXPECT_EQ(saved.footprintIntensity, "window");
-    EXPECT_FALSE(saved.footprintNumbers); EXPECT_FALSE(saved.footprintHollowCandles);
+    EXPECT_FALSE(saved.footprintNumbers); EXPECT_EQ(saved.footprintCandle, "full");
     HeatmapSettingsModel restarted(store.store, "main", store.config);
     UnifiedGridRenderer second;
     HeatmapChartControls restored(&restarted); restored.setRenderer(&second);
@@ -2685,7 +2688,7 @@ TEST(FootprintFlowFeed, PublicationWakesCandlesOnCoverageTransitionsIncludingRee
     chart::PublishedFrame published;
     MappingFrameContext frame;
     frame.activeTimeframeMs = 1000;
-    frame.raster = chart_raster::computeRaster({1000, 2000, 95, 105, {}, 1000, 1, 56, 120, 1}, {});
+    frame.raster = chart_raster::computeRaster({1000, 3000, 95, 105, {}, 1000, 1, 112, 120, 1}, {});
     published.publish(frame);
     chart::FootprintCellsLayer layer;
     chart::FlowFeed feed(layer.mailbox());
@@ -2701,10 +2704,10 @@ TEST(FootprintFlowFeed, PublicationWakesCandlesOnCoverageTransitionsIncludingRee
         notifications.clear();
         feed.receive(batch); feed.publishRows();
         EXPECT_EQ(notifications.count(), 1);
-        EXPECT_TRUE(layer.presentation().hollow(frame.raster));
+        EXPECT_TRUE(layer.presentation().spine(frame.raster));
         feed.publishRows(); EXPECT_EQ(notifications.count(), 1) << "no repeated readiness notification";
         renderer.layers()->setFootprintSource("q16");
-        EXPECT_FALSE(layer.presentation().hollow(frame.raster));
+        EXPECT_FALSE(layer.presentation().spine(frame.raster));
         renderer.layers()->setFootprintSource("cells");
     }
 }

@@ -1,4 +1,5 @@
 #pragma once
+class QFormLayout;
 // Chart settings (S6c, S7b): every HeatmapChartSettings field in six tabs
 // (Chart, Tick, Look, Budgets, Live, Debug) plus the chart's TPO controls. The
 // Chart tab holds the liquidity labels and the candle style. Changes apply
@@ -100,6 +101,8 @@ private:
     QLabel *m_status = nullptr;
     // Chart (S7b labels: chart settings; candle style: renderer state)
     QCheckBox *m_showLabels = nullptr;
+    void addFlowControls(QFormLayout*, QWidget*);
+    void refreshFlowControls();
     QComboBox *m_bubblePlacement = nullptr;
     QComboBox *m_tradeMinMode = nullptr;
     QDoubleSpinBox *m_tradeMinNotional = nullptr;

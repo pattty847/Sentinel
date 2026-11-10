@@ -27,10 +27,12 @@
 #include "render/TimeAxisMapping.hpp"
 #include <memory>
 #include <vector>
+#include <span>
 
 namespace heatmap::gpu {
 
 struct LabelStyle {
+    std::span<const QRectF> occlusion;
     bool usd = true;
     double minPx = 12, maxPx = 15; // font size (em) in logical px
     double padX = 3, padY = 1;     // logical px on each side of the text box

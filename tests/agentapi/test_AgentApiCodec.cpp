@@ -566,13 +566,17 @@ TEST(AgentApiSnapshots, HundredMillisecondsQueryReadsItsOwnSeries) {
 
 TEST(AgentApiControls, FootprintVariantsHaveStrictTypes) {
     const auto check = [](const char* body) { return validateControl({"POST", "/api/v1/layers", {}, body}, std::nullopt); };
-    const auto valid = check(R"({"footprintIntensity":"window","footprintHollowCandles":false,"footprintNumbers":false})");
+    const auto valid = check(R"({"footprintIntensity":"window","footprintCandle":"full","footprintNumbers":false})");
     ASSERT_EQ(valid.status, 200);
     EXPECT_EQ(valid.body.layers.size(), 3);
     EXPECT_EQ(check(R"({"footprintIntensity":"bar"})").status, 200);
     EXPECT_EQ(check(R"({"footprintIntensity":"global"})").status, 422);
     EXPECT_EQ(check(R"({"footprintIntensity":true})").status, 422);
-    EXPECT_EQ(check(R"({"footprintHollowCandles":"false"})").status, 422);
+    EXPECT_EQ(check(R"({"footprintCandle":"false"})").status, 422);
+    EXPECT_EQ(check(R"({"footprintHollowCandles":true})").status, 422);
+    EXPECT_EQ(check(R"({"footprintCandle":"spine","footprintDustNotional":2500})").status, 200);
+    EXPECT_EQ(check(R"({"footprintDustNotional":-1})").status, 422);
+    EXPECT_EQ(check(R"({"footprintDustNotional":"2500"})").status, 422);
     EXPECT_EQ(check(R"({"footprintNumbers":1})").status, 422);
 }
 

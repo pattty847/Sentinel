@@ -1,4 +1,5 @@
 #include "ThemeBridge.hpp"
+#include "ThemePalette.hpp"
 
 void ThemeBridge::applyTheme(const QString& themeId) {
     if (themeId == "dark") {
@@ -10,7 +11,7 @@ void ThemeBridge::applyTheme(const QString& themeId) {
 }
 
 void ThemeBridge::applyDark() {
-    m_bg = QColor("#0F1114");
+    m_bg = theme::chartBackground();
     m_panel = QColor("#1B1F24");
     m_panelAlt = QColor("#20252B");
     m_border = QColor("#2B3138");
