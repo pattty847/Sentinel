@@ -326,12 +326,15 @@ TEST_F(Fixture, MalformedIngressIsolatesOnlyItsProduct) {
         });
         ~LogScope(){qInstallMessageHandler(old);}
     } logs;
-    start({"BTC-USD","ETH-USD"}); Peer btc(server->path()),eth(server->path());
+    start({"BTC-USD","ETH-USD"});
+    ASSERT_TRUE(eventually([&]{return metric("sentinel_fanout_running 1");}));
+    Peer btc(server->path()),eth(server->path());
     btc.hello();btc.next();eth.hello({},"ETH-USD");eth.next();
     put(0); btc.next(); put(0,"healthy",1); eth.next();
     server->publish(0,{JournalEventKind::Record,"run",1,0,true,"bad"});
     EXPECT_EQ(btc.next().first["reason"],"malformed_ingress");
-    EXPECT_TRUE(metric("sentinel_fanout_running 1")); EXPECT_TRUE(metric("sentinel_fanout_clients 1"));
+    EXPECT_TRUE(metric("sentinel_fanout_running 1"));
+    EXPECT_TRUE(eventually([&]{return metric("sentinel_fanout_clients 1");}));
     EXPECT_TRUE(eventually([&]{return metric("sentinel_fanout_ring_bytes{product=\"BTC-USD\"} 0");}));
     put(1,"still healthy",1); EXPECT_EQ(eth.next().first["pos"]["block"],1);
     Peer resumed(server->path()); resumed.hello(JournalPosition{"BTC-USD","run",0,0});

@@ -18,13 +18,33 @@ struct SideScan {
     bool capped = false;
 };
 
-size_t captureSide(bool isBid, const std::vector<uint64_t>& present,
+size_t bestOccupied(bool isBid, const std::vector<uint64_t>& present, size_t from, size_t slotCount) {
+    size_t word = from / 64;
+    while (word < present.size()) {
+        const uint64_t bits = present[word];
+        if (bits) {
+            const unsigned bit = isBid ? 63u - std::countl_zero(bits) : std::countr_zero(bits);
+            return word * 64 + bit;
+        }
+        if (isBid) {
+            if (word == 0) break;
+            --word;
+        } else {
+            ++word;
+        }
+    }
+    return slotCount;
+}
+
+size_t captureSide(bool isBid, const std::vector<uint64_t>& present, size_t bestIndex,
                    const std::vector<double>& levels,
                    std::vector<std::pair<uint32_t, double>>& out,
                    size_t maxPerSide, size_t maxScanWords) {
     size_t scanned = 0;
-    while (scanned < present.size() && out.size() < maxPerSide && scanned < maxScanWords) {
-        const size_t word = isBid ? present.size() - 1 - scanned : scanned;
+    const size_t firstWord = bestIndex / 64;
+    const size_t available = isBid ? firstWord + 1 : present.size() - firstWord;
+    while (scanned < available && out.size() < maxPerSide && scanned < maxScanWords) {
+        const size_t word = isBid ? firstWord - scanned : firstWord + scanned;
         ++scanned;
         uint64_t bits = present[word];
         while (bits && out.size() < maxPerSide) {
@@ -39,7 +59,7 @@ size_t captureSide(bool isBid, const std::vector<uint64_t>& present,
 }
 
 // Known indices of one side after a capture (`remaining`: set slots not captured).
-SideScan sideKnown(bool isBid, size_t slotCount, size_t words, size_t scannedWords, size_t remaining,
+SideScan sideKnown(bool isBid, size_t slotCount, size_t bestIndex, size_t scannedWords, size_t remaining,
                    std::span<const std::pair<uint32_t, double>> captured, size_t maxPerSide) {
     SideScan scan{isBid ? 0 : slotCount, false};
     if (remaining == 0) return scan;
@@ -49,7 +69,9 @@ SideScan sideKnown(bool isBid, size_t slotCount, size_t words, size_t scannedWor
         scan.known = isBid ? last : (captured.empty() ? 0 : last + 1);
         return scan;
     }
-    scan.known = isBid ? (words - scannedWords) * 64 : std::min(slotCount, scannedWords * 64);
+    const size_t firstWord = bestIndex / 64;
+    scan.known = isBid ? std::min(slotCount, (firstWord + 1 - scannedWords) * 64)
+                       : std::min(slotCount, (firstWord + scannedWords) * 64);
     return scan;
 }
 
@@ -104,6 +126,7 @@ void LiveOrderBook::initialize(double min_price, double max_price, double tick_s
 
     m_nonZeroBidCount = 0;
     m_nonZeroAskCount = 0;
+    m_bestBidIndex = m_bestAskIndex = size;
     m_totalBidVolume = 0.0;
     m_totalAskVolume = 0.0;
     ++m_stateVersion;
@@ -122,6 +145,7 @@ void LiveOrderBook::clear() {
     m_askBlockDirty.clear();
     m_min_price = m_max_price = m_tick_size = 0.0;
     m_nonZeroBidCount = m_nonZeroAskCount = 0;
+    m_bestBidIndex = m_bestAskIndex = 0;
     m_totalBidVolume = m_totalAskVolume = 0.0;
     ++m_stateVersion;
 }
@@ -257,13 +281,17 @@ bool LiveOrderBook::applyLevelLocked(bool isBid,
 
     if (wasNonZero != isNonZero) {
         auto& present = isBid ? m_bidPresent : m_askPresent;
+        auto& best = isBid ? m_bestBidIndex : m_bestAskIndex;
         const uint64_t bit = uint64_t{1} << (index % 64);
         if (isNonZero) present[index / 64] |= bit;
         else present[index / 64] &= ~bit;
         if (isNonZero) {
             ++nonZeroLevels;
+            if (best == levels.size() || (isBid ? index > best : index < best)) best = index;
         } else if (nonZeroLevels > 0) {
             --nonZeroLevels;
+            if (best == index) best = nonZeroLevels
+                ? bestOccupied(isBid, present, index, levels.size()) : levels.size();
         }
     }
 
@@ -292,9 +320,9 @@ LiveOrderBook::DenseBookSnapshotView LiveOrderBook::captureDenseNonZero(
     askBuffer.reserve(std::min(maxPerSide, m_asks.size()));
 
     const size_t bidScanned = m_nonZeroBidCount
-        ? captureSide(true, m_bidPresent, m_bids, bidBuffer, maxPerSide, maxScanWordsPerSide) : 0;
+        ? captureSide(true, m_bidPresent, m_bestBidIndex, m_bids, bidBuffer, maxPerSide, maxScanWordsPerSide) : 0;
     const size_t askScanned = m_nonZeroAskCount
-        ? captureSide(false, m_askPresent, m_asks, askBuffer, maxPerSide, maxScanWordsPerSide) : 0;
+        ? captureSide(false, m_askPresent, m_bestAskIndex, m_asks, askBuffer, maxPerSide, maxScanWordsPerSide) : 0;
 
     DenseBookSnapshotView view;
     view.minPrice = m_min_price;
@@ -306,9 +334,9 @@ LiveOrderBook::DenseBookSnapshotView LiveOrderBook::captureDenseNonZero(
     view.scanLimited = (bidBuffer.size() < maxPerSide && m_nonZeroBidCount > bidBuffer.size() && bidScanned >= maxScanWordsPerSide) ||
                        (askBuffer.size() < maxPerSide && m_nonZeroAskCount > askBuffer.size() && askScanned >= maxScanWordsPerSide);
     view.slotCount = m_bids.size();
-    const auto bid = sideKnown(true, view.slotCount, m_bidPresent.size(), bidScanned,
+    const auto bid = sideKnown(true, view.slotCount, m_bestBidIndex, bidScanned,
                                m_nonZeroBidCount - bidBuffer.size(), view.bidLevels, maxPerSide);
-    const auto ask = sideKnown(false, view.slotCount, m_askPresent.size(), askScanned,
+    const auto ask = sideKnown(false, view.slotCount, m_bestAskIndex, askScanned,
                                m_nonZeroAskCount - askBuffer.size(), view.askLevels, maxPerSide);
     view.bidKnownLo = bid.known;
     view.askKnownEnd = ask.known;

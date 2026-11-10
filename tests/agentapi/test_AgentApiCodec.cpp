@@ -415,10 +415,14 @@ TEST(AgentApiCodec, BookTopNEmptySidesAndScanBudget) {
     EXPECT_TRUE(empty.asks.empty());
     LiveOrderBook wide("BTC-USD");
     wide.initialize(1, 100000, 1);
-    wide.applyUpdates(std::vector<BookLevelUpdate>{{true, 2, 1}}, {}, nullptr);
+    wide.applyUpdates(std::vector<BookLevelUpdate>{{true, 2, 1},
+                                                   {false, 10, 1}, {false, 100, 1}}, {}, nullptr);
     std::vector<std::pair<uint32_t, double>> bidScratch, askScratch;
     const auto limited = wide.captureDenseNonZero(bidScratch, askScratch, 20, 1);
     EXPECT_TRUE(limited.scanLimited);
+    ASSERT_EQ(limited.askLevels.size(), 1u);
+    EXPECT_EQ(limited.askLevels.front().first, 9u);
+    EXPECT_EQ(limited.askKnownEnd, 64u);
     const auto indexed = captureBook(wide, 20, 900, meta);
     ASSERT_TRUE(indexed.bestBid);
     EXPECT_DOUBLE_EQ(*indexed.bestBid, 2);

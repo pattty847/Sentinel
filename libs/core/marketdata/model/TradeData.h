@@ -173,6 +173,8 @@ private:
 
     size_t m_nonZeroBidCount = 0;
     size_t m_nonZeroAskCount = 0;
+    size_t m_bestBidIndex = 0; // slotCount when empty
+    size_t m_bestAskIndex = 0; // slotCount when empty
     double m_totalBidVolume = 0.0;
     double m_totalAskVolume = 0.0;
 

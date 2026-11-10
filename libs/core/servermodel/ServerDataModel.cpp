@@ -1254,13 +1254,16 @@ void ServerDataModel::publishFlow() {
     std::erase_if(m_flowSubscriptions, [](const auto& s) { return !s->active.load(); });
     for (auto& [symbol, product] : m_flowProducts) {
         if (m_flowStore) {
-            const auto lag = std::max<int64_t>(0, product.clock - kFlowRolloverGraceMs) / 3'600'000 * 3'600'000 -
-                             std::max(m_flowStore->sealedThroughMs(symbol),
-                                      product.firstLiveMs < 0 ? 0 : product.firstLiveMs / 3'600'000 * 3'600'000);
-            if (lag > 6 * 3'600'000 &&
-                (product.lastLagWarningClock == INT64_MIN || product.clock - product.lastLagWarningClock >= 60'000)) {
-                sLog_Warning("Flow store lag exceeds live retention symbol=" << symbol << " lagMs=" << lag);
-                product.lastLagWarningClock = product.clock;
+            const auto sealedThrough = m_flowStore->sealedThroughMs(symbol);
+            if (sealedThrough > 0 || product.firstLiveMs >= 0) {
+                const auto reference = std::max(sealedThrough,
+                    product.firstLiveMs < 0 ? int64_t{0} : product.firstLiveMs / 3'600'000 * 3'600'000);
+                const auto lag = std::max<int64_t>(0, product.clock - kFlowRolloverGraceMs) / 3'600'000 * 3'600'000 - reference;
+                if (lag > 6 * 3'600'000 &&
+                    (product.lastLagWarningClock == INT64_MIN || product.clock - product.lastLagWarningClock >= 60'000)) {
+                    sLog_Warning("Flow store lag exceeds live retention symbol=" << symbol << " lagMs=" << lag);
+                    product.lastLagWarningClock = product.clock;
+                }
             }
         }
         for (auto& [dayStart, day] : product.days) {

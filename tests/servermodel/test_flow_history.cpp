@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <QCryptographicHash>
 #include <QFile>
+#include <QScopeGuard>
 #include <future>
 #include <iostream>
 #include <thread>
@@ -44,6 +45,11 @@ namespace {
 using namespace flow_fixture;
 namespace flow = sentinel::flow;
 namespace fs = std::filesystem;
+std::atomic<int> lagWarningCount{0};
+void captureLagWarnings(QtMsgType type, const QMessageLogContext&, const QString& text) {
+    if (type == QtWarningMsg && text.contains("Flow store lag exceeds live retention symbol=BTC-USD"))
+        ++lagWarningCount;
+}
 struct Decoded {
     Json header;
     std::vector<flow::FlowBar> bars;
@@ -251,6 +257,29 @@ TEST_F(FlowHistory, DetachesStoreAfterHistoryWorkersDrain) {
     EXPECT_EQ(fixture->model->flowHistorySnapshot("BTC-USD", Minute, Epoch, Epoch + Minute).store, nullptr);
     store->stop();
 }
+TEST_F(FlowHistory, EmptyStoreWithoutLiveTradeDoesNotWarnAboutLag) {
+    ASSERT_EQ(store->sealedThroughMs("BTC-USD"), 0);
+    lagWarningCount = 0;
+    const auto old = qInstallMessageHandler(captureLagWarnings);
+    const auto restore = qScopeGuard([&] { qInstallMessageHandler(old); });
+    tick(8 * Hour + Minute);
+    EXPECT_EQ(lagWarningCount.load(), 0);
+}
+
+TEST_F(FlowHistory, RealSevenHourFlowLagWarnsOncePerMinute) {
+    ASSERT_EQ(store->sealedThroughMs("BTC-USD"), 0);
+    live(Hour, "first");
+    lagWarningCount = 0;
+    const auto old = qInstallMessageHandler(captureLagWarnings);
+    const auto restore = qScopeGuard([&] { qInstallMessageHandler(old); });
+    tick(8 * Hour + Minute);
+    EXPECT_EQ(lagWarningCount.load(), 1);
+    tick(8 * Hour + Minute + 59'000);
+    EXPECT_EQ(lagWarningCount.load(), 1);
+    tick(8 * Hour + Minute + 60'000);
+    EXPECT_EQ(lagWarningCount.load(), 2);
+}
+
 TEST_F(FlowHistory, StoreAndLiveAreOrderedAndPagingCrossesSeamWithoutJournalReads) {
     seed();
     // Moving only a synthetic fixture proves serving does not open the journal.
