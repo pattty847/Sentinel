@@ -353,8 +353,9 @@ TEST(LadderFeed, AWordBudgetStopIsIncompleteBeyondTheScannedRange) {
     rig.feed.setEnabled(true);
     std::vector<BookLevelUpdate> levels;
     for (int i = 10; i <= 20; ++i) levels.push_back({true, double(i), 1.0});
-    for (int i = 30; i <= 40; ++i) levels.push_back({false, double(i), 1.0});
-    // 1.1 M slots: the bid scan from the band top runs out of words before the bids.
+    levels.push_back({true, 1'080'000.0, 1.0});
+    for (int i = 1'080'010; i <= 1'080'020; ++i) levels.push_back({false, double(i), 1.0});
+    // The scan starts at the touch and stops before the distant bids at 10..20.
     auto replica = book(0, 1'100'000, 1, levels);
     rig.view(camera(5, 105, 1));
     EXPECT_FALSE(rig.rows(*replica).complete);
@@ -650,10 +651,11 @@ TEST(WallRadar, AnIncompleteCaptureIsNoObservation) {
     std::vector<BookLevelUpdate> levels;
     for (int i = 0; i < 50; ++i) levels.push_back({true, 99.5 + i * 0.01, 1.0}); // 99.50..99.99
     levels.push_back({true, 100.0, 25.0});                                      // 5x the bin median 5
-    for (int i = 1; i <= 50; ++i) levels.push_back({false, 100.0 + i * 0.01, 1.0});
-    auto replica = book(99, 101, 0.01, levels);
+    levels.push_back({true, 101.0, 1.0}); // one word at the touch cannot reach the wall at 100
+    for (int i = 1; i <= 50; ++i) levels.push_back({false, 101.0 + i * 0.01, 1.0});
+    auto replica = book(99, 102, 0.01, levels);
     RadarRig rig;
-    rig.view(camera(99.5, 100.5, 0.05));
+    rig.view(camera(99.5, 101.5, 0.05));
     const auto& t0 = rig.tick(*replica, 1000);
     ASSERT_TRUE(t0.valid && t0.complete) << rig.feed.lastReason();
     ASSERT_TRUE(bidLarge(t0, 2000));
@@ -673,7 +675,7 @@ TEST(WallRadar, AnIncompleteCaptureIsNoObservation) {
     EXPECT_TRUE(t1.radar);
     EXPECT_DOUBLE_EQ(t1.wallMultiple, 4);
     EXPECT_DOUBLE_EQ(rig.feed.tracker().medians()[0], median) << "the last observed reference is retained";
-    EXPECT_FALSE(rig.layer.drawing());
+    EXPECT_TRUE(rig.layer.drawing()) << "the known rows still draw without a tracker observation";
     // Negative control: padding unknown prices with zeros would invent a disappearance.
     std::vector<sentinel::book::LevelSizes> after(before.size());
     sentinel::book::LevelTracker naive({.maxRows = 4096});

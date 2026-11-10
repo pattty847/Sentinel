@@ -88,14 +88,45 @@ TEST(LiveOrderBookTest, DenseCaptureReportsTheKnownRangePerSide) {
     const std::array<BookLevelUpdate, 2> levels{{{true, 10.0, 1.0}, {false, 20.0, 1.0}}};
     wide.applyUpdates(levels, timestamp, nullptr);
     view = wide.captureDenseNonZero(bids, asks, 8, 1);
-    EXPECT_TRUE(view.scanLimited);
+    EXPECT_FALSE(view.scanLimited);
     EXPECT_FALSE(view.bidCapped);
-    EXPECT_EQ(view.bidKnownLo, 192u) << "the top word [192, 201) only";
+    EXPECT_EQ(view.bidKnownLo, 0u) << "the only bid is captured from the touch";
     EXPECT_EQ(view.askKnownEnd, 201u) << "the ask side found its only level: nothing left";
     LiveOrderBook empty;
     view = empty.captureDenseNonZero(bids, asks, 8);
     EXPECT_EQ(view.bidKnownLo, 0u);
     EXPECT_EQ(view.askKnownEnd, view.slotCount);
+}
+
+TEST(LiveOrderBookTest, WordBudgetStartsAtTheTouchInAWideBand) {
+    LiveOrderBook book;
+    book.initialize(0.0, 3'000'000.0, 1.0);
+    const std::array<BookLevelUpdate, 6> levels{{
+        {true, 1'499'999.0, 2.0}, {true, 1'499'900.0, 3.0},
+        {true, 100.0, 1.0}, {false, 1'500'001.0, 5.0},
+        {false, 1'500'100.0, 7.0}, {false, 2'900'000.0, 1.0},
+    }};
+    book.applyUpdates(levels, timestamp, nullptr);
+    std::vector<std::pair<uint32_t, double>> bids, asks;
+    const auto view = book.captureDenseNonZero(bids, asks, 16'384, 16'384);
+    ASSERT_FALSE(view.bidLevels.empty());
+    ASSERT_FALSE(view.askLevels.empty());
+    EXPECT_EQ(view.bidLevels.front().first, 1'499'999u);
+    EXPECT_EQ(view.askLevels.front().first, 1'500'001u);
+    EXPECT_LE(view.bidKnownLo, 1'499'999u);
+    EXPECT_GT(view.askKnownEnd, 1'500'001u);
+    EXPECT_TRUE(view.scanLimited);
+    EXPECT_FALSE(view.bidCapped);
+    EXPECT_FALSE(view.askCapped);
+    const std::array<BookLevelUpdate, 2> remove{{
+        {true, 1'499'999.0, 0.0}, {false, 1'500'001.0, 0.0},
+    }};
+    book.applyUpdates(remove, timestamp, nullptr);
+    const auto afterRemoval = book.captureDenseNonZero(bids, asks, 1, 1);
+    ASSERT_EQ(afterRemoval.bidLevels.size(), 1u);
+    ASSERT_EQ(afterRemoval.askLevels.size(), 1u);
+    EXPECT_EQ(afterRemoval.bidLevels.front().first, 1'499'900u);
+    EXPECT_EQ(afterRemoval.askLevels.front().first, 1'500'100u);
 }
 
 TEST(LiveOrderBookTest, RangeAndSplitClampBothEndsAndKeepBestPrices) {
