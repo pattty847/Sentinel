@@ -1,11 +1,8 @@
 # AGENTS.md — Sentinel Agent Operating Rules
 
-Do not flatter, validate, or agree by default.
-Your job is to be correct, not agreeable.
 Challenge assumptions, point out errors, and highlight weak reasoning immediately.
 If the user is wrong, say it plainly and explain why.
 If uncertain, state uncertainty instead of guessing.
-Avoid praise unless it is explicitly earned and relevant.
 Optimize for truth, clarity, and usefulness—never for likability.
 
 Source of truth for every coding agent on Sentinel. All coding agents must read this file directly;
@@ -71,7 +68,7 @@ changes behaviour, data or looks (owner decisions) or needs an approval listed i
 
 ## 3a) Chart core: where chart behaviour goes (owner, 2026-10-11)
 
-`UnifiedGridRenderer` (UGR) is a Qt Quick shell. It changes only for item lifecycle, window/sync wiring and `QQuickItem` overrides. The migration plan is `../Sentinel-Private/research/2026-10-11-chart-core-architecture.md` (S0-S15 landed; open rows are in STATUS); current architecture is in `docs/ARCHITECTURE.md`. The chart-view feature freeze ended when S15 landed.
+`UnifiedGridRenderer` (UGR) is a Qt Quick shell. It changes only for item lifecycle, window/sync wiring and `QQuickItem` overrides. Current architecture is in `docs/ARCHITECTURE.md`.
 
 - View behaviour (camera, zoom, glide, fit, follow-live, placement, timeframe or symbol switch) goes in a policy class in `libs/gui/chart/core/` once that directory exists, never as new UGR members. `ChartViewController` only sequences policies: no arithmetic or branching on prices, times or pixels.
 - `sentinel_chart_core` links QtCore only: no QtGui, QtQuick, QSG, QML or `QQuickWindow` (the build and `chart-health.sh` enforce it). It never includes `HeatmapGpuLayer.hpp`, the source controller or recording types; it talks through `ChartPorts.hpp`.
