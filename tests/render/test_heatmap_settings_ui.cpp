@@ -1035,7 +1035,7 @@ TEST(FlowSettingsDialog, EveryControlAppliesPersistsAndResets) {
     HeatmapSettingsDialog dialog(&model, nullptr);
     const QJsonObject patch{{"footprintSource", "cells"}, {"footprintIntensity", "window"},
         {"footprintCandle", "full"}, {"footprintNumbers", false}, {"footprintDustNotional", 123.45},
-        {"cvdStripPx", 128}, {"cvdReset", "utcDay"}, {"cvdStyle", "area"}};
+        {"flowFooter", true}, {"cvdStripPx", 128}, {"cvdReset", "utcDay"}, {"cvdStyle", "area"}};
     for (auto it = patch.begin(); it != patch.end(); ++it) {
         const auto name = it.key().toUtf8();
         if (it->isString()) {

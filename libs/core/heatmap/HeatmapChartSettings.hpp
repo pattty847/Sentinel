@@ -42,6 +42,7 @@ struct HeatmapChartSettings {
     double candleBodyOpacity = 1;
     int candleWickWidth = 1; // device pixels
     // Cumulative volume delta strip; height in logical px, 0..400 (0 disables).
+    bool flowFooter = false;
     int cvdStripPx = 0;
     std::string cvdReset = "visible", cvdStyle = "line";
     // Flow-backed footprint presentation.

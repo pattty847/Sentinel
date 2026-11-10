@@ -23,7 +23,7 @@ void quad(Vertex*& out, const QRectF& rect, QColor color) {
     triangle(out, rect.topLeft(), rect.bottomLeft(), rect.topRight(), color);
     triangle(out, rect.topRight(), rect.bottomLeft(), rect.bottomRight(), color);
 }
-QColor signColor(double value) { return value >= 0 ? QColor(46, 189, 133) : QColor(246, 70, 93); }
+QColor signColor(double value) { return value >= 0 ? theme::positive() : theme::negative(); }
 void segment(Vertex*& out, QPointF a, QPointF b, double zero, bool area, double stroke) {
     const auto color = signColor(zero - (a.y() + b.y()) * 0.5);
     if (area) {
@@ -67,7 +67,8 @@ QSGNode* CvdLayer::createContainer() {
 }
 void CvdLayer::sync(const ChartFrame& frame) {
     captured_ = presentation_;
-    if (mailbox_.take(current_)) dirty_ = true;
+    bottomInset_ = frame.context.raster.valid ? captured_.bottomInset(frame.context.time.activeTimeframeMs, frame.context.surfaceBounds.height()) : 0;
+    if (mailbox_.take(current_)) { dirty_ = true; ++revision_; }
     drawing_ = captured_.stripPx > 0 && frame.context.raster.valid && frame.context.raster.dpr > 0 &&
         current_->timeframeMs == std::max<int64_t>(1000, frame.context.time.activeTimeframeMs) && current_->reset == captured_.reset &&
         current_->series.count > 0;

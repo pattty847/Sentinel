@@ -5600,3 +5600,156 @@ int main(int argc, char **argv) {
     configureFixture();
     return RUN_ALL_TESTS();
 }
+
+#include "render/ChartPaneClip.hpp"
+TEST(UgrCandleCpu, DockedPaneClipsEveryStyleWithoutChangingGeometryOrPriceMapping) {
+    class Provider : public CandleTickFrameProvider {
+    public:
+        chart::CvdPresentation pane;
+        const chart::CvdPresentation* cvdPresentation() const override { return &pane; }
+    } provider;
+    auto& frame = provider.frame;
+    frame.activeTimeframeMs = 1000; frame.viewportValid = true;
+    frame.viewportTimeStart = 1000; frame.viewportTimeEnd = 4000;
+    frame.currentBoundaryStartMs = 4000; frame.surfaceDpr = 1;
+    frame.surfaceBounds = {0, 0, 300, 180};
+    frame.raster = chart_raster::computeRaster({1000, 4000, 95, 105, {}, 1000, 1, 300, 180, 1}, {});
+    frame.mapping = chart_raster::toMapping(frame.raster);
+    provider.pane.hasData = true; provider.pane.dataTimeframeMs = 1000;
+    CandleSeriesBuffer buffer;
+    buffer.applyHistory("BTC-USD", 1000, {{1000, 2000, 96, 103, 95, 97, 1},
+        {2000, 3000, 97, 103, 95, 96, 1}, {3000, 4000, 96, 102, 95, 98, 1}});
+    QQuickWindow window;
+    CandleTickGeometryItem candles;
+    candles.setParentItem(window.contentItem());
+    candles.setSize({300, 180}); candles.setSymbol("BTC-USD"); candles.setTimeframeMs(1000);
+    candles.setCandleBuffer(&buffer); candles.setMappingProvider(&provider);
+    std::unique_ptr<QSGNode> root;
+    for (int style : {0, 1, 2}) {
+        candles.setCandleStyle(style);
+        root.reset(candles.updatePaintNode(root.release(), nullptr));
+        ASSERT_EQ(root->childCount(), 2);
+        std::array<QByteArray, 2> original;
+        std::array<QSGGeometry*, 2> geometry;
+        for (int i = 0; i < 2; ++i) {
+            geometry[i] = static_cast<QSGGeometryNode*>(root->childAtIndex(i))->geometry();
+            original[i] = QByteArray(static_cast<const char*>(geometry[i]->vertexData()), geometry[i]->vertexCount() * sizeof(QSGGeometry::ColoredPoint2D));
+        }
+        for (int strip : {0, 60}) {
+            provider.pane.flowFooter = true; provider.pane.stripPx = strip;
+            window.afterSynchronizing(); // no dirty candle or new candle data
+            ASSERT_EQ(root->childCount(), 1);
+            ASSERT_EQ(root->firstChild()->type(), QSGNode::ClipNodeType);
+            auto* clip = static_cast<QSGClipNode*>(root->firstChild());
+            EXPECT_EQ(clip->clipRect().bottom(), 180 - strip - chart::FlowFooterLayout::height);
+            bool excluded = false;
+            for (int i = 0; i < 2; ++i) {
+                EXPECT_EQ(std::memcmp(original[i].constData(), geometry[i]->vertexData(), size_t(original[i].size())), 0);
+                auto* vertices = geometry[i]->vertexDataAsColoredPoint2D();
+                for (int v = 0; v < geometry[i]->vertexCount(); ++v) excluded |= vertices[v].y > clip->clipRect().bottom();
+            }
+            EXPECT_TRUE(excluded);
+        }
+        provider.pane.flowFooter = false; provider.pane.stripPx = 0;
+        window.afterSynchronizing();
+        ASSERT_EQ(root->childCount(), 2);
+        for (int i = 0; i < 2; ++i)
+            EXPECT_EQ(std::memcmp(original[i].constData(), geometry[i]->vertexData(), size_t(original[i].size())), 0);
+    }
+    candles.setParentItem(nullptr);
+}
+
+namespace {
+class PaneLifecycleProvider : public CandleTickFrameProvider {
+public:
+    PaneLifecycleProvider() {
+        frame.activeTimeframeMs = 1000; frame.viewportValid = true;
+        frame.viewportTimeStart = 1000; frame.viewportTimeEnd = 4000;
+        frame.currentBoundaryStartMs = 4000; frame.surfaceDpr = 1;
+        frame.surfaceBounds = {0, 0, 300, 180};
+        frame.raster = chart_raster::computeRaster({1000, 4000, 95, 105, {}, 1000, 1, 300, 180, 1}, {});
+        frame.mapping = chart_raster::toMapping(frame.raster);
+        pane.hasData = true; pane.dataTimeframeMs = 1000;
+        pane.flowFooter = true; pane.stripPx = 60;
+        tradeBubbleRenderFrame()->mapping = frame.mapping;
+    }
+    chart::CvdPresentation pane;
+    const chart::CvdPresentation* cvdPresentation() const override { return &pane; }
+};
+class BubbleLifecycleItem : public TradeBubbleOverlayItem {
+public:
+    using TradeBubbleOverlayItem::updatePaintNode;
+};
+}
+
+TEST(UgrCandleCpu, PaneLifecycleSurvivesAttachedItemWindowAndRendererTeardown) {
+    for (int repeat = 0; repeat < 4; ++repeat) for (int order = 0; order < 3; ++order) {
+        SCOPED_TRACE(::testing::Message() << "repeat=" << repeat << " order=" << order);
+        auto window = std::make_unique<QQuickWindow>();
+        auto provider = std::make_unique<PaneLifecycleProvider>();
+        auto candles = std::make_unique<CandleTickGeometryItem>();
+        auto bubbles = std::make_unique<BubbleLifecycleItem>();
+        CandleSeriesBuffer buffer;
+        buffer.applyHistory("BTC-USD", 1000, {{1000, 2000, 96, 103, 95, 97, 1}});
+        candles->setSize({300, 180}); candles->setSymbol("BTC-USD"); candles->setTimeframeMs(1000);
+        candles->setCandleBuffer(&buffer); candles->setMappingProvider(provider.get());
+        bubbles->setRenderer(provider.get());
+        candles->setParentItem(window->contentItem()); bubbles->setParentItem(window->contentItem());
+        std::unique_ptr<QSGNode> candleRoot(candles->updatePaintNode(nullptr, nullptr));
+        std::unique_ptr<QSGNode> bubbleRoot(bubbles->updatePaintNode(nullptr, nullptr));
+        for (auto* embedded = bubbleRoot->firstChild()->firstChild(); embedded; embedded = embedded->firstChild())
+            EXPECT_FALSE(embedded->flags().testFlag(QSGNode::OwnedByParent));
+        for (bool enabled : {true, false, true}) {
+            provider->pane.flowFooter = enabled; provider->pane.stripPx = enabled ? 60 : 0;
+            window->afterSynchronizing();
+            EXPECT_EQ(candleRoot->childCount(), enabled ? 1 : 2);
+        }
+        if (order == 0) {
+            candles.reset(); candleRoot.reset(); // attached item dies before its window/root
+            bubbles.reset(); bubbleRoot.reset();
+            window->afterSynchronizing();
+        } else if (order == 1) {
+            window.reset(); // visual parent disappears while the items and roots remain
+            candleRoot.reset(candles->updatePaintNode(candleRoot.release(), nullptr));
+            bubbleRoot.reset(bubbles->updatePaintNode(bubbleRoot.release(), nullptr));
+        } else {
+            provider.reset(); // renderer dies before overlay items and their render roots
+            window->afterSynchronizing();
+            provider = std::make_unique<PaneLifecycleProvider>();
+            candles->setMappingProvider(provider.get()); bubbles->setRenderer(provider.get());
+            candleRoot.reset(); bubbleRoot.reset();
+            window->afterSynchronizing(); // dead roots must have cleared both typed links
+            candleRoot.reset(candles->updatePaintNode(nullptr, nullptr));
+            bubbleRoot.reset(bubbles->updatePaintNode(nullptr, nullptr));
+            window->afterSynchronizing();
+        }
+    }
+}
+
+TEST(TradeLayerNodes, PaneContainersTransferAndDestroyChildrenExactlyOnce) {
+    class CountedNode : public QSGNode {
+    public:
+        explicit CountedNode(int& destroyed) : destroyed_(destroyed) {}
+        ~CountedNode() override { ++destroyed_; }
+    private:
+        int& destroyed_;
+    };
+    for (int repeat = 0; repeat < 32; ++repeat) for (bool clipped : {false, true}) {
+        int destroyed = 0;
+        auto scene = std::make_unique<QSGNode>();
+        auto* pane = new ChartPaneClip;
+        scene->appendChildNode(pane);
+        for (int i = 0; i < 3; ++i) pane->content()->appendChildNode(new CountedNode(destroyed));
+        for (double inset : {115.0, 0.0, 55.0, 0.0, clipped ? 115.0 : 0.0}) {
+            pane->sync({0, 0, 300, 180}, inset);
+            EXPECT_EQ(pane->content()->childCount(), 3);
+            if (inset > 0) EXPECT_FALSE(pane->content()->flags().testFlag(QSGNode::OwnedByParent));
+            for (auto* child = pane->content()->firstChild(); child; child = child->nextSibling())
+                EXPECT_TRUE(child->flags().testFlag(QSGNode::OwnedByParent));
+            EXPECT_EQ(destroyed, 0);
+        }
+        if (repeat % 2) delete pane;
+        scene.reset();
+        EXPECT_EQ(destroyed, 3);
+    }
+}

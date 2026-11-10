@@ -96,6 +96,7 @@ public:
     const chart::ChartDebugQml* debug() const { return &m_qml.debug; }
     ChartAgentPort agentPort();
     chart::FootprintPresentation* footprintPresentation() override { return &m_layers.footprintCells.presentation(); }
+    const chart::CvdPresentation* cvdPresentation() const override { return &m_layers.cvd.presentation(); }
     QObject* footprintNotifications() override { return &m_visibility; }
     explicit UnifiedGridRenderer(QQuickItem* parent = nullptr);
     ~UnifiedGridRenderer();
@@ -108,7 +109,6 @@ public:
     double effectiveAxisLabelPx() const { return m_layers.text.axes ? m_layers.text.axes->effectiveAxisLabelPx() : AxisLayout::kAutoAxisLabelBasePx; }
     int priceAxisWidthPx() const { return m_layers.text.axes ? m_layers.text.axes->priceAxisWidthPx() : 90; }
     int timeAxisHeightPx() const { return m_layers.text.axes ? m_layers.text.axes->timeAxisHeightPx() : 30; }
-
     // ── GPU heatmap renderer ──
     // The process service (MainWindowGPU owns it; it outlives this item). nullptr
     // detaches the layer's controller (teardown).

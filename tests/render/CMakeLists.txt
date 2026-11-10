@@ -457,3 +457,9 @@ set_target_properties(test_cvd_series PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC
 target_include_directories(test_cvd_series PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_cvd_series PRIVATE GTest::gtest_main)
 add_test(NAME CvdSeriesTests COMMAND test_cvd_series)
+
+add_executable(test_flow_footer_policy test_flow_footer_policy.cpp)
+set_target_properties(test_flow_footer_policy PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(test_flow_footer_policy PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_flow_footer_policy PRIVATE GTest::gtest_main)
+add_test(NAME FlowFooterPolicyTests COMMAND test_flow_footer_policy)

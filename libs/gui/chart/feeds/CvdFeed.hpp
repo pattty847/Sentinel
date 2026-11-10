@@ -1,5 +1,6 @@
 #pragma once
 #include "chart/core/CvdSeries.hpp"
+#include "chart/core/FlowFooter.hpp"
 #include "chart/feeds/FlowBufferAccess.hpp"
 #include "render/ITimeAxisMappingProvider.hpp"
 #include <QTimer>
@@ -12,19 +13,28 @@ class LayerVisibility;
 class ChartTpoQml;
 struct CvdPresentation {
     int stripPx = 0;
+    bool flowFooter = false;
     CvdReset reset = CvdReset::Visible;
     bool area = false;
     // GUI mailbox publication, read only during render sync (GUI is blocked).
     int64_t dataTimeframeMs = 0;
     CvdReset dataReset = CvdReset::Visible;
     bool hasData = false;
-    bool drawable(int64_t timeframeMs) const {
-        return stripPx > 0 && hasData && dataReset == reset &&
+    bool matches(int64_t timeframeMs) const {
+        return hasData && dataReset == reset &&
             dataTimeframeMs == std::max<int64_t>(1000, timeframeMs);
+    }
+    bool drawable(int64_t timeframeMs) const { return stripPx > 0 && matches(timeframeMs); }
+    double bottomInset(int64_t timeframeMs, double surfaceHeight) const {
+        if (!matches(timeframeMs)) return 0;
+        const double strip = std::clamp(double(stripPx), 0.0, std::max(0.0, surfaceHeight));
+        const double footer = flowFooter && surfaceHeight - strip >= FlowFooterLayout::height ? FlowFooterLayout::height : 0;
+        return strip + footer;
     }
 };
 struct CvdSnapshot {
     CvdSeries series;
+    std::array<FlowFooterTotals, CvdSeries::kCapacity> totals{};
     int64_t timeframeMs = 0;
     CvdReset reset = CvdReset::Visible;
     std::array<char, 80> label{};

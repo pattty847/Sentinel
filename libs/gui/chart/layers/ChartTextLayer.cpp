@@ -3,6 +3,7 @@
 #include "chart/layers/LadderLayer.hpp"
 #include "chart/layers/FootprintCellsLayer.hpp"
 #include "chart/layers/CvdLayer.hpp"
+#include "chart/layers/FlowFooterLayer.hpp"
 #include "chart/layers/RenderSequence.hpp"
 #include "chart/core/ChartFrame.hpp"
 #include "render/FrameProfiler.hpp"
@@ -46,15 +47,30 @@ void ChartTextLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& cont
         [&] { if (axes) axes->submitAxisText(context.text, context.atlas, frame.context.itemBounds.width(),
                                             frame.context.itemBounds.height(), frame.context.rightGutterPx); },
         [&] {
-            heatmap_.submitLabels(frame, context, footprint_.cards());
-            footprint_.submitLabels(frame, context);
+            submitOverlayLabels(frame, context);
             cvd_.submitLabels(frame, context);
+            footer_.submitLabels(frame, context);
             ladder_.submitLabels(frame, context);
         },
         [&](int stage) {
             if (context.profiler && stage < 2)
                 context.profiler->mark(stage == 0 ? FrameProfiler::AxisText : FrameProfiler::Labels);
         });
+}
+
+void ChartTextLayer::submitOverlayLabels(const ChartFrame& frame, LayerNodeContext& context) {
+    const auto cards = footprint_.cards();
+    static_assert(FlowSnapshot::kMaxBars + 1 == std::tuple_size_v<decltype(occlusion_)>);
+    std::copy(cards.begin(), cards.end(), occlusion_.begin());
+    size_t count = cards.size();
+    const double inset = cvd_.bottomInset();
+    if (inset > 0) {
+        auto box = frame.context.surfaceBounds;
+        box.setTop(box.bottom() - inset);
+        occlusion_[count++] = box;
+    }
+    heatmap_.submitLabels(frame, context, {occlusion_.data(), count});
+    footprint_.submitLabels(frame, context, inset);
 }
 
 void ChartTextLayer::buildMsdfAtlas() {

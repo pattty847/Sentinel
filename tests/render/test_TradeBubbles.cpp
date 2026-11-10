@@ -476,3 +476,44 @@ TEST(TradeBubbles, SettingsRoundTripPerChartAndTransientPatchesStayTransient) {
     EXPECT_FALSE(heatmap::applySettingsPatch(invalid,{{"bubblePlacement","unknown"}}).isEmpty());
     EXPECT_EQ(invalid,s);
 }
+
+#include "render/TradeBubbleOverlayItem.hpp"
+#include "chart/feeds/CvdFeed.hpp"
+#include <cstring>
+TEST(TradeBubbles, DockedPaneClipsWithoutChangingMappingOrMeshAndAllocatesNothing) {
+    auto tape = std::make_shared<Tape>();
+    tape->append({1500,105,2,AggressorSide::Buy});
+    trade_bubbles::RenderLink link;
+    link.frame = std::make_shared<RenderFrame>(tape);
+    auto& f = *link.frame;
+    f.mapping = mapping(); f.enabled = true;
+    f.options = {chart::bubbles::Mode::Individual,{0,210},1};
+    f.buy = Qt::green; f.sell = Qt::red;
+    TradeBubbleNode node; link.node = &node;
+    chart::CvdPresentation pane; link.presentation = &pane;
+    pane.dataTimeframeMs = 1000; pane.hasData = true;
+    link.sync();
+    ASSERT_GT(node.usedVertexCount(), 0);
+    const QByteArray before(static_cast<const char*>(node.geometry()->vertexData()), node.usedVertexCount() * 9 * sizeof(float));
+    const auto builds = node.rebuildCount();
+    EXPECT_EQ(node.clipRect(), f.mapping.drawRect);
+    for (const int strip : {0, 60}) {
+        pane.flowFooter = true; pane.stripPx = strip;
+        allocations = 0; countAllocations = true;
+        link.sync(); link.sync();
+        countAllocations = false;
+        EXPECT_EQ(allocations, 0u);
+        EXPECT_EQ(node.rebuildCount(), builds);
+        EXPECT_EQ(node.clipRect().bottom(), f.mapping.drawRect.bottom() - strip - chart::FlowFooterLayout::height);
+        EXPECT_EQ(std::memcmp(before.constData(), node.geometry()->vertexData(), size_t(before.size())), 0);
+        const auto* vertices = static_cast<const float*>(node.geometry()->vertexData());
+        bool covered = false;
+        for (int i = 0; i < node.usedVertexCount(); ++i) {
+            covered |= vertices[i * 9 + 1] > node.clipRect().bottom();
+        }
+        EXPECT_TRUE(covered) << "the fixture must exercise the excluded part of the bubble";
+    }
+    pane.flowFooter = false; pane.stripPx = 0; link.sync();
+    EXPECT_EQ(node.clipRect(), f.mapping.drawRect);
+    EXPECT_EQ(std::memcmp(before.constData(), node.geometry()->vertexData(), size_t(before.size())), 0);
+}

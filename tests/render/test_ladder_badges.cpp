@@ -1086,3 +1086,18 @@ TEST(LadderBadges, TinyRemainderDropsBottomPillsButKeepsFittingRows) {
     ASSERT_EQ(badges.stats().edgePills, 1);
     EXPECT_EQ(badges.pills()[0].arrow, 1);
 }
+
+TEST(LadderBadges, FlowFooterAndCvdUseOneCombinedInset) {
+    BadgeRig rig(camera(100, 180));
+    rig.snapshot(); rig.candidate(S::kAsk, S::kBelow, 90, 10); rig.post();
+    ASSERT_EQ(rig.pills().size(), 1u);
+    const double bottom = rig.pills()[0].rect.bottom();
+    rig.cvd.flowFooter = true; rig.cvdData(); rig.draw();
+    ASSERT_EQ(rig.pills().size(), 1u);
+    EXPECT_EQ(rig.pills()[0].rect.bottom(), bottom - chart::FlowFooterLayout::height);
+    rig.cvd.stripPx = 96; rig.draw();
+    ASSERT_EQ(rig.pills().size(), 1u);
+    EXPECT_EQ(rig.pills()[0].rect.bottom(), bottom - 96 - chart::FlowFooterLayout::height);
+    rig.cvd.flowFooter = false; rig.draw();
+    EXPECT_EQ(rig.pills()[0].rect.bottom(), bottom - 96);
+}

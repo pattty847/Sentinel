@@ -5,6 +5,8 @@ GPU-batched candlestick overlay (demo data only).
 #include "CandlestickOverlayItem.hpp"
 #include "chart/core/FootprintLod.hpp"
 #include "CandlePixelGeometry.hpp"
+#include "ChartPaneClip.hpp"
+#include <QQuickWindow>
 #include "../chart/core/CandleInterval.hpp"
 #include "../datasources/CandleSeriesBuffer.hpp"
 #include "SentinelLogging.hpp"
@@ -18,9 +20,10 @@ GPU-batched candlestick overlay (demo data only).
 
 namespace {
 
-class CandleOverlayNode final : public QSGNode {
+class CandleOverlayNode final : public ChartPaneClip {
 public:
-    CandleOverlayNode() {
+    explicit CandleOverlayNode(std::shared_ptr<ChartPaneClipLink> state) : pane(std::move(state)) {
+        pane->node = this;
         wickNode = new QSGGeometryNode();
         bodyNode = new QSGGeometryNode();
 
@@ -46,6 +49,8 @@ public:
         appendChildNode(bodyNode);
     }
 
+    ~CandleOverlayNode() override { if (pane->node == this) pane->node = nullptr; }
+    std::shared_ptr<ChartPaneClipLink> pane;
     QSGGeometryNode* wickNode = nullptr;
     QSGGeometryNode* bodyNode = nullptr;
     QSGGeometry* wickGeometry = nullptr;
@@ -181,8 +186,23 @@ bool mappingChanged(const TimeAxisMapping& a, const TimeAxisMapping& b) {
 } // namespace
 
 CandlestickOverlayItem::CandlestickOverlayItem(QQuickItem* parent)
-    : QQuickItem(parent) {
+    : QQuickItem(parent), m_pane(std::make_shared<ChartPaneClipLink>()) {
     setFlag(ItemHasContents, true);
+    connect(this, &QQuickItem::windowChanged, this, [this] { connectPaneWindow(); });
+}
+CandlestickOverlayItem::~CandlestickOverlayItem() {
+    // QQuickItem emits windowChanged after the derived members are destroyed.
+    disconnect(this, &QQuickItem::windowChanged, this, nullptr);
+    disconnect(m_paneSync);
+}
+void CandlestickOverlayItem::connectPaneWindow() {
+    disconnect(m_paneSync);
+    const auto* presentation = m_pane->presentation;
+    m_pane = std::make_shared<ChartPaneClipLink>();
+    m_pane->presentation = presentation;
+    update();
+    if (window()) m_paneSync = connect(window(), &QQuickWindow::afterSynchronizing, window(),
+        [pane = m_pane] { pane->sync(); }, Qt::DirectConnection);
 }
 
 QObject* CandlestickOverlayItem::candleBuffer() const {
@@ -221,6 +241,7 @@ void CandlestickOverlayItem::setMappingProvider(QObject* provider) {
     }
     m_mappingProviderObject = provider;
     m_mappingProvider = qobject_cast<ITimeAxisMappingProvider*>(provider);
+    m_pane->presentation = m_mappingProvider ? m_mappingProvider->cvdPresentation() : nullptr;
     m_lastBoundarySequence = std::numeric_limits<qint64>::min();
     if (m_mappingProviderObject) {
         m_mappingDestroyConn = connect(provider, &QObject::destroyed, this,
@@ -357,8 +378,9 @@ void CandlestickOverlayItem::onPanVisualOffsetChanged() {
 
 QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
     auto* root = static_cast<CandleOverlayNode*>(oldNode);
+    if (root && root->pane != m_pane) { delete root; root = nullptr; }
     if (!root) {
-        root = new CandleOverlayNode();
+        root = new CandleOverlayNode(m_pane);
     }
 
     if (!m_mappingProvider || m_timeframeMs <= 0) {
@@ -370,6 +392,8 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     }
 
     const MappingFrameContext frame = m_mappingProvider->currentFrameContext();
+    m_pane->surface = frame.surfaceBounds; m_pane->timeframeMs = frame.activeTimeframeMs;
+    m_pane->sync();
     const TimeAxisMapping mapping = frame.mapping;
     const auto snap = candle_pixels::axisSnap(frame.raster);
     auto* footprint = m_mappingProvider->footprintPresentation();

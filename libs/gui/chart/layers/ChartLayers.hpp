@@ -1,6 +1,7 @@
 #pragma once
 #include "chart/layers/TradeLayers.hpp"
 #include "chart/layers/CvdLayer.hpp"
+#include "chart/layers/FlowFooterLayer.hpp"
 #include "chart/layers/FootprintCellsLayer.hpp"
 #include "chart/layers/HeatmapLayer.hpp"
 #include "chart/layers/ChartTextLayer.hpp"
@@ -12,11 +13,12 @@ struct ChartLayers {
     HeatmapLayer heatmap;
     FootprintCellsLayer footprintCells;
     FootprintLayer footprint{&footprintCells.presentation()};
-    VolumeProfileLayer vp;
-    TpoLayer tpo;
     CvdLayer cvd;
+    VolumeProfileLayer vp{&cvd.presentation()};
+    TpoLayer tpo{&cvd.presentation()};
+    FlowFooterLayer flowFooter{cvd};
     LadderLayer ladder{&cvd.presentation()};
-    ChartTextLayer text{heatmap, ladder, footprintCells, cvd};
+    ChartTextLayer text{heatmap, ladder, footprintCells, cvd, flowFooter};
     LayerRegistry registry;
     BookLadderFeed ladderFeed{ladder.mailbox()};
     FlowFeed flowFeed{footprintCells.mailbox()};

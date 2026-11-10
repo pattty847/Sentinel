@@ -138,7 +138,7 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"candleWickColor", QString::fromStdString(s.candleWickColor)},
         {"candleBodyOpacity", s.candleBodyOpacity},
         {"candleWickWidth", s.candleWickWidth},
-        {"cvdStripPx", s.cvdStripPx}, {"cvdReset", QString::fromStdString(s.cvdReset)},
+        {"flowFooter", s.flowFooter}, {"cvdStripPx", s.cvdStripPx}, {"cvdReset", QString::fromStdString(s.cvdReset)},
         {"cvdStyle", QString::fromStdString(s.cvdStyle)},
         {"footprintSource", QString::fromStdString(s.footprintSource)},
         {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
@@ -212,6 +212,7 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.candleWickColor = merged["candleWickColor"].toString().toStdString();
     out.candleBodyOpacity = merged["candleBodyOpacity"].toDouble();
     out.candleWickWidth = merged["candleWickWidth"].toInt();
+    out.flowFooter = merged["flowFooter"].toBool();
     out.cvdStripPx = int(std::clamp(merged["cvdStripPx"].toDouble(), 0.0, 400.0));
     out.cvdReset = merged["cvdReset"].toString().toStdString();
     out.cvdStyle = merged["cvdStyle"].toString().toStdString();

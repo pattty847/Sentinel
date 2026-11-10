@@ -142,7 +142,7 @@ void HeatmapChartControls::applyLadderSettings() {
     if (!m_renderer) return;
     const auto &s = m_model->settings();
     m_renderer->agentPort().applyFootprintSettings({
-        {"cvdStripPx", s.cvdStripPx}, {"cvdReset", QString::fromStdString(s.cvdReset)},
+        {"flowFooter", s.flowFooter}, {"cvdStripPx", s.cvdStripPx}, {"cvdReset", QString::fromStdString(s.cvdReset)},
         {"cvdStyle", QString::fromStdString(s.cvdStyle)},
         {"footprintSource", QString::fromStdString(s.footprintSource)},
         {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},

@@ -32,6 +32,18 @@ void buildVisible(CvdSnapshot& out, const FlowSeriesBuffer::Series& source, doub
         out.series.pushVisible(it->first, double(bar.delta) / bar.baseScale, from, to);
     }
 }
+void footerTotals(CvdSnapshot& out, const FlowSeriesBuffer::Series& source) {
+    for (int i = 0; i < out.series.count; ++i) {
+        auto& totals = out.totals[size_t(i)];
+        totals = {};
+        const auto it = source.bars.find(out.series.points[size_t(i)].timeMs);
+        if (it == source.bars.end()) continue;
+        const auto& bar = it->second.bar;
+        if (bar.baseScale <= 0 || bar.timeframeMs != out.timeframeMs) continue;
+        totals = {double(bar.delta) / bar.baseScale,
+                  double(bar.sellVol) / bar.baseScale + double(bar.buyVol) / bar.baseScale, true};
+    }
+}
 void baselineLabel(CvdSnapshot& out) {
     const char* label = out.reset == CvdReset::Visible ? "CVD since view start" :
         out.reset == CvdReset::UtcDay ? "CVD since UTC day" : "CVD since TPO session";
@@ -71,6 +83,7 @@ void CvdFeed::bind(ChartViewController& view, const PublishedFrame& published,
               [&tpo] { return tpo.tpoSessionType(); }, [&visibility] { if (visibility.requestUpdate) visibility.requestUpdate(); }};
     const auto apply = [this, &visibility] {
         presentation_.stripPx = visibility.cvdStripPx();
+        presentation_.flowFooter = visibility.flowFooter();
         presentation_.reset = visibility.cvdResetRule();
         presentation_.area = visibility.cvdStyle() == "area";
         onFrameChanged();
@@ -98,7 +111,7 @@ void CvdFeed::selectSymbol() {
 }
 void CvdFeed::onFrameChanged() {
     selectSymbol();
-    if (!presentation_.stripPx) { timer_.stop(); return; }
+    if (!presentation_.stripPx && !presentation_.flowFooter) { timer_.stop(); return; }
     if (!timer_.isActive()) timer_.start(67);
 }
 void CvdFeed::receive(SentinelStreamClient::FlowBatchPtr batch) {
@@ -108,7 +121,7 @@ void CvdFeed::receive(SentinelStreamClient::FlowBatchPtr batch) {
     onFrameChanged();
 }
 int64_t CvdFeed::historyAnchor(int64_t start, int64_t timeframe) const {
-    return cvdHistoryAnchor(start, timeframe, presentation_.stripPx, presentation_.reset,
+    return cvdHistoryAnchor(start, timeframe, presentation_.stripPx || presentation_.flowFooter, presentation_.reset,
                             ports_.sessionType ? ports_.sessionType() : 4);
 }
 void CvdFeed::build(CvdSnapshot& out, const FlowSeriesBuffer::Series& source,
@@ -118,6 +131,7 @@ void CvdFeed::build(CvdSnapshot& out, const FlowSeriesBuffer::Series& source,
     if (!cam.valid || out.timeframeMs <= 0) return;
     if (reset == CvdReset::Visible) {
         buildVisible(out, source, cam.drawnStartMs, cam.drawnEndMs);
+        footerTotals(out, source);
         baselineLabel(out);
         return;
     }
@@ -130,6 +144,7 @@ void CvdFeed::build(CvdSnapshot& out, const FlowSeriesBuffer::Series& source,
         const bool visible = double(time) < cam.drawnEndMs && double(time) + out.timeframeMs > cam.drawnStartMs;
         out.series.push(time, double(bar.delta) / bar.baseScale, boundary, visible, from);
     }
+    footerTotals(out, source);
     baselineLabel(out);
 }
 void CvdFeed::publish() {
@@ -138,7 +153,7 @@ void CvdFeed::publish() {
     out.series.clear(); out.reset = presentation_.reset;
     const auto frame = ports_.frame ? ports_.frame() : MappingFrameContext{};
     out.timeframeMs = frame.activeTimeframeMs > 0 ? std::max<int64_t>(1000, frame.activeTimeframeMs) : 0;
-    if (presentation_.stripPx) {
+    if (presentation_.stripPx || presentation_.flowFooter) {
         const auto* series = buffer_.series(symbol_, out.timeframeMs);
         if (series) build(out, *series, frame, presentation_.reset, ports_.sessionType ? ports_.sessionType() : 4);
     }

@@ -113,9 +113,10 @@ in `GET /api/v1/state` under `layers`. QML exposes them on
 | `footprintCandle` | `spine` (default), `full` | Footprint → Candle |
 | `footprintNumbers` | boolean, true | Footprint → Show numbers |
 | `footprintDustNotional` | finite nonnegative quote amount, 2500 | Footprint → Dust threshold (quote currency) |
-| `cvdStripPx` | integer 0..400, 0 | CVD → Strip height |
-| `cvdReset` | `visible` (default), `utcDay`, `tpoSession` | CVD → Reset |
-| `cvdStyle` | `line` (default), `area` | CVD → Style |
+| `flowFooter` | boolean, false | Order flow → Show flow footer |
+| `cvdStripPx` | integer 0..400, 0 | Order flow → Strip height |
+| `cvdReset` | `visible` (default), `utcDay`, `tpoSession` | Order flow → Reset |
+| `cvdStyle` | `line` (default), `area` | Order flow → Style |
 
 `footprint:true` shows the selected source. `q16` preserves the default picture.
 The cells feed runs only when footprint is visible and source is `cells`.
@@ -155,6 +156,7 @@ curl -s -H 'Content-Type: application/json' -d '{"footprint":true,"footprintSour
 
 | Key / QML property on `layers` | Values | Default |
 | --- | --- | --- |
+| `flowFooter` | Boolean; per-bar DELTA / CUM / VOL footer | `false` |
 | `cvdStripPx` | Integer logical px, clamped to 0..400 by API and QML setters; 0 disables. Drawing also clamps to surface height. | `0` |
 | `cvdReset` | `visible`, `utcDay`, `tpoSession` | `visible` |
 | `cvdStyle` | `line`, `area` | `line` |
@@ -176,14 +178,14 @@ replace the forming bar's previous value.
 `utcDay` and `tpoSession` sum loaded bars from their reset boundary, including bars
 outside the viewport. `tpoSession` uses the configured `tpo.tpoSessionType` and
 resets at its session open; accumulation continues until the next open, including
-outside session hours. Only these two modes, while the strip is enabled, extend
+outside session hours. Only these two modes, while the strip or footer is enabled, extend
 flow requests and retention to the earliest visible flow bar's reset boundary,
 within the existing 8,192-bar limit. Panning or zooming inside a fully loaded reset
 period preserves its baseline. Until history reaches the boundary, or when the
 cap excludes it, the label says “CVD since HH:MM loaded” (with a UTC date across
 days). Complete coverage of earlier empty buckets counts as loaded. Each visible
 reset period tracks its own loaded start; any truncated period makes the label explicit.
-A disabled strip or `visible` mode keeps the usual viewport history window.
+With both strip and footer disabled, or in `visible` mode, CVD keeps the usual viewport history window.
 
 The removed `none` value is rejected by both API routes; QML writes leave the
 current value unchanged. A persisted `none` is normalized to `visible` on load,
@@ -193,8 +195,19 @@ The semi-opaque strip overlays the bottom of the chart surface, leaving price ma
 unchanged and excluding the time axis, price axis and ladder gutters. `area` fills to
 zero in green above and red below; `line` draws the cumulative curve. Min/max and reset
 labels use 13 px MSDF text within the strip, with labels omitted where the strip is too small to fit.
-Ladder bottom edge pills and row badges stay above the strip when it has drawable data
-for the current timeframe. With no drawable CVD data, ladder badges keep their full height.
+The optional footer uses three 13 px rows (55 px including padding), docked above the
+strip or at the surface bottom when the strip is off. DELTA uses signed flow-bar
+delta with an explicit positive `+` (magnitudes below .01 show `0` without a pill),
+a CVD-green/red pill scaled to visible maximum
+absolute delta; CUM reads the exact CVD value and reset anchor; VOL uses unsigned
+flow-bar volume. No flow bar means no values. The atlas keeps ASCII row labels
+DELTA / CUM / VOL. Narrow bars show every k-th absolute bar index. The stride uses the widest possible
+formatted value at the current atlas size, so panning, re-anchoring and live magnitude
+changes preserve its phase. The footer hides when the remaining surface
+is shorter than its three rows.
+Ladder bottom edge pills and row badges stay above the combined footer and strip
+when matching flow data is available for the current timeframe. Candles, trade bubbles,
+and TPO/VP subtrees are clipped above the same pane; price mapping stays unchanged. With no drawable CVD data, ladder badges keep their full height.
 Missing flow data draws nothing. No default or golden scene changes until enabled.
 
 On an isolated lab at port 17116 (each command is process-only):

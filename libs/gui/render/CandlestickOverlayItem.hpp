@@ -9,6 +9,7 @@ Threading: Update on GUI thread; rendering on render thread.
 #include <QPointer>
 #include <QColor>
 #include <vector>
+#include <memory>
 #include <cstdint>
 #include <limits>
 #include <QtQml/qqmlregistration.h>
@@ -17,6 +18,7 @@ Threading: Update on GUI thread; rendering on render thread.
 #include "../datasources/CandleSeriesBuffer.hpp"
 
 
+struct ChartPaneClipLink;
 struct CandleOverlayBar {
     qint64 timeStartMs = 0;
     qint64 timeEndMs = 0;
@@ -45,6 +47,7 @@ class CandlestickOverlayItem : public QQuickItem {
 
 public:
     explicit CandlestickOverlayItem(QQuickItem* parent = nullptr);
+    ~CandlestickOverlayItem() override;
 
     QObject* candleBuffer() const;
     void setCandleBuffer(QObject* buffer);
@@ -83,6 +86,9 @@ private slots:
     void onPanVisualOffsetChanged();
 
 private:
+    void connectPaneWindow();
+    std::shared_ptr<ChartPaneClipLink> m_pane;
+    QMetaObject::Connection m_paneSync;
     void connectCandleSignals();
     void disconnectCandleSignals();
     void markGeometryDirty();
