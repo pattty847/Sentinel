@@ -393,7 +393,7 @@ TEST(LadderBadges, ACappedCaptureDrawsOnlyKnownRowsAndNoUnobservedAges) {
         feed.setPorts({[&] { MappingFrameContext f; f.raster = rig.cam; return f; }, {}, {}, {}, {}});
         feed.setEnabled(true);
         feed.setRadar(true, 4);
-        feed.setScanBudget(mode == 1 ? 2 : chart::BookLadderFeed::kMaxScanWords,
+        feed.setScanBudget(mode == 1 ? 1 : chart::BookLadderFeed::kMaxScanWords,
                           mode == 0 ? 12 : chart::BookLadderFeed::kMaxLevels);
         LiveOrderBook book("TEST");
         book.initialize(mode == 2 ? 100 : 0, mode == 0 ? 400 : mode == 1 ? 191 : 139, 1);
