@@ -479,23 +479,36 @@ const FlowSeriesBuffer::Series& widestSeries() {
         sentinel::flow::FlowBar bar;
         bar.timeframeMs = 60000; bar.nativeTick = 1; bar.baseScale = 1; bar.lowRow = 100;
         for (int i = 0; i < 200; ++i) bar.rows.push_back({int16_t(i * 14), 10 + i, 100 + i});
-        for (int i = -100; i < chart::kFootprintMaxDevicePx + 100; ++i) {
+        for (int i = -100; i < heatmap::kMaxChartSurfaceDevicePx + 100; ++i) {
             auto& slot = out.bars[int64_t(i) * 60000].bar; slot = bar; slot.startMs = int64_t(i) * 60000;
         }
         return out;
     }();
     return series;
 }
-MappingFrameContext widestFrame(double shiftColumns) {
+// Fully zoomed out on a surface of widthDev device px: the shared clamp sets the span.
+MappingFrameContext widestFrame(double shiftColumns, int widthDev = heatmap::kMaxChartSurfaceDevicePx) {
     auto frame = footprintFrame();
     frame.activeTimeframeMs = 60000;
     auto& r = frame.raster;
-    r.tfMs = 60000; r.colPxF = 1; r.colPx = 1; r.rowPxF = 1; r.rowPx = 1; r.dpr = 1;
-    r.widthDev = chart::kFootprintMaxDevicePx; r.heightDev = 2880;
-    r.drawnStartMs = shiftColumns * 60000; r.drawnEndMs = r.drawnStartMs + r.widthDev * 60000.0;
+    const double span = heatmap::maxTimeSpanMs(widthDev, 60000);
+    r.tfMs = 60000; r.colPxF = widthDev * 60000.0 / span; r.colPx = 1; r.rowPxF = 1; r.rowPx = 1; r.dpr = 1;
+    r.widthDev = widthDev; r.heightDev = 2880;
+    r.drawnStartMs = shiftColumns * 60000; r.drawnEndMs = r.drawnStartMs + span;
     r.drawnMinPrice = shiftColumns * .37; r.drawnMaxPrice = r.drawnMinPrice + 2880;
-    r.leftF = shiftColumns;
+    r.leftF = shiftColumns * r.colPxF;
     return frame;
+}
+// The same bars through the real retention path (history page, then eviction).
+FlowSeriesBuffer retainedWidest() {
+    FlowSeriesBuffer buffer;
+    FlowSeriesBuffer::Batch batch;
+    batch.symbol = "BTC-USD"; batch.timeframeMs = 60000; batch.history = true;
+    for (const auto& [start, record] : widestSeries().bars) {
+        auto& next = batch.bars.emplace_back(record); next.complete = true; next.source = SentinelStreamClient::FlowSource::Store;
+    }
+    buffer.apply(batch, 0);
+    return buffer;
 }
 TEST(FootprintBands, WidestOneMinuteViewKeepsEveryVisibleBarWithinTheCellBudget) {
     ASSERT_EQ(chart::footprintLod(.5, 1), chart::FootprintStage::Strip) << "1 device px at dpr 2";
@@ -510,7 +523,7 @@ TEST(FootprintBands, WidestOneMinuteViewKeepsEveryVisibleBarWithinTheCellBudget)
     std::printf("footprint bin at the widest 1m view: %d bars, %d cells, k=%lld, %.2f ms\n",
                 out->barCount, out->cellCount, (long long)out->bandRows, best);
     RecordProperty("bin_ms", std::to_string(best));
-    EXPECT_EQ(visibleBars60(*out, frame), chart::kFootprintMaxDevicePx);
+    EXPECT_EQ(visibleBars60(*out, frame), heatmap::kMaxChartSurfaceDevicePx);
     EXPECT_EQ(out->truncatedBars, 0);
     EXPECT_EQ(out->bandRows, 481) << "8193 bars x 2881 rows fit 65536 cells at 481 rows per band";
     EXPECT_LE(out->cellCount, chart::FlowSnapshot::kMaxCells);
@@ -527,9 +540,39 @@ TEST(FootprintBands, PanAtOneDevicePixelColumnsKeepsEveryVisibleBarAndTheBandFac
         EXPECT_LE(out->cellCount, chart::FlowSnapshot::kMaxCells);
     }
 }
+TEST(FootprintBands, RetainedHistoryKeepsEveryVisibleBarOfTheWidestViewAcrossFractionalPans) {
+    const auto buffer = retainedWidest();
+    const auto* series = buffer.series(60000);
+    ASSERT_NE(series, nullptr);
+    EXPECT_EQ(series->bars.size(), FlowSeriesBuffer::kMaxBuckets);
+    const int64_t newest = series->bars.rbegin()->first / 60000;
+    auto out = std::make_unique<chart::FlowSnapshot>();
+    // Views ending at the newest bar, the first two touching 8193 bars (a partial edge each side).
+    for (double fraction : {.5, .25, 0.}) {
+        const auto frame = widestFrame(double(newest + 1 - heatmap::kMaxChartSurfaceDevicePx) - fraction);
+        const auto& r = frame.raster;
+        ASSERT_TRUE(chart::FlowFeed::bin(*out, *series, frame, chart::FootprintStage::Strip, 0));
+        const int expected = int(std::ceil(r.drawnEndMs / 60000) - std::floor(r.drawnStartMs / 60000));
+        EXPECT_EQ(visibleBars60(*out, frame), expected) << fraction;
+        EXPECT_EQ(out->truncatedBars, 0) << fraction;
+    }
+}
+TEST(FootprintBands, SurfaceWiderThanTheMaximumClampsZoomOutAndKeepsEveryVisibleBar) {
+    EXPECT_DOUBLE_EQ(heatmap::maxTimeSpanMs(10000, 60000), heatmap::kMaxChartSurfaceDevicePx * 60000.0);
+    const auto buffer = retainedWidest();
+    const auto* series = buffer.series(60000);
+    const int64_t newest = series->bars.rbegin()->first / 60000;
+    auto out = std::make_unique<chart::FlowSnapshot>();
+    const auto frame = widestFrame(double(newest + 1 - heatmap::kMaxChartSurfaceDevicePx) - .5, 10000);
+    EXPECT_NEAR(frame.raster.colPxF, 10000.0 / 8192, 1e-12) << "columns stay wider than one device px";
+    ASSERT_TRUE(chart::FlowFeed::bin(*out, *series, frame, chart::FootprintStage::Strip, 0));
+    EXPECT_EQ(visibleBars60(*out, frame), heatmap::kMaxChartSurfaceDevicePx + 1);
+    EXPECT_EQ(out->truncatedBars, 0);
+    EXPECT_LE(out->cellCount, chart::FlowSnapshot::kMaxCells);
+}
 TEST(FootprintBands, BarCapIsTheSharedZoomOutOnTheWidestSurface) {
     for (int64_t tf : {int64_t(1000), int64_t(60000), int64_t(300000), int64_t(3600000), int64_t(86400000)})
-        EXPECT_EQ(int64_t(heatmap::maxTimeSpanMs(chart::kFootprintMaxDevicePx, tf)) / tf + 2,
+        EXPECT_EQ(int64_t(heatmap::maxTimeSpanMs(heatmap::kMaxChartSurfaceDevicePx, tf)) / tf + 2,
                   chart::FlowSnapshot::kMaxBars) << tf;
 }
 TEST(FootprintBands, OneDevicePixelColumnsTileWithoutOverlap) {

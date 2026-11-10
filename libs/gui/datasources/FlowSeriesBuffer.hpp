@@ -1,4 +1,5 @@
 #pragma once
+#include "../../core/heatmap/ChartSurface.hpp"
 #include "../../core/protocol/SentinelStreamClient.hpp"
 #include <map>
 
@@ -12,7 +13,8 @@ public:
     enum class Merge { Drop, Replace };
     static Merge merge(const Record* held, const Record& incoming, int64_t sealedThroughMs);
     static constexpr int64_t kRefetchIntervalMs = 30'000;
-    static constexpr size_t kMaxBuckets = 8192;
+    // Every bar of the widest allowed view (retention and backfill share it).
+    static constexpr size_t kMaxBuckets = heatmap::kMaxChartSurfaceBars;
     struct Series {
         std::map<int64_t, Record> bars;
         std::map<int64_t, Range> coverage;

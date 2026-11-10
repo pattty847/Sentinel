@@ -634,7 +634,7 @@ TEST_F(FlowDataSourceTest, CvdSecondBarsRespectCapAndLabelActualLoadedTime) {
     EXPECT_EQ(flowStart(), expected);
     load(cvdHistory(tf, 15 * hour));
     const auto* series = source.flowBuffer().series(tf);
-    ASSERT_EQ(series->bars.size(), 8192u); EXPECT_EQ(series->bars.begin()->first, expected);
+    ASSERT_EQ(series->bars.size(), FlowSeriesBuffer::kMaxBuckets); EXPECT_EQ(series->bars.begin()->first, expected);
     chart::CvdSnapshot snapshot;
     chart::CvdFeed::build(snapshot, *series, cvdFrame(tf, 12 * hour, 15 * hour), chart::CvdReset::UtcDay, 4);
     EXPECT_STREQ(snapshot.label.data(), "CVD since 12:43 loaded");

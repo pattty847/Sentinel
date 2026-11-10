@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cmath>
 #include "FlowNumberFormat.hpp"
+#include "../../../core/heatmap/ChartSurface.hpp"
 
 namespace chart {
 enum class FootprintStage { Hidden, Strip, Cells, Numbers };
@@ -24,11 +25,9 @@ inline constexpr double kFootprintCellsColumn = 24;
 inline constexpr double kFootprintStageHysteresis = 2;
 // Minimum logical height of one drawn band; thinner rows merge into bands.
 inline constexpr double kFootprintBandMinRow = 6;
-// The chart's shared time zoom-out (heatmap::maxTimeSpanMs: one column per device px,
-// every timeframe) on the widest supported surface, 8192 device px: 8192 columns plus
-// two partial edges. A wider surface keeps the newest bars and trims the far past.
-inline constexpr int kFootprintMaxDevicePx = 8192;
-inline constexpr int kFootprintMaxBars = kFootprintMaxDevicePx + 2;
+// Every bar of the chart's widest allowed view (heatmap::maxTimeSpanMs on
+// heatmap::kMaxChartSurfaceDevicePx columns, partial edges included).
+inline constexpr int kFootprintMaxBars = heatmap::kMaxChartSurfaceBars;
 // Rows merge into bands, so stages depend on the column width only.
 inline FootprintStage footprintLod(double column, double row, FootprintStage previous = FootprintStage::Hidden) {
     if (!std::isfinite(column) || !std::isfinite(row) || column <= 0 || row <= 0) return FootprintStage::Hidden;

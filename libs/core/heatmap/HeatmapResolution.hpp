@@ -8,6 +8,7 @@
 //   the data in view. All tick arithmetic is in integer price units
 //   (price * priceScale), as recording::ladderTickUnits.
 // Pure functions and value types; any thread.
+#include "ChartSurface.hpp"
 #include "SparseColumns.hpp"
 #include "../servermodel/PriceLadder.hpp"
 #include <algorithm>
@@ -143,9 +144,11 @@ inline std::vector<int64_t> manualPresetUnits(const std::vector<int64_t> &gridCo
 }
 
 // ------------------------------------------------------------------ clamps
-// Time zoom-out stops at one column per physical pixel (spec rule 1).
+// Time zoom-out stops at one column per physical pixel (spec rule 1), on at most
+// kMaxChartSurfaceDevicePx columns: a wider surface keeps wider columns.
 inline double maxTimeSpanMs(double widthPx, int64_t tfMs) {
-    return std::isfinite(widthPx) && widthPx > 0 && tfMs > 0 ? widthPx * double(tfMs) : 0;
+    return std::isfinite(widthPx) && widthPx > 0 && tfMs > 0
+        ? std::min(widthPx, double(kMaxChartSurfaceDevicePx)) * double(tfMs) : 0;
 }
 // Manual price zoom-out stops at one row per physical pixel (spec rule 2).
 inline double maxManualPriceSpan(double heightPx, double tick) {
