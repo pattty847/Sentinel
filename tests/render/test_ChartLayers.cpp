@@ -1,4 +1,5 @@
 #include "chart/layers/ChartLayers.hpp"
+#include "themes/ThemePalette.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "chart/feeds/TradeOverlaySequence.hpp"
 #include <gtest/gtest.h>
@@ -880,5 +881,102 @@ TEST(FlowFooter, FooterOnlyPublishesRetainedFlowWithTheSelectedCvdAnchor) {
         EXPECT_EQ(data.series.points[0].value, reset == chart::CvdReset::Visible ? 0 : 4);
         EXPECT_EQ(data.totals[0].delta, 2); EXPECT_EQ(data.totals[0].volume, 4);
         EXPECT_FALSE(cvd.drawing());
+    }
+}
+
+TEST(FlowFooter, PanAndMagnitudeChangesKeepTheSameAbsoluteColumnPhase) {
+    QTemporaryDir cache;
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error));
+    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
+    ChartTextAtlas atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 64; params.charset = " 0123456789.+-<>kMBDELTACUMVO";
+    ASSERT_TRUE(atlas.build(params));
+    chart::CvdLayer cvd; chart::FlowFooterLayer footer(cvd);
+    cvd.presentation().flowFooter = true;
+    auto source = footprintSeries();
+    for (int i = 0; i <= 12; ++i) {
+        auto& bar = source.bars[i * 1000].bar;
+        bar.startMs = i * 1000; bar.timeframeMs = 1000; bar.baseScale = 100;
+        bar.sellVol = 0; bar.buyVol = bar.delta = i == 12 ? 1000000000000000LL : 1;
+    }
+    auto frame = footprintChartFrame(); frame.context.surfaceBounds = {0, 0, 600, 180};
+    frame.context.raster.colPxF = 50; frame.context.raster.drawnEndMs = 12000;
+    ChartTextRenderer text;
+    chart::LayerNodeContext context{nullptr, nullptr, text, atlas, true};
+    std::unique_ptr<QSGNode> root;
+    std::vector<int64_t> previous;
+    for (int pan : {0, 1, 0}) {
+        frame.context.raster.leftF = pan * 50;
+        frame.context.raster.drawnStartMs = pan * 1000;
+        frame.context.raster.drawnEndMs = (pan + 12) * 1000;
+        auto feedFrame = footprintFrame(); feedFrame.raster = frame.context.raster;
+        chart::CvdFeed::build(cvd.mailbox().back(), source, feedFrame, chart::CvdReset::Visible, 4);
+        cvd.mailbox().post(); cvd.sync(frame); footer.sync(frame);
+        if (!root) root.reset(footer.createContainer());
+        context.root = root.get(); footer.updateNodes(frame, context);
+        EXPECT_EQ(footer.columnStride(), 2);
+        std::vector<int64_t> columns;
+        auto* geometry = static_cast<QSGGeometryNode*>(root->firstChild())->geometry();
+        const auto* vertices = geometry->vertexDataAsColoredPoint2D();
+        for (int i = 0; i < footer.columnCount(); ++i) {
+            const auto& centre = vertices[6 + i * 36];
+            columns.push_back(int64_t(std::llround((centre.x + pan * 50 - 25) / 50)));
+            const auto positive = theme::positive();
+            EXPECT_EQ(centre.r, positive.red() * centre.a / 255);
+            EXPECT_EQ(centre.g, positive.green() * centre.a / 255);
+            EXPECT_EQ(centre.b, positive.blue() * centre.a / 255);
+        }
+        ASSERT_FALSE(columns.empty());
+        for (int64_t index : {4, 6, 8, 10}) EXPECT_EQ(std::count(columns.begin(), columns.end(), index), 1);
+        for (const auto index : columns) EXPECT_EQ(index % 2, 0);
+        if (pan == 0 && previous.empty()) previous = columns;
+        else {
+            for (int64_t index : {4, 6, 8, 10})
+                EXPECT_EQ(std::count(previous.begin(), previous.end(), index), std::count(columns.begin(), columns.end(), index));
+        }
+    }
+    for (auto& [time, record] : source.bars) { record.bar.delta = 1; record.bar.baseScale = 1000; }
+    auto feedFrame = footprintFrame(); feedFrame.raster = frame.context.raster;
+    chart::CvdFeed::build(cvd.mailbox().back(), source, feedFrame, chart::CvdReset::Visible, 4);
+    cvd.mailbox().post(); cvd.sync(frame); footer.sync(frame); footer.updateNodes(frame, context);
+    auto* geometry = static_cast<QSGGeometryNode*>(root->firstChild())->geometry();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    EXPECT_EQ(geometry->vertexCount(), 6) << "subcent deltas must not draw pills";
+#else
+    const auto* vertices = geometry->vertexDataAsColoredPoint2D();
+    for (int i = 6; i < geometry->vertexCount(); ++i) EXPECT_EQ(vertices[i].a, 0);
+#endif
+}
+
+TEST(FlowFooter, TpoAndVpSubtreesRespectTheCombinedPaneWithoutAllocating) {
+    chart::CvdPresentation presentation;
+    chart::VolumeProfileLayer vp(&presentation); chart::TpoLayer tpo(&presentation);
+    auto frame = footprintChartFrame();
+    ChartTextRenderer text; ChartTextAtlas atlas;
+    for (chart::PaneChartLayer* layer : {static_cast<chart::PaneChartLayer*>(&vp), static_cast<chart::PaneChartLayer*>(&tpo)}) {
+        presentation.stripPx = 0; presentation.flowFooter = false;
+        std::unique_ptr<QSGNode> root(layer->createContainer());
+        auto* label = new QSGNode; root->appendChildNode(label);
+        chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
+        layer->sync(frame); layer->updateNodes(frame, context);
+        EXPECT_EQ(label->parent(), root.get());
+        presentation.hasData = true; presentation.dataTimeframeMs = 1000;
+        for (const auto strip : {0, 60}) {
+            presentation.flowFooter = true; presentation.stripPx = strip;
+            footprintAllocations = 0; footprintCounting = true;
+            layer->sync(frame); layer->updateNodes(frame, context);
+            footprintCounting = false;
+            EXPECT_EQ(footprintAllocations.load(), 0u);
+            ASSERT_EQ(root->firstChild()->type(), QSGNode::ClipNodeType);
+            auto* clip = static_cast<QSGClipNode*>(root->firstChild());
+            EXPECT_EQ(label->parent(), clip);
+            EXPECT_EQ(clip->clipRect().bottom(), frame.context.surfaceBounds.bottom() - strip - chart::FlowFooterLayout::height);
+        }
+        presentation.flowFooter = false; presentation.stripPx = 0;
+        layer->sync(frame); layer->updateNodes(frame, context);
+        EXPECT_EQ(label->parent(), root.get());
     }
 }

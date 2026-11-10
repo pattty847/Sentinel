@@ -35,9 +35,22 @@ struct FlowFooterLayout {
         return index % k == 0;
     }
 };
+// Bounds all formatter forms: three significant digits, decimal/suffix,
+// the >999B cap, and the unsigned <.01 sentinel. Independent of live data.
+template<class Advance>
+double footerLabelWidth(Advance advance) {
+    double digit = 0;
+    for (char c = '0'; c <= '9'; ++c) digit = std::max(digit, advance(c));
+    const double suffix = std::max({advance('k'), advance('M'), advance('B')});
+    const double magnitude = std::max({3 * digit + advance('.'), 3 * digit + suffix + advance('.'),
+                                      advance('>') + 3 * digit + advance('B')});
+    const double signedWidth = magnitude + std::max(advance('+'), advance('-'));
+    return std::max(signedWidth, advance('<') + advance('.') + advance('0') + advance('1'));
+}
+inline bool footerPill(double delta) { return std::isfinite(delta) && std::abs(delta) >= .01; }
 inline int footerNumber(double value, char (&out)[24], bool signedValue) {
     const int size = flowNumber(value, out, signedValue ? FlowNumberContext::SignedLabel : FlowNumberContext::Footprint);
-    if (signedValue && value > 0 && size) {
+    if (signedValue && value >= .01 && size) {
         std::move_backward(out, out + size + 1, out + size + 2);
         out[0] = '+';
         return size + 1;

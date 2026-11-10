@@ -38,3 +38,21 @@ TEST(FlowFooterPolicy, ThreeRowsStayAboveStripAndTooSmallSurfacesSuppressFooter)
     }
     EXPECT_FALSE(FlowFooterLayout::place(10, 110, 96).fits);
 }
+
+TEST(FlowFooterPolicy, SubcentDeltasAreUnsignedZeroWithoutAPill) {
+    for (double delta : {-.009, 0., .009}) {
+        char value[24]; footerNumber(delta, value, true);
+        EXPECT_STREQ(value, "0"); EXPECT_FALSE(footerPill(delta));
+    }
+    EXPECT_TRUE(footerPill(.01)); EXPECT_TRUE(footerPill(-.01));
+}
+TEST(FlowFooterPolicy, WidthBoundCoversFormatterTransitionsIndependentlyOfValues) {
+    const auto width = footerLabelWidth([](char) { return 8.; });
+    EXPECT_EQ(width, 48);
+    for (double value : {0., .001, .01, 9.99, 99.9, 999., 1000., 99999., 1e12, -1e12}) {
+        for (bool signedValue : {false, true}) {
+            char text[24]; const int count = footerNumber(value, text, signedValue);
+            EXPECT_LE(count * 8., width);
+        }
+    }
+}

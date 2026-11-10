@@ -16,6 +16,7 @@ public:
     bool drawing() const { return drawing_; }
     QRectF bounds() const { return bounds_; }
     double bottomInset() const { return bottomInset_; }
+    int64_t columnStride() const { return stride_; }
     int columnCount() const { return columns_; }
     const auto& glyphs() const { return glyphs_; }
 private:
@@ -33,7 +34,11 @@ private:
     double measure(const char*, const ChartTextAtlas&) const;
     void text(const char*, const QRectF&, const ChartTextAtlas&);
     void drawColumns(const ChartFrame&, const ChartTextAtlas&, Vertex*&);
-    double widest(const ChartTextAtlas&) const;
+    void measureAtlas(const ChartTextAtlas&);
+    qint64 measuredAtlas_ = 0;
+    int measuredFontPx_ = 0;
+    double labelWidth_ = 0, rowLabelWidth_ = 0;
+    int64_t stride_ = 1;
     void column(int index, double x, double width, const ChartTextAtlas&, Vertex*&);
     const CvdLayer& cvd_;
     CvdPresentation captured_;

@@ -33,11 +33,12 @@ struct MappingFrameContext {
     chart_raster::RasterCamera raster;
 };
 
-namespace chart { struct FootprintPresentation; }
+namespace chart { struct FootprintPresentation; struct CvdPresentation; }
 class ITimeAxisMappingProvider {
 public:
     virtual ~ITimeAxisMappingProvider() = default;
     virtual chart::FootprintPresentation* footprintPresentation() { return nullptr; }
+    virtual const chart::CvdPresentation* cvdPresentation() const { return nullptr; }
     virtual QObject* footprintNotifications() { return nullptr; }
     virtual QObject* viewNotifications() = 0;
     virtual MappingFrameContext currentFrameContext() const = 0;

@@ -3,6 +3,7 @@
 #include "chart/feeds/TradeBubbleFeed.hpp"
 #include <QQuickWindow>
 #include <QTimer>
+#include "chart/feeds/CvdFeed.hpp"
 
 namespace {
 class OverlayRoot final : public QSGNode {
@@ -26,6 +27,8 @@ void trade_bubbles::RenderLink::sync() {
         syncedRevision = providerRevision;
     }
     if (frame) {
+        node->setBottomInset(presentation && frame->mapping.valid ?
+            presentation->bottomInset(int64_t(frame->mapping.appendMs), frame->mapping.drawRect.height()) : 0);
         node->sync(*frame->tape, frame->mapping, frame->enabled, frame->options, frame->buy, frame->sell);
     } else {
         // Clearing a provider also clears its old mesh; no QObject is accessed here.
@@ -42,6 +45,8 @@ void TradeBubbleOverlayItem::setRenderer(QObject* renderer) {
     disconnect(m_destroyConnection);
     m_renderer = renderer;
     auto* chart = dynamic_cast<chart::ITradeBubbleFrameSource*>(renderer);
+    const auto* mapping = dynamic_cast<ITimeAxisMappingProvider*>(renderer);
+    m_link->presentation = mapping ? mapping->cvdPresentation() : nullptr;
     m_link->frame = chart ? chart->tradeBubbleRenderFrame() : nullptr;
     ++m_link->providerRevision;
     if (renderer) m_destroyConnection = connect(renderer, &QObject::destroyed, this, [this] { setRenderer(nullptr); });
@@ -53,8 +58,10 @@ void TradeBubbleOverlayItem::connectWindow() {
     // A moved item can leave a root awaiting deletion in another render thread.
     // Give each window its own node link; old roots retain only the old link.
     auto frame = m_link->frame;
+    auto* presentation = m_link->presentation;
     m_link = std::make_shared<trade_bubbles::RenderLink>();
     m_link->frame = std::move(frame);
+    m_link->presentation = presentation;
     update();
     if (!window()) return;
     // afterSynchronizing runs on the render thread while the GUI is blocked,

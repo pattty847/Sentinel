@@ -21,6 +21,7 @@ public:
     bool drawing() const { return drawing_; }
     int vertexCount() const { return vertices_; }
     const CvdSnapshot& current() const { return *current_; }
+    double bottomInset() const { return bottomInset_; }
     QRectF strip() const { return strip_; }
 private:
     struct Key {
@@ -37,6 +38,7 @@ private:
     QSGOpacityNode* gate_ = nullptr;
     QSGGeometryNode* node_ = nullptr;
     QRectF strip_;
+    double bottomInset_ = 0;
     CvdScale scale_;
     bool drawing_ = false, reserved_ = false, dirty_ = true;
     Key key_;

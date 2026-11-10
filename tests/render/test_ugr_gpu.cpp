@@ -5600,3 +5600,61 @@ int main(int argc, char **argv) {
     configureFixture();
     return RUN_ALL_TESTS();
 }
+
+#include "render/ChartPaneClip.hpp"
+TEST(UgrCandleCpu, DockedPaneClipsEveryStyleWithoutChangingGeometryOrPriceMapping) {
+    class Provider : public CandleTickFrameProvider {
+    public:
+        chart::CvdPresentation pane;
+        const chart::CvdPresentation* cvdPresentation() const override { return &pane; }
+    } provider;
+    auto& frame = provider.frame;
+    frame.activeTimeframeMs = 1000; frame.viewportValid = true;
+    frame.viewportTimeStart = 1000; frame.viewportTimeEnd = 4000;
+    frame.currentBoundaryStartMs = 4000; frame.surfaceDpr = 1;
+    frame.surfaceBounds = {0, 0, 300, 180};
+    frame.raster = chart_raster::computeRaster({1000, 4000, 95, 105, {}, 1000, 1, 300, 180, 1}, {});
+    frame.mapping = chart_raster::toMapping(frame.raster);
+    provider.pane.hasData = true; provider.pane.dataTimeframeMs = 1000;
+    CandleSeriesBuffer buffer;
+    buffer.applyHistory("BTC-USD", 1000, {{1000, 2000, 96, 103, 95, 97, 1},
+        {2000, 3000, 97, 103, 95, 96, 1}, {3000, 4000, 96, 102, 95, 98, 1}});
+    QQuickWindow window;
+    CandleTickGeometryItem candles;
+    candles.setParentItem(window.contentItem());
+    candles.setSize({300, 180}); candles.setSymbol("BTC-USD"); candles.setTimeframeMs(1000);
+    candles.setCandleBuffer(&buffer); candles.setMappingProvider(&provider);
+    std::unique_ptr<QSGNode> root;
+    for (int style : {0, 1, 2}) {
+        candles.setCandleStyle(style);
+        root.reset(candles.updatePaintNode(root.release(), nullptr));
+        ASSERT_EQ(root->childCount(), 2);
+        std::array<QByteArray, 2> original;
+        std::array<QSGGeometry*, 2> geometry;
+        for (int i = 0; i < 2; ++i) {
+            geometry[i] = static_cast<QSGGeometryNode*>(root->childAtIndex(i))->geometry();
+            original[i] = QByteArray(static_cast<const char*>(geometry[i]->vertexData()), geometry[i]->vertexCount() * sizeof(QSGGeometry::ColoredPoint2D));
+        }
+        for (int strip : {0, 60}) {
+            provider.pane.flowFooter = true; provider.pane.stripPx = strip;
+            window.afterSynchronizing(); // no dirty candle or new candle data
+            ASSERT_EQ(root->childCount(), 1);
+            ASSERT_EQ(root->firstChild()->type(), QSGNode::ClipNodeType);
+            auto* clip = static_cast<QSGClipNode*>(root->firstChild());
+            EXPECT_EQ(clip->clipRect().bottom(), 180 - strip - chart::FlowFooterLayout::height);
+            bool excluded = false;
+            for (int i = 0; i < 2; ++i) {
+                EXPECT_EQ(std::memcmp(original[i].constData(), geometry[i]->vertexData(), size_t(original[i].size())), 0);
+                auto* vertices = geometry[i]->vertexDataAsColoredPoint2D();
+                for (int v = 0; v < geometry[i]->vertexCount(); ++v) excluded |= vertices[v].y > clip->clipRect().bottom();
+            }
+            EXPECT_TRUE(excluded);
+        }
+        provider.pane.flowFooter = false; provider.pane.stripPx = 0;
+        window.afterSynchronizing();
+        ASSERT_EQ(root->childCount(), 2);
+        for (int i = 0; i < 2; ++i)
+            EXPECT_EQ(std::memcmp(original[i].constData(), geometry[i]->vertexData(), size_t(original[i].size())), 0);
+    }
+    candles.setParentItem(nullptr);
+}

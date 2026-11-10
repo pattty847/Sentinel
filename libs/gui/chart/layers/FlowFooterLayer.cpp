@@ -86,26 +86,21 @@ void FlowFooterLayer::text(const char* value, const QRectF& box, const ChartText
         glyphs_.push_back(glyph); pen += g.advance * scale;
     }
 }
-double FlowFooterLayer::widest(const ChartTextAtlas& atlas) const {
-    double width = 0;
-    const auto& snapshot = cvd_.current();
-    for (int i = 0; i < snapshot.series.count; ++i) {
-        const auto& totals = snapshot.totals[size_t(i)];
-        if (!totals.valid) continue;
-        const double values[] = {totals.delta, snapshot.series.points[size_t(i)].value, totals.volume};
-        for (int row = 0; row < 3; ++row) {
-            char value[24]; footerNumber(values[row], value, row < 2);
-            width = std::max(width, measure(value, atlas));
-        }
-    }
-    return width;
+void FlowFooterLayer::measureAtlas(const ChartTextAtlas& atlas) {
+    const auto key = atlas.image().cacheKey();
+    if (measuredAtlas_ == key && measuredFontPx_ == atlas.fontPx()) return;
+    measuredAtlas_ = key; measuredFontPx_ = atlas.fontPx();
+    labelWidth_ = footerLabelWidth([&](char c) {
+        return atlas.glyph(QChar(c)).advance * FlowFooterLayout::textPx / atlas.fontPx();
+    });
+    rowLabelWidth_ = measure("DELTA", atlas) + 8;
 }
 void FlowFooterLayer::column(int index, double x, double width, const ChartTextAtlas& atlas, Vertex*& out) {
     const auto& snapshot = cvd_.current();
     const auto& totals = snapshot.totals[size_t(index)];
     const double values[] = {totals.delta, snapshot.series.points[size_t(index)].value, totals.volume};
-    if (totals.delta != 0 && maximum_ > 0) {
-        auto color = totals.delta > 0 ? ChartLookSettings::footprintBid() : ChartLookSettings::footprintAsk();
+    if (footerPill(totals.delta) && maximum_ > 0) {
+        auto color = totals.delta > 0 ? theme::positive() : theme::negative();
         color.setAlphaF(.15 + .65 * std::clamp(std::abs(totals.delta) / maximum_, 0.0, 1.0));
         pill(out, {x - width * .5 - 2, layout_.rowTop(0) - 1, width + 4, FlowFooterLayout::textPx + 2}, color);
     }
@@ -118,11 +113,12 @@ void FlowFooterLayer::column(int index, double x, double width, const ChartTextA
 void FlowFooterLayer::drawColumns(const ChartFrame& frame, const ChartTextAtlas& atlas, Vertex*& out) {
     const auto& snapshot = cvd_.current();
     const auto& cam = frame.context.raster;
-    const double width = widest(atlas);
-    const double labels = measure("DELTA", atlas) + 8;
+    measureAtlas(atlas);
+    const double width = labelWidth_;
+    const double labels = rowLabelWidth_;
     const double left = bounds_.left() + labels;
     const double barWidth = cam.colPxF / cam.dpr * snapshot.timeframeMs / cam.tfMs;
-    const auto k = FlowFooterLayout::stride(barWidth, std::max(width + 4, bounds_.width() / kColumns));
+    stride_ = FlowFooterLayout::stride(barWidth, width + 4);
     maximum_ = 0;
     for (int i = 0; i < snapshot.series.count; ++i) {
         const auto time = snapshot.series.points[size_t(i)].timeMs;
@@ -131,7 +127,7 @@ void FlowFooterLayer::drawColumns(const ChartFrame& frame, const ChartTextAtlas&
     }
     for (int i = 0; i < snapshot.series.count && columns_ < kColumns; ++i) {
         const auto time = snapshot.series.points[size_t(i)].timeMs;
-        if (!snapshot.totals[size_t(i)].valid || !FlowFooterLayout::selected(time, snapshot.timeframeMs, k)) continue;
+        if (!snapshot.totals[size_t(i)].valid || !FlowFooterLayout::selected(time, snapshot.timeframeMs, stride_)) continue;
         const double x = bounds_.left() + cam.xDev(double(time) + snapshot.timeframeMs * .5) / cam.dpr;
         if (x - width * .5 - 2 < left || x + width * .5 + 2 > bounds_.right()) continue;
         column(i, x, width, atlas, out);

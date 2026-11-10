@@ -197,14 +197,17 @@ zero in green above and red below; `line` draws the cumulative curve. Min/max an
 labels use 13 px MSDF text within the strip, with labels omitted where the strip is too small to fit.
 The optional footer uses three 13 px rows (55 px including padding), docked above the
 strip or at the surface bottom when the strip is off. DELTA uses signed flow-bar
-delta with an explicit positive `+`, a green/red pill scaled to visible maximum
+delta with an explicit positive `+` (magnitudes below .01 show `0` without a pill),
+a CVD-green/red pill scaled to visible maximum
 absolute delta; CUM reads the exact CVD value and reset anchor; VOL uses unsigned
 flow-bar volume. No flow bar means no values. The atlas keeps ASCII row labels
-DELTA / CUM / VOL. Narrow bars show every k-th absolute bar index so labels fit
-and retain their phase when panning. The footer hides when the remaining surface
+DELTA / CUM / VOL. Narrow bars show every k-th absolute bar index. The stride uses the widest possible
+formatted value at the current atlas size, so panning, re-anchoring and live magnitude
+changes preserve its phase. The footer hides when the remaining surface
 is shorter than its three rows.
 Ladder bottom edge pills and row badges stay above the combined footer and strip
-when matching flow data is available for the current timeframe. With no drawable CVD data, ladder badges keep their full height.
+when matching flow data is available for the current timeframe. Candles, trade bubbles,
+and TPO/VP subtrees are clipped above the same pane; price mapping stays unchanged. With no drawable CVD data, ladder badges keep their full height.
 Missing flow data draws nothing. No default or golden scene changes until enabled.
 
 On an isolated lab at port 17116 (each command is process-only):

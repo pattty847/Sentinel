@@ -13,6 +13,8 @@ public:
     QSGGeometry* geometry() { return &geometry_; }
     const QSGGeometry* geometry() const { return &geometry_; }
     void clear();
+    void setBottomInset(double inset) { bottomInset_ = inset; }
+    QRectF clipRect() const { return clip_.clipRect(); }
     int usedVertexCount() const { return usedVertexCount_; }
     uint64_t rebuildCount() const { return rebuildCount_; }
     uint64_t dirtyMarks() const { return dirtyMarks_; } // scene graph changes this node made
@@ -34,6 +36,7 @@ private:
     TimeAxisMapping mapping_;
     chart::bubbles::Options options_;
     bool enabled_ = false;
+    double bottomInset_ = 0;
     int usedVertexCount_ = 0;
     QColor buy_, sell_;
 };

@@ -6,11 +6,13 @@
 #include <QtQml/qqmlregistration.h>
 
 class TradeBubbleNode;
+namespace chart { struct CvdPresentation; }
 namespace trade_bubbles {
 // The typed node pointer is render-thread-only, and cleared by its owning root.
 struct RenderLink {
     std::shared_ptr<RenderFrame> frame;
     TradeBubbleNode* node = nullptr;
+    const chart::CvdPresentation* presentation = nullptr;
     uint64_t providerRevision = 1, syncedRevision = 0;
     std::atomic_bool retryQueued = false;
     void sync();

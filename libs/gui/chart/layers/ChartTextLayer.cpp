@@ -63,7 +63,7 @@ void ChartTextLayer::submitOverlayLabels(const ChartFrame& frame, LayerNodeConte
     static_assert(FlowSnapshot::kMaxBars + 1 == std::tuple_size_v<decltype(occlusion_)>);
     std::copy(cards.begin(), cards.end(), occlusion_.begin());
     size_t count = cards.size();
-    const double inset = footer_.drawing() ? footer_.bottomInset() : 0;
+    const double inset = cvd_.bottomInset();
     if (inset > 0) {
         auto box = frame.context.surfaceBounds;
         box.setTop(box.bottom() - inset);

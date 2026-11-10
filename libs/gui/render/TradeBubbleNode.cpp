@@ -61,6 +61,13 @@ TradeBubbleNode::TradeBubbleNode()
 }
 void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMapping& m,
                           bool enabled, const chart::bubbles::Options& options, QColor buy, QColor sell) {
+    auto clip = m.drawRect;
+    if (bottomInset_ > 0) clip.setHeight(std::max(0.0, clip.height() - bottomInset_));
+    if (clip_.clipRect() != clip) {
+        clip_.setClipRect(clip);
+        QSGGeometry::updateRectGeometry(&clipGeometry_, clip);
+        clip_.markDirty(DirtyGeometry);
+    }
     lastScanRows_ = rangeComparisons_ = 0;
     const bool slot = options.mode == chart::bubbles::Mode::Slot && m.appendMs > 0;
     const double start = slot ? std::floor(m.viewStartMs / m.appendMs) * m.appendMs : m.viewStartMs;
@@ -90,9 +97,6 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
     windowKey_ = key; enabled_ = enabled; options_ = options;
     mapping_ = m; buy_ = buy; sell_ = sell;
     transform_.setMatrix(QMatrix4x4{});
-    clip_.setClipRect(m.drawRect);
-    QSGGeometry::updateRectGeometry(&clipGeometry_, m.drawRect);
-    clip_.markDirty(DirtyGeometry);
     const auto bubbles = enabled ? layout_.build(window.rows, m, options, window.previousPrice) : std::span<const trade_bubbles::Bubble>{};
     lastScanRows_ = enabled ? layout_.scannedRows() : 0;
     ++rebuildCount_;
