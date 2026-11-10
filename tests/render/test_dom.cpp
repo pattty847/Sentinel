@@ -1211,9 +1211,16 @@ TEST_F(DomDock, QuietConnectedBookRetainsLastChangeAgeAndDetectsDisconnect) {
     const qint64 changedAt = QDateTime::currentMSecsSinceEpoch() - 60000;
     source.update({{true, 200, 2}, {false, 200.1, 3}}, changedAt);
     show();
-    EXPECT_TRUE(label("domFreshness").startsWith("Live · last change "));
-    EXPECT_GE(label("domFreshness").section("last change ", 1).section(" s", 0, 0).toDouble(), 60.0);
     auto* timer = dock.findChild<QTimer*>("domPublishTimer");
+    ASSERT_NE(timer, nullptr);
+    flushEvents(); // The datasource sends book and connection changes through queued signals.
+    QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection);
+    const auto agedLive = [&] {
+        const QString status = label("domFreshness");
+        return status.startsWith("Live · last change ") &&
+               status.section("last change ", 1).section(" s", 0, 0).toDouble() >= 60.0;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(agedLive(), 2000);
     timer->stop();
     for (int i = 0; i < 100; ++i) {
         // Like the real replica: identical updates advance getLastUpdate but
