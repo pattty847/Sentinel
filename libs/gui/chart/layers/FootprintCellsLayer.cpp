@@ -97,8 +97,7 @@ void FootprintCellsLayer::cells(const ChartFrame& frame) {
         const auto card = cardRect(frame, bar);
         if (!bar.cellCount || card.isEmpty()) continue;
         cards_[cardCount_++] = card;
-        // The chart surface uses ThemeBridge's dark background.
-        rectangle(vertices + used, card, QColor(15, 17, 20), 1); used += 6;
+        rectangle(vertices + used, card, ChartLookSettings::chartBackground(), 1); used += 6;
         const auto& cam = frame.context.raster;
         const double left = frame.context.surfaceBounds.left() + cam.xDev(double(bar.startMs)) / cam.dpr;
         const double mid = left + (cam.colPxF / cam.dpr + kFootprintCandleSpace) * .5;

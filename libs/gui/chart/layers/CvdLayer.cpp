@@ -142,9 +142,9 @@ void CvdLayer::submitLabels(const ChartFrame&, LayerNodeContext& context) {
     char value[24];
     const double width = std::min(100.0, strip_.width() - 8);
     const double left = strip_.right() - width - 4;
-    flowNumber(scale_.max, value);
+    flowNumber(scale_.max, value, FlowNumberContext::SignedLabel);
     addLabel(value, {left, strip_.top() + 2, width, strip_.height() - 4}, context.atlas);
-    flowNumber(scale_.min, value);
+    flowNumber(scale_.min, value, FlowNumberContext::SignedLabel);
     if (strip_.height() >= 32) addLabel(value, {left, strip_.bottom() - 15, width, 13}, context.atlas);
     context.text.submitGlyphs(glyphs_, ChartTextRenderer::Priority::High);
 }

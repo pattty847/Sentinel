@@ -42,7 +42,6 @@ public:
     explicit FlowMailbox(FootprintCoverage* coverage = nullptr);
     FlowSnapshot& back() { return *back_; }
     bool post();
-    bool covers(const chart_raster::RasterCamera& cam) const { return coverage_ && coverage_->covers(cam); }
     bool take(std::unique_ptr<FlowSnapshot>& current);
 private:
     FootprintCoverage* coverage_;

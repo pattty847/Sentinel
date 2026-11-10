@@ -198,14 +198,14 @@ namespace {
 MappingFrameContext footprintFrame() {
     MappingFrameContext f;
     f.activeTimeframeMs = 1000;
-    f.surfaceBounds = {0, 0, 200, 160};
+    f.surfaceBounds = {0, 0, 200, 180};
     f.surfaceDpr = 1;
     f.viewportValid = true;
     auto& r = f.raster;
     r.valid = true; r.dpr = 1; r.tick = 1; r.tfMs = 1000;
-    r.rowPx = 16; r.rowPxF = 16; r.colPx = 100; r.colPxF = 100;
+    r.rowPx = 18; r.rowPxF = 18; r.colPx = 100; r.colPxF = 100;
     r.drawnStartMs = 0; r.drawnEndMs = 2000; r.drawnMinPrice = 95; r.drawnMaxPrice = 105;
-    r.topF = 1680; r.topRowIndex = 1680; r.heightDev = 160; r.widthDev = 200;
+    r.topF = 1890; r.topRowIndex = 1890; r.heightDev = 180; r.widthDev = 200;
     return f;
 }
 FlowSeriesBuffer::Series footprintSeries(double nativeTick = 0.5) {
@@ -407,7 +407,7 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     params.fontPx = 64; params.charset = " 0123456789.+-,:/<>$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     ASSERT_TRUE(atlas.build(params));
     const double widest = chart::kFlowMagnitudeGlyphs * atlas.glyph(QChar('8')).advance * chart::kFootprintTextPx / atlas.fontPx();
-    EXPECT_LE(widest, (chart::kFootprintNumbersColumn - chart::kFootprintCandleSpace) / 2 - 3);
+    EXPECT_LE(widest, (chart::kFootprintNumbersFitColumn - chart::kFootprintCandleSpace) / 2 - 3);
     chart::FootprintCellsLayer layer;
     layer.presentation().enabled = true; layer.presentation().cellsSource = true;
     auto frame = footprintChartFrame();
@@ -450,6 +450,20 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
         footprintCounting = false;
         EXPECT_EQ(footprintAllocations.load(), 0u);
     }
+    auto& widestRow = layer.mailbox().back(); widestRow = layer.current();
+    widestRow.cells[0].bidVol = 123400; widestRow.cells[0].askVol = 123400;
+    layer.mailbox().post();
+    frame.context.raster.colPxF = chart::kFootprintNumbersColumn;
+    frame.context.raster.rowPxF = chart::kFootprintNumbersRow;
+    frame.context.raster.topF = 105 * frame.context.raster.rowPxF;
+    layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+    ASSERT_EQ(layer.glyphCount(), 10u); // 1.23k on both sides
+    frame.context.raster.colPxF = chart::kFootprintNumbersFitColumn;
+    frame.context.raster.rowPxF = chart::kFootprintNumbersFitRow;
+    frame.context.raster.topF = 105 * frame.context.raster.rowPxF;
+    layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+    EXPECT_EQ(layer.stage(), chart::FootprintStage::Numbers);
+    EXPECT_EQ(layer.glyphCount(), 10u) << "widest labels survive at the hysteresis exit edge";
     layer.presentation().numbers = false;
     layer.sync(frame); layer.submitLabels(frame, context);
     EXPECT_EQ(layer.glyphCount(), 0u);
@@ -637,13 +651,17 @@ TEST(CvdLayer, LabelsAreBoundedAndFreshDataFramesAllocateNothing) {
     chart::CvdLayer layer;
     layer.presentation().stripPx = 80;
     auto frame = footprintChartFrame(); frame.context.surfaceBounds.setWidth(400);
-    chart::CvdFeed::build(layer.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
+    auto labelledSeries = footprintSeries();
+    labelledSeries.bars[1000] = labelledSeries.bars[0];
+    labelledSeries.bars[1000].bar.startMs = 1000;
+    chart::CvdFeed::build(layer.mailbox().back(), labelledSeries, footprintFrame(), chart::CvdReset::Visible, 4);
     layer.mailbox().post(); layer.sync(frame);
     std::unique_ptr<QSGNode> root(layer.createContainer());
     ChartTextRenderer text;
     chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
     layer.updateNodes(frame, context); layer.submitLabels(frame, context);
-    ASSERT_GT(text.submittedGlyphs(), 0);
+    ASSERT_EQ(text.submittedGlyphs(), int(std::strlen(layer.current().label.data())) + 5)
+        << "3.00 maximum and exact zero minimum must both have glyphs";
     for (int i = 0; i < 2; ++i) {
         auto series = footprintSeries(); series.bars[0].bar.delta += i + 1;
         chart::CvdFeed::build(layer.mailbox().back(), series, footprintFrame(), chart::CvdReset::Visible, 4);

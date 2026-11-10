@@ -2370,8 +2370,8 @@ TEST(FootprintCandles, BothDirectionsUseLeftSpineAndFullFallback) {
     auto& f = provider.frame;
     f.activeTimeframeMs = 1000; f.viewportValid = true;
     f.viewportTimeStart = 1000; f.viewportTimeEnd = 3000;
-    f.surfaceBounds = {0, 0, 200, 160};
-    f.raster = chart_raster::computeRaster({1000, 3000, 95, 105, {}, 1000, 1, 200, 160, 1}, {});
+    f.surfaceBounds = {0, 0, 200, 180};
+    f.raster = chart_raster::computeRaster({1000, 3000, 95, 105, {}, 1000, 1, 200, 180, 1}, {});
     f.mapping = chart_raster::toMapping(f.raster);
     FlowSeriesBuffer::Series flow;
     for (int start : {1000, 2000}) {
@@ -2384,7 +2384,7 @@ TEST(FootprintCandles, BothDirectionsUseLeftSpineAndFullFallback) {
     CandleSeriesBuffer buffer;
     buffer.applyHistory("BTC-USD", 1000, {{1000, 2000, 99, 103, 98, 102, 1}, {2000, 3000, 102, 103, 98, 99, 1}});
     FootprintCandleFixture candle;
-    candle.setSize({200, 160}); candle.setSymbol("BTC-USD"); candle.setTimeframeMs(1000);
+    candle.setSize({200, 180}); candle.setSymbol("BTC-USD"); candle.setTimeframeMs(1000);
     candle.setCandleBuffer(&buffer); candle.setMappingProvider(&provider); candle.setWickWidth(3);
     std::unique_ptr<QSGNode> root(candle.paint(nullptr));
     auto* body = static_cast<QSGGeometryNode*>(root->childAtIndex(1))->geometry();
@@ -2482,7 +2482,6 @@ TEST(FootprintCandles, Q16MatchesOriginalGeometryAcrossStylesAndAfterCells) {
     chart::FootprintPresentation look;
     look.enabled = true;
     look.coverage.tick = 1; look.coverage.timeframeMs = 1000;
-    look.coverage.low = 85; look.coverage.high = 115; look.coverage.add(1000, 3000);
     look.coverage.barCount = 2; look.coverage.bars[0] = {1000, 2000, 98, 104}; look.coverage.bars[1] = {2000, 3000, 98, 104};
     selected.look = &look; // original provider has no footprint presentation
     CandleSeriesBuffer buffer;
@@ -2510,7 +2509,7 @@ TEST(FootprintCandles, Q16MatchesOriginalGeometryAcrossStylesAndAfterCells) {
         candidate.paint(actual.get());
         for (int node : {0, 1}) EXPECT_EQ(bytes(expected.get(), node), bytes(actual.get(), node));
     }
-    look.cellsSource = true; look.coverage.count = 0; look.coverage.barCount = 0; ++look.coverage.revision;
+    look.cellsSource = true; look.coverage.barCount = 0; ++look.coverage.revision;
     candidate.paint(actual.get());
     for (int node : {0, 1}) EXPECT_EQ(bytes(expected.get(), node), bytes(actual.get(), node)) << "no flow keeps the original look";
     look.coverage.barCount = 1; ++look.coverage.revision;
@@ -2642,7 +2641,7 @@ TEST(FootprintFlowFeed, EarlyNewSymbolHistorySurvivesSelectionAndHiddenLod) {
     ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
     symbol = "ETH-USD"; feed.onFrameChanged(); feed.publishRows();
     ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_TRUE(current->valid);
-    EXPECT_EQ(current->cellCount, 1); EXPECT_TRUE(layer.presentation().coverage.covers(frame.raster));
+    EXPECT_EQ(current->cellCount, 1); EXPECT_EQ(layer.presentation().coverage.barCount, 1);
     // Hidden/source-off callbacks do no merging; authoritative remote history remains available.
     frame.raster.colPxF = 10; feed.onFrameChanged();
     bar.rows[0].bidVol = 40; FlowDataSourceTest::deliver(source, batch);
@@ -2652,7 +2651,7 @@ TEST(FootprintFlowFeed, EarlyNewSymbolHistorySurvivesSelectionAndHiddenLod) {
     feed.setEnabled(true); feed.publishRows();
     ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->cells[0].bidVol, 50);
     symbol = "SOL-USD"; feed.onFrameChanged();
-    EXPECT_EQ(layer.presentation().coverage.count, 0);
+    EXPECT_EQ(layer.presentation().coverage.barCount, 0);
     feed.publishRows(); ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
 }
 

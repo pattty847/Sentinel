@@ -267,7 +267,7 @@ TEST_F(LabelLayout, FootprintCardsSuppressWholeIntersectingLabelsWithoutCapacity
     const auto glyphCapacity = glyphs.capacity();
     // Touch just one glyph edge: the entire first label must disappear.
     const auto edge = glyphs.front().rect;
-    const std::array<QRectF, 1> cards{{{edge.left(), edge.top(), 1, edge.height()}}};
+    std::array<QRectF, 1> cards{{{edge.left(), edge.top(), 1, edge.height()}}};
     appearance.occlusion = cards;
     for (int i = 0; i < 120; ++i) {
         layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
@@ -275,6 +275,13 @@ TEST_F(LabelLayout, FootprintCardsSuppressWholeIntersectingLabelsWithoutCapacity
         for (const auto& glyph : glyphs) EXPECT_GT(glyph.rect.center().x(), 120);
         EXPECT_EQ(layout.capacityBytes(), capacity); EXPECT_EQ(glyphs.capacity(), glyphCapacity);
     }
+    const auto rebuilds = layout.stats().rebuilds;
+    // Same heatmap snapshot, atlas and mapping; only the footprint occupancy pans.
+    cards[0].translate(120, 0);
+    layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
+    EXPECT_EQ(layout.stats().labels, 1u);
+    for (const auto& glyph : glyphs) EXPECT_LT(glyph.rect.center().x(), 120);
+    EXPECT_EQ(layout.stats().rebuilds, rebuilds) << "cached heatmap runs still relayout against new cards";
     appearance.occlusion = {};
     layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
     EXPECT_EQ(layout.stats().labels, 2u);

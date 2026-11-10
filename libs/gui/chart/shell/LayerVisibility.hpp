@@ -1,5 +1,4 @@
 #pragma once
-#include <cmath>
 #include "chart/core/CvdSeries.hpp"
 #include <cmath>
 #include <functional>

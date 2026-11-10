@@ -96,13 +96,11 @@ bool FlowMailbox::post() {
     if (coverage_) {
         changed = coverage_->tick != back_->tick || coverage_->timeframeMs != back_->timeframeMs;
         const int oldCount = coverage_->barCount;
-        coverage_->count = 0; coverage_->barCount = 0;
+        coverage_->barCount = 0;
         coverage_->tick = back_->tick; coverage_->timeframeMs = back_->timeframeMs;
-        coverage_->low = back_->low; coverage_->high = back_->high;
         if (back_->valid) for (int i = 0; i < back_->barCount; ++i) {
             const auto& bar = back_->bars[size_t(i)];
             if (bar.cellCount) {
-                coverage_->add(double(bar.startMs), double(bar.startMs) + back_->timeframeMs);
                 const FootprintCoverage::Bar next{double(bar.startMs), double(bar.startMs) + back_->timeframeMs,
                     bar.lowRow * back_->tick, bar.highRow * back_->tick};
                 auto& previous = coverage_->bars[size_t(coverage_->barCount++)];

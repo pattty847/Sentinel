@@ -119,9 +119,11 @@ in `GET /api/v1/state` under `layers`. QML exposes them on
 
 `footprint:true` shows the selected source. `q16` preserves the default picture.
 The cells feed runs only when footprint is visible and source is `cells`.
-Cells enter at 24 logical px per column and 6 per row. Numbers enter at 94.013/15,
+Cells enter at 24 logical px per column and 6 per row. Numbers enter at 96.013/17,
 calculated from two maximum-width five-glyph labels at 13 px, their centre gaps,
-and the candle space. Both stages retain a 2 px zoom-out hysteresis band.
+and the candle space, plus the retention margin. Both stages retain a 2 px
+zoom-out hysteresis band. Numbers exit at the fit boundary (94.013/15), so the
+widest labels fit throughout the retained stage.
 
 A card covers the heatmap across the bar's low-to-high rows, including gaps;
 intersecting heatmap label boxes are omitted. Bid fills extend left from the
@@ -129,9 +131,12 @@ centre spine, ask fills right. Length uses the maximum single-side cell volume
 of the bar or visible window. Numbers align toward the centre. Zero sides are
 blank; positive magnitudes below .01 use `<.01`; other base-unit values use
 magnitude-dependent decimals and k/M/B (at most five characters, never scientific
-notation). Suffixed values truncate to three significant digits and trim trailing
-fractional zeros; magnitudes at or above one trillion use `>999B` to retain the width bound without understating the value.
-CVD extrema share this formatter, with a minus sign for negative values.
+notation). Values round decimal half-up with carries across magnitude and suffix boundaries.
+Suffixed values use three significant digits and trim trailing fractional zeros
+(including carries such as `999.6 → 1k`). Magnitudes rounding to one trillion or
+above use `>999B` to retain the width bound without understating the value.
+CVD extrema share this formatter, with a minus sign for negative values and `0`
+for exact zero or magnitudes below .01.
 
 Dust sides (below the quote threshold or below .01 base units) have no fill and
 22% text alpha. Other text is muted, or bright above 55% of the bar's maximum

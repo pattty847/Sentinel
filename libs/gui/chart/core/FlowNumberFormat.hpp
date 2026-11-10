@@ -2,46 +2,80 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <cstdint>
 
 namespace chart {
 // Magnitudes use at most four characters plus one suffix. A signed consumer
 // may prepend one minus sign. Values beyond the B range use >999B.
 inline constexpr int kFlowMagnitudeGlyphs = 5;
 namespace flow_format {
-inline int decimals(double value) { return value < 10 ? 2 : value < 100 ? 1 : 0; }
-inline char scale(double& value) {
-    if (value < 1000) return 0;
-    char suffix = 0;
-    for (char c : {'k', 'M', 'B'}) {
-        value /= 1000; suffix = c;
-        if (value < 1000) break;
-    }
-    value = std::min(value, 999.0);
-    return suffix;
+inline uint64_t power10(int exponent) {
+    uint64_t result = 1;
+    while (exponent-- > 0) result *= 10;
+    return result;
 }
-inline char* magnitude(double value, char* begin) {
-    if (value >= 1e12) {
-        for (char c : {'>', '9', '9', '9', 'B'}) *begin++ = c;
-        return begin;
+// Parse the shortest decimal representation before rounding. Integer division
+// implements decimal half-up without binary multiply/divide errors at ties.
+inline uint64_t roundedCents(double value) {
+    char decimal[64];
+    const auto end = std::to_chars(decimal, decimal + sizeof(decimal), value, std::chars_format::fixed).ptr;
+    uint64_t coefficient = 0;
+    int fraction = 0, whole = 0;
+    bool afterPoint = false;
+    for (auto* p = decimal; p != end; ++p) {
+        if (*p == '.') { afterPoint = true; continue; }
+        coefficient = coefficient * 10 + unsigned(*p - '0');
+        if (afterPoint) ++fraction; else ++whole;
     }
-    const char suffix = scale(value);
-    int precision = decimals(value);
-    const double factor = precision == 2 ? 100 : precision == 1 ? 10 : 1;
-    value = (suffix ? std::floor(value * factor) : std::round(value * factor)) / factor;
-    precision = decimals(value);
-    char* end = std::to_chars(begin, begin + 20, value, std::chars_format::fixed, precision).ptr;
-    if (value < 1) { for (char* p = begin; p + 1 < end; ++p) *p = *(p + 1); --end; }
-    if (suffix && precision) {
-        while (end > begin && end[-1] == '0') --end;
-        if (end > begin && end[-1] == '.') --end;
+    const int exponent = value < 10 ? -2 : value < 100 ? -1 : whole - 3;
+    const int discarded = fraction + exponent;
+    if (discarded > 0) {
+        const auto divisor = power10(discarded);
+        coefficient = (coefficient + divisor / 2) / divisor;
+    } else coefficient *= power10(-discarded);
+    return coefficient * power10(exponent + 2);
+}
+inline char* fixed(uint64_t amount, int precision, bool trim, char* out) {
+    const auto divisor = power10(precision);
+    char* begin = out;
+    if (amount >= divisor) out = std::to_chars(out, out + 20, amount / divisor).ptr;
+    if (precision) {
+        *out++ = '.';
+        auto remainder = amount % divisor;
+        for (auto place = divisor / 10; place; place /= 10) {
+            *out++ = char('0' + remainder / place); remainder %= place;
+        }
+        if (trim) {
+            while (out > begin && out[-1] == '0') --out;
+            if (out > begin && out[-1] == '.') --out;
+        }
     }
-    if (suffix) *end++ = suffix;
-    return end;
+    return out;
+}
+inline char* magnitude(double value, char* out) {
+    const auto cents = value < 1e12 ? roundedCents(value) : uint64_t(100000000000000);
+    if (cents >= 100000000000000) {
+        for (char c : {'>', '9', '9', '9', 'B'}) *out++ = c;
+        return out;
+    }
+    if (cents < 100000) {
+        const int precision = cents < 1000 ? 2 : cents < 10000 ? 1 : 0;
+        return fixed(cents / power10(2 - precision), precision, false, out);
+    }
+    const int unit = cents >= 100000000000 ? 3 : cents >= 100000000 ? 2 : 1;
+    out = fixed(cents / power10(3 * unit), 2, true, out);
+    *out++ = "kMB"[unit - 1];
+    return out;
 }
 } // namespace flow_format
-inline int flowNumber(double value, char (&out)[24]) {
+enum class FlowNumberContext { Footprint, SignedLabel };
+inline int flowNumber(double value, char (&out)[24], FlowNumberContext context = FlowNumberContext::Footprint) {
     out[0] = '\0';
-    if (!std::isfinite(value) || value == 0) return 0;
+    if (!std::isfinite(value)) return 0;
+    if (context == FlowNumberContext::SignedLabel && std::abs(value) < .01) {
+        out[0] = '0'; out[1] = '\0'; return 1;
+    }
+    if (value == 0) return 0;
     char* begin = out;
     if (value < 0) { *begin++ = '-'; value = -value; }
     char* end = begin;

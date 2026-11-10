@@ -11,8 +11,10 @@ inline constexpr double kFootprintTextPx = 13;
 // Bundled Roboto Mono advance is 1229/2048 em. Two widest magnitude labels, centre gap,
 // outer padding and the left candle pill must all fit before numbers appear.
 inline constexpr double kFootprintCandleSpace = 10;
-inline constexpr double kFootprintNumbersColumn = 2 * kFlowMagnitudeGlyphs * (1229.0 / 2048) * kFootprintTextPx + 6 + kFootprintCandleSpace;
-inline constexpr double kFootprintNumbersRow = kFootprintTextPx + 2;
+inline constexpr double kFootprintNumbersFitColumn = 2 * kFlowMagnitudeGlyphs * (1229.0 / 2048) * kFootprintTextPx + 6 + kFootprintCandleSpace;
+inline constexpr double kFootprintNumbersFitRow = kFootprintTextPx + 2;
+inline constexpr double kFootprintNumbersColumn = kFootprintNumbersFitColumn + 2;
+inline constexpr double kFootprintNumbersRow = kFootprintNumbersFitRow + 2;
 inline FootprintStage footprintLod(double column, double row, FootprintStage previous = FootprintStage::Hidden) {
     if (!std::isfinite(column) || !std::isfinite(row) || column <= 0 || row <= 0) return FootprintStage::Hidden;
     const double cellsBand = previous == FootprintStage::Hidden ? 0 : 2;
@@ -21,30 +23,15 @@ inline FootprintStage footprintLod(double column, double row, FootprintStage pre
     return column >= kFootprintNumbersColumn - numbersBand && row >= kFootprintNumbersRow - numbersBand ? FootprintStage::Numbers : FootprintStage::Cells;
 }
 // Published alongside the row mailbox on the GUI thread, read during render sync.
-// Actual contiguous bar intervals distinguish missing history from an empty price row.
+// Per-bar price bounds distinguish missing history from an empty price row.
 struct FootprintCoverage {
-    static constexpr int kMaxRanges = 512;
-    struct Range { double from = 0, to = 0; };
-    std::array<Range, kMaxRanges> ranges{};
-    int count = 0;
+    static constexpr int kMaxBars = 512;
     uint64_t revision = 0;
     struct Bar { double from = 0, to = 0, low = 0, high = 0; bool operator==(const Bar&) const = default; };
-    std::array<Bar, kMaxRanges> bars{};
+    std::array<Bar, kMaxBars> bars{};
     int barCount = 0;
-    double tick = 0, low = 0, high = 0;
+    double tick = 0;
     int64_t timeframeMs = 0;
-    void add(double from, double to) {
-        if (count && from <= ranges[size_t(count - 1)].to)
-            ranges[size_t(count - 1)].to = std::max(to, ranges[size_t(count - 1)].to);
-        else if (count < kMaxRanges) ranges[size_t(count++)] = {from, to};
-    }
-    template<class Raster> bool covers(const Raster& r) const {
-        if (!r.valid || r.tick != tick || r.tfMs != timeframeMs ||
-            r.drawnMinPrice < low || r.drawnMaxPrice > high) return false;
-        for (int i = 0; i < count; ++i)
-            if (ranges[size_t(i)].from <= r.drawnStartMs && ranges[size_t(i)].to >= r.drawnEndMs) return true;
-        return false;
-    }
 };
 // A shared render-owned history makes candle and cell decisions independent of
 // item sync order, root recreation, and a temporarily hidden candle item.

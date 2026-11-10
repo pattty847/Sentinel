@@ -994,6 +994,66 @@ class CandleTickGeometryItem : public CandlestickOverlayItem {
 public:
     using CandlestickOverlayItem::updatePaintNode;
 };
+TEST(UgrCandleCpu, FootprintSpineCapsAndUncoveredPaddingMatchSlotGeometry) {
+    CandleTickFrameProvider provider;
+    auto& frame = provider.frame;
+    frame.activeTimeframeMs = 1000; frame.viewportValid = true;
+    frame.viewportTimeStart = 1000; frame.viewportTimeEnd = 3000;
+    frame.currentBoundaryStartMs = 3000; frame.surfaceDpr = 1;
+    frame.surfaceBounds = {0, 0, 200, 180};
+    frame.raster = chart_raster::computeRaster({1000, 3000, 95, 105, {}, 1000, 1, 200, 180, 1}, {});
+    frame.mapping = chart_raster::toMapping(frame.raster);
+    provider.layers()->setFootprintEnabled(true);
+    provider.layers()->setFootprintSource("cells");
+    provider.layers()->setFootprintCandle("spine");
+    auto& coverage = provider.footprintPresentation()->coverage;
+    coverage.tick = 1; coverage.timeframeMs = 1000; coverage.barCount = 1;
+    coverage.bars[0] = {1000, 2000, 98, 104}; ++coverage.revision;
+    CandleSeriesBuffer buffer;
+    buffer.applyHistory("BTC-USD", 1000, {{1000, 2000, 99, 103, 98, 102, 1},
+                                          {2000, 3000, 102, 103, 98, 99, 1}});
+    CandleTickGeometryItem candles;
+    candles.setSize({200, 180}); candles.setSymbol("BTC-USD"); candles.setTimeframeMs(1000);
+    candles.setCandleBuffer(&buffer); candles.setMappingProvider(&provider); candles.setWickWidth(3);
+    std::unique_ptr<QSGNode> root(candles.updatePaintNode(nullptr, nullptr));
+    auto* bodies = static_cast<QSGGeometryNode*>(root->childAtIndex(1))->geometry();
+    auto* wicks = static_cast<QSGGeometryNode*>(root->childAtIndex(0))->geometry();
+    ASSERT_EQ(bodies->vertexCount(), 84); // each body: rectangle + twelve cap triangles
+    ASSERT_EQ(wicks->vertexCount(), 12);
+    const auto* b = bodies->vertexDataAsColoredPoint2D();
+    const auto* w = wicks->vertexDataAsColoredPoint2D();
+    const auto first = bodyForFrame(frame, 1000, 99, 102);
+    EXPECT_FLOAT_EQ(b[0].x, 2); EXPECT_FLOAT_EQ(b[2].x, 8);
+    EXPECT_FLOAT_EQ(w[0].x, 4.25); EXPECT_FLOAT_EQ(w[2].x, 5.75);
+    EXPECT_FLOAT_EQ((w[0].x + w[2].x) / 2, (b[0].x + b[2].x) / 2);
+    EXPECT_FLOAT_EQ(b[6].x, 5); EXPECT_FLOAT_EQ(b[6].y, first.y.lo + 3);
+    EXPECT_FLOAT_EQ(b[7].x, 2); EXPECT_FLOAT_EQ(b[7].y, first.y.lo + 3);
+    EXPECT_NEAR(b[8].x, 5 - 3 * std::sqrt(3.) / 2, 1e-5);
+    EXPECT_NEAR(b[8].y, first.y.lo + 1.5, 1e-5);
+    float minY = b[0].y, maxY = b[0].y;
+    for (int i = 0; i < 42; ++i) {
+        EXPECT_GE(b[i].x, 2); EXPECT_LE(b[i].x, 8);
+        minY = std::min(minY, b[i].y); maxY = std::max(maxY, b[i].y);
+    }
+    EXPECT_FLOAT_EQ(minY, first.y.lo); EXPECT_FLOAT_EQ(maxY, first.y.hi);
+    const auto second = bodyForFrame(frame, 2000, 102, 99);
+    EXPECT_FLOAT_EQ(b[42].x, second.x.lo); EXPECT_FLOAT_EQ(b[44].x, second.x.hi);
+    EXPECT_FLOAT_EQ(b[42].y, second.y.lo); EXPECT_FLOAT_EQ(b[43].y, second.y.hi);
+    EXPECT_FLOAT_EQ(w[8].x - w[6].x, 3);
+    for (int i = 48; i < 84; ++i) {
+        EXPECT_FLOAT_EQ(b[i].x, 0); EXPECT_FLOAT_EQ(b[i].y, 0);
+        EXPECT_EQ(b[i].a, 0) << "uncovered full body pads unused cap vertices";
+    }
+    provider.layers()->setFootprintCandle("full");
+    ASSERT_EQ(candles.updatePaintNode(root.get(), nullptr), root.get());
+    ASSERT_EQ(bodies->vertexCount(), 12);
+    b = bodies->vertexDataAsColoredPoint2D(); w = wicks->vertexDataAsColoredPoint2D();
+    EXPECT_FLOAT_EQ(b[0].x, first.x.lo); EXPECT_FLOAT_EQ(b[2].x, first.x.hi);
+    EXPECT_FLOAT_EQ(b[6].x, second.x.lo); EXPECT_FLOAT_EQ(b[8].x, second.x.hi);
+    EXPECT_FLOAT_EQ(w[2].x - w[0].x, 3); EXPECT_FLOAT_EQ(w[8].x - w[6].x, 3);
+    candles.setMappingProvider(nullptr);
+}
+
 TEST(UgrCandleCpu, NonPositiveIntervalsClearExistingGeometry) {
     CandleTickFrameProvider provider;
     CandleTickGeometryItem candles;
