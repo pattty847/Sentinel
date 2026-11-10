@@ -699,11 +699,36 @@ History sources today:
   trade IDs, millisecond time, aggressor sides and capture gaps. The CLI also
   imports CSV. There is no binary tick logger/reader or legacy history fallback.
 
-Cheapest durable extension: page event-time executions (ID, price, base size,
-normalized aggressor, symbol/selection identity and explicit coverage) from the
-roller's trade store on the existing bounded history workers. Feed the bounded
-chart tape/aggregation input, deduplicate by trade ID across live/history and report
-coverage/evictions. Do not reconstruct executions from footprint or candle data.
+`trade_history_request` pages raw event-time executions from this RAM tape when
+the requested window is retained, and otherwise from RAWL2 through FlowStore's
+journal reader on the two-worker history pool. A window crossing the RAM floor
+uses a half-open journal prefix and RAM suffix, then sorts by exchange ms and
+deduplicates nonempty trade IDs. No footprint or candle aggregate is used to
+reconstruct trades. One job per client may be in flight. Its binary reply shares
+the bounded chunk write queue. The global history queue remains capped at eight
+jobs. Requests must name a configured
+product and a half-open `[start_ms,end_ms)` window of at most 3,600,000 ms.
+More than 250,000 executions, an invalid request, or an unavailable worker
+returns `refused` with a `reason`. Journal gaps or unavailable early/late
+coverage return `partial`; a source still warming may return `building`.
+
+The request is JSON, for example
+`{"type":"trade_history_request","req":9,"symbol":"BTC-USD","start_ms":1000,"end_ms":2000}`.
+The binary `trade_history_chunk` is `TRD1`, followed by a little-endian u32
+JSON-header length, UTF-8 JSON header, little-endian u32 row count, then rows.
+The header carries `type`, `schema_version: 1`, unsigned `req`, `symbol`, echoed
+`start_ms`/`end_ms`, `status` (`complete`, `partial`, `building`, `refused`),
+`coverage: {from_ms,to_ms}` and `count`; refusals also carry `reason`. Each row
+is little-endian u16 ID byte length, ID bytes (at most 128), i64 exchange ms,
+f64 price, f64 base size, u8 aggressor side (0 buy, 1 sell, 2 unknown), and u32
+count (1 for an individual trade). The frame is capped at 48 MiB. The client
+rejects truncated frames, count/length mismatches, invalid values, out-of-order
+times and trailing bytes before emitting a page. `server_config.flow` announces
+`trade_history: true`, `trade_history_encoding: "TRD1"`,
+`trade_history_max_window_ms: 3600000` and `trade_history_max_trades: 250000`.
+TradeBubbleFeed inserts accepted history rows into the existing 100,000-row
+event-time tape; live and history resends of a retained nonempty ID occupy one
+row. The GUI does not request these pages automatically yet.
 
 ## Independent trade-overlay publication
 

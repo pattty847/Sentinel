@@ -527,6 +527,27 @@ bool ServerDataModel::collectFootprintTrades(const std::string& symbol,
     return !out.empty();
 }
 
+ServerDataModel::TradeHistorySnapshot ServerDataModel::tradeHistorySnapshot(
+    const std::string& symbol, int64_t fromMs, int64_t toMs, size_t limit) const {
+    TradeHistorySnapshot result;
+    result.store = m_flowStore;
+    std::lock_guard lock(m_footprintTradeMutex);
+    const auto it = m_recentFootprintTrades.find(symbol);
+    if (it == m_recentFootprintTrades.end() || it->second.empty()) return result;
+    const bool fallbackFloor = !m_tradeHistoryFloorMs.contains(symbol);
+    if (const auto floor = m_tradeHistoryFloorMs.find(symbol); floor != m_tradeHistoryFloorMs.end())
+        result.retainedFromMs = floor->second;
+    else result.retainedFromMs = INT64_MAX;
+    for (const auto& sample : it->second) {
+        if (fallbackFloor)
+            result.retainedFromMs = std::min(result.retainedFromMs, sample.timestampMs);
+        if (sample.timestampMs < fromMs || sample.timestampMs >= toMs) continue;
+        if (result.rows.size() <= limit)
+            result.rows.push_back({sample.id, sample.timestampMs, sample.price, sample.size, sample.side, 1});
+    }
+    return result;
+}
+
 void ServerDataModel::onTrade(const Trade& trade) {
     if (!m_feeds.contains(trade.product_id)) return;
     const int64_t exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -545,10 +566,13 @@ void ServerDataModel::onTrade(const Trade& trade) {
         std::lock_guard<std::mutex> lock(m_footprintTradeMutex);
         auto& trades = m_recentFootprintTrades[trade.product_id];
         const int64_t cutoff = exchangeMs - m_footprintTradeRetentionMs;
+        auto& historyFloor = m_tradeHistoryFloorMs[trade.product_id];
+        if (!historyFloor) historyFloor = exchangeMs;
+        historyFloor = std::max(historyFloor, cutoff);
         while (!trades.empty() && trades.front().timestampMs < cutoff) {
             trades.pop_front();
         }
-        trades.push_back(FootprintTradeSample{exchangeMs, trade.price, trade.size, trade.side});
+        trades.push_back(FootprintTradeSample{exchangeMs, trade.price, trade.size, trade.side, trade.trade_id});
     }
     
     emit tradeBroadcast(trade);

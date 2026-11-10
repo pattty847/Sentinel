@@ -18,6 +18,7 @@
 #include <bit>
 #include <cctype>
 #include <set>
+#include <unordered_set>
 
 namespace recording {
 namespace {
@@ -1089,6 +1090,79 @@ FlowStore::Reply FlowStore::buildWindow(const std::string &symbol, int64_t from,
         reply.ranges = {{from, to, "partial", {}}};
     }
     return reply;
+}
+FlowStore::TradeWindow FlowStore::readTrades(const std::string &symbol, int64_t from, int64_t to,
+                                             size_t limit, std::stop_token stop) {
+    std::stop_source combined;
+    std::stop_callback callerStop(stop, [&] { combined.request_stop(); });
+    std::stop_callback storeStop(stopSource_.get_token(), [&] { combined.request_stop(); });
+    stop = combined.get_token();
+    sentinel::capture::validateSymbol(symbol);
+    if (from < 0 || to <= from || to - from > protocol::SentinelProtocol::kTradeHistoryMaxWindowMs ||
+        to > INT64_MAX - TradeTail || limit > protocol::SentinelProtocol::kTradeHistoryMaxTrades)
+        throw std::invalid_argument("invalid trade journal window");
+    TradeWindow result;
+    result.coveredFromMs = from;
+    result.coveredToMs = from;
+    try {
+        std::shared_ptr<roller::JournalReader> catalog;
+        {
+            std::lock_guard lock(catalogMutex_);
+            auto& cached = catalogs_[symbol];
+            if (!cached) {
+                checkStop(stop);
+                cached = std::make_shared<roller::JournalReader>(options_.journalRoot, symbol);
+                if (options_.afterCatalogConstructForTest) options_.afterCatalogConstructForTest();
+            }
+            catalog = cached;
+        }
+        const auto firstJournalMs = catalog->files().front().header.at("opened_system_ns").get<int64_t>() / 1'000'000;
+        result.coveredFromMs = std::max(from, firstJournalMs);
+        if (result.coveredFromMs >= to) { result.partial = true; return result; }
+        const auto start = firstDurable(*catalog, std::max<int64_t>(0, from - TradeTail), stop);
+        if (!start) { result.partial = true; return result; }
+        roller::JournalReader reader(*catalog, *start);
+        roller::JournalFeed feed(symbol);
+        std::unordered_set<std::string> ids;
+        ids.reserve(std::min(limit, size_t(250'000)));
+        feed.onInvalid = [&](int64_t ms, const std::string&) {
+            if (ms > from && ms < to + TradeTail) result.partial = true;
+        };
+        feed.onTrade = [&](const Trade& trade) {
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                trade.timestamp.time_since_epoch()).count();
+            if (ms < from || ms >= to) return;
+            if (result.rows.size() > limit) return;
+            if (trade.trade_id.size() > protocol::SentinelProtocol::kTradeHistoryMaxIdBytes ||
+                !std::isfinite(trade.price) || trade.price <= 0 ||
+                !std::isfinite(trade.size) || trade.size <= 0) {
+                result.partial = true;
+                return;
+            }
+            if (!trade.trade_id.empty() && !ids.insert(trade.trade_id).second) return;
+            if (result.rows.size() <= limit)
+                result.rows.push_back({trade.trade_id, ms, trade.price, trade.size, trade.side, 1});
+        };
+        roller::JournalRecord input;
+        int64_t lastReceive = 0;
+        while (reader.next(input)) {
+            checkStop(stop);
+            const auto receiveMs = input.record.time.systemNs / 1'000'000;
+            lastReceive = std::max(lastReceive, receiveMs);
+            if (receiveMs > to + TradeTail) break;
+            feed.apply(input);
+            if (options_.afterRecordForTest) options_.afterRecordForTest(stop);
+            if (result.rows.size() > limit) break;
+        }
+        checkStop(stop);
+        if (reader.damaged()) throw std::runtime_error("damaged journal in trade read");
+        result.coveredToMs = std::min(to, lastReceive);
+        result.partial |= result.coveredFromMs > from || lastReceive < to + TradeTail;
+        std::stable_sort(result.rows.begin(), result.rows.end(), [](const auto& a, const auto& b) {
+            return a.exchangeMs < b.exchangeMs;
+        });
+    } catch (const roller::NoJournalFiles&) { result.partial = true; }
+    return result;
 }
 FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int64_t to) {
     sentinel::capture::validateSymbol(symbol);

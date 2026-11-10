@@ -3,6 +3,7 @@
 #include "../servermodel/TradeOverlayPublisher.hpp"
 #include <boost/asio/steady_timer.hpp>
 #include "SentinelStreamProtocol.hpp"
+#include "TradeHistoryWire.hpp"
 #include "flow/FlowCodec.hpp"
 #include "flow/FlowCompose.hpp"
 #include "capture/RawCapture.hpp"
@@ -158,6 +159,9 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingA
         {"history_encoding", "FHE1/FLB1"},
         {"history_max_bars", protocol::SentinelProtocol::kFlowHistoryMaxBars},
         {"history_second_replay_max_ms", recording::FlowStore::kMaxReplayWindowMs},
+        {"trade_history", true}, {"trade_history_encoding", "TRD1"},
+        {"trade_history_max_window_ms", protocol::SentinelProtocol::kTradeHistoryMaxWindowMs},
+        {"trade_history_max_trades", protocol::SentinelProtocol::kTradeHistoryMaxTrades},
         {"grid", "per_bar"}};
     payload["trade_overlays"] = {
         {"retention_columns", cfg.tradeOverlays.retentionColumns},
@@ -418,6 +422,7 @@ class Session : public std::enable_shared_from_this<Session> {
     std::map<std::string, std::shared_ptr<recording::LiveService::RawSubscription>> rawViews_;
     std::map<uint64_t, std::shared_ptr<FlowSubscription>> flowViews_;
     bool flowHistoryBusy_ = false;
+    std::unordered_set<std::string> tradeHistoryBusy_;
     std::stop_source flowReplayStop_;
 #ifdef SENTINEL_FLOW_HISTORY_TEST
     std::function<void(std::string, bool)> flowHistoryWriteForTest_;
@@ -1132,6 +1137,8 @@ public:
                 }
             } else if (type == "flow_history_request") {
                 handleFlowHistory(j);
+            } else if (type == "trade_history_request") {
+                handleTradeHistory(j);
             } else if (type == "flow_live_subscribe") {
                 handleFlowSubscribe(j);
             } else if (type == "flow_live_unsubscribe") {
@@ -1646,6 +1653,143 @@ public:
     void flowHistoryError(const flow_history::Request& q, const std::string& message) {
         do_write(nlohmann::json{{"type", "error"}, {"context", "flow_history_request"},
             {"req", q.req}, {"symbol", q.symbol}, {"message", message}}.dump());
+    }
+    void onTradeHistoryReply(std::string payload) {
+#ifdef SENTINEL_FLOW_HISTORY_TEST
+        if (flowHistoryWriteForTest_) {
+            flowHistoryWriteForTest_(std::move(payload), true);
+            return;
+        }
+#endif
+        if (closing_.load(std::memory_order_acquire)) return;
+        chunkBytes_ += payload.size();
+        write_queue_.push_back({std::move(payload), true, true});
+        if (write_queue_.size() == 1) internal_async_write();
+    }
+    void handleTradeHistory(const nlohmann::json& j) {
+        using namespace protocol;
+        tradewire::Page page;
+        try {
+            if (!j.at("req").is_number_unsigned()) throw std::invalid_argument("unsigned req is required");
+            page.req = j.at("req").get<uint64_t>();
+            page.symbol = j.at("symbol").get<std::string>();
+            sentinel::capture::validateSymbol(page.symbol);
+            const auto& products = rollerProducts(owner_->serverConfig());
+            if (std::find(products.begin(), products.end(), page.symbol) == products.end())
+                throw std::invalid_argument("unknown symbol");
+            const auto integer = [&](const char* name) {
+                const auto& value = j.at(name);
+                if (!value.is_number_integer() ||
+                    (value.is_number_unsigned() && value.get<uint64_t>() > INT64_MAX))
+                    throw std::invalid_argument(std::string(name) + " must be an int64");
+                return value.get<int64_t>();
+            };
+            page.startMs = integer("start_ms");
+            page.endMs = integer("end_ms");
+            if (page.startMs < 0 || page.endMs <= page.startMs ||
+                page.endMs - page.startMs > SentinelProtocol::kTradeHistoryMaxWindowMs ||
+                page.endMs > INT64_MAX - 60'000)
+                throw std::invalid_argument("trade history window must be <= 3600000 ms (1 h)");
+        } catch (const std::exception& e) {
+            page.status = "refused";
+            page.reason = e.what();
+            page.startMs = std::max<int64_t>(0, page.startMs);
+            page.coveredFromMs = page.startMs;
+            page.coveredToMs = page.coveredFromMs;
+            page.endMs = std::max(page.endMs, page.coveredFromMs);
+            do_write(tradewire::encode(page), true);
+            return;
+        }
+        if (!tradeHistoryBusy_.empty() || chunkBytes_ >= kMaxChunkBytes ||
+            !tradeHistoryBusy_.insert(page.symbol).second) {
+            page.status = "refused";
+            page.reason = "trade history session budget is busy";
+            page.coveredFromMs = page.coveredToMs = page.startMs;
+            do_write(tradewire::encode(page), true);
+            return;
+        }
+        const auto closeToken = flowReplayStop_.get_token();
+        const auto serverToken = owner_->m_flowReplayStop.get_token();
+        const auto requestedSymbol = page.symbol;
+        const auto queued = owner_->submitHistoryTask(
+            [weak = weak_from_this(), executor = ws_.get_executor(), page = std::move(page),
+             closeToken, serverToken]() mutable {
+                std::string payload;
+                std::stop_source combined;
+                std::stop_callback onClose(closeToken, [&] { combined.request_stop(); });
+                std::stop_callback onServer(serverToken, [&] { combined.request_stop(); });
+                try {
+                    if (const auto self = weak.lock()) {
+                        const auto snapshot = self->model_.tradeHistorySnapshot(page.symbol, page.startMs, page.endMs,
+                            SentinelProtocol::kTradeHistoryMaxTrades);
+                        if (snapshot.rows.size() > SentinelProtocol::kTradeHistoryMaxTrades)
+                            throw std::length_error("trade history exceeds 250000 trades");
+                        const int64_t seam = snapshot.retainedFromMs > 0 ?
+                            std::clamp(snapshot.retainedFromMs, page.startMs, page.endMs) : page.endMs;
+                        bool partial = false, building = false;
+                        page.coveredFromMs = page.startMs;
+                        page.coveredToMs = page.endMs;
+                        if (seam > page.startMs) {
+                            if (snapshot.store) {
+                                auto journal = snapshot.store->readTrades(page.symbol, page.startMs, seam,
+                                    SentinelProtocol::kTradeHistoryMaxTrades, combined.get_token());
+                                partial = journal.partial;
+                                page.coveredFromMs = journal.coveredFromMs;
+                                page.coveredToMs = journal.coveredToMs;
+                                page.rows = std::move(journal.rows);
+                                if (page.rows.size() > SentinelProtocol::kTradeHistoryMaxTrades)
+                                    throw std::length_error("trade history exceeds 250000 trades");
+                            } else {
+                                building = true;
+                                page.coveredFromMs = page.coveredToMs = page.startMs;
+                            }
+                        }
+                        if (seam < page.endMs) {
+                            if (page.coveredToMs < seam) page.coveredFromMs = seam;
+                            page.coveredToMs = page.endMs;
+                            for (const auto& row : snapshot.rows)
+                                if (row.exchangeMs >= seam) page.rows.push_back(row);
+                        }
+                        std::unordered_set<std::string> ids;
+                        ids.reserve(std::min(page.rows.size(), size_t(SentinelProtocol::kTradeHistoryMaxTrades)));
+                        std::stable_sort(page.rows.begin(), page.rows.end(), [](const auto& a, const auto& b) {
+                            return a.exchangeMs < b.exchangeMs;
+                        });
+                        page.rows.erase(std::remove_if(page.rows.begin(), page.rows.end(), [&](const auto& row) {
+                            return !row.id.empty() && !ids.insert(row.id).second;
+                        }), page.rows.end());
+                        if (page.rows.size() > SentinelProtocol::kTradeHistoryMaxTrades) {
+                            page.rows.clear();
+                            page.status = "refused";
+                            page.reason = "trade history exceeds 250000 trades";
+                            page.coveredFromMs = page.coveredToMs = page.startMs;
+                        } else page.status = building ? "building" : partial ? "partial" : "complete";
+                        payload = tradewire::encode(page);
+                    }
+                } catch (const std::exception& e) {
+                    page.rows.clear(); page.status = "refused"; page.reason = e.what();
+                    page.coveredFromMs = page.coveredToMs = page.startMs;
+                    payload = tradewire::encode(page);
+                }
+                net::post(executor, [weak, symbol = page.symbol, payload = std::move(payload)]() mutable {
+                    if (const auto self = weak.lock()) {
+                        self->tradeHistoryBusy_.erase(symbol);
+                        if (!payload.empty()) self->onTradeHistoryReply(std::move(payload));
+                    }
+                });
+            });
+        if (!queued) {
+            tradeHistoryBusy_.erase(requestedSymbol);
+            tradewire::Page refused;
+            refused.req = j.at("req").get<uint64_t>();
+            refused.symbol = requestedSymbol;
+            refused.startMs = j.at("start_ms").get<int64_t>();
+            refused.endMs = j.at("end_ms").get<int64_t>();
+            refused.status = "refused";
+            refused.reason = "history worker queue is full";
+            refused.coveredFromMs = refused.coveredToMs = refused.startMs;
+            do_write(tradewire::encode(refused), true);
+        }
     }
     void queueFlowHistory(flow_history::Request q, ServerDataModel::FlowHistorySnapshot snapshot) {
         if (closing_.load()) return;

@@ -107,6 +107,10 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             }, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::tradeReceived,
             this, &IGridDataSource::tradeReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::tradeHistoryReceived,
+            this, &IGridDataSource::tradeHistoryReceived, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::tradeHistoryFailed,
+            this, &IGridDataSource::tradeHistoryFailed, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::snapshotReceived,
             this, &RemoteGridDataSource::onSnapshotReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::l2UpdateReceived,
@@ -308,6 +312,12 @@ void RemoteGridDataSource::requestFootprintHistory(const QString& symbol,
                                                    int count) {
     if (!symbolPermitted(symbol.toStdString(), "footprint history")) return;
     m_client.requestFootprintHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
+}
+
+void RemoteGridDataSource::requestTradeHistory(const QString& symbol, int64_t startMs,
+                                                int64_t endMs, quint64 req) {
+    if (!symbolPermitted(symbol.toStdString(), "trade history")) return;
+    m_client.requestTradeHistory(req, symbol.toStdString(), startMs, endMs);
 }
 
 void RemoteGridDataSource::setCandleHistoryViewport(const QString& symbol, int64_t timeframeMs,

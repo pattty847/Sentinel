@@ -117,6 +117,7 @@ add_library(sentinel_core
     protocol/SentinelStreamClient.cpp
     protocol/SentinelStreamClientParseHelpers.hpp
     protocol/SentinelStreamClientParseHelpers.cpp
+    protocol/TradeHistoryWire.hpp
     protocol/ChunkWire.hpp
     trading/TradingTypes.hpp
     trading/TradingTypes.cpp

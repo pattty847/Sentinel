@@ -1,6 +1,7 @@
 #pragma once
 #include "RecordingLive.hpp"
 #include "FlowStore.hpp"
+#include "protocol/TradeHistoryWire.hpp"
 #include "flow/FlowBarBuilder.hpp"
 #include "flow/FlowScales.hpp"
 #include "roller/Grid.hpp"
@@ -54,6 +55,7 @@ public:
         double price = 0.0;
         double size = 0.0;
         AggressorSide side = AggressorSide::Unknown;
+        std::string id;
     };
 
     explicit ServerDataModel(const ServerConfig& config, QObject* parent = nullptr);
@@ -69,6 +71,13 @@ public:
     };
     // Model-thread only. Attachment occurs before the stream server starts.
     void attachFlowStore(recording::FlowStore* store);
+    struct TradeHistorySnapshot {
+        std::vector<protocol::tradewire::Row> rows;
+        int64_t retainedFromMs = 0;
+        recording::FlowStore* store = nullptr;
+    };
+    TradeHistorySnapshot tradeHistorySnapshot(const std::string& symbol, int64_t fromMs,
+                                             int64_t toMs, size_t limit) const;
     void onFlowHourThrough(const std::string& symbol, int64_t hourThroughMs);
     void wakeFlowStoreOnRecorderHour(const std::string& symbol);
     FlowHistorySnapshot flowHistorySnapshot(const std::string& symbol, int64_t timeframeMs,
@@ -254,6 +263,7 @@ private:
     std::map<std::string, FeedState> m_feeds; // main thread, captured products only
     mutable std::mutex m_footprintTradeMutex;
     std::unordered_map<std::string, std::deque<FootprintTradeSample>> m_recentFootprintTrades;
+    std::unordered_map<std::string, int64_t> m_tradeHistoryFloorMs;
     int64_t m_footprintTradeRetentionMs = 300'000;
     // Recording v2 (null when recording.enabled is false or no usable dir).
     std::shared_ptr<recording::LiveService> m_recordingLive;

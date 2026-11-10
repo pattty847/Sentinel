@@ -16,6 +16,11 @@ constexpr size_t kFlowHistoryMaxFrameBytes = 15 * 1024 * 1024;
 // Binary flow_history_chunk: magic, LE u32 JSON length, JSON, then LE u32
 // length + FLB1 per header bars entry. Revision/completeness live in the JSON.
 constexpr char kFlowHistoryMagic[] = "FHE1";
+constexpr char kTradeHistoryMagic[] = "TRD1";
+constexpr int64_t kTradeHistoryMaxWindowMs = 3'600'000;
+constexpr uint32_t kTradeHistoryMaxTrades = 250'000;
+constexpr size_t kTradeHistoryMaxIdBytes = 128;
+constexpr size_t kTradeHistoryMaxFrameBytes = 48 * 1024 * 1024;
 constexpr int kFootprintSchemaVersion = 1;
 constexpr int kTpoSchemaVersion = 1;
 constexpr int kVolumeProfileSchemaVersion = 1;
@@ -63,6 +68,8 @@ enum class MessageType {
     FlowBar,
     FlowHistoryRequest,
     FlowHistoryChunk,
+    TradeHistoryRequest,
+    TradeHistoryChunk,
     FootprintConfig,
     FootprintSlice,
     FootprintHistoryRequest,
@@ -103,6 +110,8 @@ inline std::string toString(MessageType t) {
         case MessageType::FlowLiveUnsubscribe: return "flow_live_unsubscribe";
         case MessageType::FlowHistoryRequest: return "flow_history_request";
         case MessageType::FlowHistoryChunk: return "flow_history_chunk";
+        case MessageType::TradeHistoryRequest: return "trade_history_request";
+        case MessageType::TradeHistoryChunk: return "trade_history_chunk";
         case MessageType::FlowBar: return "flow_bar";
         case MessageType::FootprintConfig: return "footprint_config";
         case MessageType::FootprintSlice: return "footprint_slice";
@@ -143,6 +152,8 @@ inline MessageType fromString(const std::string& s) {
     if (s == "flow_live_unsubscribe") return MessageType::FlowLiveUnsubscribe;
     if (s == "flow_history_request") return MessageType::FlowHistoryRequest;
     if (s == "flow_history_chunk") return MessageType::FlowHistoryChunk;
+    if (s == "trade_history_request") return MessageType::TradeHistoryRequest;
+    if (s == "trade_history_chunk") return MessageType::TradeHistoryChunk;
     if (s == "flow_bar") return MessageType::FlowBar;
     if (s == "footprint_config") return MessageType::FootprintConfig;
     if (s == "footprint_slice") return MessageType::FootprintSlice;
