@@ -474,6 +474,13 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
                 result.body.layers.insert(key, v);
                 continue;
             }
+            if (key == "footprintCandle" || key == "footprintDustNotional") {
+                heatmap::HeatmapChartSettings settings;
+                const auto error = heatmap::applySettingsPatch(settings, {{key, v}});
+                if (!error.isEmpty()) return reject("invalid_layer", error.toUtf8().constData());
+                result.body.layers.insert(key, v);
+                continue;
+            }
             if (key == "footprintIntensity") {
                 if (v != "bar" && v != "window") return reject("invalid_layer", "footprintIntensity must be bar or window");
                 result.body.layers.insert(key, v);
@@ -490,7 +497,7 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
                 continue;
             }
             if (key != "heatmap" && key != "candles" && key != "footprint" && key != "tpo" && key != "volumeProfile" &&
-                key != "ladder" && key != "wallRadar" && key != "footprintHollowCandles" && key != "footprintNumbers")
+                key != "ladder" && key != "wallRadar" && key != "footprintNumbers")
                 return reject("invalid_field", "Unknown layer");
             if (!v.isBool()) return reject("invalid_layer", "Layer values must be boolean");
             result.body.layers.insert(key, v);
@@ -593,7 +600,8 @@ QJsonObject stateJson(const StateSnapshot& s) {
             {"cvdReset", s.footprintSettings.value("cvdReset")}, {"cvdStyle", s.footprintSettings.value("cvdStyle")},
             {"footprintSource", s.footprintSettings.value("footprintSource")},
             {"footprintIntensity", s.footprintSettings.value("footprintIntensity")},
-            {"footprintHollowCandles", s.footprintSettings.value("footprintHollowCandles")},
+            {"footprintCandle", s.footprintSettings.value("footprintCandle")},
+            {"footprintDustNotional", s.footprintSettings.value("footprintDustNotional")},
             {"footprintNumbers", s.footprintSettings.value("footprintNumbers")}, {"tpo", boolean(s.tpoLayer)},
             {"volumeProfile", boolean(s.volumeProfileLayer)}, {"ladder", boolean(s.ladderLayer)},
             {"wallRadar", boolean(s.wallRadarLayer)},

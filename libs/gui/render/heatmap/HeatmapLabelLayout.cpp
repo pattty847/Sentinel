@@ -151,6 +151,9 @@ void HeatmapLabelLayout::layout(const std::shared_ptr<const LabelCells> &cells, 
             const double left = snap(cx - width * 0.5, dpr), top = snap(cy - boxHeight * 0.5, dpr);
             if (left < clip.left() || top < clip.top() || left + width > clip.right() || top + boxHeight > clip.bottom())
                 continue;
+            const QRectF labelBox(left, top, width, boxHeight);
+            if (std::any_of(style.occlusion.begin(), style.occlusion.end(),
+                            [&](const QRectF& card) { return card.intersects(labelBox); })) continue;
             if (out.size() + run.count > style.maxGlyphs) {
                 ++stats_.droppedBudget;
                 continue;

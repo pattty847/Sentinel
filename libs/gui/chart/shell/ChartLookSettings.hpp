@@ -27,7 +27,6 @@ class ChartLookSettings : public QObject {
     Q_PROPERTY(double candleBodyOpacity READ candleBodyOpacity NOTIFY candleAppearanceChanged)
     Q_PROPERTY(int candleWickWidth READ candleWickWidth NOTIFY candleAppearanceChanged)
 public:
-    static constexpr double kFootprintTextPx = 12;
     static QColor footprintBid() { return QColor(38, 167, 154, 230); }
     static QColor footprintAsk() { return QColor(238, 83, 80, 230); }
     static QColor footprintText() { return QColor(240, 244, 248); }

@@ -257,6 +257,29 @@ protected:
     std::vector<ChartGlyphInstance> glyphs;
 };
 
+TEST_F(LabelLayout, FootprintCardsSuppressWholeIntersectingLabelsWithoutCapacityGrowth) {
+    auto cells = window(2, 1);
+    const auto camera = fit({0, 0, 240, 30}, 2, 1);
+    auto appearance = style();
+    layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
+    ASSERT_EQ(layout.stats().labels, 2u);
+    const auto capacity = layout.capacityBytes();
+    const auto glyphCapacity = glyphs.capacity();
+    // Touch just one glyph edge: the entire first label must disappear.
+    const auto edge = glyphs.front().rect;
+    const std::array<QRectF, 1> cards{{{edge.left(), edge.top(), 1, edge.height()}}};
+    appearance.occlusion = cards;
+    for (int i = 0; i < 120; ++i) {
+        layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
+        EXPECT_EQ(layout.stats().labels, 1u);
+        for (const auto& glyph : glyphs) EXPECT_GT(glyph.rect.center().x(), 120);
+        EXPECT_EQ(layout.capacityBytes(), capacity); EXPECT_EQ(glyphs.capacity(), glyphCapacity);
+    }
+    appearance.occlusion = {};
+    layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
+    EXPECT_EQ(layout.stats().labels, 2u);
+}
+
 // The label gate (owner decision 2): only valid cells the palette colours
 // (code - codeFloor > 0, exactly the shader's test) get a label; veil, loading,
 // no data and cells at or below the low handle get none.

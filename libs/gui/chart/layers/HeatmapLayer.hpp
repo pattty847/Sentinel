@@ -18,7 +18,7 @@ public:
     QSGNode* createContainer() override;
     void updateNodes(const ChartFrame&, LayerNodeContext&) override;
     void afterRendering() override;
-    void submitLabels(const ChartFrame&, LayerNodeContext&);
+    void submitLabels(const ChartFrame&, LayerNodeContext&, std::span<const QRectF> cards = {});
     bool labelsChangedSinceDraw() const;
     std::unique_ptr<heatmap::gpu::HeatmapGpuLayer> gpu;
     std::function<void()> queueUpdate, queueLabelCheck;

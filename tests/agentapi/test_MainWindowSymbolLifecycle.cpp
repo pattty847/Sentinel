@@ -1127,13 +1127,13 @@ TEST(MainWindowLayers, FootprintVariantsApplyThroughChartPort) {
     auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
     ASSERT_TRUE(renderer);
     const auto validated = AgentApi::validateControl({"POST", "/api/v1/layers", {},
-        R"({"footprintSource":"cells","footprintIntensity":"window","footprintHollowCandles":false,"footprintNumbers":false})"}, std::nullopt);
+        R"({"footprintSource":"cells","footprintIntensity":"window","footprintCandle":"full","footprintNumbers":false})"}, std::nullopt);
     ASSERT_EQ(validated.status, 200);
     const auto applied = MainWindowSymbolLifecyclePeer::applyLayers(window, validated.body);
     ASSERT_EQ(applied.status, 200);
     EXPECT_EQ(renderer->layers()->footprintSource(), "cells");
     EXPECT_EQ(renderer->layers()->footprintIntensity(), "window");
-    EXPECT_FALSE(renderer->layers()->footprintHollowCandles());
+    EXPECT_EQ(renderer->layers()->footprintCandle(), "full");
     EXPECT_FALSE(renderer->layers()->footprintNumbers());
     const auto layers = applied.data["layers"].toObject();
     EXPECT_EQ(layers["footprintSource"], "cells");
@@ -1142,7 +1142,7 @@ TEST(MainWindowLayers, FootprintVariantsApplyThroughChartPort) {
     const auto state = AgentApi::stateJson(MainWindowSymbolLifecyclePeer::state(window));
     EXPECT_EQ(state["data"].toObject()["layers"].toObject()["footprintIntensity"], "window");
     const auto reset = AgentApi::validateControl({"POST", "/api/v1/layers", {},
-        R"({"footprintSource":"q16","footprintIntensity":"bar","footprintHollowCandles":true,"footprintNumbers":true})"}, std::nullopt);
+        R"({"footprintSource":"q16","footprintIntensity":"bar","footprintCandle":"spine","footprintNumbers":true})"}, std::nullopt);
     ASSERT_EQ(MainWindowSymbolLifecyclePeer::applyLayers(window, reset.body).status, 200);
 }
 

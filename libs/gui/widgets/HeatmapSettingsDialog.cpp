@@ -304,7 +304,8 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
     if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelMinPx", "labelMaxPx",
-                                "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleWickWidth"};
+                                "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleWickWidth", "footprintSource", "footprintIntensity", "footprintCandle", "footprintNumbers",
+                                "footprintDustNotional", "cvdStripPx", "cvdReset", "cvdStyle"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
         return {"palettePreset", "bidGradient", "askGradient", "opacity",
@@ -399,6 +400,7 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     form->addRow(note("GPU labels appear on coloured cells above the range low when the text fits. "
                       "Their size grows with the cell, up to the largest size.",
                       page));
+    addFlowControls(form, page);
     m_tradesAboveCandles = new QCheckBox("Trades above candles", page);
     m_tradesAboveCandles->setObjectName("tradesAboveCandles");
     m_tradesAboveCandles->setToolTip("Keep translucent executions visible over opaque candle bodies.");
@@ -775,6 +777,54 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
     return page;
 }
 
+void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
+    const auto combo = [this](QFormLayout* rows, QWidget* group, const char* key, const char* label, QStringList choices, const char* help) {
+        auto* control = new QComboBox(group); control->setObjectName(key);
+        for (const auto& choice : choices) control->addItem(choice, choice);
+        rows->addRow(label, control);
+        describe(rows, control, help);
+        connect(control, &QComboBox::currentIndexChanged, this, [this, control, key] {
+            apply({{key, control->currentData().toString()}});
+        });
+    };
+    auto* footprint = new QGroupBox("Footprint", page);
+    auto* rows = new QFormLayout(footprint);
+    combo(rows, footprint, "footprintSource", "Source", {"q16", "cells"}, "Select the recorded q16 picture or detailed trade-flow cells.");
+    combo(rows, footprint, "footprintIntensity", "Volume scale", {"bar", "window"}, "Scale outward bars against the largest single-side cell in this candle or visible window.");
+    combo(rows, footprint, "footprintCandle", "Candle", {"spine", "full"}, "Use a narrow candle at the left of each flow card, or the full candle appearance.");
+    auto* numbers = new QCheckBox("Show numbers", footprint); numbers->setObjectName("footprintNumbers");
+    rows->addRow(numbers);
+    describe(rows, numbers, "Show 13 px bid and ask amounts when both columns fit. Zero sides stay blank.");
+    connect(numbers, &QCheckBox::toggled, this, [this](bool on) { apply({{"footprintNumbers", on}}); });
+    auto* dust = new QDoubleSpinBox(footprint); dust->setObjectName("footprintDustNotional");
+    dust->setRange(0, 9007199254740991.0); dust->setDecimals(2); dust->setSingleStep(100);
+    rows->addRow("Dust threshold (quote currency)", dust);
+    describe(rows, dust, "Side volume times its row price below this quote amount gets faint text and no volume fill.");
+    connect(dust, &QDoubleSpinBox::valueChanged, this, [this](double value) { apply({{"footprintDustNotional", value}}); });
+    form->addRow(footprint);
+    auto* cvd = new QGroupBox("CVD", page); rows = new QFormLayout(cvd);
+    auto* height = new QSpinBox(cvd); height->setObjectName("cvdStripPx"); height->setRange(0, 400);
+    height->setSuffix(" px"); height->setSpecialValueText("Off"); rows->addRow("Strip height", height);
+    describe(rows, height, "Cumulative volume delta strip height in pixels. Zero hides the strip.");
+    connect(height, &QSpinBox::valueChanged, this, [this](int value) { apply({{"cvdStripPx", value}}); });
+    combo(rows, cvd, "cvdReset", "Reset", {"utcDay", "visible", "tpoSession"}, "Anchor cumulative delta at UTC midnight, the visible window, or the TPO session open.");
+    combo(rows, cvd, "cvdStyle", "Style", {"line", "area"}, "Draw cumulative volume delta as a line or a filled area around zero.");
+    form->addRow(cvd);
+}
+void HeatmapSettingsDialog::refreshFlowControls() {
+    const auto values = heatmap::settingsJson(m_model->settings());
+    for (const auto* key : {"footprintSource", "footprintIntensity", "footprintCandle", "cvdReset", "cvdStyle"}) {
+        auto* control = findChild<QComboBox*>(key); const QSignalBlocker block(control);
+        control->setCurrentIndex(control->findData(values[key].toString()));
+    }
+    auto* numbers = findChild<QCheckBox*>("footprintNumbers"); const QSignalBlocker a(numbers);
+    numbers->setChecked(values["footprintNumbers"].toBool());
+    auto* dust = findChild<QDoubleSpinBox*>("footprintDustNotional"); const QSignalBlocker b(dust);
+    dust->setValue(values["footprintDustNotional"].toDouble());
+    auto* height = findChild<QSpinBox*>("cvdStripPx"); const QSignalBlocker c(height);
+    height->setValue(values["cvdStripPx"].toInt());
+}
+
 void HeatmapSettingsDialog::apply(const QJsonObject &patch, bool persist) {
     if (m_loading || !m_model) return;
     const auto error = m_model->apply(patch, persist);
@@ -828,6 +878,7 @@ void HeatmapSettingsDialog::refreshFromModel() {
     }
     set(m_minRowPx, s.minRowPx);
     set(m_hysteresis, s.hysteresis);
+    refreshFlowControls();
     {
         const QSignalBlocker a(m_showLabels), b(m_labelCurrency);
         m_showLabels->setChecked(s.showLabels);

@@ -3,6 +3,8 @@
 #include "chart/feeds/FlowFeed.hpp"
 #include "chart/core/FootprintLod.hpp"
 #include "render/ChartTextPrimitives.hpp"
+#include <span>
+#include <QSGGeometry>
 
 class QSGOpacityNode;
 class QSGGeometryNode;
@@ -23,19 +25,24 @@ public:
     bool drawing() const { return drawing_; }
     int vertexCount() const { return vertices_; }
     size_t glyphCount() const { return glyphs_.size(); }
-    static double intensity(const FlowColumn&, const FlowCell&, const FlowSnapshot&, bool window);
+    std::span<const QRectF> cards() const { return {cards_.data(), drawing_ ? cardCount_ : 0}; }
+    const auto& glyphs() const { return glyphs_; }
 private:
     struct Key {
         double top = 0, left = 0, row = 0, column = 0, tick = 0, dpr = 0;
         QRectF bounds;
         bool window = false;
+        double dust = 0;
         bool operator==(const Key&) const = default;
     };
     static constexpr int kMaxGlyphs = 32000;
     void cells(const ChartFrame&);
     double windowMaximum(const ChartFrame&) const;
     void labels(const ChartFrame&, const ChartTextAtlas&);
-    void number(double, const QRectF&, const ChartTextAtlas&);
+    struct Number { double volume, price, maximum; QRectF box; bool bid; };
+    void number(const Number&, const ChartTextAtlas&);
+    QRectF cardRect(const ChartFrame&, const FlowColumn&) const;
+    void rowGeometry(QSGGeometry::ColoredPoint2D*, int&, const ChartFrame&, const FlowColumn&, const FlowCell&);
     QRectF cellRect(const ChartFrame&, const FlowColumn&, const FlowCell&) const;
     FootprintPresentation presentation_;
     FlowMailbox mailbox_{&presentation_.coverage};
@@ -48,5 +55,7 @@ private:
     Key key_;
     qint64 atlasKey_ = 0;
     std::vector<ChartGlyphInstance> glyphs_;
+    std::array<QRectF, FlowSnapshot::kMaxBars> cards_{};
+    size_t cardCount_ = 0;
 };
 } // namespace chart

@@ -47,7 +47,9 @@ struct HeatmapChartSettings {
     // Flow-backed footprint presentation.
     std::string footprintSource = "q16";
     std::string footprintIntensity = "bar";
-    bool footprintHollowCandles = true, footprintNumbers = true;
+    std::string footprintCandle = "spine";
+    double footprintDustNotional = 2500;
+    bool footprintNumbers = true;
     // Chart-edge book ladder strip (chart menu); width in logical px, 60..240.
     bool showLadder = false;
     int ladderWidthPx = 120;

@@ -146,7 +146,7 @@ void HeatmapChartControls::applyLadderSettings() {
         {"cvdStyle", QString::fromStdString(s.cvdStyle)},
         {"footprintSource", QString::fromStdString(s.footprintSource)},
         {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
-        {"footprintHollowCandles", s.footprintHollowCandles}, {"footprintNumbers", s.footprintNumbers}});
+        {"footprintCandle", QString::fromStdString(s.footprintCandle)}, {"footprintDustNotional", s.footprintDustNotional}, {"footprintNumbers", s.footprintNumbers}});
     const AppliedLadder want{s.showLadder, s.ladderWidthPx, s.showWallRadar, s.wallMultiple};
     if (m_appliedLadder == want) return;
     m_appliedLadder = want;

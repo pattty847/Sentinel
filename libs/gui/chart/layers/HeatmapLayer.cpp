@@ -46,7 +46,7 @@ bool HeatmapLayer::labelsChangedSinceDraw() const {
     return gpu && gpu->labelSignature() != m_gpuLabelSignature.load();
 }
 
-void HeatmapLayer::submitLabels(const ChartFrame& snapshot, LayerNodeContext& context) {
+void HeatmapLayer::submitLabels(const ChartFrame& snapshot, LayerNodeContext& context, std::span<const QRectF> cards) {
     const auto& frame = snapshot.context;
     const bool prepared = prepared_;
     if (m_heatmapLabelGlyphs.capacity() < heatmap::gpu::HeatmapLabelLayout::kMaxGlyphs)
@@ -67,6 +67,7 @@ void HeatmapLayer::submitLabels(const ChartFrame& snapshot, LayerNodeContext& co
     const size_t matched = gpu->matchLabelColumns(*labels, m_gpuLabelColumns);
     const auto& settings = gpu->settings();
     heatmap::gpu::LabelStyle style;
+    style.occlusion = cards;
     style.usd = settings.labelCurrency != "asset";
     style.minPx = settings.labelMinPx;
     style.maxPx = settings.labelMaxPx;
