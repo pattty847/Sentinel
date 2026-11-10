@@ -8,6 +8,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <set>
+#include "render/ChartRaster.hpp"
 
 #include "chart/core/ChartFrame.hpp"
 #include "render/ChartTextRenderer.hpp"
@@ -304,7 +306,7 @@ TEST(FootprintCells, InvalidBarDoesNotWithdrawCompatibleBars) {
 TEST(FootprintCells, CapacityRetainsNearestBarsAndNeverPartialBarCells) {
     auto out = std::make_unique<chart::FlowSnapshot>();
     auto series = footprintSeries();
-    auto frame = footprintFrame(); frame.raster.drawnEndMs = 3000000;
+    auto frame = footprintFrame(); frame.raster.drawnEndMs = 3000000; frame.raster.widthDev = 300000;
     for (int i = -1000; i < 4000; ++i) {
         series.bars[i * 1000] = series.bars[0]; series.bars[i * 1000].bar.startMs = i * 1000;
     }
@@ -314,7 +316,7 @@ TEST(FootprintCells, CapacityRetainsNearestBarsAndNeverPartialBarCells) {
     EXPECT_EQ(out->bars[0].startMs, 950000) << "the far past is trimmed";
     EXPECT_EQ(out->bars[size_t(out->barCount - 1)].startMs, 2999000) << "never the newest edge";
     // A view that fits the cap shrinks its overscan instead of truncating.
-    frame.raster.drawnEndMs = 1500000;
+    frame.raster.drawnEndMs = 1500000; frame.raster.widthDev = 150000;
     ASSERT_TRUE(chart::FlowFeed::bin(*out, series, frame));
     EXPECT_EQ(out->truncatedBars, 0);
     EXPECT_EQ(out->fromMs, -274000); EXPECT_EQ(out->toMs, 1774000);
@@ -389,6 +391,7 @@ TEST(FootprintBands, WidestStripViewFitsEveryVisibleBarAndTheCellBudget) {
     auto frame = stripFrame(.25);
     auto& r = frame.raster;
     r.colPxF = 2; r.drawnStartMs = 0; r.drawnEndMs = 2048000; r.drawnMinPrice = 0; r.drawnMaxPrice = 400;
+    r.widthDev = 4096; r.heightDev = 100;
     ASSERT_TRUE(chart::FlowFeed::bin(*out, series, frame));
     EXPECT_EQ(out->barCount, 2048); EXPECT_EQ(out->truncatedBars, 0);
     EXPECT_LE(out->cellCount, chart::FlowSnapshot::kMaxCells);
@@ -404,6 +407,7 @@ MappingFrameContext denseFrame() {
     auto frame = stripFrame(.25);
     auto& r = frame.raster;
     r.colPxF = 2; r.drawnStartMs = 0; r.drawnEndMs = 2048000; r.drawnMinPrice = 0; r.drawnMaxPrice = 1000;
+    r.widthDev = 4096; r.heightDev = 250;
     return frame;
 }
 int visibleBars(const chart::FlowSnapshot& out, const MappingFrameContext& frame) {
@@ -436,6 +440,26 @@ TEST(FootprintBands, PanNeverDropsAVisibleBarOrFlipsTheBandFactor) {
         EXPECT_EQ(visibleBars(*out, frame), expected) << shift;
         EXPECT_LE(out->cellCount, chart::FlowSnapshot::kMaxCells);
     }
+}
+TEST(FootprintBands, BudgetBandFactorIgnoresPanRoundingOnADecimalTick) {
+    // Real free-camera arithmetic (shiftedRaster): drawn bounds carry ~1e-10 rounding on a .01 tick.
+    auto frame = footprintFrame();
+    auto base = frame.raster;
+    base.free = true; base.widthDev = 4096; base.heightDev = 299; base.colPx = 2; base.rowPx = 1;
+    base.colPxF = 2; base.rowPxF = 1; base.dpr = 1; base.tick = .01; base.tfMs = 1000;
+    base.topF = 6553897; base.leftF = 2000000;
+    const FlowSeriesBuffer::Series empty;
+    auto out = std::make_unique<chart::FlowSnapshot>();
+    std::set<int64_t> factors;
+    for (int step = 1; step <= 64; ++step) {
+        for (const auto& raster : {chart_raster::shiftedRaster(base, 0, step * .25),   // price pan across 6553898/9
+                                   chart_raster::shiftedRaster(base, step * .37, 0)}) { // fractional time pan
+            frame.raster = raster;
+            ASSERT_TRUE(chart::FlowFeed::bin(*out, empty, frame, chart::FootprintStage::Strip, 0)) << step;
+            factors.insert(out->bandRows);
+        }
+    }
+    EXPECT_EQ(factors, std::set<int64_t>{10}) << "2049 bars x 300 rows: k = 10 on every pan";
 }
 TEST(FootprintBands, StripDrawsOneTintedCellPerBandWithoutCardOrSpine) {
     chart::FootprintCellsLayer layer;

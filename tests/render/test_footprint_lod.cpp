@@ -101,6 +101,15 @@ TEST(FootprintLod, BudgetBandRowsFitTheWorstCaseVisibleCells) {
             EXPECT_LE(bars * ((rows + k - 1) / k + 1), 65536) << bars << ' ' << rows;
         }
 }
+TEST(FootprintLod, SpanCountIsConservativeAndIgnoresRoundingNoise) {
+    using chart::footprintSpanCount;
+    EXPECT_EQ(footprintSpanCount(2048), 2049);
+    EXPECT_EQ(footprintSpanCount(2048 + 1e-12), 2049);
+    EXPECT_EQ(footprintSpanCount(2048 - 1e-12), 2049);
+    EXPECT_EQ(footprintSpanCount(299.5), 301);
+    EXPECT_EQ(footprintSpanCount(0), 1);
+    EXPECT_EQ(footprintSpanCount(std::numeric_limits<double>::infinity()), 1);
+}
 TEST(FootprintLod, BandsAnchorToTheAbsoluteRowGrid) {
     using chart::footprintBandStart;
     EXPECT_EQ(footprintBandStart(-1, 3), -3);

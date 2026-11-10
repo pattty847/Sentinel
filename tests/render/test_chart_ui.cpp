@@ -2307,6 +2307,7 @@ TEST(FootprintFlowFeed, CoalescesRearmsAndWithdrawsOnSymbolSwitch) {
     frame.activeTimeframeMs = 1000;
     frame.raster.valid = true; frame.raster.tick = 1;
     frame.raster.dpr = 1; frame.raster.tfMs = 1000; frame.raster.colPxF = 56; frame.raster.rowPxF = 12;
+    frame.raster.widthDev = 56; frame.raster.heightDev = 120;
     frame.raster.drawnStartMs = 0; frame.raster.drawnEndMs = 1000;
     frame.raster.drawnMinPrice = 95; frame.raster.drawnMaxPrice = 105;
     QString symbol = "BTC-USD";
@@ -2741,6 +2742,7 @@ TEST(FootprintFlowFeed, BandsFollowTheNumbersSettingAndRepublishWhenItChanges) {
     frame.activeTimeframeMs = 1000;
     auto& r = frame.raster;
     r.valid = true; r.dpr = 1; r.tick = 1; r.tfMs = 1000; r.colPxF = 100; r.rowPxF = 7;
+    r.widthDev = 200; r.heightDev = 70;
     r.drawnStartMs = 1000; r.drawnEndMs = 3000; r.drawnMinPrice = 95; r.drawnMaxPrice = 105;
     published.publish(frame);
     chart::FootprintCellsLayer layer;
@@ -2768,6 +2770,13 @@ TEST(FootprintFlowFeed, BandsFollowTheNumbersSettingAndRepublishWhenItChanges) {
         EXPECT_EQ(current->bandRows, numbers ? 3 : 1);
         EXPECT_EQ(current->cellCount, numbers ? 1 : 3);
     }
+    // At exactly 6 px rows, numbers off after Numbers keeps k = 2 (1 px band hysteresis):
+    // k = 1 reaches the 6 px minimum but not 6 + 1.
+    r.rowPxF = 6; published.publish(frame);
+    renderer.layers()->setFootprintNumbers(true); QTest::qWait(150);
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->bandRows, 3);
+    renderer.layers()->setFootprintNumbers(false); QTest::qWait(150);
+    ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->bandRows, 2);
 }
 
 #include "test_chart_ui.moc"

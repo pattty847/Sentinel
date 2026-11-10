@@ -86,22 +86,25 @@ Added addBar(FlowSnapshot& out, const sentinel::flow::FlowBar& bar, FlatRows& ro
 }
 bool validWindow(const FlowSnapshot& out, const chart_raster::RasterCamera& cam, double width, double height) {
     return cam.valid && std::isfinite(cam.tick) && cam.tick > 0 && out.timeframeMs >= 1000 &&
+        cam.colPxF > 0 && cam.rowPxF > 0 && cam.widthDev > 0 && cam.heightDev > 0 &&
         std::isfinite(cam.drawnStartMs) && std::isfinite(cam.drawnMinPrice) &&
         std::isfinite(width) && std::isfinite(height) && width > 0 && height > 0;
 }
 struct Budget { int64_t band = 1; double padMs = 0, padPrice = 0; };
 // Bands coarsen until every visible bar's worst case fits kMaxCells; only overscan
-// shrinks to fit. Visible bar and row counts depend on the view size, not the pan.
-Budget budget(const FlowSnapshot& out, const chart_raster::RasterCamera& cam, double width, double height,
+// shrinks to fit. Every count comes from device pixels (never subtracted world bounds),
+// so a pan cannot change it.
+// Overscan is at most one view each side.
+Budget budget(const chart_raster::RasterCamera& cam, int64_t timeframeMs, double width, double height,
               FootprintStage stage, int64_t previous) {
-    const double tf = double(out.timeframeMs);
-    const double bars = std::min(std::ceil(width / tf) + 1, 1e12), rows = std::min(std::ceil(height / cam.tick) + 1, 1e12);
+    const double columns = double(cam.widthDev) / cam.colPxF, rowsShown = double(cam.heightDev) / cam.rowPxF;
+    const int64_t bars = footprintSpanCount(columns), rows = footprintSpanCount(rowsShown);
     Budget plan;
     plan.band = std::max(footprintBandRows(cam.rowPxF / cam.dpr, stage, previous),
-                         footprintBudgetBandRows(int64_t(bars), int64_t(rows), FlowSnapshot::kMaxCells));
-    const double perBar = double(std::max<int64_t>(1, FlowSnapshot::kMaxCells / int64_t(bars) - 1));
-    plan.padPrice = std::clamp((perBar * double(plan.band) - rows) * 0.5, 0.0, height / cam.tick) * cam.tick;
-    plan.padMs = std::clamp(((FlowSnapshot::kMaxBars - 2) * tf - width) * 0.5, 0.0, width);
+                         footprintBudgetBandRows(bars, rows, FlowSnapshot::kMaxCells));
+    const double perBar = double(std::max<int64_t>(1, FlowSnapshot::kMaxCells / bars - 1));
+    plan.padPrice = std::clamp((perBar * double(plan.band) - double(rows)) * 0.5, 0.0, height / cam.tick) * cam.tick;
+    plan.padMs = std::clamp((FlowSnapshot::kMaxBars - 2 - columns) * 0.5 * double(timeframeMs), 0.0, width);
     return plan;
 }
 Added visit(FlowSnapshot& out, const sentinel::flow::FlowBar& bar, FlatRows& rows,
@@ -259,7 +262,7 @@ bool FlowFeed::bin(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, co
     out.tick = cam.tick; out.timeframeMs = frame.activeTimeframeMs;
     const double width = cam.drawnEndMs - cam.drawnStartMs, height = cam.drawnMaxPrice - cam.drawnMinPrice;
     if (!validWindow(out, cam, width, height)) return false;
-    const auto plan = budget(out, cam, width, height, stage, previousBand);
+    const auto plan = budget(cam, out.timeframeMs, width, height, stage, previousBand);
     out.bandRows = plan.band;
     out.fromMs = cam.drawnStartMs - plan.padMs; out.toMs = cam.drawnEndMs + plan.padMs;
     out.low = cam.drawnMinPrice - plan.padPrice; out.high = cam.drawnMaxPrice + plan.padPrice;

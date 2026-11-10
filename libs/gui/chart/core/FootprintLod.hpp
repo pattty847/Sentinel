@@ -49,6 +49,12 @@ inline int64_t footprintBandRows(double row, FootprintStage stage, int64_t previ
     return std::max(footprintRowsFor(minimum, row),
                     std::min(previous, footprintRowsFor(minimum + kFootprintBandHysteresis, row)));
 }
+// Bars or rows a view of `cells` columns or rows can touch, partial edges included.
+// Callers pass a device-pixel ratio (size / cell px), never a world-bound difference.
+inline int64_t footprintSpanCount(double cells) {
+    if (!std::isfinite(cells) || cells <= 0) return 1;
+    return int64_t(std::min(std::ceil(cells - 1e-9), 1e12)) + 1;
+}
 // Smallest k whose worst case fits the cell budget: a run of rows spans at most
 // ceil(rows / k) + 1 bands in each visible bar.
 inline int64_t footprintBudgetBandRows(int64_t visibleBars, int64_t visibleRows, int64_t maxCells) {
