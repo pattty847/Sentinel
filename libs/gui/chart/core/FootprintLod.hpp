@@ -15,23 +15,24 @@ inline constexpr double kFootprintNumbersFitColumn = 2 * kFlowMagnitudeGlyphs * 
 inline constexpr double kFootprintNumbersFitRow = kFootprintTextPx + 2;
 inline constexpr double kFootprintNumbersColumn = kFootprintNumbersFitColumn + 2;
 inline constexpr double kFootprintNumbersRow = kFootprintNumbersFitRow + 2;
-// Logical px per column where each stage starts. Strip keeps the footprint at every
-// zoom where a column is still drawable; Cells adds the bid/ask split and spine.
-inline constexpr double kFootprintStripColumn = 2;
+// Logical px per column where Cells starts (bid/ask split and spine). Below it every
+// valid positive column draws Strip across exactly its column, never hidden by zoom.
+// The narrowest column is the chart's shared zoom-out clamp, one device px per column
+// (heatmap::maxTimeSpanMs), the same column a candle body fills; no footprint floor.
 inline constexpr double kFootprintCellsColumn = 24;
-// A stage is held this far below its entry width (Strip's own exit is tighter: a
-// 2 px band would make it reach zero).
+// A stage is held this far below its entry width.
 inline constexpr double kFootprintStageHysteresis = 2;
-inline constexpr double kFootprintStripHysteresis = 0.5;
 // Minimum logical height of one drawn band; thinner rows merge into bands.
 inline constexpr double kFootprintBandMinRow = 6;
-// Widest surface at 2 px columns (4096 logical px): 2048 columns plus two partial edge bars.
-inline constexpr int kFootprintMaxBars = 2050;
+// The chart's shared time zoom-out (heatmap::maxTimeSpanMs: one column per device px,
+// every timeframe) on the widest supported surface, 8192 device px: 8192 columns plus
+// two partial edges. A wider surface keeps the newest bars and trims the far past.
+inline constexpr int kFootprintMaxDevicePx = 8192;
+inline constexpr int kFootprintMaxBars = kFootprintMaxDevicePx + 2;
 // Rows merge into bands, so stages depend on the column width only.
 inline FootprintStage footprintLod(double column, double row, FootprintStage previous = FootprintStage::Hidden) {
     if (!std::isfinite(column) || !std::isfinite(row) || column <= 0 || row <= 0) return FootprintStage::Hidden;
     const auto held = [previous](FootprintStage stage, double band) { return previous >= stage ? band : 0.0; };
-    if (column < kFootprintStripColumn - held(FootprintStage::Strip, kFootprintStripHysteresis)) return FootprintStage::Hidden;
     if (column < kFootprintCellsColumn - held(FootprintStage::Cells, kFootprintStageHysteresis)) return FootprintStage::Strip;
     return column >= kFootprintNumbersColumn - held(FootprintStage::Numbers, kFootprintStageHysteresis)
         ? FootprintStage::Numbers : FootprintStage::Cells;

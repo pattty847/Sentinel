@@ -9,6 +9,9 @@
 #include <string>
 #include <vector>
 #include <set>
+#include "heatmap/HeatmapResolution.hpp"
+#include <chrono>
+#include <cstdio>
 #include "render/ChartRaster.hpp"
 
 #include "chart/core/ChartFrame.hpp"
@@ -306,20 +309,20 @@ TEST(FootprintCells, InvalidBarDoesNotWithdrawCompatibleBars) {
 TEST(FootprintCells, CapacityRetainsNearestBarsAndNeverPartialBarCells) {
     auto out = std::make_unique<chart::FlowSnapshot>();
     auto series = footprintSeries();
-    auto frame = footprintFrame(); frame.raster.drawnEndMs = 3000000; frame.raster.widthDev = 300000;
-    for (int i = -1000; i < 4000; ++i) {
+    auto frame = footprintFrame(); frame.raster.drawnEndMs = 9000000; frame.raster.widthDev = 900000;
+    for (int i = -1000; i < 10000; ++i) {
         series.bars[i * 1000] = series.bars[0]; series.bars[i * 1000].bar.startMs = i * 1000;
     }
     ASSERT_TRUE(chart::FlowFeed::bin(*out, series, frame));
     EXPECT_TRUE(out->valid); EXPECT_EQ(out->barCount, chart::FlowSnapshot::kMaxBars);
     EXPECT_GT(out->truncatedBars, 0);
-    EXPECT_EQ(out->bars[0].startMs, 950000) << "the far past is trimmed";
-    EXPECT_EQ(out->bars[size_t(out->barCount - 1)].startMs, 2999000) << "never the newest edge";
+    EXPECT_EQ(out->bars[0].startMs, 9000000 - chart::FlowSnapshot::kMaxBars * 1000) << "the far past is trimmed";
+    EXPECT_EQ(out->bars[size_t(out->barCount - 1)].startMs, 8999000) << "never the newest edge";
     // A view that fits the cap shrinks its overscan instead of truncating.
-    frame.raster.drawnEndMs = 1500000; frame.raster.widthDev = 150000;
+    frame.raster.drawnEndMs = 7000000; frame.raster.widthDev = 700000;
     ASSERT_TRUE(chart::FlowFeed::bin(*out, series, frame));
     EXPECT_EQ(out->truncatedBars, 0);
-    EXPECT_EQ(out->fromMs, -274000); EXPECT_EQ(out->toMs, 1774000);
+    EXPECT_EQ(out->fromMs, -596000); EXPECT_EQ(out->toMs, 7596000);
     EXPECT_EQ(out->barCount, chart::FlowSnapshot::kMaxBars - 2);
     // The nearest oversized bar cannot corrupt the following small bar's cells.
     series = footprintSeries();
@@ -417,6 +420,13 @@ int visibleBars(const chart::FlowSnapshot& out, const MappingFrameContext& frame
                  double(out.bars[size_t(i)].startMs) < frame.raster.drawnEndMs;
     return count;
 }
+int visibleBars60(const chart::FlowSnapshot& out, const MappingFrameContext& frame) {
+    int count = 0;
+    for (int i = 0; i < out.barCount; ++i)
+        count += double(out.bars[size_t(i)].startMs) + 60000 > frame.raster.drawnStartMs &&
+                 double(out.bars[size_t(i)].startMs) < frame.raster.drawnEndMs;
+    return count;
+}
 TEST(FootprintBands, DenseViewCoarsensBandsInsteadOfDroppingVisibleBars) {
     auto out = std::make_unique<chart::FlowSnapshot>();
     const auto frame = denseFrame();
@@ -460,6 +470,88 @@ TEST(FootprintBands, BudgetBandFactorIgnoresPanRoundingOnADecimalTick) {
         }
     }
     EXPECT_EQ(factors, std::set<int64_t>{10}) << "2049 bars x 300 rows: k = 10 on every pan";
+}
+// The widest allowed 1m view: one column per device pixel (heatmap::maxTimeSpanMs) across
+// the widest supported surface, 200 rows per bar spread over the whole visible height.
+const FlowSeriesBuffer::Series& widestSeries() {
+    static const FlowSeriesBuffer::Series series = [] {
+        FlowSeriesBuffer::Series out;
+        sentinel::flow::FlowBar bar;
+        bar.timeframeMs = 60000; bar.nativeTick = 1; bar.baseScale = 1; bar.lowRow = 100;
+        for (int i = 0; i < 200; ++i) bar.rows.push_back({int16_t(i * 14), 10 + i, 100 + i});
+        for (int i = -100; i < chart::kFootprintMaxDevicePx + 100; ++i) {
+            auto& slot = out.bars[int64_t(i) * 60000].bar; slot = bar; slot.startMs = int64_t(i) * 60000;
+        }
+        return out;
+    }();
+    return series;
+}
+MappingFrameContext widestFrame(double shiftColumns) {
+    auto frame = footprintFrame();
+    frame.activeTimeframeMs = 60000;
+    auto& r = frame.raster;
+    r.tfMs = 60000; r.colPxF = 1; r.colPx = 1; r.rowPxF = 1; r.rowPx = 1; r.dpr = 1;
+    r.widthDev = chart::kFootprintMaxDevicePx; r.heightDev = 2880;
+    r.drawnStartMs = shiftColumns * 60000; r.drawnEndMs = r.drawnStartMs + r.widthDev * 60000.0;
+    r.drawnMinPrice = shiftColumns * .37; r.drawnMaxPrice = r.drawnMinPrice + 2880;
+    r.leftF = shiftColumns;
+    return frame;
+}
+TEST(FootprintBands, WidestOneMinuteViewKeepsEveryVisibleBarWithinTheCellBudget) {
+    ASSERT_EQ(chart::footprintLod(.5, 1), chart::FootprintStage::Strip) << "1 device px at dpr 2";
+    auto out = std::make_unique<chart::FlowSnapshot>();
+    const auto frame = widestFrame(0);
+    double best = 1e9;
+    for (int run = 0; run < 3; ++run) {
+        const auto start = std::chrono::steady_clock::now();
+        ASSERT_TRUE(chart::FlowFeed::bin(*out, widestSeries(), frame, chart::FootprintStage::Strip, 0));
+        best = std::min(best, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+    }
+    std::printf("footprint bin at the widest 1m view: %d bars, %d cells, k=%lld, %.2f ms\n",
+                out->barCount, out->cellCount, (long long)out->bandRows, best);
+    RecordProperty("bin_ms", std::to_string(best));
+    EXPECT_EQ(visibleBars60(*out, frame), chart::kFootprintMaxDevicePx);
+    EXPECT_EQ(out->truncatedBars, 0);
+    EXPECT_EQ(out->bandRows, 481) << "8193 bars x 2881 rows fit 65536 cells at 481 rows per band";
+    EXPECT_LE(out->cellCount, chart::FlowSnapshot::kMaxCells);
+}
+TEST(FootprintBands, PanAtOneDevicePixelColumnsKeepsEveryVisibleBarAndTheBandFactor) {
+    auto out = std::make_unique<chart::FlowSnapshot>();
+    for (double shift : {0., .3, .5, 1.7, 2.5, -.999, 37.25}) {
+        const auto frame = widestFrame(shift);
+        const auto& r = frame.raster;
+        ASSERT_TRUE(chart::FlowFeed::bin(*out, widestSeries(), frame, chart::FootprintStage::Strip, 481));
+        EXPECT_EQ(out->bandRows, 481) << shift;
+        const int expected = int(std::ceil(r.drawnEndMs / 60000) - std::floor(r.drawnStartMs / 60000));
+        EXPECT_EQ(visibleBars60(*out, frame), expected) << shift;
+        EXPECT_LE(out->cellCount, chart::FlowSnapshot::kMaxCells);
+    }
+}
+TEST(FootprintBands, BarCapIsTheSharedZoomOutOnTheWidestSurface) {
+    for (int64_t tf : {int64_t(1000), int64_t(60000), int64_t(300000), int64_t(3600000), int64_t(86400000)})
+        EXPECT_EQ(int64_t(heatmap::maxTimeSpanMs(chart::kFootprintMaxDevicePx, tf)) / tf + 2,
+                  chart::FlowSnapshot::kMaxBars) << tf;
+}
+TEST(FootprintBands, OneDevicePixelColumnsTileWithoutOverlap) {
+    chart::FootprintCellsLayer layer;
+    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    layer.presentation().dustNotional = 0;
+    auto series = ladderSeries(1);
+    series.bars[1000] = series.bars[0]; series.bars[1000].bar.startMs = 1000;
+    auto binFrame = stripFrame(6); binFrame.raster.colPxF = 1;
+    ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), series, binFrame));
+    layer.mailbox().post();
+    std::unique_ptr<QSGNode> root(layer.createContainer());
+    ChartTextRenderer text; ChartTextAtlas atlas;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
+    auto frame = footprintChartFrame();
+    frame.context.raster.colPxF = 1; frame.context.raster.rowPxF = 6; frame.context.raster.topF = 110 * 6;
+    layer.sync(frame); layer.updateNodes(frame, context);
+    ASSERT_EQ(layer.stage(), chart::FootprintStage::Strip);
+    ASSERT_EQ(layer.vertexCount(), 12);
+    auto* v = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
+    EXPECT_FLOAT_EQ(v[0].x, 0); EXPECT_FLOAT_EQ(v[2].x, 1) << "a strip fills exactly its column, like a candle body";
+    EXPECT_FLOAT_EQ(v[6].x, 1); EXPECT_FLOAT_EQ(v[8].x, 2);
 }
 TEST(FootprintBands, StripDrawsOneTintedCellPerBandWithoutCardOrSpine) {
     chart::FootprintCellsLayer layer;
