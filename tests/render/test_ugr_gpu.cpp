@@ -994,7 +994,7 @@ class CandleTickGeometryItem : public CandlestickOverlayItem {
 public:
     using CandlestickOverlayItem::updatePaintNode;
 };
-TEST(UgrCandleCpu, FootprintSpineCapsAndUncoveredPaddingMatchSlotGeometry) {
+TEST(UgrCandleCpu, FootprintSpineSquareBodiesAndUncoveredFullBodiesMatchSlotGeometry) {
     CandleTickFrameProvider provider;
     auto& frame = provider.frame;
     frame.activeTimeframeMs = 1000; frame.viewportValid = true;
@@ -1018,7 +1018,7 @@ TEST(UgrCandleCpu, FootprintSpineCapsAndUncoveredPaddingMatchSlotGeometry) {
     std::unique_ptr<QSGNode> root(candles.updatePaintNode(nullptr, nullptr));
     auto* bodies = static_cast<QSGGeometryNode*>(root->childAtIndex(1))->geometry();
     auto* wicks = static_cast<QSGGeometryNode*>(root->childAtIndex(0))->geometry();
-    ASSERT_EQ(bodies->vertexCount(), 84); // each body: rectangle + twelve cap triangles
+    ASSERT_EQ(bodies->vertexCount(), 12); // covered spine body + uncovered full body, one quad each
     ASSERT_EQ(wicks->vertexCount(), 12);
     const auto* b = bodies->vertexDataAsColoredPoint2D();
     const auto* w = wicks->vertexDataAsColoredPoint2D();
@@ -1026,24 +1026,17 @@ TEST(UgrCandleCpu, FootprintSpineCapsAndUncoveredPaddingMatchSlotGeometry) {
     EXPECT_FLOAT_EQ(b[0].x, 2); EXPECT_FLOAT_EQ(b[2].x, 8);
     EXPECT_FLOAT_EQ(w[0].x, 4.25); EXPECT_FLOAT_EQ(w[2].x, 5.75);
     EXPECT_FLOAT_EQ((w[0].x + w[2].x) / 2, (b[0].x + b[2].x) / 2);
-    EXPECT_FLOAT_EQ(b[6].x, 5); EXPECT_FLOAT_EQ(b[6].y, first.y.lo + 3);
-    EXPECT_FLOAT_EQ(b[7].x, 2); EXPECT_FLOAT_EQ(b[7].y, first.y.lo + 3);
-    EXPECT_NEAR(b[8].x, 5 - 3 * std::sqrt(3.) / 2, 1e-5);
-    EXPECT_NEAR(b[8].y, first.y.lo + 1.5, 1e-5);
-    float minY = b[0].y, maxY = b[0].y;
-    for (int i = 0; i < 42; ++i) {
-        EXPECT_GE(b[i].x, 2); EXPECT_LE(b[i].x, 8);
-        minY = std::min(minY, b[i].y); maxY = std::max(maxY, b[i].y);
+    // Square ends: the spine is one rectangle; no vertex leaves it.
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_TRUE(b[i].x == 2 || b[i].x == 8) << i;
+        EXPECT_TRUE(b[i].y == first.y.lo || b[i].y == first.y.hi) << i;
     }
-    EXPECT_FLOAT_EQ(minY, first.y.lo); EXPECT_FLOAT_EQ(maxY, first.y.hi);
+    EXPECT_FLOAT_EQ(b[0].y, first.y.lo); EXPECT_FLOAT_EQ(b[1].y, first.y.hi);
     const auto second = bodyForFrame(frame, 2000, 102, 99);
-    EXPECT_FLOAT_EQ(b[42].x, second.x.lo); EXPECT_FLOAT_EQ(b[44].x, second.x.hi);
-    EXPECT_FLOAT_EQ(b[42].y, second.y.lo); EXPECT_FLOAT_EQ(b[43].y, second.y.hi);
+    EXPECT_FLOAT_EQ(b[6].x, second.x.lo); EXPECT_FLOAT_EQ(b[8].x, second.x.hi);
+    EXPECT_FLOAT_EQ(b[6].y, second.y.lo); EXPECT_FLOAT_EQ(b[7].y, second.y.hi);
     EXPECT_FLOAT_EQ(w[8].x - w[6].x, 3);
-    for (int i = 48; i < 84; ++i) {
-        EXPECT_FLOAT_EQ(b[i].x, 0); EXPECT_FLOAT_EQ(b[i].y, 0);
-        EXPECT_EQ(b[i].a, 0) << "uncovered full body pads unused cap vertices";
-    }
+    for (int i = 6; i < 12; ++i) EXPECT_GT(b[i].a, 0) << "uncovered bar draws its own full body";
     provider.layers()->setFootprintCandle("full");
     ASSERT_EQ(candles.updatePaintNode(root.get(), nullptr), root.get());
     ASSERT_EQ(bodies->vertexCount(), 12);
