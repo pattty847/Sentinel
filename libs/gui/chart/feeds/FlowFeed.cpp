@@ -18,7 +18,7 @@ bool grid(double native, double drawn) {
     return std::isfinite(ratio) && ratio < 1e9 && std::abs(ratio - std::round(ratio)) < 1e-6;
 }
 using FlatRows = std::array<FlowCell, FlowSnapshot::kMaxCells>;
-enum class Added { Yes, Invalid, Full };
+enum class Added { Yes, Invalid, Oversized, Full };
 int prepareRows(FlatRows& rows, const sentinel::flow::FlowBar& bar, double tick) {
     if (bar.baseScale <= 0 || !grid(bar.nativeTick, tick)) return -1;
     if (bar.rows.size() > rows.size()) return -2;
@@ -32,6 +32,14 @@ int prepareRows(FlatRows& rows, const sentinel::flow::FlowBar& bar, double tick)
     }
     std::sort(rows.begin(), rows.begin() + count, [](const auto& a, const auto& b) { return a.row < b.row; });
     return count;
+}
+// Coarse native bins stay whole: a band spans a multiple of the native span.
+void bandRows(FlatRows& rows, int count, int64_t factor) {
+    if (count == 0 || factor <= 1) return;
+    const int64_t span = rows[0].span, band = span * ((factor + span - 1) / span);
+    if (band <= span) return;
+    for (int i = 0; i < count; ++i) rows[size_t(i)] = {footprintBandStart(rows[size_t(i)].row, band), band,
+                                                        rows[size_t(i)].bidVol, rows[size_t(i)].askVol};
 }
 int mergeRows(FlatRows& rows, int count) {
     int used = 0;
@@ -50,9 +58,10 @@ bool inPrice(const FlowCell& row, double tick, double low, double high) {
     return (double(row.row) + row.span) * tick > low && double(row.row) * tick < high;
 }
 Added addBar(FlowSnapshot& out, const sentinel::flow::FlowBar& bar, FlatRows& rows,
-             const chart_raster::RasterCamera& cam) {
+             const chart_raster::RasterCamera& cam, int64_t band) {
     int count = prepareRows(rows, bar, out.tick);
-    if (count == -2) return Added::Full;
+    if (count == -2) return Added::Oversized;
+    if (count >= 0) bandRows(rows, count, band);
     if (count < 0 || (count = mergeRows(rows, count)) < 0) return Added::Invalid;
     FlowColumn column{bar.startMs, bar.baseScale, bar.sellVol, bar.buyVol, bar.delta, 0, out.cellCount, 0};
     if (count) { column.lowRow = rows[0].row; column.highRow = rows[size_t(count - 1)].row + rows[size_t(count - 1)].span; }
@@ -203,23 +212,33 @@ bool FlowFeed::visible(const MappingFrameContext& frame) {
 }
 bool FlowFeed::bin(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, const MappingFrameContext& frame) {
     const auto& cam = frame.raster;
+    return bin(out, series, frame, cam.dpr > 0 ? footprintLod(cam.colPxF / cam.dpr, cam.rowPxF / cam.dpr) : FootprintStage::Hidden);
+}
+bool FlowFeed::bin(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, const MappingFrameContext& frame,
+                   FootprintStage stage) {
+    const auto& cam = frame.raster;
     out.valid = false; out.barCount = 0; out.cellCount = 0; out.maxRowVolume = 0;
     out.skippedBars = 0; out.truncatedBars = 0;
     out.tick = cam.tick; out.timeframeMs = frame.activeTimeframeMs;
     const double width = cam.drawnEndMs - cam.drawnStartMs, height = cam.drawnMaxPrice - cam.drawnMinPrice;
-    out.fromMs = cam.drawnStartMs - width; out.toMs = cam.drawnEndMs + width;
+    // Overscan one view each side, shrunk so the whole window fits kMaxBars (narrow columns).
+    const double pad = std::clamp(((FlowSnapshot::kMaxBars - 2) * double(out.timeframeMs) - width) * 0.5, 0.0, width);
+    out.fromMs = cam.drawnStartMs - pad; out.toMs = cam.drawnEndMs + pad;
     out.low = cam.drawnMinPrice - height; out.high = cam.drawnMaxPrice + height;
     if (!validWindow(out, cam, width, height)) return false;
     // Reused on the GUI thread; fixed storage also bounds malformed/oversized bars.
     thread_local FlatRows rows;
+    const int64_t band = footprintBandRows(cam.rowPxF / cam.dpr, stage);
     const double centre = cam.drawnStartMs + width * 0.5 - out.timeframeMs * 0.5;
     auto right = series.bars.lower_bound(int64_t(std::clamp(centre, -9e15, 9e15))), left = right;
     while (left != series.bars.begin() || right != series.bars.end()) {
         const auto& bar = nearest(series, left, right, centre);
         if (double(bar.startMs) >= out.toMs || double(bar.startMs) + bar.timeframeMs <= out.fromMs) continue;
-        const auto result = bar.timeframeMs == out.timeframeMs ? addBar(out, bar, rows, cam) : Added::Invalid;
+        const auto result = bar.timeframeMs == out.timeframeMs ? addBar(out, bar, rows, cam, band) : Added::Invalid;
         if (result == Added::Invalid) ++out.skippedBars;
-        if (result == Added::Full) ++out.truncatedBars;
+        if (result == Added::Oversized || result == Added::Full) ++out.truncatedBars;
+        // Nearest-first: a full snapshot keeps one contiguous run around the centre, no holes.
+        if (result == Added::Full) break;
     }
     std::sort(out.bars.begin(), out.bars.begin() + out.barCount,
               [](const auto& a, const auto& b) { return a.startMs < b.startMs; });
@@ -245,7 +264,7 @@ void FlowFeed::publishRows() {
     out.valid = false; out.barCount = 0; out.cellCount = 0;
     out.skippedBars = 0; out.truncatedBars = 0; out.serial = ++serial_;
     const auto* series = buffer_.series(symbol_, frame.activeTimeframeMs);
-    if (series) bin(out, *series, frame);
+    if (series) bin(out, *series, frame, lod_);
     report(out);
     post();
     if (ports_.update) ports_.update();

@@ -6,7 +6,7 @@
 #include "FlowNumberFormat.hpp"
 
 namespace chart {
-enum class FootprintStage { Hidden, Cells, Numbers };
+enum class FootprintStage { Hidden, Strip, Cells, Numbers };
 inline constexpr double kFootprintTextPx = 13;
 // Bundled Roboto Mono advance is 1229/2048 em. Two widest magnitude labels, centre gap,
 // outer padding and the left candle pill must all fit before numbers appear.
@@ -15,17 +15,43 @@ inline constexpr double kFootprintNumbersFitColumn = 2 * kFlowMagnitudeGlyphs * 
 inline constexpr double kFootprintNumbersFitRow = kFootprintTextPx + 2;
 inline constexpr double kFootprintNumbersColumn = kFootprintNumbersFitColumn + 2;
 inline constexpr double kFootprintNumbersRow = kFootprintNumbersFitRow + 2;
+// Logical px per column where each stage starts. Strip keeps the footprint at every
+// zoom where a column is still drawable; Cells adds the bid/ask split and spine.
+inline constexpr double kFootprintStripColumn = 2;
+inline constexpr double kFootprintCellsColumn = 24;
+// A stage is held this far below its entry width (Strip's own exit is tighter: a
+// 2 px band would make it reach zero).
+inline constexpr double kFootprintStageHysteresis = 2;
+inline constexpr double kFootprintStripHysteresis = 0.5;
+// Minimum logical height of one drawn band; thinner rows merge into bands.
+inline constexpr double kFootprintBandMinRow = 6;
+// Widest surface at 2 px columns (4096 logical px) fits every visible bar.
+inline constexpr int kFootprintMaxBars = 2048;
+// Rows merge into bands, so stages depend on the column width only.
 inline FootprintStage footprintLod(double column, double row, FootprintStage previous = FootprintStage::Hidden) {
     if (!std::isfinite(column) || !std::isfinite(row) || column <= 0 || row <= 0) return FootprintStage::Hidden;
-    const double cellsBand = previous == FootprintStage::Hidden ? 0 : 2;
-    if (column < 24 - cellsBand || row < 6 - cellsBand) return FootprintStage::Hidden;
-    const double numbersBand = previous == FootprintStage::Numbers ? 2 : 0;
-    return column >= kFootprintNumbersColumn - numbersBand && row >= kFootprintNumbersRow - numbersBand ? FootprintStage::Numbers : FootprintStage::Cells;
+    const auto held = [previous](FootprintStage stage, double band) { return previous >= stage ? band : 0.0; };
+    if (column < kFootprintStripColumn - held(FootprintStage::Strip, kFootprintStripHysteresis)) return FootprintStage::Hidden;
+    if (column < kFootprintCellsColumn - held(FootprintStage::Cells, kFootprintStageHysteresis)) return FootprintStage::Strip;
+    return column >= kFootprintNumbersColumn - held(FootprintStage::Numbers, kFootprintStageHysteresis)
+        ? FootprintStage::Numbers : FootprintStage::Cells;
+}
+// Drawn rows per band: the smallest k with k * row >= the stage's minimum band height.
+inline int64_t footprintBandRows(double row, FootprintStage stage) {
+    if (stage == FootprintStage::Hidden || !std::isfinite(row) || row <= 0) return 1;
+    const double minimum = stage == FootprintStage::Numbers ? kFootprintNumbersRow : kFootprintBandMinRow;
+    return int64_t(std::clamp(std::ceil(minimum / row - 1e-9), 1.0, 1048576.0));
+}
+// Bands sit on the absolute drawn-row grid, so a pan never re-partitions them.
+inline int64_t footprintBandStart(int64_t row, int64_t rows) {
+    if (rows <= 1) return row;
+    const int64_t band = row / rows - (row % rows < 0 ? 1 : 0);
+    return band * rows;
 }
 // Published alongside the row mailbox on the GUI thread, read during render sync.
 // Per-bar price bounds distinguish missing history from an empty price row.
 struct FootprintCoverage {
-    static constexpr int kMaxBars = 512;
+    static constexpr int kMaxBars = kFootprintMaxBars;
     uint64_t revision = 0;
     struct Bar { double from = 0, to = 0, low = 0, high = 0; bool operator==(const Bar&) const = default; };
     std::array<Bar, kMaxBars> bars{};
@@ -49,7 +75,7 @@ struct FootprintPresentation {
         return !numbers && previous == FootprintStage::Numbers ? FootprintStage::Cells : previous;
     }
     template<class Raster> bool spine(const Raster& raster) {
-        return stage(raster) != FootprintStage::Hidden && spineCandles &&
+        return stage(raster) >= FootprintStage::Cells && spineCandles &&
             raster.tick == coverage.tick && raster.tfMs == coverage.timeframeMs && coverage.barCount > 0;
     }
     template<class Raster> bool spineBar(const Raster& raster, double start) {

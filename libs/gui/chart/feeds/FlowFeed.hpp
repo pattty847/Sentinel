@@ -26,7 +26,7 @@ struct FlowColumn {
     int64_t maxSideVol = 0, lowRow = 0, highRow = 0;
 };
 struct FlowSnapshot {
-    static constexpr int kMaxBars = 512, kMaxCells = 16384;
+    static constexpr int kMaxBars = kFootprintMaxBars, kMaxCells = 65536;
     uint64_t serial = 0;
     bool valid = false;
     int64_t timeframeMs = 0;
@@ -67,6 +67,8 @@ public:
     void setEnabled(bool);
     bool pending() const { return timer_.isActive(); }
     // Deterministic GUI-side binning; also usable by a later consumer of bar totals.
+    // Rows merge into price bands sized for the stage (footprintBandRows).
+    static bool bin(FlowSnapshot&, const FlowSeriesBuffer::Series&, const MappingFrameContext&, FootprintStage);
     static bool bin(FlowSnapshot&, const FlowSeriesBuffer::Series&, const MappingFrameContext&);
 private:
     void selectSymbol();

@@ -81,6 +81,21 @@ void FootprintCellsLayer::rowGeometry(QSGGeometry::ColoredPoint2D* vertices, int
         used += 6;
     }
 }
+// One band-wide cell: total volume intensity, tinted by the side that dominates.
+void FootprintCellsLayer::stripGeometry(QSGGeometry::ColoredPoint2D* vertices, int& used,
+    const ChartFrame& frame, const FlowColumn& bar, const FlowCell& cell) {
+    const auto rect = cellRect(frame, bar, cell);
+    if (rect.isEmpty()) return;
+    const double volume = double(cell.bidVol + cell.askVol) / bar.baseScale;
+    const double maximum = double(bar.maxRowVol) / bar.baseScale;
+    const double price = (double(cell.row) + cell.span * .5) * frame.context.raster.tick;
+    const auto tier = flowTier(volume, price, maximum, presentation_.dustNotional);
+    if (tier == FlowTier::Empty || tier == FlowTier::Dust) return;
+    const double normaliser = presentation_.windowIntensity ? current_->maxRowVolume : maximum;
+    rectangle(vertices + used, rect, cell.askVol >= cell.bidVol ? ChartLookSettings::footprintAsk()
+              : ChartLookSettings::footprintBid(), volume / normaliser);
+    used += 6;
+}
 void FootprintCellsLayer::cells(const ChartFrame& frame) {
     auto* geometry = node_->geometry();
     const int needed = current_->cellCount * 12 + current_->barCount * 12;
@@ -94,6 +109,11 @@ void FootprintCellsLayer::cells(const ChartFrame& frame) {
     cardCount_ = 0;
     for (int b = 0; b < current_->barCount; ++b) {
         const auto& bar = current_->bars[size_t(b)];
+        if (stage_ == FootprintStage::Strip) {
+            for (int i = bar.firstCell; i < bar.firstCell + bar.cellCount; ++i)
+                stripGeometry(vertices, used, frame, bar, current_->cells[size_t(i)]);
+            continue;
+        }
         const auto card = cardRect(frame, bar);
         if (!bar.cellCount || card.isEmpty()) continue;
         cards_[cardCount_++] = card;
@@ -120,8 +140,8 @@ double FootprintCellsLayer::windowMaximum(const ChartFrame& frame) const {
         const auto& bar = current_->bars[size_t(b)];
         for (int i = bar.firstCell; i < bar.firstCell + bar.cellCount; ++i) {
             const auto& cell = current_->cells[size_t(i)];
-            if (!cellRect(frame, bar, cell).isEmpty())
-                maximum = std::max(maximum, double(std::max(cell.bidVol, cell.askVol)) / bar.baseScale);
+            const auto volume = stage_ == FootprintStage::Strip ? cell.bidVol + cell.askVol : std::max(cell.bidVol, cell.askVol);
+            if (!cellRect(frame, bar, cell).isEmpty()) maximum = std::max(maximum, double(volume) / bar.baseScale);
         }
     }
     return maximum;
@@ -132,7 +152,7 @@ void FootprintCellsLayer::updateNodes(const ChartFrame& frame, LayerNodeContext&
     if (!drawing_) return;
     const auto& cam = frame.context.raster;
     const Key key{cam.topF, cam.leftF, cam.rowPxF, cam.colPxF, cam.tick, cam.dpr,
-                  frame.context.surfaceBounds, presentation_.windowIntensity, presentation_.dustNotional};
+                  frame.context.surfaceBounds, presentation_.windowIntensity, presentation_.dustNotional, stage_};
     if (built_ && key == key_) return;
     key_ = key; built_ = true; labelsDirty_ = true;
     if (presentation_.windowIntensity) current_->maxRowVolume = windowMaximum(frame);

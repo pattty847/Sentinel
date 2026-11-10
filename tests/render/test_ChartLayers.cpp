@@ -170,6 +170,7 @@ TEST(HeatmapLayer, AfterRenderingWithoutHostCallbacksConsumesFrameRequest) {
 #include "chart/feeds/FlowFeed.hpp"
 #include "chart/layers/FootprintCellsLayer.hpp"
 #include "chart/shell/LayerVisibility.hpp"
+#include "chart/shell/ChartLookSettings.hpp"
 #include "mainwindow/ChartAgentPort.hpp"
 #include "render/heatmap/HeatmapSettingsStore.hpp"
 #include <QSGOpacityNode>
@@ -303,15 +304,21 @@ TEST(FootprintCells, InvalidBarDoesNotWithdrawCompatibleBars) {
 TEST(FootprintCells, CapacityRetainsNearestBarsAndNeverPartialBarCells) {
     auto out = std::make_unique<chart::FlowSnapshot>();
     auto series = footprintSeries();
-    auto frame = footprintFrame(); frame.raster.drawnEndMs = 600000;
-    for (int i = -600; i < 1200; ++i) {
+    auto frame = footprintFrame(); frame.raster.drawnEndMs = 3000000;
+    for (int i = -1000; i < 4000; ++i) {
         series.bars[i * 1000] = series.bars[0]; series.bars[i * 1000].bar.startMs = i * 1000;
     }
     ASSERT_TRUE(chart::FlowFeed::bin(*out, series, frame));
     EXPECT_TRUE(out->valid); EXPECT_EQ(out->barCount, chart::FlowSnapshot::kMaxBars);
     EXPECT_GT(out->truncatedBars, 0);
-    EXPECT_EQ(out->bars[0].startMs, 44000);
-    EXPECT_EQ(out->bars[size_t(out->barCount - 1)].startMs, 555000);
+    EXPECT_EQ(out->bars[0].startMs, 476000);
+    EXPECT_EQ(out->bars[size_t(out->barCount - 1)].startMs, 2523000) << "one contiguous run around the centre";
+    // A view that fits the cap shrinks its overscan instead of truncating.
+    frame.raster.drawnEndMs = 1500000;
+    ASSERT_TRUE(chart::FlowFeed::bin(*out, series, frame));
+    EXPECT_EQ(out->truncatedBars, 0);
+    EXPECT_EQ(out->fromMs, -273000); EXPECT_EQ(out->toMs, 1773000);
+    EXPECT_EQ(out->barCount, chart::FlowSnapshot::kMaxBars - 2);
     // The nearest oversized bar cannot corrupt the following small bar's cells.
     series = footprintSeries();
     auto huge = series.bars[0]; huge.bar.rows.resize(chart::FlowSnapshot::kMaxCells + 1);
@@ -321,6 +328,100 @@ TEST(FootprintCells, CapacityRetainsNearestBarsAndNeverPartialBarCells) {
     EXPECT_EQ(out->truncatedBars, 1); ASSERT_EQ(out->barCount, 1);
     EXPECT_EQ(out->bars[0].firstCell, 0); EXPECT_EQ(out->cellCount, 2);
     EXPECT_EQ(out->cells[0].bidVol, 240);
+}
+FlowSeriesBuffer::Series ladderSeries(int rows, int64_t nativeTick = 1) {
+    FlowSeriesBuffer::Series series;
+    auto& b = series.bars[0].bar;
+    b.startMs = 0; b.timeframeMs = 1000; b.nativeTick = double(nativeTick); b.baseScale = 1;
+    b.lowRow = 100 / nativeTick;
+    for (int i = 0; i < rows; ++i) b.rows.push_back({int16_t(i), 10 + i, 100 + i});
+    return series;
+}
+MappingFrameContext stripFrame(double rowPx) {
+    auto frame = footprintFrame();
+    frame.raster.colPxF = 10; frame.raster.rowPxF = rowPx;
+    return frame;
+}
+TEST(FootprintBands, MergedBandsSumBidAndAskAcrossRowBoundaries) {
+    auto out = std::make_unique<chart::FlowSnapshot>();
+    ASSERT_EQ(chart::footprintLod(10, 2), chart::FootprintStage::Strip);
+    ASSERT_TRUE(chart::FlowFeed::bin(*out, ladderSeries(6), stripFrame(2))); // k = 3
+    ASSERT_EQ(out->cellCount, 3);
+    const int64_t starts[] = {99, 102, 105}, bids[] = {10 + 11, 12 + 13 + 14, 15}, asks[] = {100 + 101, 102 + 103 + 104, 105};
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(out->cells[size_t(i)].row, starts[i]); EXPECT_EQ(out->cells[size_t(i)].span, 3);
+        EXPECT_EQ(out->cells[size_t(i)].bidVol, bids[i]); EXPECT_EQ(out->cells[size_t(i)].askVol, asks[i]);
+    }
+    EXPECT_EQ(out->bars[0].bidVol, 0) << "bar totals come from the bar, not the bands";
+    EXPECT_EQ(out->bars[0].maxRowVol, 12 + 13 + 14 + 102 + 103 + 104);
+    EXPECT_EQ(out->bars[0].lowRow, 99); EXPECT_EQ(out->bars[0].highRow, 108);
+    // Coarse native bins stay whole: span 2 with k = 3 bands by 4.
+    ASSERT_TRUE(chart::FlowFeed::bin(*out, ladderSeries(3, 2), stripFrame(2)));
+    ASSERT_EQ(out->cellCount, 2);
+    EXPECT_EQ(out->cells[0].row, 100); EXPECT_EQ(out->cells[0].span, 4);
+    EXPECT_EQ(out->cells[0].bidVol, 21); EXPECT_EQ(out->cells[1].row, 104); EXPECT_EQ(out->cells[1].bidVol, 12);
+    // Rows that already reach the band height are not merged.
+    ASSERT_TRUE(chart::FlowFeed::bin(*out, ladderSeries(6), stripFrame(6)));
+    EXPECT_EQ(out->cellCount, 6); EXPECT_EQ(out->cells[0].span, 1);
+}
+TEST(FootprintBands, PanKeepsTheSameBandsForTheSamePrices) {
+    auto first = std::make_unique<chart::FlowSnapshot>(), panned = std::make_unique<chart::FlowSnapshot>();
+    const auto series = ladderSeries(9);
+    ASSERT_TRUE(chart::FlowFeed::bin(*first, series, stripFrame(2)));
+    for (double shift : {1., 2., 2.5, 7.}) {
+        auto frame = stripFrame(2);
+        auto& r = frame.raster;
+        r.topF += shift * 2; r.drawnMinPrice += shift; r.drawnMaxPrice += shift;
+        r.leftF += shift; r.drawnStartMs += shift * 100; r.drawnEndMs += shift * 100;
+        ASSERT_TRUE(chart::FlowFeed::bin(*panned, series, frame));
+        ASSERT_EQ(panned->cellCount, first->cellCount) << shift;
+        for (int i = 0; i < first->cellCount; ++i) {
+            EXPECT_EQ(panned->cells[size_t(i)].row, first->cells[size_t(i)].row) << shift;
+            EXPECT_EQ(panned->cells[size_t(i)].bidVol, first->cells[size_t(i)].bidVol) << shift;
+        }
+    }
+}
+TEST(FootprintBands, WidestStripViewFitsEveryVisibleBarAndTheCellBudget) {
+    // 2 px columns across a 4096 px surface with sub-pixel rows: every visible bar keeps its bands.
+    auto out = std::make_unique<chart::FlowSnapshot>();
+    auto series = ladderSeries(200);
+    for (int i = 0; i < 2048; ++i) { series.bars[i * 1000] = series.bars[0]; series.bars[i * 1000].bar.startMs = i * 1000; }
+    auto frame = stripFrame(.25);
+    auto& r = frame.raster;
+    r.colPxF = 2; r.drawnStartMs = 0; r.drawnEndMs = 2048000; r.drawnMinPrice = 0; r.drawnMaxPrice = 400;
+    ASSERT_TRUE(chart::FlowFeed::bin(*out, series, frame));
+    EXPECT_EQ(out->barCount, 2048); EXPECT_EQ(out->truncatedBars, 0);
+    EXPECT_LE(out->cellCount, chart::FlowSnapshot::kMaxCells);
+    EXPECT_EQ(out->bars[0].cellCount, 9) << "200 rows in 24-row bands from row 96";
+}
+TEST(FootprintBands, StripDrawsOneTintedCellPerBandWithoutCardOrSpine) {
+    chart::FootprintCellsLayer layer;
+    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    layer.presentation().dustNotional = 0;
+    auto series = ladderSeries(6);
+    series.bars[0].bar.rows[0] = {0, 500, 1}; // bid-dominant lowest band
+    ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), series, stripFrame(2)));
+    layer.mailbox().post();
+    std::unique_ptr<QSGNode> root(layer.createContainer());
+    ChartTextRenderer text; ChartTextAtlas atlas;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
+    auto frame = footprintChartFrame();
+    frame.context.raster.colPxF = 10; frame.context.raster.rowPxF = 2; frame.context.raster.topF = 110 * 2;
+    layer.sync(frame); layer.updateNodes(frame, context);
+    EXPECT_EQ(layer.stage(), chart::FootprintStage::Strip);
+    ASSERT_TRUE(layer.drawing());
+    EXPECT_EQ(layer.vertexCount(), 3 * 6) << "one quad per band, no card or mid line";
+    EXPECT_TRUE(layer.cards().empty());
+    EXPECT_FALSE(layer.presentation().spine(frame.context.raster));
+    auto* v = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
+    EXPECT_FLOAT_EQ(v[0].x, 0); EXPECT_FLOAT_EQ(v[2].x, 10) << "the band spans the whole column";
+    const auto bid = chart::ChartLookSettings::footprintBid(), ask = chart::ChartLookSettings::footprintAsk();
+    EXPECT_EQ(v[0].a, 255 * bid.alpha() / 255) << "the bid-dominant band is the bar's busiest";
+    EXPECT_EQ(v[0].g, bid.green() * v[0].a / 255);
+    EXPECT_EQ(v[6].g, ask.green() * v[6].a / 255);
+    EXPECT_LT(v[12].a, v[6].a) << "intensity follows band volume";
+    layer.submitLabels(frame, context);
+    EXPECT_EQ(layer.glyphCount(), 0u);
 }
 TEST(FootprintCells, RegistrySlotAndNoData) {
     chart::ChartLayers layers;
