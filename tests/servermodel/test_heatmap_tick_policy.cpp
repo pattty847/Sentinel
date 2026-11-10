@@ -174,15 +174,15 @@ TEST(HeatmapTickPolicy, ManualTickIsRememberedPerSymbolAndTimeframe) {
     EXPECT_EQ(memory.entries().size(), 2u);
 }
 
-TEST(HeatmapTickPolicy, OneColumnAndOneRowPerPixelClamps) {
-    EXPECT_DOUBLE_EQ(maxTimeSpanMs(1500, kMinuteMs), 1500.0 * kMinuteMs);
-    EXPECT_DOUBLE_EQ(maxTimeSpanMs(1500, kHourMs), 1500.0 * kHourMs);
+// Owner 2026-11-10: at least 2 logical px per column and per Manual row (logical sizes in).
+TEST(HeatmapTickPolicy, TwoLogicalPixelColumnAndRowClamps) {
+    EXPECT_DOUBLE_EQ(maxTimeSpanMs(1500, kMinuteMs), 750.0 * kMinuteMs);
+    EXPECT_DOUBLE_EQ(maxTimeSpanMs(1500, kHourMs), 750.0 * kHourMs);
+    EXPECT_DOUBLE_EQ(maxTimeSpanMs(1501, kMinuteMs), 750.0 * kMinuteMs) << "whole columns";
     EXPECT_EQ(maxTimeSpanMs(0, kMinuteMs), 0);
-    EXPECT_DOUBLE_EQ(maxTimeSpanMs(8192, kMinuteMs), 8192.0 * kMinuteMs);
-    EXPECT_DOUBLE_EQ(maxTimeSpanMs(8193, kMinuteMs), 4096.0 * kMinuteMs) << "2 px columns past the widest surface";
-    EXPECT_DOUBLE_EQ(maxTimeSpanMs(10000, kMinuteMs), 5000.0 * kMinuteMs);
-    EXPECT_DOUBLE_EQ(maxManualPriceSpan(880, 1), 880);
-    EXPECT_DOUBLE_EQ(maxManualPriceSpan(1760, 25), 44'000);
+    EXPECT_DOUBLE_EQ(maxTimeSpanMs(1, kMinuteMs), 1.0 * kMinuteMs) << "at least one column";
+    EXPECT_DOUBLE_EQ(maxManualPriceSpan(880, 1), 440);
+    EXPECT_DOUBLE_EQ(maxManualPriceSpan(1760, 25), 22'000);
     EXPECT_EQ(maxManualPriceSpan(880, 0), 0);
     double lo = 0, hi = 3000;
     clampSpan(lo, hi, 1000);

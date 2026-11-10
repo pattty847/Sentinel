@@ -144,17 +144,16 @@ inline std::vector<int64_t> manualPresetUnits(const std::vector<int64_t> &gridCo
 }
 
 // ------------------------------------------------------------------ clamps
-// Time zoom-out stops at one column per physical pixel (spec rule 1). A surface wider
-// than kMaxChartSurfaceDevicePx stops at its narrowest whole-px column instead
-// (minColumnDevicePx), so the drawn camera never holds more than that many columns.
-inline double maxTimeSpanMs(double widthPx, int64_t tfMs) {
-    if (!std::isfinite(widthPx) || !(widthPx > 0) || tfMs <= 0) return 0;
-    const int column = minColumnDevicePx(widthPx);
-    return column == 1 ? widthPx * double(tfMs) : std::floor(std::floor(widthPx + 1e-6) / column) * double(tfMs);
+// Whole cells of kMinChartCellLogicalPx that fit a logical length (at least one).
+inline double chartCells(double logicalPx) { return std::max(1.0, std::floor(logicalPx / kMinChartCellLogicalPx)); }
+// Time zoom-out stops at one column per kMinChartCellLogicalPx logical px (spec rule 1).
+inline double maxTimeSpanMs(double widthLogical, int64_t tfMs) {
+    return std::isfinite(widthLogical) && widthLogical > 0 && tfMs > 0 ? chartCells(widthLogical) * double(tfMs) : 0;
 }
-// Manual price zoom-out stops at one row per physical pixel (spec rule 2).
-inline double maxManualPriceSpan(double heightPx, double tick) {
-    return std::isfinite(heightPx) && heightPx > 0 && std::isfinite(tick) && tick > 0 ? heightPx * tick : 0;
+// Manual price zoom-out stops at one row per kMinChartCellLogicalPx logical px (spec rule 2).
+inline double maxManualPriceSpan(double heightLogical, double tick) {
+    return std::isfinite(heightLogical) && heightLogical > 0 && std::isfinite(tick) && tick > 0
+        ? chartCells(heightLogical) * tick : 0;
 }
 // Shrinks [lo, hi) about its centre so hi - lo <= maxSpan (no-op if maxSpan <= 0).
 inline void clampSpan(double &lo, double &hi, double maxSpan) {

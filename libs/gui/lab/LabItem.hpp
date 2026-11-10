@@ -4,11 +4,11 @@
 //   (all on the "heatmap-data" thread, LabData) -> SpanSet -> HeatmapTileNode.
 // The item owns the view and the tick policy:
 // - a column is exactly the selected timeframe; time zoom-out clamps at one
-//   column per physical pixel;
+//   column per two logical px (kMinChartCellLogicalPx);
 // - Auto tick (default): the smallest preset whose rows are at least minRowPx
 //   tall that the data builds on every row in view (the SpanSet's resolution
 //   summary), with hysteresis h; Manual: a locked preset, remembered per symbol
-//   and timeframe, price zoom-out clamped at one row per physical pixel, never
+//   and timeframe, price zoom-out clamped at one row per two logical px, never
 //   coarsened (unbuildable rows veil and the resolution indicator names them);
 // - the tick is chosen in updatePaintNode (GUI blocked) and handed to the node in
 //   the same frame, then posted to the controller;

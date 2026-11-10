@@ -1,5 +1,4 @@
 #include "ChartRaster.hpp"
-#include "../../core/heatmap/ChartSurface.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -44,8 +43,6 @@ RasterCamera computeRaster(const RasterInputs &in, RasterStep previous) {
     // whole device pixels is then always a whole-ms commit (panShift). A stored window
     // narrower than that (a direct viewport of a few ms) draws wider than stored.
     cam.colPx = std::min(stepPixels(rCol, previous.colPx), maxColumnPixels(in.tfMs));
-    // Never more columns than the widest supported surface: retention and snapshots hold that many.
-    cam.colPx = std::max(cam.colPx, heatmap::minColumnDevicePx(cam.widthDev));
     const double P = cam.rowPx, C = cam.colPx;
     // The anchor keeps its screen position within half a device pixel for any P
     // and C; the drag moves the picture by whole device pixels, 1:1 with the mouse.
@@ -90,8 +87,7 @@ RasterCamera continuousRaster(const RasterInputs &in) {
     if (!cam.valid) return cam;
     const double timeSpan = double(in.timeEnd - in.timeStart), priceSpan = in.maxPrice - in.minPrice;
     cam.rowPxF = double(cam.heightDev) * cam.tick / priceSpan;
-    cam.colPxF = std::max(std::min(double(cam.widthDev) * in.tfMs / timeSpan, double(maxColumnPixels(in.tfMs))),
-                          double(heatmap::minColumnDevicePx(cam.widthDev)));
+    cam.colPxF = std::min(double(cam.widthDev) * in.tfMs / timeSpan, double(maxColumnPixels(in.tfMs)));
     const double fracX = std::isfinite(in.anchorFracX) ? std::clamp(in.anchorFracX, 0.0, 1.0) : 0.5;
     const double fracY = std::isfinite(in.anchorFracY) ? std::clamp(in.anchorFracY, 0.0, 1.0) : 0.5;
     const double anchorTime = double(in.timeStart) + fracX * timeSpan;

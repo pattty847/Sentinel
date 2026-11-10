@@ -218,14 +218,14 @@ TEST_F(LabItemTest, ShiftWheelScalesPriceOnlyWithinTheClamps) {
     item->wheelZoom(0, 120, true, 0.5, 0.5); // a mouse that keeps the vertical delta
     EXPECT_LT(span("priceSpan"), price1);
     EXPECT_DOUBLE_EQ(span("timeSpanMin"), time0);
-    // Manual $10: zoom-out stops at one row per pixel (500 px -> $5000).
+    // Manual $10: zoom-out stops at one row per two logical px (500 px -> $2500).
     item->setManualTick(10);
     for (int i = 0; i < 80; ++i) item->wheelZoom(-120, 0, true, 0.5, 0.5);
-    EXPECT_NEAR(span("priceSpan"), 5000, 1e-6);
-    // Plain wheel zoom-out stops at one column per pixel (1000 px at 1 m).
+    EXPECT_NEAR(span("priceSpan"), 2500, 1e-6);
+    // Plain wheel zoom-out stops at one column per two logical px (1000 px at 1 m).
     for (int i = 0; i < 80; ++i) item->wheelZoom(0, -120, false, 0.5, 0.5);
-    EXPECT_LE(span("timeSpanMin"), 1000 + 1e-9);
-    EXPECT_NEAR(span("priceSpan"), 5000, 1e-6) << "Manual price clamp holds for plain wheel too";
+    EXPECT_LE(span("timeSpanMin"), 500 + 1e-9);
+    EXPECT_NEAR(span("priceSpan"), 2500, 1e-6) << "Manual price clamp holds for plain wheel too";
     item->setManualMode(false); // Auto re-ticks instead of clamping
     for (int i = 0; i < 10; ++i) item->wheelZoom(-120, 0, true, 0.5, 0.5);
     EXPECT_GT(span("priceSpan"), 5000);

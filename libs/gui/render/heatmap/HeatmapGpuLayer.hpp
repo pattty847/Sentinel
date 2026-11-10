@@ -96,8 +96,8 @@ public:
     // continuous rows' height (device px) for metrics() (atomics; GUI-thread reads).
     void noteRaster(int rowPx, int colPx, double rowPxContinuous);
 
-    // Spec rules 1, 2 and 9 for the chart's GridViewState (0 = none): one column
-    // per physical pixel; Manual: one row per physical pixel.
+    // Spec rules 1, 2 and 9 for the chart's GridViewState (0 = none): one column per
+    // kMinChartCellLogicalPx logical px; Manual: one row per kMinChartCellLogicalPx.
     double maxTimeSpanMs() const;
     double maxPriceSpan() const;
     // The price scale is the active symbol's: false while the previous symbol's

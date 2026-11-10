@@ -390,8 +390,8 @@ TEST_F(UgrGpu, SettlesOnTheProductionPath) {
     EXPECT_EQ(root->firstChild()->type(), QSGNode::OpacityNodeType);
     EXPECT_EQ(static_cast<QSGOpacityNode *>(root->firstChild())->opacity(), 1.0);
     EXPECT_EQ(root->firstChild()->firstChild()->type(), QSGNode::RenderNodeType);
-    // The limits clamp the view: one column per pixel at 1m over 640 px.
-    EXPECT_EQ(ugr->getViewState()->maxTimeSpanMs(), 640.0 * minute);
+    // The limits clamp the view: one column per two logical px at 1m over 640 px.
+    EXPECT_EQ(ugr->getViewState()->maxTimeSpanMs(), 320.0 * minute);
 }
 
 // Candles map through the
@@ -544,6 +544,7 @@ TEST_F(UgrGpu, CandleBodyEdgesAtEveryColumnWidthAndDeviceRatio) {
         ASSERT_TRUE(scene->setDevicePixelRatio(dpr, &error)) << error.toStdString();
         emit scene->window()->screenChanged(scene->window()->screen());
         for (int columns : {3, 4, 5, 8, 10, 11, 12, 15, 20, 32, 60}) {
+            if (columns < 2 * dpr) continue; // below the 2 logical px zoom-out limit
             SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
             const qint64 lo = epoch + minute / 3;
             ugr->view()->setViewport(lo, lo + std::llround(320 * dpr * minute / columns), 99'900, 100'300);
@@ -1400,47 +1401,47 @@ TEST_F(UgrGpu, FollowLiveMovesByWholePixelSteps) {
     EXPECT_GE(steps, 10);
 }
 
-// At the clamps the drawn cells are one device pixel: zoomed out to
-// one column per pixel, C = 1 and the drawn window is exactly the 640 columns; Manual at
-// its maximum price span (one row per pixel), P = 1 and 320 rows.
-TEST_F(UgrGpu, TheClampsDrawOnePixelColumnsAndRows) {
+// At the clamps the drawn cells are two logical px (owner 2026-11-10): zoomed out to
+// one column per two px, C = 2 and the drawn window is exactly the 320 columns; Manual at
+// its maximum price span (one row per two px), P = 2 and 160 rows.
+TEST_F(UgrGpu, TheClampsDrawTwoPixelColumnsAndRows) {
     noLabels();
     gpuOn();
     ASSERT_TRUE(settle()) << error.toStdString();
     auto *view = ugr->getViewState();
-    // From 2 px columns straight to the 1 column/px clamp (one step), then by the wheel.
+    // From 4 px columns straight to the 2 px column clamp (one step), then by the wheel.
+    view->setViewport(view->getVisibleTimeEnd() - 160 * minute, view->getVisibleTimeEnd(), view->getMinPrice(),
+                      view->getMaxPrice());
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    ASSERT_EQ(drawn().colPx, 4);
     view->setViewport(view->getVisibleTimeEnd() - 320 * minute, view->getVisibleTimeEnd(), view->getMinPrice(),
                       view->getMaxPrice());
     ASSERT_TRUE(frames(2)) << error.toStdString();
-    ASSERT_EQ(drawn().colPx, 2);
-    view->setViewport(view->getVisibleTimeEnd() - 640 * minute, view->getVisibleTimeEnd(), view->getMinPrice(),
-                      view->getMaxPrice());
-    ASSERT_TRUE(frames(2)) << error.toStdString();
-    EXPECT_EQ(drawn().colPx, 1) << "one column per device pixel at the clamp";
+    EXPECT_EQ(drawn().colPx, 2) << "two logical px per column at the clamp";
     for (int i = 0; i < 80; ++i) ugr->view()->zoomTimeClicks(-1, 320);
-    ASSERT_EQ(timeSpan(), 640.0 * minute);
+    ASSERT_EQ(timeSpan(), 320.0 * minute);
     ASSERT_TRUE(frames(2)) << error.toStdString();
     auto cam = drawn();
-    EXPECT_EQ(cam.colPx, 1);
-    EXPECT_NEAR((cam.drawnEndMs - cam.drawnStartMs) / double(minute), 640.0, 1e-6);
-    EXPECT_DOUBLE_EQ(ugr->currentTimeAxisMapping().cellW, 1.0);
+    EXPECT_EQ(cam.colPx, 2);
+    EXPECT_NEAR((cam.drawnEndMs - cam.drawnStartMs) / double(minute), 320.0, 1e-6);
+    EXPECT_DOUBLE_EQ(ugr->currentTimeAxisMapping().cellW, 2.0);
     auto manual = brightSettings();
     manual.showLabels = false;
     manual.tickMode = heatmap::TickMode::Manual;
     manual.manualTick = 1000; // $10
     ugr->setHeatmapChartSettings(manual, true);
-    ASSERT_TRUE(setRows(2.0));
+    ASSERT_TRUE(setRows(4.0));
     ASSERT_TRUE(settle()) << error.toStdString();
-    ASSERT_EQ(drawn().rowPx, 2);
+    ASSERT_EQ(drawn().rowPx, 4);
     for (int i = 0; i < 80; ++i) ugr->view()->zoomPriceClicks(-1, 160);
-    ASSERT_NEAR(priceSpan(), 3200, 1e-6);
+    ASSERT_NEAR(priceSpan(), 1600, 1e-6);
     ASSERT_TRUE(settle()) << error.toStdString();
     cam = drawn();
     EXPECT_DOUBLE_EQ(cam.tick, 10.0);
-    EXPECT_EQ(cam.rowPx, 1);
-    EXPECT_NEAR((cam.drawnMaxPrice - cam.drawnMinPrice) / cam.tick, 320.0, 1e-9);
-    EXPECT_DOUBLE_EQ(ugr->currentTimeAxisMapping().cellH, 1.0);
-    EXPECT_EQ(bandHeight(image), 1);
+    EXPECT_EQ(cam.rowPx, 2);
+    EXPECT_NEAR((cam.drawnMaxPrice - cam.drawnMinPrice) / cam.tick, 160.0, 1e-9);
+    EXPECT_DOUBLE_EQ(ugr->currentTimeAxisMapping().cellH, 2.0);
+    EXPECT_EQ(bandHeight(image), 2);
 }
 
 // Spec rules 6-8 and plan section 2: a timeframe switch keeps the old picture
@@ -1507,14 +1508,14 @@ TEST_F(UgrGpu, TimeframeSwitchKeepsTheColumnsOnScreen) {
     EXPECT_EQ(switchTf(minute), 1u) << "5m -> 1m";
     EXPECT_EQ(view->getVisibleTimeEnd(), viewHi);
     EXPECT_EQ(view->getVisibleTimeEnd() - view->getVisibleTimeStart(), 40 * minute) << "40 columns of 1m again";
-    // The clamp still rules: 640 px cannot show more than 640 columns.
-    ugr->view()->setViewport(viewHi - 600 * minute, viewHi, 99'900, 100'300);
+    // The clamp still rules: 640 px cannot show more than 320 columns.
+    ugr->view()->setViewport(viewHi - 300 * minute, viewHi, 99'900, 100'300);
     EXPECT_EQ(switchTf(5 * minute), 1u);
-    EXPECT_LE(view->getVisibleTimeEnd() - view->getVisibleTimeStart(), 640 * 5 * minute);
+    EXPECT_LE(view->getVisibleTimeEnd() - view->getVisibleTimeStart(), 320 * 5 * minute);
     EXPECT_EQ(view->getVisibleTimeEnd(), viewHi);
-    // Shorter timeframe from a view wider than its 1 column/px limit: the old span is read
+    // Shorter timeframe from a view wider than its column limit: the old span is read
     // before the new limit re-clamps it (72 h of 1h became 30.8 min of 1m), and
-    // the limit is not published on its own first (it would clamp 72 h to 640 min).
+    // the limit is not published on its own first (it would clamp 72 h to 320 min).
     ugr->view()->setTimeframe(int(60 * minute));
     ugr->view()->setViewport(viewHi - 72 * kHourMs, viewHi, 99'900, 100'300);
     ASSERT_EQ(view->getVisibleTimeEnd() - view->getVisibleTimeStart(), 72 * kHourMs);
@@ -1761,7 +1762,7 @@ TEST_F(UgrGpu, TheChartHasExactlyOneRootPath) {
 // Spec rules 1, 2 and 9 through the chart (port of LabItemTest.
 // ShiftWheelScalesPriceOnlyWithinTheClamps): Shift+wheel scales price only
 // (macOS delivers it as a horizontal delta); Manual clamps price at one row per
-// pixel for every input; time zoom-out stops at one column per pixel; Auto
+// two logical px for every input; time zoom-out stops at one column per two px; Auto
 // re-ticks instead of clamping.
 TEST_F(UgrGpu, ShiftWheelScalesPriceOnlyWithinTheClamps) {
     gpuOn();
@@ -1787,23 +1788,23 @@ TEST_F(UgrGpu, ShiftWheelScalesPriceOnlyWithinTheClamps) {
     wheel({0, 120}, Qt::ShiftModifier); // a mouse that keeps the vertical delta
     EXPECT_LT(priceSpan(), price1);
     EXPECT_EQ(timeSpan(), time0);
-    // Manual $10: zoom-out stops at one row per pixel (320 px -> $3200).
+    // Manual $10: zoom-out stops at one row per two logical px (320 px -> $1600).
     auto manual = brightSettings();
     manual.tickMode = heatmap::TickMode::Manual;
     manual.manualTick = 1000;
     ugr->setHeatmapChartSettings(manual, true);
     for (int i = 0; i < 80; ++i) wheel({-120, 0}, Qt::ShiftModifier);
-    EXPECT_NEAR(priceSpan(), 3200, 1e-6);
-    // Plain wheel zoom-out stops at one column per pixel (640 px at 1m).
+    EXPECT_NEAR(priceSpan(), 1600, 1e-6);
+    // Plain wheel zoom-out stops at one column per two logical px (640 px at 1m).
     for (int i = 0; i < 80; ++i) wheel({0, -120}, Qt::NoModifier);
-    EXPECT_LE(timeSpan(), 640.0 * minute);
-    EXPECT_GE(timeSpan(), 639.0 * minute);
-    EXPECT_NEAR(priceSpan(), 3200, 1e-6) << "the Manual price clamp holds for plain wheel too";
+    EXPECT_LE(timeSpan(), 320.0 * minute);
+    EXPECT_GE(timeSpan(), 319.0 * minute);
+    EXPECT_NEAR(priceSpan(), 1600, 1e-6) << "the Manual price clamp holds for plain wheel too";
     ASSERT_TRUE(settle()) << error.toStdString();
     EXPECT_EQ(layer().tickUnits(), 1000) << "Manual draws the locked tick";
     ugr->setHeatmapChartSettings(brightSettings()); // Auto re-ticks instead of clamping
     for (int i = 0; i < 10; ++i) wheel({-120, 0}, Qt::ShiftModifier);
-    EXPECT_GT(priceSpan(), 3200);
+    EXPECT_GT(priceSpan(), 1600);
 }
 
 // MainWindowGPU destroys its HeatmapDataService (a member)
@@ -1967,7 +1968,7 @@ TEST_F(UgrGpu, PriceAxisFitLandsTheVisibleCandlesInView) {
     ugr->setCandleBuffer(nullptr);
 }
 
-// Manual tick ($10 over 320 px: at most $3200) cannot hold candles spanning $5000.
+// Manual tick ($10 over 320 px at 2 px rows: at most $1600) cannot hold candles spanning $5000.
 // Owner decision 2026-10-02: keep the Manual tick and show the max span centred on the
 // current price (book mid, then last trade, then the newest close), within one row.
 TEST_F(UgrGpu, PriceAxisFitUnderTheManualClampCentresTheCurrentPrice) {
@@ -1979,7 +1980,7 @@ TEST_F(UgrGpu, PriceAxisFitUnderTheManualClampCentresTheCurrentPrice) {
     const auto *view = ugr->getViewState();
     // The limits need BTC's price scale (its first snapshot).
     ASSERT_TRUE(pump(30'000, [&] { return layer().priceScaleCurrent() && view->maxPriceSpan() > 0; }));
-    ASSERT_DOUBLE_EQ(view->maxPriceSpan(), 3200);
+    ASSERT_DOUBLE_EQ(view->maxPriceSpan(), 1600);
     const double row = 10;
     CandleSeriesBuffer buffer;
     std::vector<CandleSeriesBuffer::CandleBar> bars;
@@ -1993,7 +1994,7 @@ TEST_F(UgrGpu, PriceAxisFitUnderTheManualClampCentresTheCurrentPrice) {
     auto centre = [&] { return (view->getMinPrice() + view->getMaxPrice()) / 2; };
     // No book or trade yet: the newest close.
     ASSERT_TRUE(ugr->view()->fitPriceToData());
-    EXPECT_DOUBLE_EQ(view->getMaxPrice() - view->getMinPrice(), 3200) << "the Manual max span, tick kept";
+    EXPECT_DOUBLE_EQ(view->getMaxPrice() - view->getMinPrice(), 1600) << "the Manual max span, tick kept";
     EXPECT_NEAR(centre(), 105'000, row) << "centred on the newest close";
     // A trade: the last trade price.
     Trade trade{};
@@ -2006,7 +2007,7 @@ TEST_F(UgrGpu, PriceAxisFitUnderTheManualClampCentresTheCurrentPrice) {
     ugr->setLiveBook(bookWithTop(103'499, 103'501));
     ASSERT_TRUE(ugr->view()->fitPriceToData());
     EXPECT_NEAR(centre(), 103'500, row) << "centred on the book mid";
-    EXPECT_DOUBLE_EQ(view->getMaxPrice() - view->getMinPrice(), 3200);
+    EXPECT_DOUBLE_EQ(view->getMaxPrice() - view->getMinPrice(), 1600);
     EXPECT_EQ(layer().manualMode(), true) << "never switched to Auto";
     EXPECT_EQ(layer().manualTickUnits(), 1000) << "never coarsened";
     ugr->setCandleBuffer(nullptr);
@@ -2430,20 +2431,20 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     gpuOn();
     auto manual = brightSettings();
     manual.tickMode = heatmap::TickMode::Manual;
-    manual.manualTick = 1000; // $10 on BTC: at most $3200 over 320 px
+    manual.manualTick = 1000; // $10 on BTC: at most $1600 over 320 px (2 px rows)
     ugr->setHeatmapChartSettings(manual, true);
     ASSERT_TRUE(settle()) << error.toStdString();
     auto *view = ugr->getViewState();
-    ASSERT_DOUBLE_EQ(view->maxPriceSpan(), 3200);
+    ASSERT_DOUBLE_EQ(view->maxPriceSpan(), 1600);
     const int64_t t0 = view->getVisibleTimeStart(), t1 = view->getVisibleTimeEnd();
     auto expectCarried = [&](double mid, const char *what) {
-        const double span = mid * 0.02; // 2,000 / 100,000
+        const double span = mid * 0.015; // 1,500 / 100,000 (inside BTC's $1,600 Manual limit)
         EXPECT_NEAR(view->getMaxPrice() - view->getMinPrice(), span, span * 1e-6) << what;
         EXPECT_NEAR(view->getMinPrice(), mid - 0.25 * span, span * 1e-6) << what;
         EXPECT_EQ(view->getVisibleTimeStart(), t0) << what;
         EXPECT_EQ(view->getVisibleTimeEnd(), t1) << what;
     };
-    ugr->view()->setViewport(t0, t1, 99'500, 101'500); // auto off; the book a quarter up
+    ugr->view()->setViewport(t0, t1, 99'625, 101'125); // auto off; the book a quarter up
     ugr->setLiveBook(bookWithTop(99'999, 100'001));
     // BTC -> TINY (price scale 1e10, recorded).
     auto tinyMemory = layer().tickMemory();
@@ -2458,11 +2459,11 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     ASSERT_TRUE(pump(30'000, [&] { return layer().priceScaleCurrent() && view->maxPriceSpan() > 0; }))
         << "TINY's snapshot never arrived: current=" << layer().priceScaleCurrent() << " max=" << view->maxPriceSpan()
         << " avail=" << bool(lab::LabData::instance().service().availability("TINY-USD")) << " scale=" << layer().priceScale();
-    EXPECT_NEAR(view->maxPriceSpan(), 3.2e-5, 1e-12) << "TINY's own Manual limit";
+    EXPECT_NEAR(view->maxPriceSpan(), 1.6e-5, 1e-12) << "TINY's own Manual limit";
     expectCarried(0.00001, "TINY after its snapshot");
     // TINY -> ETH (not recorded): the controller publishes ETH snapshots before any ETH
     // availability, still at TINY's price scale; they must not size ETH's limits (a
-    // $0.000032 Manual limit would clamp the carried $60).
+    // $0.000016 Manual limit would clamp the carried $45).
     ugr->setActiveSymbol("ETH-USD");
     ugr->setLiveBook(bookWithTop(2'999, 3'001));
     expectCarried(3'000, "ETH before its first snapshot");
@@ -2479,7 +2480,7 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     EXPECT_EQ(view->maxPriceSpan(), 0.0);
     ugr->setLiveBook(bookWithTop(99'999, 100'001));
     expectCarried(100'000, "BTC before its snapshot");
-    ASSERT_TRUE(pump(30'000, [&] { return layer().priceScaleCurrent() && view->maxPriceSpan() == 3200; }));
+    ASSERT_TRUE(pump(30'000, [&] { return layer().priceScaleCurrent() && view->maxPriceSpan() == 1600; }));
     expectCarried(100'000, "BTC after its snapshot");
     // BTC -> ETH (no price this time; candles at $3,000 held) -> TINY: BTC's carry, not
     // one computed from ETH's candles against BTC-priced bounds.
@@ -5168,10 +5169,10 @@ TEST_F(UgrGpu, ZoomClicksAndGesturesObeyTheLimits) {
     auto manual = brightSettings();
     manual.showLabels = false;
     manual.tickMode = heatmap::TickMode::Manual;
-    manual.manualTick = 1000; // $10: one row per pixel is $3,200 over 320 px
+    manual.manualTick = 1000; // $10: one row per two px is $1,600 over 320 px
     ugr->setHeatmapChartSettings(manual, true);
     ASSERT_TRUE(settle()) << error.toStdString();
-    const double maxTime = 640.0 * minute, maxPrice = 3200;
+    const double maxTime = 320.0 * minute, maxPrice = 1600;
     ASSERT_EQ(view->maxTimeSpanMs(), maxTime);
     ASSERT_DOUBLE_EQ(view->maxPriceSpan(), maxPrice);
     const QPointF at(250, 100);
@@ -5191,13 +5192,13 @@ TEST_F(UgrGpu, ZoomClicksAndGesturesObeyTheLimits) {
         ugr->view()->setViewport(viewLo, viewLo + startMinutes * minute, centre - startMinutes, centre + startMinutes);
         ASSERT_TRUE(settle()) << error.toStdString();
         ASSERT_TRUE(clicksOut(40)) << error.toStdString();
-        // One column per pixel drawn (a 600 min view already draws it: its clicks have
-        // nothing left to zoom), one row per pixel.
-        EXPECT_EQ(drawn().colPx, 1);
-        EXPECT_NEAR(drawn().drawnEndMs - drawn().drawnStartMs, maxTime, 1e-3) << "one column per pixel";
+        // Two px columns drawn (a 600 min view is clamped to it: its clicks have
+        // nothing left to zoom), two px rows.
+        EXPECT_EQ(drawn().colPx, 2);
+        EXPECT_NEAR(drawn().drawnEndMs - drawn().drawnStartMs, maxTime, 1e-3) << "one column per two px";
         EXPECT_LE(timeSpan(), maxTime);
-        EXPECT_DOUBLE_EQ(priceSpan(), maxPrice) << "one row per pixel";
-        EXPECT_EQ(drawn().rowPx, 1);
+        EXPECT_DOUBLE_EQ(priceSpan(), maxPrice) << "one row per two px";
+        EXPECT_EQ(drawn().rowPx, 2);
     }
     // At the price limit a click out keeps the price bounds exactly (time is at its
     // limit too: nothing moves); from a narrower time it zooms time only.
@@ -5243,7 +5244,7 @@ TEST_F(UgrGpu, ZoomClicksAndGesturesObeyTheLimits) {
     ASSERT_TRUE(settle()) << error.toStdString();
     EXPECT_FALSE(drawn().free);
     ASSERT_TRUE(clicksOut(40)) << error.toStdString();
-    EXPECT_EQ(drawn().colPx, 1);
+    EXPECT_EQ(drawn().colPx, 2);
     EXPECT_NEAR(drawn().drawnEndMs - drawn().drawnStartMs, maxTime, 1e-3);
     EXPECT_DOUBLE_EQ(priceSpan(), maxPrice);
     // Axis drags far past the limits stop at them too.
@@ -5260,7 +5261,7 @@ TEST_F(UgrGpu, ZoomClicksAndGesturesObeyTheLimits) {
 // The input route on the real chart QML (DepthChartView.qml): a synthesized
 // wheel reaches UnifiedGridRenderer and changes the viewport exactly once; the
 // price axis WheelHandler zooms price only; a time-axis MouseArea drag obeys the
-// one-column-per-pixel clamp (spec rule 9).
+// one-column-per-two-px clamp (spec rule 9).
 TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     QQuickView view;
     view.setResizeMode(QQuickView::SizeRootObjectToView);
@@ -5330,7 +5331,7 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     ASSERT_EQ(apply("dragEnd", "timeAxis", 20, 10), 200);
     EXPECT_GT(changes, 2);
     const double dpr = view.effectiveDevicePixelRatio();
-    EXPECT_DOUBLE_EQ(timeSpan(), std::floor(ugr->width() * dpr * double(minute))) << "spec rule 9: the axis drag clamps";
+    EXPECT_DOUBLE_EQ(timeSpan(), std::floor(ugr->width() / 2) * double(minute)) << "spec rule 9: the axis drag clamps";
     const double timeSpanBefore = timeSpan();
     // A double-click on either axis (QML MouseArea onDoubleClicked) is one viewport
     // change. Price: auto price scale on, the visible candles fitted.

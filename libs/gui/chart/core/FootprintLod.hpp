@@ -18,15 +18,15 @@ inline constexpr double kFootprintNumbersColumn = kFootprintNumbersFitColumn + 2
 inline constexpr double kFootprintNumbersRow = kFootprintNumbersFitRow + 2;
 // Logical px per column where Cells starts (bid/ask split and spine). Below it every
 // valid positive column draws Strip across exactly its column, never hidden by zoom.
-// The narrowest column is the chart's shared zoom-out clamp, one device px per column
-// (heatmap::maxTimeSpanMs), the same column a candle body fills; no footprint floor.
+// The narrowest column is the chart's shared zoom-out limit, kMinChartCellLogicalPx
+// (heatmap::maxTimeSpanMs), the same column a candle fills; no footprint floor.
 inline constexpr double kFootprintCellsColumn = 24;
 // A stage is held this far below its entry width.
 inline constexpr double kFootprintStageHysteresis = 2;
 // Minimum logical height of one drawn band; thinner rows merge into bands.
 inline constexpr double kFootprintBandMinRow = 6;
-// Every bar of the chart's widest allowed view (heatmap::maxTimeSpanMs on
-// heatmap::kMaxChartSurfaceDevicePx columns, partial edges included).
+// Every bar of the chart's widest supported view (heatmap::kMaxChartColumns columns,
+// partial edges included).
 inline constexpr int kFootprintMaxBars = heatmap::kMaxChartSurfaceBars;
 // Rows merge into bands, so stages depend on the column width only.
 inline FootprintStage footprintLod(double column, double row, FootprintStage previous = FootprintStage::Hidden) {

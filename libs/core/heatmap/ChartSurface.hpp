@@ -1,19 +1,15 @@
 #pragma once
-#include <algorithm>
-#include <cmath>
 
 namespace heatmap {
-// The widest chart surface supported, in device px. Time zoom-out stops at one column
-// per device px on at most this many columns (maxTimeSpanMs), so a view never holds
-// more bars than kMaxChartSurfaceBars: those columns plus two partially visible edges.
-// Flow retention, backfill and the footprint snapshot are sized from it.
-inline constexpr int kMaxChartSurfaceDevicePx = 8192;
-inline constexpr int kMaxChartSurfaceBars = kMaxChartSurfaceDevicePx + 2;
-// The narrowest whole-device-px column a surface of widthPx may draw: a surface wider
-// than kMaxChartSurfaceDevicePx draws wider columns so it never holds more columns.
-inline int minColumnDevicePx(double widthPx) {
-    if (!std::isfinite(widthPx) || !(widthPx > 0)) return 1;
-    const double width = std::floor(widthPx + 1e-6); // as devicePixels() rounds the surface
-    return std::max(1, int(std::ceil(width / kMaxChartSurfaceDevicePx)));
-}
+// The thinnest chart cell, in logical px (owner 2026-11-10): time zoom-out stops at one
+// column per this width, a Manual tick at one row per this height (maxTimeSpanMs,
+// maxManualPriceSpan). The span limit is the only zoom-out limit; cameras add no floor.
+inline constexpr double kMinChartCellLogicalPx = 2;
+// The most columns supported in one view: full zoom-out on a surface up to
+// kMaxChartColumns * kMinChartCellLogicalPx (16384) logical px wide.
+inline constexpr int kMaxChartColumns = 8192;
+// Every bar of such a view: those columns plus two partially visible edges. Flow
+// retention and backfill, the footprint snapshot and the CVD series are sized from it.
+// A wider surface keeps the newest bars and logs the trimmed far past.
+inline constexpr int kMaxChartSurfaceBars = kMaxChartColumns + 2;
 } // namespace heatmap
