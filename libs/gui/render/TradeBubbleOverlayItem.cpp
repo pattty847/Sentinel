@@ -39,7 +39,11 @@ TradeBubbleOverlayItem::TradeBubbleOverlayItem(QQuickItem* parent) : QQuickItem(
     setFlag(ItemHasContents, true);
     connect(this, &QQuickItem::windowChanged, this, [this] { connectWindow(); });
 }
-TradeBubbleOverlayItem::~TradeBubbleOverlayItem() { disconnect(m_syncConnection); }
+TradeBubbleOverlayItem::~TradeBubbleOverlayItem() {
+    // QQuickItem emits windowChanged after the derived members are destroyed.
+    disconnect(this, &QQuickItem::windowChanged, this, nullptr);
+    disconnect(m_syncConnection);
+}
 void TradeBubbleOverlayItem::setRenderer(QObject* renderer) {
     if (m_renderer == renderer && renderer) return;
     disconnect(m_destroyConnection);

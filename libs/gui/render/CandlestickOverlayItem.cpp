@@ -190,7 +190,11 @@ CandlestickOverlayItem::CandlestickOverlayItem(QQuickItem* parent)
     setFlag(ItemHasContents, true);
     connect(this, &QQuickItem::windowChanged, this, [this] { connectPaneWindow(); });
 }
-CandlestickOverlayItem::~CandlestickOverlayItem() { disconnect(m_paneSync); }
+CandlestickOverlayItem::~CandlestickOverlayItem() {
+    // QQuickItem emits windowChanged after the derived members are destroyed.
+    disconnect(this, &QQuickItem::windowChanged, this, nullptr);
+    disconnect(m_paneSync);
+}
 void CandlestickOverlayItem::connectPaneWindow() {
     disconnect(m_paneSync);
     const auto* presentation = m_pane->presentation;

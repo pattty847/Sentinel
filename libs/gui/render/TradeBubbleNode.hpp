@@ -10,6 +10,7 @@
 class TradeBubbleNode final : public QSGNode {
 public:
     TradeBubbleNode();
+    ~TradeBubbleNode() override;
     QSGGeometry* geometry() { return &geometry_; }
     const QSGGeometry* geometry() const { return &geometry_; }
     void clear();

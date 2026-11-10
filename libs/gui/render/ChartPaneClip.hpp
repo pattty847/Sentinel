@@ -9,8 +9,12 @@ class ChartPaneClip : public QSGNode {
 public:
     ChartPaneClip() : geometry_(QSGGeometry::defaultAttributes_Point2D(), 4) {
         geometry_.setDrawingMode(QSGGeometry::DrawTriangleStrip);
+        clip_.setFlag(OwnedByParent, false);
         clip_.setGeometry(&geometry_);
         clip_.setIsRectangular(true);
+    }
+    ~ChartPaneClip() override {
+        if (clip_.parent()) removeChildNode(&clip_);
     }
     QSGNode* content() { return active_ ? static_cast<QSGNode*>(&clip_) : this; }
     QRectF clipRect() const { return clip_.clipRect(); }

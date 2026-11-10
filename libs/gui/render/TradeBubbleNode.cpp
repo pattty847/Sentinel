@@ -52,12 +52,20 @@ TradeBubbleNode::TradeBubbleNode()
     clipGeometry_.setDrawingMode(QSGGeometry::DrawTriangleStrip);
     clip_.setGeometry(&clipGeometry_);
     clip_.setIsRectangular(true);
+    clip_.setFlag(OwnedByParent, false);
+    transform_.setFlag(OwnedByParent, false);
+    mesh_.setFlag(OwnedByParent, false);
     appendChildNode(&clip_);
     clip_.appendChildNode(&transform_);
     transform_.appendChildNode(&mesh_);
     mesh_.setGeometry(&geometry_);
     mesh_.setMaterial(new Material);
     mesh_.setFlag(OwnsMaterial);
+}
+TradeBubbleNode::~TradeBubbleNode() {
+    transform_.removeChildNode(&mesh_);
+    clip_.removeChildNode(&transform_);
+    removeChildNode(&clip_);
 }
 void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMapping& m,
                           bool enabled, const chart::bubbles::Options& options, QColor buy, QColor sell) {
