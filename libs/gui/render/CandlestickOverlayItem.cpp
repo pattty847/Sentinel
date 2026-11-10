@@ -636,7 +636,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
 
     // ── Candle / Hollow mode ───────────────────────────────────────────────────
     // Hollow bullish bodies need 4 border quads (24 verts) instead of 1 filled (6 verts)
-    const int bodyVertices = footprintSpine ? 42 : isHollow ? 24 : 6;
+    const int bodyVertices = isHollow ? 24 : 6;
     root->setCounts(visibleCount * 6, visibleCount * bodyVertices);
     auto* wickVerts = root->wickGeometry->vertexDataAsColoredPoint2D();
     auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
@@ -679,19 +679,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
 
         auto* bodyStart = bodyVerts;
         if (spine) {
-            const float radius = std::min(3.f, (bodyY1 - bodyY0) * .5f);
-            addQuad(bodyVerts, bodyX0, bodyY0 + radius, bodyX1, bodyY1 - radius, br, bg, bb, ba);
-            for (int end = 0; end < 2; ++end) {
-                const float cy = end ? bodyY1 - radius : bodyY0 + radius;
-                for (int step = 0; step < 6; ++step) {
-                    const double a = (end ? 0 : 3.141592653589793) + step * 3.141592653589793 / 6;
-                    const double z = a + 3.141592653589793 / 6;
-                    bodyVerts[0].set(float(centerX), cy, br, bg, bb, ba);
-                    bodyVerts[1].set(float(centerX + 3 * std::cos(a)), cy + radius * float(std::sin(a)), br, bg, bb, ba);
-                    bodyVerts[2].set(float(centerX + 3 * std::cos(z)), cy + radius * float(std::sin(z)), br, bg, bb, ba);
-                    bodyVerts += 3;
-                }
-            }
+            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, br, bg, bb, ba);
         } else if (isHollow && bullish && c.open != c.close) {
             // Hollow bullish: border outline only (4 quads)
             const float bw = std::max(1.0f, bodyWidth * 0.12f);

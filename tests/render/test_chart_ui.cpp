@@ -2389,11 +2389,28 @@ TEST(FootprintCandles, BothDirectionsUseLeftSpineAndFullFallback) {
     std::unique_ptr<QSGNode> root(candle.paint(nullptr));
     auto* body = static_cast<QSGGeometryNode*>(root->childAtIndex(1))->geometry();
     auto* wick = static_cast<QSGGeometryNode*>(root->childAtIndex(0))->geometry();
-    ASSERT_EQ(body->vertexCount(), 84);
+    ASSERT_EQ(body->vertexCount(), 12);
     const auto* b = body->vertexDataAsColoredPoint2D();
     EXPECT_FLOAT_EQ(b[2].x - b[0].x, 6);
     EXPECT_FLOAT_EQ(b[0].x, 2);
-    EXPECT_FLOAT_EQ(b[42].x, 102);
+    EXPECT_FLOAT_EQ(b[6].x, 102);
+    // Square ends: every vertex of a spine body lies on the one rectangle
+    // (x+2..x+8, bodyY0..bodyY1); a cap fan would reach outside it.
+    for (int bar = 0; bar < 2; ++bar) {
+        const auto* v = b + bar * 6;
+        float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
+        for (int i = 1; i < 6; ++i) {
+            x0 = std::min(x0, v[i].x); x1 = std::max(x1, v[i].x);
+            y0 = std::min(y0, v[i].y); y1 = std::max(y1, v[i].y);
+        }
+        EXPECT_FLOAT_EQ(x0, bar * 100 + 2);
+        EXPECT_FLOAT_EQ(x1, bar * 100 + 8);
+        for (int i = 0; i < 6; ++i) {
+            EXPECT_TRUE(v[i].x == x0 || v[i].x == x1) << bar << ' ' << i;
+            EXPECT_TRUE(v[i].y == y0 || v[i].y == y1) << bar << ' ' << i;
+        }
+        EXPECT_GT(y1, y0);
+    }
     const auto* w = wick->vertexDataAsColoredPoint2D();
     EXPECT_FLOAT_EQ(w[2].x - w[0].x, 1.5);
     chart::ChartFrame layerFrame;
@@ -2404,7 +2421,7 @@ TEST(FootprintCandles, BothDirectionsUseLeftSpineAndFullFallback) {
     layer.sync(layerFrame);
     EXPECT_EQ(layer.stage(), chart::FootprintStage::Cells);
     EXPECT_EQ(candle.paint(root.get()), root.get());
-    EXPECT_EQ(body->vertexCount(), 84);
+    EXPECT_EQ(body->vertexCount(), 12);
     provider.look->spineCandles = false;
     EXPECT_EQ(candle.paint(root.get()), root.get());
     EXPECT_EQ(body->vertexCount(), 12);
@@ -2412,7 +2429,7 @@ TEST(FootprintCandles, BothDirectionsUseLeftSpineAndFullFallback) {
     provider.look->spineCandles = true;
     candle.setCandleStyle(2);
     candle.paint(root.get());
-    EXPECT_EQ(body->vertexCount(), 84) << "footprint look overrides line mode too";
+    EXPECT_EQ(body->vertexCount(), 12) << "footprint look overrides line mode too";
     candle.setMappingProvider(nullptr);
 }
 
