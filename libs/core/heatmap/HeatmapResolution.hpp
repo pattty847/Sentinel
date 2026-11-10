@@ -144,11 +144,13 @@ inline std::vector<int64_t> manualPresetUnits(const std::vector<int64_t> &gridCo
 }
 
 // ------------------------------------------------------------------ clamps
-// Time zoom-out stops at one column per physical pixel (spec rule 1), on at most
-// kMaxChartSurfaceDevicePx columns: a wider surface keeps wider columns.
+// Time zoom-out stops at one column per physical pixel (spec rule 1). A surface wider
+// than kMaxChartSurfaceDevicePx stops at its narrowest whole-px column instead
+// (minColumnDevicePx), so the drawn camera never holds more than that many columns.
 inline double maxTimeSpanMs(double widthPx, int64_t tfMs) {
-    return std::isfinite(widthPx) && widthPx > 0 && tfMs > 0
-        ? std::min(widthPx, double(kMaxChartSurfaceDevicePx)) * double(tfMs) : 0;
+    if (!std::isfinite(widthPx) || !(widthPx > 0) || tfMs <= 0) return 0;
+    const int column = minColumnDevicePx(widthPx);
+    return column == 1 ? widthPx * double(tfMs) : std::floor(std::floor(widthPx + 1e-6) / column) * double(tfMs);
 }
 // Manual price zoom-out stops at one row per physical pixel (spec rule 2).
 inline double maxManualPriceSpan(double heightPx, double tick) {

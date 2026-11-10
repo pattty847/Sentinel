@@ -179,8 +179,8 @@ TEST(HeatmapTickPolicy, OneColumnAndOneRowPerPixelClamps) {
     EXPECT_DOUBLE_EQ(maxTimeSpanMs(1500, kHourMs), 1500.0 * kHourMs);
     EXPECT_EQ(maxTimeSpanMs(0, kMinuteMs), 0);
     EXPECT_DOUBLE_EQ(maxTimeSpanMs(8192, kMinuteMs), 8192.0 * kMinuteMs);
-    EXPECT_DOUBLE_EQ(maxTimeSpanMs(10000, kMinuteMs), double(heatmap::kMaxChartSurfaceDevicePx) * kMinuteMs)
-        << "a surface wider than the widest supported one stops at its column count";
+    EXPECT_DOUBLE_EQ(maxTimeSpanMs(8193, kMinuteMs), 4096.0 * kMinuteMs) << "2 px columns past the widest surface";
+    EXPECT_DOUBLE_EQ(maxTimeSpanMs(10000, kMinuteMs), 5000.0 * kMinuteMs);
     EXPECT_DOUBLE_EQ(maxManualPriceSpan(880, 1), 880);
     EXPECT_DOUBLE_EQ(maxManualPriceSpan(1760, 25), 44'000);
     EXPECT_EQ(maxManualPriceSpan(880, 0), 0);

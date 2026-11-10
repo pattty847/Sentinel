@@ -6,6 +6,7 @@
 #include "datasources/IGridDataSource.hpp"
 #include "render/GridViewState.hpp"
 #include "chart/core/CvdHistory.hpp"
+#include "SentinelLogging.hpp"
 #include <QDateTime>
 #include <cstdio>
 namespace chart {
@@ -156,6 +157,13 @@ void CvdFeed::publish() {
     if (presentation_.stripPx || presentation_.flowFooter) {
         const auto* series = buffer_.series(symbol_, out.timeframeMs);
         if (series) build(out, *series, frame, presentation_.reset, ports_.sessionType ? ports_.sessionType() : 4);
+    }
+    if (out.series.overflow) {
+        static sentinel::log_throttle::Site warning;
+        uint32_t suppressed = 0;
+        if (warning.admit(5000, sentinel::log_throttle::nowMs(), suppressed))
+            sLog_Warning("CVD series full: symbol=" << symbol_ << " dropped=" << out.series.overflow
+                         << sentinel::log_throttle::Suppressed{suppressed});
     }
     mailbox_.post();
     if (ports_.update) ports_.update();

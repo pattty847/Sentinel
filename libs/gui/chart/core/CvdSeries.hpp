@@ -1,4 +1,5 @@
 #pragma once
+#include "../../../core/heatmap/ChartSurface.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -20,9 +21,11 @@ struct CvdScale {
 // starting inside the drawn window. Repeated forming times replace their value.
 class CvdSeries {
 public:
-    static constexpr int kCapacity = 8192;
+    // Every bar of the widest allowed view, partial edges included.
+    static constexpr int kCapacity = heatmap::kMaxChartSurfaceBars;
     std::array<CvdPoint, kCapacity> points{};
     int count = 0;
+    int overflow = 0; // visible points refused because the series was full
     static int64_t resetStart(int64_t time, CvdReset rule, int64_t tpoStart) {
         if (rule == CvdReset::Visible) return time;
         if (rule == CvdReset::TpoSession) return tpoStart;
@@ -30,7 +33,7 @@ public:
         const auto remainder = time % day;
         return time - remainder - (remainder < 0 ? day : 0);
     }
-    void clear() { count = 0; started_ = false; total_ = prefix_ = 0; }
+    void clear() { count = 0; overflow = 0; started_ = false; total_ = prefix_ = 0; }
     bool push(int64_t time, double delta, int64_t reset, bool visible, int64_t loadedFrom = -1) {
         if (!std::isfinite(delta) || (started_ && time < lastTime_)) return false;
         const bool replace = started_ && time == lastTime_;
@@ -46,7 +49,7 @@ public:
         total_ = next; lastTime_ = time; lastReset_ = reset; started_ = true;
         if (count && points[size_t(count - 1)].timeMs == time) --count;
         if (visible) {
-            if (count == kCapacity) return false;
+            if (count == kCapacity) { ++overflow; return false; }
             points[size_t(count++)] = {time, reset, total_, periodLoadedFrom_};
         }
         return true;
