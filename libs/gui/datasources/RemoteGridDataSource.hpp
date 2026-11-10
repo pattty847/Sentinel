@@ -21,6 +21,7 @@ public:
     void subscribe(const QString& symbol) override;
     void unsubscribe(const QString& symbol) override;
     void requestFlowHistory(const QString& symbol, int64_t timeframeMs, int64_t startMs, int64_t endMs, int64_t resetAnchorMs = -1) override;
+    void requestTradeHistory(const QString& symbol, int64_t startMs, int64_t endMs, quint64 req) override;
     void subscribeFlowLive(const QString& symbol, int64_t timeframeMs) override;
     void unsubscribeFlowLive() override;
     const FlowSeriesBuffer& flowBuffer() const { return m_flowBuffer; }

@@ -30,6 +30,7 @@
 #include "TpoSlice.hpp"
 #include "VolumeProfileSlice.hpp"
 #include "../marketdata/model/TradeData.h"
+#include "TradeHistoryWire.hpp"
 #include "../config/ConfigTypes.hpp"
 #include "../trading/TradingTypes.hpp"
 #include "../trading/IAlgo.hpp"
@@ -46,6 +47,7 @@ class SentinelStreamClient : public QObject {
     friend struct CandleDataSourceTest;
     friend struct SentinelStreamClientWriteTest;
     friend struct HeatmapChunkWireTest;
+    friend struct TradeHistoryWireClientTest;
     friend struct ServerFeedAdmissionTest;
     friend struct ScreenerErrorDispatchTest;
     Q_OBJECT
@@ -87,6 +89,7 @@ public:
         std::vector<FlowRecord> bars;
     };
     using FlowBatchPtr = std::shared_ptr<const FlowBatch>;
+    using TradeHistoryPtr = std::shared_ptr<const protocol::tradewire::Page>;
 
     // Decoded chunk replies are immutable and shared, never copied per receiver.
     using HeatmapChunkPtr = std::shared_ptr<const heatmap::ChunkFrame>;
@@ -122,6 +125,7 @@ public:
     void unsubscribeHeatmapLive(const std::string& symbol);
     void requestFlowHistory(quint64 req, const std::string& symbol, int64_t timeframeMs,
                             int64_t endTimeMs, int limit);
+    void requestTradeHistory(quint64 req, const std::string& symbol, int64_t startMs, int64_t endMs);
     quint64 subscribeFlowLive(const std::string& symbol, int64_t timeframeMs);
     void unsubscribeFlowLive(quint64 sub);
     void requestFootprintHistory(const std::string& symbol,
@@ -176,6 +180,8 @@ signals:
     // Other signals as needed for aggregated slices
     void flowBarsReceived(SentinelStreamClient::FlowBatchPtr batch);
     void flowHistoryFailed(quint64 req, const QString& message, SentinelStreamClient::FlowFailure failure);
+    void tradeHistoryReceived(SentinelStreamClient::TradeHistoryPtr page);
+    void tradeHistoryFailed(quint64 req, const QString& message);
     void flowLiveDropped(quint64 sub, const QString& symbol, int64_t timeframeMs, int64_t bucketStartMs);
     void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
@@ -294,6 +300,7 @@ private:
 
     std::atomic<quint64> m_nextChunkRequestId{0};
     std::atomic<quint64> m_flowHistoryRequest{0};
+    std::atomic<quint64> m_tradeHistoryRequest{0};
     std::map<std::pair<quint64, int64_t>, std::chrono::steady_clock::time_point> m_flowDropNotified;
     // Replies from an older connection are dropped after reconnect.
     std::atomic<quint64> m_connectionEpoch{0};
@@ -321,4 +328,5 @@ Q_DECLARE_METATYPE(SentinelStreamClient::HeatmapChunkError)
 Q_DECLARE_METATYPE(protocol::chunkwire::Availability)
 
 Q_DECLARE_METATYPE(SentinelStreamClient::FlowBatchPtr)
+Q_DECLARE_METATYPE(SentinelStreamClient::TradeHistoryPtr)
 Q_DECLARE_METATYPE(SentinelStreamClient::FlowFailure)

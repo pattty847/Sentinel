@@ -7,6 +7,16 @@ bool TradeBubbleFeed::append(const Trade& trade) {
     const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(trade.timestamp.time_since_epoch()).count();
     return tape_->append({ms, trade.price, trade.size, trade.side, trade.trade_id, ns}) && show_;
 }
+size_t TradeBubbleFeed::appendHistory(const protocol::tradewire::Page& page) {
+    if (page.status == "refused") return 0;
+    size_t added = 0;
+    for (const auto& row : page.rows) {
+        if (row.exchangeMs > INT64_MAX / 1'000'000) continue;
+        if (tape_->append({row.exchangeMs, row.price, row.size, row.side, row.id,
+                           row.exchangeMs * 1'000'000})) ++added;
+    }
+    return added;
+}
 void TradeBubbleFeed::setSettings(const heatmap::HeatmapChartSettings& settings, const std::function<void()>& notify) {
     const auto gradients = heatmap::gpu::gradientsFor(settings);
     show_ = settings.showTrades;

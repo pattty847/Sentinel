@@ -1,6 +1,7 @@
 #pragma once
 #include "flow/FlowCodec.hpp"
 #include "flow/FlowScales.hpp"
+#include "protocol/TradeHistoryWire.hpp"
 #include <chrono>
 #include <array>
 #include <condition_variable>
@@ -83,6 +84,14 @@ class FlowStore {
     // One-shot 1s replay; worker-local cursor over the cached catalog, no persistent writes.
     Reply buildWindow(const std::string &symbol, int64_t fromMs, int64_t toMs,
                       std::stop_token stop = {});
+    struct TradeWindow {
+        std::vector<protocol::tradewire::Row> rows;
+        bool partial = false;
+        int64_t coveredFromMs = 0, coveredToMs = 0;
+    };
+    // Worker-only bounded read through the same JournalReader catalog as buildWindow.
+    TradeWindow readTrades(const std::string &symbol, int64_t fromMs, int64_t toMs,
+                           size_t limit, std::stop_token stop = {});
     // Contiguous built-through closed-hour watermark; safe on a history worker.
     int64_t sealedThroughMs(const std::string &symbol) const;
     // Model-thread journal clock floor; the builder uses it only under the index lock.

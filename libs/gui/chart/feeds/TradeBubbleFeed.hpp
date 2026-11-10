@@ -1,6 +1,7 @@
 #pragma once
 #include "render/TradeBubbleFrame.hpp"
 #include "heatmap/HeatmapChartSettings.hpp"
+#include "protocol/TradeHistoryWire.hpp"
 #include <functional>
 struct TradeBubbleRendererTest;
 namespace chart {
@@ -13,6 +14,7 @@ class TradeBubbleFeed final : public ITradeBubbleFrameSource {
     friend struct ::TradeBubbleRendererTest;
 public:
     bool append(const Trade& trade);
+    size_t appendHistory(const protocol::tradewire::Page& page);
     void clear() { tape_->clear(); statistics_.reset(); }
     void setSettings(const heatmap::HeatmapChartSettings&, const std::function<void()>& notify);
     void publish(const TimeAxisMapping&);

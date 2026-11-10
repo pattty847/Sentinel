@@ -354,6 +354,11 @@ void ServerDataModel::onMarketDataConnectionChanged(const std::string& symbol, b
     if (feed.connected == connected) return;
     feed.connected = connected;
     ++(connected ? feed.ups : feed.downs);
+    if (!connected) {
+        std::lock_guard lock(m_footprintTradeMutex);
+        m_tradeHistoryAwaitingResume.insert(symbol);
+        m_tradeHistoryFloorMs[symbol] = INT64_MAX;
+    }
 }
 
 void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
@@ -527,6 +532,33 @@ bool ServerDataModel::collectFootprintTrades(const std::string& symbol,
     return !out.empty();
 }
 
+ServerDataModel::TradeHistorySnapshot ServerDataModel::tradeHistorySnapshot(
+    const std::string& symbol, int64_t fromMs, int64_t toMs, size_t limit) const {
+    TradeHistorySnapshot result;
+    result.store = m_flowStore;
+    std::lock_guard lock(m_footprintTradeMutex);
+    const auto it = m_recentFootprintTrades.find(symbol);
+    if (it == m_recentFootprintTrades.end() || it->second.empty()) return result;
+    const bool fallbackFloor = !m_tradeHistoryFloorMs.contains(symbol);
+    if (const auto floor = m_tradeHistoryFloorMs.find(symbol); floor != m_tradeHistoryFloorMs.end())
+        result.retainedFromMs = floor->second;
+    else result.retainedFromMs = INT64_MAX;
+    const auto& trades = it->second;
+    if (fallbackFloor) result.retainedFromMs = trades.front().timestampMs;
+    const auto first = std::lower_bound(trades.begin(), trades.end(), std::max(fromMs, result.retainedFromMs),
+        [](const FootprintTradeSample& row, int64_t ms) { return row.timestampMs < ms; });
+    for (auto row = first; row != trades.end() && row->timestampMs < toMs; ++row) {
+        if (result.rows.size() + result.invalidRows >= limit) {
+            result.exceededLimit = true;
+            break;
+        }
+        protocol::tradewire::Row candidate{row->id, row->timestampMs, row->price, row->size, row->side, 1};
+        if (!protocol::tradewire::validRow(candidate, fromMs, toMs)) { ++result.invalidRows; continue; }
+        result.rows.push_back(std::move(candidate));
+    }
+    return result;
+}
+
 void ServerDataModel::onTrade(const Trade& trade) {
     if (!m_feeds.contains(trade.product_id)) return;
     const int64_t exchangeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -544,11 +576,28 @@ void ServerDataModel::onTrade(const Trade& trade) {
     if (exchangeMs > 0 && trade.price > 0.0 && trade.size > 0.0) {
         std::lock_guard<std::mutex> lock(m_footprintTradeMutex);
         auto& trades = m_recentFootprintTrades[trade.product_id];
-        const int64_t cutoff = exchangeMs - m_footprintTradeRetentionMs;
+        const int64_t newestMs = trades.empty() ? exchangeMs : std::max(exchangeMs, trades.back().timestampMs);
+        const int64_t cutoff = newestMs - m_footprintTradeRetentionMs;
+        auto& historyFloor = m_tradeHistoryFloorMs[trade.product_id];
+        if (m_tradeHistoryAwaitingResume.contains(trade.product_id)) {
+            if (m_feeds.at(trade.product_id).connected) {
+                historyFloor = exchangeMs;
+                m_tradeHistoryAwaitingResume.erase(trade.product_id);
+                m_tradeHistoryHasResumeBoundary.insert(trade.product_id);
+            }
+        } else if (!historyFloor) historyFloor = exchangeMs;
+        else if (exchangeMs >= cutoff && !m_tradeHistoryHasResumeBoundary.contains(trade.product_id))
+            historyFloor = std::min(historyFloor, exchangeMs);
+        historyFloor = std::max(historyFloor, cutoff);
         while (!trades.empty() && trades.front().timestampMs < cutoff) {
             trades.pop_front();
         }
-        trades.push_back(FootprintTradeSample{exchangeMs, trade.price, trade.size, trade.side});
+        if (exchangeMs >= cutoff) {
+            FootprintTradeSample sample{exchangeMs, trade.price, trade.size, trade.side, trade.trade_id};
+            if (trades.empty() || trades.back().timestampMs <= exchangeMs) trades.push_back(std::move(sample));
+            else trades.insert(std::upper_bound(trades.begin(), trades.end(), exchangeMs,
+                [](int64_t ms, const FootprintTradeSample& row) { return ms < row.timestampMs; }), std::move(sample));
+        }
     }
     
     emit tradeBroadcast(trade);
@@ -664,6 +713,18 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
 
 void ServerDataModel::onLiveOrderBookInvalidated(const QString& productId, const QString& reason) {
     const std::string symbol = productId.toStdString();
+    {
+        std::lock_guard lock(m_footprintTradeMutex);
+        if (symbol.empty()) {
+            for (const auto& [product, feed] : m_feeds) {
+                m_tradeHistoryAwaitingResume.insert(product);
+                m_tradeHistoryFloorMs[product] = INT64_MAX;
+            }
+        } else if (m_feeds.contains(symbol)) {
+            m_tradeHistoryAwaitingResume.insert(symbol);
+            m_tradeHistoryFloorMs[symbol] = INT64_MAX;
+        }
+    }
     int count = 0;
     std::vector<std::pair<QString, uint64_t>> notifications;
     {

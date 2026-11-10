@@ -186,6 +186,7 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<OrderBookLevel>("OrderBookLevel");
     qRegisterMetaType<std::vector<OrderBookLevel>>("OrderBookLevelVector");
     qRegisterMetaType<FlowBatchPtr>("SentinelStreamClient::FlowBatchPtr");
+    qRegisterMetaType<TradeHistoryPtr>("SentinelStreamClient::TradeHistoryPtr");
     qRegisterMetaType<FlowFailure>("SentinelStreamClient::FlowFailure");
     qRegisterMetaType<FootprintSlice>("FootprintSlice");
     qRegisterMetaType<TpoSlice>("TpoSlice");
@@ -208,6 +209,7 @@ SentinelStreamClient::~SentinelStreamClient() {
 void SentinelStreamClient::connectToServer() {
     if (m_running) return;
     m_ws = std::make_unique<WebSocket>(m_strand, m_sslCtx);
+    m_ws->read_message_max(protocol::SentinelProtocol::kTradeHistoryMaxFrameBytes);
     {
         std::lock_guard lock(m_chunkOrderMutex);
         ++m_connectionEpoch;
@@ -291,6 +293,7 @@ void SentinelStreamClient::run() {
         if (!m_running) break;
         m_ioc.restart();
         m_ws = std::make_unique<WebSocket>(m_strand, m_sslCtx);
+        m_ws->read_message_max(protocol::SentinelProtocol::kTradeHistoryMaxFrameBytes);
         m_buffer.consume(m_buffer.size());
         m_writeQueue.clear(); // never replay ambiguous writes or obsolete requests
         m_expectedTpoRequestId.clear();
@@ -466,6 +469,7 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
     std::lock_guard lock(m_chunkOrderMutex);
     if (!m_acceptChunkFrames) return;
     const size_t bytes = frame->size();
+    const bool tradeFrame = bytes >= 4 && std::equal(frame->begin(), frame->begin() + 4, "TRD1");
     const bool flowFrame = flowLive || (bytes >= 4 && std::equal(frame->begin(), frame->begin() + 4, "FHE1"));
     const auto flowRequest = m_flowHistoryRequest.load();
     // Refusals run inline, with at most one notification per reason until the
@@ -476,6 +480,8 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
         // heatmap/live refusals were already coalesced during this backlog.
         if (flowFrame && !flowLive)
             emit flowHistoryFailed(flowRequest, QString::fromLatin1(message), FlowFailure::Retryable);
+        if (tradeFrame)
+            emit tradeHistoryFailed(m_tradeHistoryRequest.load(), QString::fromLatin1(message));
         if (flowLive && reason == 2 && flowDrop && flowDrop->sub && !flowDrop->symbol.isEmpty() &&
             protocol::clientparse::validFlowTimeframe(flowDrop->timeframeMs) &&
             flowDrop->bucketStartMs >= 0 && flowDrop->bucketStartMs % flowDrop->timeframeMs == 0) {
@@ -489,11 +495,11 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
                                      flowDrop->bucketStartMs);
             }
         }
-        const auto mask = flowFrame ? reason << 2 : reason;
+        const auto mask = tradeFrame ? reason << 4 : flowFrame ? reason << 2 : reason;
         if (m_decodeRefusals & mask) return;
         m_decodeRefusals |= mask;
         sLog_Warning("Stream frame refused: bytes=" << bytes << " reason=" << message);
-        if (flowFrame) return;
+        if (flowFrame || tradeFrame) return;
         emit heatmapChunkFailed({peekEnvelopeRequestId(*frame), {}, QString::fromLatin1(code),
                                  QString::fromLatin1(message)});
     };
@@ -519,6 +525,20 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
 }
 
 void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame, quint64 epoch, bool flowLive, quint64 flowRequest) {
+    if (frame.size() >= 4 && std::equal(frame.begin(), frame.begin() + 4, "TRD1")) {
+        try {
+            auto page = protocol::tradewire::decode(frame);
+            std::lock_guard lock(m_chunkOrderMutex);
+            if (epoch != m_connectionEpoch.load() || page.req != m_tradeHistoryRequest.load()) return;
+            emit tradeHistoryReceived(std::make_shared<const protocol::tradewire::Page>(std::move(page)));
+        } catch (const std::exception& e) {
+            std::lock_guard lock(m_chunkOrderMutex);
+            if (epoch != m_connectionEpoch.load()) return;
+            sLog_Warning("Trade history frame rejected: bytes=" << frame.size() << " error=" << e.what());
+            emit tradeHistoryFailed(m_tradeHistoryRequest.load(), QString::fromUtf8(e.what()));
+        }
+        return;
+    }
     if (flowLive || (frame.size() >= 4 && std::equal(frame.begin(), frame.begin() + 4, "FHE1"))) {
         try {
             auto batch = flowLive ? protocol::clientparse::parseFlowLive(nlohmann::json::parse(frame))
@@ -605,6 +625,22 @@ void SentinelStreamClient::requestFlowHistory(quint64 req, const std::string& sy
     m_flowHistoryRequest.store(req);
     const nlohmann::json message = {{"type", "flow_history_request"}, {"req", req}, {"symbol", symbol},
         {"timeframe_ms", timeframeMs}, {"end_time_ms", endTimeMs}, {"limit", limit}};
+    net::post(m_strand, [this, payload = message.dump()]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) doWrite();
+    });
+}
+
+void SentinelStreamClient::requestTradeHistory(quint64 req, const std::string& symbol,
+                                                int64_t startMs, int64_t endMs) {
+    if (symbol.empty() || startMs < 0 || endMs <= startMs ||
+        endMs - startMs > protocol::SentinelProtocol::kTradeHistoryMaxWindowMs) {
+        emit tradeHistoryFailed(req, QStringLiteral("invalid trade history arguments"));
+        return;
+    }
+    m_tradeHistoryRequest.store(req);
+    const nlohmann::json message = {{"type", "trade_history_request"}, {"req", req},
+        {"symbol", symbol}, {"start_ms", startMs}, {"end_ms", endMs}};
     net::post(m_strand, [this, payload = message.dump()]() mutable {
         m_writeQueue.push_back(std::move(payload));
         if (m_isConnected && m_writeQueue.size() == 1) doWrite();
