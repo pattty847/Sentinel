@@ -35,10 +35,8 @@ ServerConfig parseServerConfig(const nlohmann::json& msg) {
         const auto& overlay = msg["trade_overlays"];
         mark(overlay, "retention_columns", "tradeOverlays.retentionColumns");
         cfg.tradeOverlays.retentionColumns = overlay.value("retention_columns", cfg.tradeOverlays.retentionColumns);
-        cfg.tradeOverlays.gridWidth = overlay.value("grid_width", cfg.tradeOverlays.gridWidth);
         cfg.tradeOverlays.gridHeight = overlay.value("grid_height", cfg.tradeOverlays.gridHeight);
         cfg.tradeOverlays.tickSize = overlay.value("tick_size", cfg.tradeOverlays.tickSize);
-        cfg.tradeOverlays.footprintTimeframeMs = overlay.value("footprint_timeframe_ms", cfg.tradeOverlays.footprintTimeframeMs);
     }
     mark(msg, "default_symbols", "defaultSymbols");
     if (msg.contains("chart") && msg["chart"].is_object()) {

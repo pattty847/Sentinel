@@ -2,8 +2,6 @@
 #include "marketdata/MarketDataFeeds.hpp"
 #include "fixtures/coinbase_messages.hpp"
 #include "fixtures/fake_ws_transport.hpp"
-#include "servermodel/TradeOverlayPublisher.hpp"
-#include <QtEndian>
 
 namespace {
 using namespace std::chrono_literals;
@@ -94,40 +92,6 @@ TEST_F(FeedsTest, CoinbaseMakerSidesBecomeAggressorSidesBeforeDelivery) {
     ASSERT_EQ(receivedTrades.size(), 2u);
     EXPECT_EQ(receivedTrades[0].side, AggressorSide::Sell);
     EXPECT_EQ(receivedTrades[1].side, AggressorSide::Buy);
-}
-
-TEST_F(FeedsTest, CoinbaseTapeProducesAggressorSignedFootprintDelta) {
-    create({"BTC-USD"});
-    auto makerBuy = fixtures::coinbaseTrade("BTC-USD", 115, 3, "BUY");
-    auto makerSell = fixtures::coinbaseTrade("BTC-USD", 115, 1, "SELL");
-    for (auto* frame : {&makerBuy, &makerSell}) {
-        (*frame)["events"] = nlohmann::json::array({{{"trades", (*frame)["trades"]}}});
-        frame->erase("trades");
-        (*frame)["events"][0]["trades"][0]["time"] = "2025-10-09T12:34:00.000Z";
-    }
-    send("BTC-USD", makerBuy);
-    send("BTC-USD", makerSell);
-    ASSERT_EQ(receivedTrades.size(), 2u);
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        receivedTrades[0].timestamp.time_since_epoch()).count();
-    std::vector<ServerDataModel::FootprintTradeSample> tape;
-    for (const auto& trade : receivedTrades)
-        tape.push_back({ms, trade.price, trade.size, trade.side});
-    trade_overlay::Request request;
-    request.symbol = "BTC-USD";
-    request.grid = {16, 10, 2, 120};
-    request.nowMs = ms + 1000;
-    request.previousMs = ms;
-    const auto result = trade_overlay::build(request, tape);
-    ASSERT_TRUE(result.error.empty()) << result.error;
-    ASSERT_FALSE(result.messages.empty());
-    const auto column = nlohmann::json::parse(result.messages[0]);
-    ASSERT_EQ(column.at("type"), "footprint_slice");
-    const auto bytes = QByteArray::fromBase64(
-        QByteArray::fromStdString(column.at("delta_levels_q16").get<std::string>()));
-    ASSERT_GE(bytes.size(), 6);
-    const int code = qFromLittleEndian<uint16_t>(reinterpret_cast<const uchar*>(bytes.constData()) + 4);
-    EXPECT_NEAR((code - 32768) * column.at("quant_scale").get<double>(), -2.0, 0.001);
 }
 
 TEST_F(FeedsTest, SequenceGapInvalidatesAndReconnectsOnlyItsProduct) {

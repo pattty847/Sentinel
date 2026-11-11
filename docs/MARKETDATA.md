@@ -12,7 +12,7 @@ Coinbase Advanced Trade `market_trades.side` names the resting maker. The
 `MarketDataCoreEngine` flips BUY to sell aggressor and SELL to buy aggressor
 once for engine consumers. The server consumes `JournalFeed`, which independently
 flips the raw maker side once; `JournalTradeEventSource` does the same for backtests. Unknown stays unknown.
-Server footprint delta is positive for buy aggressors and negative for sell
+Flow-bar delta is positive for buy aggressors and negative for sell
 aggressors; candle, TPO, and volume profile calculations ignore side. Live
 stream `trade` messages carry `side_basis: "aggressor"` so clients use `side`
 without another flip. An unmarked older stream carries Coinbase maker side.
@@ -427,7 +427,7 @@ libs/core/marketdata/
 
 The internal stream server (`SentinelStreamServer`) defaults to `ws://127.0.0.1:8080`. Without TLS, all traffic (market data, server config, and eventually trade commands) is plaintext. TLS upgrades to `wss://` so the stream is encrypted and the client can verify the server.
 
-**Encrypted:** `server_config`, `heatmap_slice`, l2 snapshots/updates, `market_trades`, candle and footprint/TPO history, `trade_command`, `order_update`, `position_update`, and control messages (e.g. `subscribe`).
+**Encrypted:** `server_config`, `heatmap_slice`, l2 snapshots/updates, `market_trades`, candle and TPO history, `trade_command`, `order_update`, `position_update`, and control messages (e.g. `subscribe`).
 
 **Live order-book grid:** Each server `snapshot` carries `tick_size` for that product and
 `book_status` (`ready`, `unavailable`, `metadata_unavailable`, `invalid_tick`,
@@ -646,7 +646,7 @@ the aggressor side once at ingest, and trade frames carry `side_basis:"aggressor
 trade side section at the top of this file). The client uses `side` as-is when
 `side_basis` is `"aggressor"`; an unmarked frame from an older server is treated as maker and
 flipped (maker sell -> aggressor buy, maker buy -> aggressor sell); unknown side/basis stays
-unknown. Server footprint delta is aggressor-based.
+unknown. Flow-bar delta is aggressor-based.
 
 The GPU chart retains the newest 100,000 valid executions by event time in a fixed,
 time-ordered ring for its selected symbol, including while Trades is off. Normal
@@ -689,10 +689,10 @@ separate rows (time/price/size equality cannot establish execution identity), so
 legacy producers can still cause duplicate bubbles on reconnect.
 
 History sources today:
-- `ServerDataModel::m_recentFootprintTrades`: server-global RAM, retention
-  `clamp(2 * maxConfiguredTimeframe * max(1024, gridWidth), 5 min, 24 h)`;
+- `ServerDataModel::m_recentTrades`: server-global RAM, retention
+  `clamp(2 * maxConfiguredTimeframe * max(1024, retentionColumns), 5 min, 24 h)`;
   `collectOverlayTrades` copies bounded windows for aggregate publishers only.
-- `TradeOverlayPublisher`: footprint/VP aggregates and TPO letters; TPO's older
+- `TradeOverlayPublisher`: VP aggregates and TPO letters; TPO's older
   REST-candle range fallback contains no individual executions, sizes or sides.
   `trade_overlay` is also the error context, not a raw-row response family.
 - `JournalTradeEventSource`: recorded trades come from RAWL2 only, with preserved
@@ -739,7 +739,9 @@ row. The GUI does not request these pages automatically yet.
 
 ## Independent trade-overlay publication
 
-Footprint, TPO and volume profile no longer run from `heatmap_slice` callbacks.
+Footprint cells consume `flow_bar` and `flow_history_chunk`; there is no separate
+footprint publisher, config, slice or history wire family. TPO and volume profile
+run independently of `heatmap_slice` callbacks.
 A session timer dispatches at most one overlay job per second, with one job in
 flight per session, up to eight pending history requests and sixteen overlay
 symbols. Live symbols rotate; pending history alternates with live work so neither
@@ -751,7 +753,7 @@ late replies, and selection generations prevent obsolete grids from publishing.
 
 Each job copies at most 250,000 trades inside its requested half-open time window
 and produces at most 8 MiB. Trades outside that window do not consume the budget;
-only matching trades are sorted. Oversized live and footprint windows fail explicitly
+only matching trades are sorted. Oversized live windows fail explicitly
 instead of producing a partial profile. TPO history keeps the newest 250,000 trades
 by exchange timestamp and extends the existing approximate candle-range fallback
 through the last omitted timestamp (including timestamp ties at candle boundaries).
@@ -761,21 +763,19 @@ pages contain at most 512 columns. Saturation rejects history requests with a
 `trade_overlay` error; live refreshes coalesce until the next timer turn. A live
 refresh sends the forming bucket and, when a boundary was crossed, the preceding
 closed bucket. Long stalls do not enqueue a bucket backlog; older ranges use
-history requests. Footprint uses UTC epoch-aligned half-open buckets; TPO letters
-and brackets align to its own session open. TPO history ends at session close,
+TPO history requests. TPO letters and brackets align to its own session open. TPO history ends at session close,
 and live TPO never publishes periods outside the session. VP aggregates the current
 TPO session, or the UTC day for W1/M1.
 
-The existing `footprint_slice`, `tpo_slice`, `volume_profile_slice`, and history
-chunk wire families retain self-describing grid metadata. Overlay history requests
+The `tpo_slice`, `volume_profile_slice`, and `tpo_history_chunk` wire families
+carry self-describing grid metadata. TPO history requests
 may additionally specify `price_min`, `tick_size`, and `rows`; defaults come from
 `trade_overlays`, independently of heatmap settings. History and live publications
 share the selected overlay grid. Weekly (`session_type` 5) and monthly (6, the
 UTC calendar month) TPO columns use the same rows at a 5x / 10x coarser tick,
 centred on that grid and aligned to their own tick (`tpoGridFor`), so a whole
-week or month fits; footprint and VP keep the base grid. The GUI maps footprint
-time slots, TPO session columns and VP prices through their own metadata and the
-common viewport. Clients page W1/M1 TPO history in windows of at most 7 days.
+week or month fits; VP keeps the base grid. The GUI maps TPO session columns
+and VP prices through their own metadata and the common viewport. Clients page W1/M1 TPO history in windows of at most 7 days.
 W1 is the crypto week: 7 days from Monday 00:00 UTC. `tpo_history_request`
 requires a unique `request_id` string (1-64 characters; a request without one is
 rejected). The server echoes it on the `tpo_history_chunk` and on `trade_overlay`
@@ -792,7 +792,7 @@ The live volume profile follows the TPO session when that session is 24 hours or
 shorter (NY, London, Asia, Australia, H24); for W1 and M1 it covers the current
 UTC day, because the live trade tape is retained for at most 24 hours.
 
-Live overlays and footprint history derive from the retained server trade tape.
+Live overlays derive from the retained server trade tape.
 TPO history additionally approximates older price rows from REST candle high/low
 ranges before the complete selected tape, including a partially covered boundary
 candle. This covers both pre-retention time and trades omitted by the budget. With
@@ -810,7 +810,7 @@ for resolver capacity within its own deadline.
 Candle ranges and retained trades map
 onto the same independent overlay grid, anchored from a candle close when no
 trade is available. This preserves session history without introducing persisted
-trade-history storage. Footprint and VP still have no observations outside the
+trade-history storage for these overlays. VP has no observations outside the
 retained tape; an empty profile does not establish complete historical coverage.
 
 

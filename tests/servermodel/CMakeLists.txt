@@ -248,3 +248,11 @@ target_link_libraries(test_trade_history PRIVATE sentinel_core GTest::gtest_main
 add_test(NAME TradeHistoryTests COMMAND test_trade_history)
 set_tests_properties(TradeHistoryTests PROPERTIES LABELS "servermodel;trade" TIMEOUT 30)
 add_dependencies(servermodel_tests test_trade_history)
+
+add_executable(test_flow_store_lag test_flow_store_lag.cpp)
+set_target_properties(test_flow_store_lag PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(test_flow_store_lag PRIVATE ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_flow_store_lag PRIVATE GTest::gtest_main)
+add_test(NAME FlowStoreLagTests COMMAND test_flow_store_lag)
+set_tests_properties(FlowStoreLagTests PROPERTIES LABELS "servermodel;flow")
+add_dependencies(servermodel_tests test_flow_store_lag)

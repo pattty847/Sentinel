@@ -2,6 +2,10 @@
 #include "datasources/FlowSeriesBuffer.hpp"
 #include "datasources/FlowBackfillState.hpp"
 #include "chart/feeds/CvdFeed.hpp"
+#include "chart/feeds/FlowFeed.hpp"
+#include "flow/FlowBarBuilder.hpp"
+#include "flow/FlowCodec.hpp"
+#include <future>
 #include "chart/core/CvdHistory.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
 #include <QCoreApplication>
@@ -195,6 +199,14 @@ struct FlowDataSourceTest : testing::Test {
         source.subscribeFlowLive(symbol, tf);
         source.requestFlowHistory(symbol, tf, 60'000, 120'000);
     }
+    void receiveWire(const Json& message) { client().handleMessage(message.dump()); }
+    void drainWire() {
+        std::promise<void> done;
+        net::post(*client().m_decodePool, [&] { done.set_value(); });
+        done.get_future().wait();
+        QCoreApplication::sendPostedEvents(&client(), QEvent::MetaCall);
+        deliver();
+    }
     void emitLive(quint64 id, const QString& symbol, int64_t tf = 60'000) {
         auto b = batch(bar(1, true, Source::Live, 60'000, tf)); b.id = id; b.symbol = symbol;
         client().flowBarsReceived(std::make_shared<const Client::FlowBatch>(b)); deliver();
@@ -215,6 +227,65 @@ TEST_F(FlowDataSourceTest, NoRequestBeforeConfigOrAfterDisconnect) {
     client().disconnected(); deliver(); select(); EXPECT_TRUE(requests().empty());
     client().connected(); deliver(); select(); EXPECT_TRUE(requests().empty());
 }
+TEST_F(FlowDataSourceTest, FlowOnlyConnectionAndReconnectPreserveFootprintCells) {
+    using namespace sentinel::flow;
+    FlowBarBuilder builder(60'000, 0.5, 100, 100, 100);
+    ASSERT_EQ(builder.add({"sell", 60'001, 100, 1.1, Side::Sell}), FlowBarBuilder::AddResult::Accepted);
+    ASSERT_EQ(builder.add({"buy", 60'002, 100.5, 2.3, Side::Buy}), FlowBarBuilder::AddResult::Accepted);
+    ASSERT_EQ(builder.add({"buy2", 60'003, 101, 2.7, Side::Buy}), FlowBarBuilder::AddResult::Accepted);
+    const auto flowBar = builder.bar(60'000); ASSERT_TRUE(flowBar);
+    const auto encoded = encodeFlowBar(*flowBar);
+    FlowSeriesBuffer::Series expectedSeries;
+    expectedSeries.bars[60'000].bar = *flowBar;
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 60'000; frame.surfaceBounds = {0, 0, 200, 180};
+    frame.surfaceDpr = 1; frame.viewportValid = true;
+    auto& r = frame.raster;
+    r.valid = true; r.dpr = 1; r.tick = 1; r.tfMs = 60'000;
+    r.rowPx = 18; r.rowPxF = 18; r.colPx = 100; r.colPxF = 100;
+    r.drawnStartMs = 60'000; r.drawnEndMs = 180'000; r.drawnMinPrice = 95; r.drawnMaxPrice = 105;
+    r.topF = 1890; r.topRowIndex = 1890; r.heightDev = 180; r.widthDev = 200;
+    auto expected = std::make_unique<chart::FlowSnapshot>();
+    ASSERT_TRUE(chart::FlowFeed::bin(*expected, expectedSeries, frame));
+    ASSERT_EQ(expected->barCount, 1); ASSERT_EQ(expected->cellCount, 2);
+    EXPECT_EQ(expected->cells[0].bidVol, 110); EXPECT_EQ(expected->cells[0].askVol, 230);
+    EXPECT_EQ(expected->cells[1].askVol, 270);
+
+    for (int connection = 0; connection < 2; ++connection) {
+        client().connected(); deliver();
+        receiveWire({{"type", "server_config"}, {"schema_version", protocol::SentinelProtocol::kServerConfigSchemaVersion}}); deliver();
+        select();
+        const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
+        EXPECT_EQ(sent[0]["type"], "flow_live_subscribe");
+        EXPECT_EQ(sent[1]["type"], "flow_history_request");
+        receiveWire({{"type", "flow_bar"}, {"schema_version", 1}, {"sub", sent[0]["sub"]},
+            {"symbol", "BTC-USD"}, {"timeframe_ms", 60'000}, {"bucket_start_ms", 60'000},
+            {"price_scale", 100}, {"row_tick_units", 50}, {"revision", 1},
+            {"source", "live"}, {"closed", true}, {"complete", true}, {"encoding", "FLB1/base64"},
+            {"bar", QByteArray(reinterpret_cast<const char*>(encoded.data()), encoded.size()).toBase64().toStdString()}});
+        drainWire();
+        const auto* series = source.flowBuffer().series(60'000); ASSERT_NE(series, nullptr);
+        ASSERT_EQ(series->bars.size(), 1u);
+        EXPECT_EQ(series->bars.at(60'000).bar, *flowBar);
+        auto actual = std::make_unique<chart::FlowSnapshot>();
+        ASSERT_TRUE(chart::FlowFeed::bin(*actual, *series, frame));
+        ASSERT_EQ(actual->barCount, expected->barCount);
+        ASSERT_EQ(actual->cellCount, expected->cellCount);
+        EXPECT_EQ(actual->bars[0].bidVol, expected->bars[0].bidVol);
+        EXPECT_EQ(actual->bars[0].askVol, expected->bars[0].askVol);
+        EXPECT_EQ(actual->bars[0].delta, expected->bars[0].delta);
+        EXPECT_EQ(actual->bars[0].maxSideVol, expected->bars[0].maxSideVol);
+        for (int i = 0; i < actual->cellCount; ++i) {
+            EXPECT_EQ(actual->cells[i].row, expected->cells[i].row);
+            EXPECT_EQ(actual->cells[i].span, expected->cells[i].span);
+            EXPECT_EQ(actual->cells[i].bidVol, expected->cells[i].bidVol);
+            EXPECT_EQ(actual->cells[i].askVol, expected->cells[i].askVol);
+        }
+        client().disconnected(); deliver();
+        EXPECT_EQ(source.flowBuffer().series(60'000), nullptr);
+    }
+}
+
 TEST_F(FlowDataSourceTest, SymbolAndTimeframeSwitchUnsubscribeClearAndRejectStaleFrames) {
     ready(); select(); auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
     const auto sub = sent[0]["sub"].get<quint64>();

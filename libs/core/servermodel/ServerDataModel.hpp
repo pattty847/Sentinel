@@ -51,7 +51,7 @@ class ServerDataModel : public QObject {
     friend struct ShadowServerTestAccess;
     friend struct FlowLiveTestAccess;
 public:
-    struct FootprintTradeSample {
+    struct RetainedTradeSample {
         int64_t timestampMs = 0;
         double price = 0.0;
         double size = 0.0;
@@ -101,15 +101,11 @@ public:
     // Newest is for TPO history only: retainedFromMs becomes the complete-tape
     // cutoff for candle fallback; budgetExceeded reports a truncated selection.
     bool collectOverlayTrades(const std::string& symbol, int64_t startMs, int64_t endMs,
-                              size_t limit, std::vector<FootprintTradeSample>& out,
+                              size_t limit, std::vector<RetainedTradeSample>& out,
                               int64_t* retainedFromMs = nullptr,
                               OverlayTradeBudget budget = OverlayTradeBudget::Reject,
                               bool* budgetExceeded = nullptr,
                               size_t* heapOperations = nullptr) const;
-    bool collectFootprintTrades(const std::string& symbol,
-                                int64_t startTimeMs,
-                                int64_t endTimeMs,
-                                std::vector<FootprintTradeSample>& out) const;
     virtual int64_t exchangeNowMs() const;
     recording::LiveService* recordingLive() const { return m_recordingLive.get(); }
     // The journal roller is attached.
@@ -264,12 +260,12 @@ private:
     void publishAggregatedBook(const QString& productId, SymbolHotData& data,
                                const FeedState& feed, qint64 envelopeMs);
     std::map<std::string, FeedState> m_feeds; // main thread, captured products only
-    mutable std::mutex m_footprintTradeMutex;
-    std::unordered_map<std::string, std::deque<FootprintTradeSample>> m_recentFootprintTrades;
+    mutable std::mutex m_tradeMutex;
+    std::unordered_map<std::string, std::deque<RetainedTradeSample>> m_recentTrades;
     std::unordered_map<std::string, int64_t> m_tradeHistoryFloorMs;
     std::unordered_set<std::string> m_tradeHistoryAwaitingResume;
     std::unordered_set<std::string> m_tradeHistoryHasResumeBoundary;
-    int64_t m_footprintTradeRetentionMs = 300'000;
+    int64_t m_tradeRetentionMs = 300'000;
     // Recording v2 (null when recording.enabled is false or no usable dir).
     std::shared_ptr<recording::LiveService> m_recordingLive;
     std::optional<std::filesystem::path> m_recordingDir;

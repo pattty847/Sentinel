@@ -285,7 +285,6 @@ private:
     
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};
-    uint64_t m_footprintFramesIgnored = 0; // read loop only; test access via friend
     std::atomic<quint64> m_candleDeliveryGeneration{0};
     mutable std::mutex m_bookDeliveryMutex;
     std::unordered_map<std::string, quint64> m_bookDeliveryGenerations;

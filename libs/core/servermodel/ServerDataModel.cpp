@@ -1,4 +1,5 @@
 #include "ServerDataModel.hpp"
+#include "FlowStoreLag.hpp"
 #include "SentinelLogging.hpp"
 #include "RecordingDir.hpp"
 #include "flow/FlowCodec.hpp"
@@ -120,7 +121,7 @@ ServerDataModel::ServerDataModel(const ServerConfig& config, QObject* parent)
         }
     }
     const int64_t gridSpanMs = maxTfMs * std::max<int64_t>(1024, m_serverConfig.tradeOverlays.retentionColumns);
-    m_footprintTradeRetentionMs = std::clamp<int64_t>(gridSpanMs * 2, 300'000, 86'400'000);
+    m_tradeRetentionMs = std::clamp<int64_t>(gridSpanMs * 2, 300'000, 86'400'000);
 
     // Candles close on each product's journal
     // time (onFeedWatermark and its trades), never this process's wall clock.
@@ -355,7 +356,7 @@ void ServerDataModel::onMarketDataConnectionChanged(const std::string& symbol, b
     feed.connected = connected;
     ++(connected ? feed.ups : feed.downs);
     if (!connected) {
-        std::lock_guard lock(m_footprintTradeMutex);
+        std::lock_guard lock(m_tradeMutex);
         m_tradeHistoryAwaitingResume.insert(symbol);
         m_tradeHistoryFloorMs[symbol] = INT64_MAX;
     }
@@ -469,7 +470,7 @@ std::vector<OHLCVBar> ServerDataModel::getHistory(const std::string& symbol, int
 // Worker-only bounded snapshot. False means over budget, never a partial tape.
 bool ServerDataModel::collectOverlayTrades(const std::string& symbol, int64_t startMs,
                                           int64_t endMs, size_t limit,
-                                          std::vector<FootprintTradeSample>& out,
+                                          std::vector<RetainedTradeSample>& out,
                                           int64_t* retainedFromMs, OverlayTradeBudget budget,
                                           bool* budgetExceeded, size_t* heapOperations) const {
     OverlayTradeSelection selection(startMs, endMs, limit, out, budget);
@@ -478,9 +479,9 @@ bool ServerDataModel::collectOverlayTrades(const std::string& symbol, int64_t st
     if (heapOperations) *heapOperations = 0;
     if (endMs <= startMs) return true;
     {
-        std::lock_guard<std::mutex> lock(m_footprintTradeMutex);
-        const auto it = m_recentFootprintTrades.find(symbol);
-        if (it == m_recentFootprintTrades.end()) return true;
+        std::lock_guard<std::mutex> lock(m_tradeMutex);
+        const auto it = m_recentTrades.find(symbol);
+        if (it == m_recentTrades.end()) return true;
         if (budget == OverlayTradeBudget::Newest) {
             // The tape is nearly chronological. Starting at the newest end
             // avoids a heap replacement per trade while holding the ingest lock.
@@ -506,39 +507,13 @@ bool ServerDataModel::collectOverlayTrades(const std::string& symbol, int64_t st
     return true;
 }
 
-bool ServerDataModel::collectFootprintTrades(const std::string& symbol,
-                                             int64_t startTimeMs,
-                                             int64_t endTimeMs,
-                                             std::vector<FootprintTradeSample>& out) const {
-    out.clear();
-    if (symbol.empty() || endTimeMs <= startTimeMs) {
-        return false;
-    }
-    std::lock_guard<std::mutex> lock(m_footprintTradeMutex);
-    auto it = m_recentFootprintTrades.find(symbol);
-    if (it == m_recentFootprintTrades.end()) {
-        return false;
-    }
-    const auto& trades = it->second;
-    for (const auto& sample : trades) {
-        if (sample.timestampMs < startTimeMs) {
-            continue;
-        }
-        if (sample.timestampMs >= endTimeMs) {
-            break;
-        }
-        out.push_back(sample);
-    }
-    return !out.empty();
-}
-
 ServerDataModel::TradeHistorySnapshot ServerDataModel::tradeHistorySnapshot(
     const std::string& symbol, int64_t fromMs, int64_t toMs, size_t limit) const {
     TradeHistorySnapshot result;
     result.store = m_flowStore;
-    std::lock_guard lock(m_footprintTradeMutex);
-    const auto it = m_recentFootprintTrades.find(symbol);
-    if (it == m_recentFootprintTrades.end() || it->second.empty()) return result;
+    std::lock_guard lock(m_tradeMutex);
+    const auto it = m_recentTrades.find(symbol);
+    if (it == m_recentTrades.end() || it->second.empty()) return result;
     const bool fallbackFloor = !m_tradeHistoryFloorMs.contains(symbol);
     if (const auto floor = m_tradeHistoryFloorMs.find(symbol); floor != m_tradeHistoryFloorMs.end())
         result.retainedFromMs = floor->second;
@@ -546,7 +521,7 @@ ServerDataModel::TradeHistorySnapshot ServerDataModel::tradeHistorySnapshot(
     const auto& trades = it->second;
     if (fallbackFloor) result.retainedFromMs = trades.front().timestampMs;
     const auto first = std::lower_bound(trades.begin(), trades.end(), std::max(fromMs, result.retainedFromMs),
-        [](const FootprintTradeSample& row, int64_t ms) { return row.timestampMs < ms; });
+        [](const RetainedTradeSample& row, int64_t ms) { return row.timestampMs < ms; });
     for (auto row = first; row != trades.end() && row->timestampMs < toMs; ++row) {
         if (result.rows.size() + result.invalidRows >= limit) {
             result.exceededLimit = true;
@@ -574,10 +549,10 @@ void ServerDataModel::onTrade(const Trade& trade) {
     data.lastTradePrice = trade.price;
 
     if (exchangeMs > 0 && trade.price > 0.0 && trade.size > 0.0) {
-        std::lock_guard<std::mutex> lock(m_footprintTradeMutex);
-        auto& trades = m_recentFootprintTrades[trade.product_id];
+        std::lock_guard<std::mutex> lock(m_tradeMutex);
+        auto& trades = m_recentTrades[trade.product_id];
         const int64_t newestMs = trades.empty() ? exchangeMs : std::max(exchangeMs, trades.back().timestampMs);
-        const int64_t cutoff = newestMs - m_footprintTradeRetentionMs;
+        const int64_t cutoff = newestMs - m_tradeRetentionMs;
         auto& historyFloor = m_tradeHistoryFloorMs[trade.product_id];
         if (m_tradeHistoryAwaitingResume.contains(trade.product_id)) {
             if (m_feeds.at(trade.product_id).connected) {
@@ -593,10 +568,10 @@ void ServerDataModel::onTrade(const Trade& trade) {
             trades.pop_front();
         }
         if (exchangeMs >= cutoff) {
-            FootprintTradeSample sample{exchangeMs, trade.price, trade.size, trade.side, trade.trade_id};
+            RetainedTradeSample sample{exchangeMs, trade.price, trade.size, trade.side, trade.trade_id};
             if (trades.empty() || trades.back().timestampMs <= exchangeMs) trades.push_back(std::move(sample));
             else trades.insert(std::upper_bound(trades.begin(), trades.end(), exchangeMs,
-                [](int64_t ms, const FootprintTradeSample& row) { return ms < row.timestampMs; }), std::move(sample));
+                [](int64_t ms, const RetainedTradeSample& row) { return ms < row.timestampMs; }), std::move(sample));
         }
     }
     
@@ -714,7 +689,7 @@ void ServerDataModel::onLiveOrderBookLevelUpdates(const QString& productId,
 void ServerDataModel::onLiveOrderBookInvalidated(const QString& productId, const QString& reason) {
     const std::string symbol = productId.toStdString();
     {
-        std::lock_guard lock(m_footprintTradeMutex);
+        std::lock_guard lock(m_tradeMutex);
         if (symbol.empty()) {
             for (const auto& [product, feed] : m_feeds) {
                 m_tradeHistoryAwaitingResume.insert(product);
@@ -1316,15 +1291,12 @@ void ServerDataModel::publishFlow() {
     for (auto& [symbol, product] : m_flowProducts) {
         if (m_flowStore) {
             const auto sealedThrough = m_flowStore->sealedThroughMs(symbol);
-            if (sealedThrough > 0 || product.firstLiveMs >= 0) {
-                const auto reference = std::max(sealedThrough,
-                    product.firstLiveMs < 0 ? int64_t{0} : product.firstLiveMs / 3'600'000 * 3'600'000);
-                const auto lag = std::max<int64_t>(0, product.clock - kFlowRolloverGraceMs) / 3'600'000 * 3'600'000 - reference;
-                if (lag > 6 * 3'600'000 &&
-                    (product.lastLagWarningClock == INT64_MIN || product.clock - product.lastLagWarningClock >= 60'000)) {
-                    sLog_Warning("Flow store lag exceeds live retention symbol=" << symbol << " lagMs=" << lag);
-                    product.lastLagWarningClock = product.clock;
-                }
+            const auto lag = sentinel::flow::storeLagMs(product.clock, sealedThrough,
+                                                        product.firstLiveMs, kFlowRolloverGraceMs);
+            if (lag && *lag > 6 * 3'600'000 &&
+                (product.lastLagWarningClock == INT64_MIN || product.clock - product.lastLagWarningClock >= 60'000)) {
+                sLog_Warning("Flow store lag exceeds live retention symbol=" << symbol << " lagMs=" << *lag);
+                product.lastLagWarningClock = product.clock;
             }
         }
         for (auto& [dayStart, day] : product.days) {

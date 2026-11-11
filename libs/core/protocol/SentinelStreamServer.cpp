@@ -165,8 +165,8 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingA
         {"grid", "per_bar"}};
     payload["trade_overlays"] = {
         {"retention_columns", cfg.tradeOverlays.retentionColumns},
-        {"grid_width", cfg.tradeOverlays.gridWidth}, {"grid_height", cfg.tradeOverlays.gridHeight},
-        {"tick_size", cfg.tradeOverlays.tickSize}, {"footprint_timeframe_ms", cfg.tradeOverlays.footprintTimeframeMs}};
+        {"grid_height", cfg.tradeOverlays.gridHeight},
+        {"tick_size", cfg.tradeOverlays.tickSize}};
     payload["chart"] = {
         {"timeframes_ms", cfg.chart.timeframesMs},
         {"served_timeframes_ms", servedTimeframes}
@@ -609,8 +609,7 @@ class Session : public std::enable_shared_from_this<Session> {
             it->second.generation = nextOverlayGeneration_++;
             const auto& cfg = owner_->serverConfig().tradeOverlays;
             it->second.request.symbol = symbol;
-            it->second.request.grid = {cfg.gridWidth, cfg.gridHeight, cfg.tickSize, 0};
-            it->second.request.footprintMs = cfg.footprintTimeframeMs;
+            it->second.request.grid = {cfg.gridHeight, cfg.tickSize, 0};
         }
         return it->second;
     }
@@ -655,33 +654,29 @@ class Session : public std::enable_shared_from_this<Session> {
         do_write(nlohmann::json{{"type", "error"}, {"context", "trade_overlay"}, {"symbol", symbol},
                                 {"request_id", requestId}, {"message", message}}.dump());
     }
-    void requestOverlayHistory(const nlohmann::json& j, bool tpo) {
+    void requestOverlayHistory(const nlohmann::json& j) {
         const auto symbol = j.value("symbol", std::string{});
         const auto tf = j.value("timeframe_ms", int64_t{0});
         std::string requestId;
-        if (tpo) {
-            if (j.contains("request_id") && j["request_id"].is_string())
-                requestId = j["request_id"].get<std::string>();
-            if (requestId.empty() || requestId.size() > trade_overlay::kMaxRequestIdLength ||
-                tpoRequestCancel_.contains(requestId) || tpoRequestCancel_.size() >= 16) {
-                send_error("trade_overlay", symbol, "TPO history requires a unique request_id of at most 64 characters");
-                return;
-            }
+        if (j.contains("request_id") && j["request_id"].is_string())
+            requestId = j["request_id"].get<std::string>();
+        if (requestId.empty() || requestId.size() > trade_overlay::kMaxRequestIdLength ||
+            tpoRequestCancel_.contains(requestId) || tpoRequestCancel_.size() >= 16) {
+            send_error("trade_overlay", symbol, "TPO history requires a unique request_id of at most 64 characters");
+            return;
         }
         if (!subscriptions_.contains(symbol) || (overlays_.size() >= 16 && !overlays_.contains(symbol)) ||
-            tf < (tpo ? 60000 : 1000) || tf > 86400000 || j.value("count", 0) <= 0 || overlayHistory_.size() >= 8) {
+            tf < 60000 || tf > 86400000 || j.value("count", 0) <= 0 || overlayHistory_.size() >= 8) {
             send_overlay_error(symbol, requestId, "invalid request or overlay queue full"); return;
         }
         auto& state = overlayState(symbol);
         auto q = state.request;
-        if (tpo) {
-            q.tpoMs = tf;
-            const int type = j.value("session_type", static_cast<int>(q.session));
-            if (type < 0 || type > static_cast<int>(SessionManager::SessionType::M1)) {
-                send_overlay_error(symbol, requestId, "invalid session"); return;
-            }
-            q.session = static_cast<SessionManager::SessionType>(type);
-        } else q.footprintMs = tf;
+        q.tpoMs = tf;
+        const int type = j.value("session_type", static_cast<int>(q.session));
+        if (type < 0 || type > static_cast<int>(SessionManager::SessionType::M1)) {
+            send_overlay_error(symbol, requestId, "invalid session"); return;
+        }
+        q.session = static_cast<SessionManager::SessionType>(type);
         const auto duration = SessionManager::sessionDurationMs(q.session);
         if (duration % q.tpoMs != 0 || duration / q.tpoMs > trade_overlay::kMaxGridWidth) {
             send_overlay_error(symbol, requestId, "TPO timeframe must partition the session within the grid budget"); return;
@@ -693,7 +688,7 @@ class Session : public std::enable_shared_from_this<Session> {
         if (check.maxPrice == 0) check.maxPrice = check.rows * check.tick;
         if (!check.valid()) { send_overlay_error(symbol, requestId, "invalid overlay grid"); return; }
         // A selection change invalidates worker replies and queued requests for that symbol.
-        const bool changed = q.footprintMs != state.request.footprintMs || q.tpoMs != state.request.tpoMs ||
+        const bool changed = q.tpoMs != state.request.tpoMs ||
             q.session != state.request.session || q.grid.tick != state.request.grid.tick ||
             q.grid.rows != state.request.grid.rows || q.grid.maxPrice != state.request.grid.maxPrice;
         if (changed) {
@@ -702,11 +697,11 @@ class Session : public std::enable_shared_from_this<Session> {
             state.generation = nextOverlayGeneration_++; q.previousMs = 0;
         }
         state.request = q;
-        q.kind = tpo ? trade_overlay::Kind::TpoHistory : trade_overlay::Kind::FootprintHistory;
+        q.kind = trade_overlay::Kind::TpoHistory;
         q.endMs = j.value("end_time", int64_t{0});
         q.count = std::clamp(j.value("count", 128), 1, trade_overlay::kMaxColumns);
         q.requestId = requestId;
-        if (tpo) tpoRequestCancel_.emplace(requestId, std::make_shared<std::atomic_bool>(false));
+        tpoRequestCancel_.emplace(requestId, std::make_shared<std::atomic_bool>(false));
         overlayHistory_.push_back(std::move(q));
     }
     void pumpOverlays() {
@@ -740,7 +735,7 @@ class Session : public std::enable_shared_from_this<Session> {
         const bool queued = owner_->submitHistoryTask([weak = weak_from_this(), executor, model, rest, q, generation, stopped, requestFlag] {
             trade_overlay::Result result;
             try {
-                std::vector<ServerDataModel::FootprintTradeSample> trades;
+                std::vector<ServerDataModel::RetainedTradeSample> trades;
                 const auto window = trade_overlay::tradeWindow(q);
                 int64_t retainedFromMs = 0;
                 bool budgetExceeded = false;
@@ -797,7 +792,7 @@ class Session : public std::enable_shared_from_this<Session> {
                 if (q.kind == trade_overlay::Kind::Live) it->second.request.previousMs = q.nowMs;
                 for (const auto& message : result.messages) self->do_write(message);
                 sLog_Probe("overlay.publish", "symbol=" << q.symbol << " messages=" << result.messages.size()
-                           << " tf=" << q.footprintMs << " tick=" << result.grid.tick);
+                           << " tf=" << q.tpoMs << " tick=" << result.grid.tick);
             });
         });
         overlayBusy_ = queued;
@@ -1157,10 +1152,8 @@ public:
                 }
             } else if (type == "heatmap_chunk_request") {
                 handleChunkRequest(j);
-            } else if (type == "footprint_history_request") {
-                requestOverlayHistory(j, false);
             } else if (type == "tpo_history_request") {
-                requestOverlayHistory(j, true);
+                requestOverlayHistory(j);
             } else if (type == "tpo_history_cancel") {
                 cancelOverlayHistory(j);
             } else if (type == "candle_history_request") {

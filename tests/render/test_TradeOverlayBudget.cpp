@@ -5,12 +5,12 @@
 // Pure worker tests: no Qt application, event loop, GUI or network is required.
 namespace {
 using namespace trade_overlay;
-using OverlayTrade = ServerDataModel::FootprintTradeSample;
+using OverlayTrade = ServerDataModel::RetainedTradeSample;
 constexpr int64_t day = 172800000, hour = 3600000;
 Request historyRequest() {
     Request q;
     q.symbol = "BTC-USD"; q.kind = Kind::TpoHistory; q.requestId = "tpo-1-0";
-    q.grid = {16, 10, 2, 120}; q.footprintMs = hour; q.tpoMs = hour;
+    q.grid = {10, 2, 120}; q.tpoMs = hour;
     q.nowMs = day + 2 * hour; q.count = 2;
     return q;
 }

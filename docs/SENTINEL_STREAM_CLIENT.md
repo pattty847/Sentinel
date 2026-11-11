@@ -8,7 +8,7 @@ The `SentinelStreamClient` (`libs/core/protocol/SentinelStreamClient.cpp`) is th
 WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor → UnifiedGridRenderer → GPU
 ```
 
-- **Server** produces GPU-ready slices (heatmap, footprint, TPO, volume profile, candles) and streams them over JSON + base64.
+- **Server** streams chart data as JSON/base64 messages and binary envelopes. Footprint cells use the flow stream and flow history; there is no footprint wire family.
 - **SentinelStreamClient** parses, validates, decodes, and emits typed DTOs via Qt signals.
 - **RemoteGridDataSource** owns the client instance, connects signals with `Qt::QueuedConnection`, and buffers slices before forwarding to the render pipeline.
 
@@ -60,9 +60,9 @@ The client parses JSON by `type` and dispatches to handler methods. Each handler
 | `snapshot` | `handleSnapshotMessage` | `snapshotReceived` | Order book init |
 | `l2update` | `handleL2UpdateMessage` | `l2UpdateReceived` | Order book deltas |
 | `trade` | `handleTradeMessage` | `tradeReceived` | Trade feed |
+| `flow_bar` / `flow_history_chunk` | `handleBinaryMessage` (worker decode) | `flowBarsReceived` | FlowSeriesBuffer → FlowFeed → footprint cells; live FLB1/base64 and history FHE1/FLB1 |
 | `heatmap_availability` | (inline) | `heatmapAvailabilityReceived` | Recorded heatmap sources and levels |
 | `heatmap_slice`, `heatmap_history_chunk`, `heatmap_recording_live` | none | none | Retired legacy heatmap (S8a): dropped silently, no per-frame warning, until the server stops sending them (S8b) |
-| `footprint_config`, `footprint_slice`, `footprint_history_chunk` | (inline) | none | Ignored: the client reads the top-level `type` and returns before any payload field, with one debug line per client. The JSON parse cost of these frames is accepted until the server publisher is removed. |
 | `tpo_slice` | `handleTpoSliceMessage` | `tpoSliceReceived` | TPO letters → GPU |
 | `tpo_history_chunk` | `handleTpoHistoryChunkMessage` | `tpoSliceReceived` (per column) | Historical TPO |
 | `volume_profile_slice` | `handleVolumeProfileSliceMessage` | `volumeProfileSliceReceived` | Volume profile bins |
@@ -85,7 +85,7 @@ The client parses JSON by `type` and dispatches to handler methods. Each handler
 
 The client enforces protocol guardrails before emitting. Invalid messages are dropped with throttled warnings.
 
-1. **Schema version** — Each message family (heatmap, candle, footprint, TPO, volume_profile, server_config) has a supported schema version. Mismatches or missing `schema_version` cause a drop.
+1. **Schema version** — Each message family (heatmap, candle, TPO, volume_profile, server_config) has a supported schema version. Mismatches or missing `schema_version` cause a drop.
 2. **Grid height** — Must be ≤ `SentinelProtocol::kMaxGridHeight` (65536).
 3. **Payload size** — Base64-decoded payloads must be ≤ `SentinelProtocol::kMaxPayloadBytes` (256 KiB). Estimate is checked before decode; actual size is checked after.
 4. **Base64 decode** — Uses `QByteArray::fromBase64(..., AbortOnBase64DecodingErrors)`. Empty or invalid decode causes a drop.

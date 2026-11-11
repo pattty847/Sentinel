@@ -44,17 +44,17 @@ struct HeatmapChunkWireTest {
     }
 };
 struct TradeOverlayModelTest {
-    static int64_t retentionMs(const ServerDataModel& model) { return model.m_footprintTradeRetentionMs; }
+    static int64_t retentionMs(const ServerDataModel& model) { return model.m_tradeRetentionMs; }
     static void fill(ServerDataModel& model, int64_t ms) {
-        std::lock_guard lock(model.m_footprintTradeMutex);
-        auto& tape = model.m_recentFootprintTrades["BTC-USD"];
+        std::lock_guard lock(model.m_tradeMutex);
+        auto& tape = model.m_recentTrades["BTC-USD"];
         for (size_t i = 0; i <= protocol::SentinelProtocol::kTradeHistoryMaxTrades; ++i)
             tape.push_back({ms + int64_t(i / 100), 100000, 0.1, AggressorSide::Buy,
                             std::to_string(i)});
     }
     static void invalid(ServerDataModel& model, int64_t ms) {
-        std::lock_guard lock(model.m_footprintTradeMutex);
-        auto& tape = model.m_recentFootprintTrades["BTC-USD"];
+        std::lock_guard lock(model.m_tradeMutex);
+        auto& tape = model.m_recentTrades["BTC-USD"];
         tape.insert(tape.begin() + 1, {ms, 100000, 0.0, AggressorSide::Buy, "invalid"});
         tape.insert(tape.begin() + 2, {ms, std::numeric_limits<double>::quiet_NaN(), 0.1,
                                       AggressorSide::Buy, "nan"});

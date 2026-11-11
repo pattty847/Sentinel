@@ -284,29 +284,27 @@ RAM history is empty after a restart. There is no knob for the rebuild.
 `trade_overlays.retention_columns` defaults to 5120 (8192 in the checked-in config).
 Retained execution history uses exactly
 `clamp(2 * max(1000, default_timeframe_ms, timeframes_ms...) * max(1024, retention_columns), 300000, 86400000)`
-milliseconds. It is independent of the overlay display `grid_width` (default 512).
+milliseconds.
 These sections may be at the YAML root or under `server`. Server `heatmap.*` keys
 are retired, with no aliases. Existing `data/heatmap` archives are untouched and
 no longer read or written. Deploying this change requires the owner present.
 
 ## Trade overlays
 
-Footprint, TPO and volume profile use an independent trade grid. The server
-advertises these settings as `trade_overlays` in `server_config`:
+TPO and volume profile use an independent trade grid. Footprint cells use the
+flow grid. The server advertises these settings as `trade_overlays` in `server_config`:
 
 ```yaml
 trade_overlays:
   retention_columns: 8192
-  grid_width: 512
   grid_height: 2048
   tick_size: 5
-  footprint_timeframe_ms: 60000
 ```
 
-Width and height are bounded to 2048. Footprint's selected chart timeframe is
-sent explicitly in its history request; the configured timeframe is the startup
-default. TPO uses its requested session and bracket duration, with at most 2048
-session columns; the bracket must divide the session duration. Price rows descend
+The removed `footprint_timeframe_ms` and `grid_width` keys are ignored if present
+in an old config, like other unrecognized YAML keys; neither is advertised in
+`server_config`. Height is bounded to 2048. TPO uses its requested session and
+bracket duration, with at most 2048 session columns; the bracket must divide the session duration. Price rows descend
 from `max_price`, with `min_price = max_price - grid_height * tick_size`.
 The first successful publication anchors the grid on the latest retained trade
 (or a candle close for TPO history after restart), rounded to its own tick. The grid remains fixed for that subscription; requests
