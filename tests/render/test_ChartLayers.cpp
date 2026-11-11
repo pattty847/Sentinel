@@ -745,6 +745,22 @@ TEST(FootprintAggressorColours, FillIsFullHalfWidthAndOpacityTracksVolume) {
     EXPECT_GE(sell[0].a, 45) << "the weakest fill stays visible (alpha .18)";
     EXPECT_NEAR(sell[0].a / 255., chart::flowFillAlpha(1, 2), 1. / 255);
 }
+TEST(FootprintAggressorColours, RenderedHalvesFollowAggressorColourFullWidthAndVolumeOpacity) {
+    CellsRig rig({{0, 100, 200}}, 0);  // sell 1.0 on the left, buy 2.0 on the right, normaliser 2.0
+    ASSERT_EQ(rig.layer.vertexCount(), 12 + 12);
+    const auto* sell = rig.vertices() + 12; const auto* buy = rig.vertices() + 18;
+    const auto up = theme::positive(), down = theme::negative();
+    EXPECT_LT(sell[2].x, 55) << "sell aggression is the left half";
+    EXPECT_GT(buy[0].x, 55) << "buy aggression is the right half";
+    EXPECT_NEAR(sell[2].x - sell[0].x, buy[2].x - buy[0].x, 1e-4) << "both fills span their whole half";
+    EXPECT_GT(sell[2].x - sell[0].x, 40);
+    EXPECT_NEAR(sell[0].a, 150, 1) << "alpha .18 + .82 * (1 / 2)";
+    EXPECT_NEAR(buy[0].a, 255, 1) << "full volume is opaque";
+    EXPECT_NEAR(sell[0].r, down.red() * sell[0].a / 255., 1.5) << "sell is the down colour";
+    EXPECT_NEAR(sell[0].g, down.green() * sell[0].a / 255., 1.5);
+    EXPECT_NEAR(buy[0].r, up.red() * buy[0].a / 255., 1.5) << "buy is the up colour";
+    EXPECT_NEAR(buy[0].g, up.green() * buy[0].a / 255., 1.5);
+}
 TEST(FootprintAggressorColours, DustDrawsItsFillAndDimsItsNumber) {
     CellsRig rig({{0, 1, 0}});  // 0.01 contracts at ~100 is far under the 2500 notional
     ASSERT_EQ(rig.layer.vertexCount(), 12 + 6) << "a dust cell still draws its fill";
