@@ -25,7 +25,6 @@
 #include <tuple>
 #include <functional>
 #include <unordered_map>
-#include "FootprintSlice.hpp"
 #include "../flow/FlowBar.hpp"
 #include "TpoSlice.hpp"
 #include "VolumeProfileSlice.hpp"
@@ -128,10 +127,6 @@ public:
     void requestTradeHistory(quint64 req, const std::string& symbol, int64_t startMs, int64_t endMs);
     quint64 subscribeFlowLive(const std::string& symbol, int64_t timeframeMs);
     void unsubscribeFlowLive(quint64 sub);
-    void requestFootprintHistory(const std::string& symbol,
-                                 int64_t timeframeMs,
-                                 int64_t endTimeMs,
-                                 int count);
     // requestId (required, 1..64 chars) is echoed on the reply chunk and on errors.
     // Only the most recently requested id is accepted: a chunk with any other id
     // (or none) is dropped before a single slice is emitted.
@@ -183,7 +178,6 @@ signals:
     void tradeHistoryReceived(SentinelStreamClient::TradeHistoryPtr page);
     void tradeHistoryFailed(quint64 req, const QString& message);
     void flowLiveDropped(quint64 sub, const QString& symbol, int64_t timeframeMs, int64_t bucketStartMs);
-    void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
     // After the in-flight tpo_history_chunk's slices were emitted (requestId always set).
     void tpoHistoryChunkReceived(const QString& symbol, const QString& requestId, qint64 timeframeMs,
@@ -247,9 +241,6 @@ private:
     void handleTradeMessage(const nlohmann::json& msg);
     void handleCandleHistoryChunkMessage(const nlohmann::json& msg);
     void handleCandleBarMessage(protocol::MessageType type, const nlohmann::json& msg);
-    void handleFootprintConfigMessage(const nlohmann::json& msg);
-    void handleFootprintSliceMessage(const nlohmann::json& msg);
-    void handleFootprintHistoryChunkMessage(const nlohmann::json& msg);
     void handleTpoSliceMessage(const nlohmann::json& msg);
     void handleTpoHistoryChunkMessage(const nlohmann::json& msg);
     void handleOrderUpdateMessage(const nlohmann::json& msg);
@@ -294,6 +285,7 @@ private:
     
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};
+    uint64_t m_footprintFramesIgnored = 0; // read loop only; test access via friend
     std::atomic<quint64> m_candleDeliveryGeneration{0};
     mutable std::mutex m_bookDeliveryMutex;
     std::unordered_map<std::string, quint64> m_bookDeliveryGenerations;

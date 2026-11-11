@@ -20,12 +20,12 @@ struct TradeOverlayWireTest {
     static void receive(SentinelStreamClient& client, const nlohmann::json& msg) {
         const auto type = msg.at("type");
         if (type == "trade") client.handleTradeMessage(msg);
-        else if (type == "footprint_slice") client.handleFootprintSliceMessage(msg);
-        else if (type == "footprint_history_chunk") client.handleFootprintHistoryChunkMessage(msg);
         else if (type == "tpo_slice") client.handleTpoSliceMessage(msg);
         else if (type == "tpo_history_chunk") client.handleTpoHistoryChunkMessage(msg);
         else if (type == "volume_profile_slice") client.handleVolumeProfileSliceMessage(msg);
     }
+    static void dispatch(SentinelStreamClient& client, const std::string& raw) { client.handleMessage(raw); }
+    static uint64_t ignoredFootprint(const SentinelStreamClient& client) { return client.m_footprintFramesIgnored; }
     static void expectTpo(SentinelStreamClient& client, const std::string& id) { client.m_expectedTpoRequestId = id; }
 };
 struct TradeOverlayModelTest {
@@ -176,28 +176,37 @@ TEST_F(TradeOverlay, CadenceClosesPreviousThenRefreshesFormingWithoutBacklog) {
 TEST_F(TradeOverlay, WireRoundTripRetainsOwnGridAndHalfOpenTradeBuckets) {
     const auto result = build(request(), tape()); ASSERT_TRUE(result.error.empty()) << result.error;
     SentinelStreamClient client("127.0.0.1", "0");
-    std::vector<FootprintSlice> foot;
     std::vector<TpoSlice> tpo;
     std::vector<VolumeProfileSlice> vp;
-    QObject::connect(&client, &SentinelStreamClient::footprintSliceReceived, &client, [&](auto s) { foot.push_back(s); });
     QObject::connect(&client, &SentinelStreamClient::tpoSliceReceived, &client, [&](auto s) { tpo.push_back(s); });
     QObject::connect(&client, &SentinelStreamClient::volumeProfileSliceReceived, &client, [&](auto s) { vp.push_back(s); });
-    for (const auto& message : result.messages) TradeOverlayWireTest::receive(client, nlohmann::json::parse(message));
-    ASSERT_EQ(foot.size(), 2); ASSERT_EQ(tpo.size(), 1); ASSERT_EQ(vp.size(), 1);
-    EXPECT_EQ(foot[0].bucketStartMs, day + 60000); EXPECT_EQ(foot[0].bucketEndMs, day + 120000);
-    EXPECT_EQ(foot[1].bucketStartMs, day + 120000);
-    for (const auto& s : foot) {
-        EXPECT_EQ(s.gridWidth, 16); EXPECT_EQ(s.gridHeight, 10);
-        EXPECT_DOUBLE_EQ(s.tickSize, 2); EXPECT_DOUBLE_EQ(s.minPrice, 100); EXPECT_DOUBLE_EQ(s.maxPrice, 120);
+    int footprintFrames = 0;
+    for (const auto& message : result.messages) {
+        const auto json = nlohmann::json::parse(message);
+        if (json.at("type") == "footprint_slice") ++footprintFrames;
+        TradeOverlayWireTest::receive(client, json);
     }
-    const auto cell = [](const FootprintSlice& s, int row) {
-        return (int(qFromLittleEndian<uint16_t>(reinterpret_cast<const uchar*>(s.deltaLevelsQ16.constData()) + row * 2)) - 32768) * s.quantScale;
-    };
-    EXPECT_NEAR(cell(foot[0], 2), 2, .0001); EXPECT_NEAR(cell(foot[0], 4), 0, .0001);
-    EXPECT_NEAR(cell(foot[1], 4), -5, .0001);
+    ASSERT_EQ(footprintFrames, 2); ASSERT_EQ(tpo.size(), 1); ASSERT_EQ(vp.size(), 1);
     EXPECT_EQ(tpo[0].letters[2], 'A'); EXPECT_EQ(tpo[0].letters[4], 'A');
     EXPECT_DOUBLE_EQ(tpo[0].tickSize, 2); EXPECT_DOUBLE_EQ(vp[0].tickSize, 2);
     EXPECT_DOUBLE_EQ(vp[0].totalVolume, 9);
+}
+TEST_F(TradeOverlay, ClientIgnoresFootprintFramesBeforeParsingThem) {
+    const auto result = build(request(), tape()); ASSERT_TRUE(result.error.empty()) << result.error;
+    SentinelStreamClient client("127.0.0.1", "0");
+    std::vector<TpoSlice> tpo;
+    QObject::connect(&client, &SentinelStreamClient::tpoSliceReceived, &client, [&](auto s) { tpo.push_back(s); });
+    int footprintFrames = 0;
+    for (const auto& message : result.messages) {
+        if (message.find("\"type\":\"footprint_slice\"") != std::string::npos) ++footprintFrames;
+        TradeOverlayWireTest::dispatch(client, message);
+    }
+    ASSERT_EQ(footprintFrames, 2);
+    EXPECT_EQ(TradeOverlayWireTest::ignoredFootprint(client), 2u) << "no parse, no decode, no signal";
+    EXPECT_EQ(tpo.size(), 1u) << "other overlay frames still decode";
+    const std::string malformed = R"({"type":"footprint_slice","delta_levels_q16":"@@not base64@@")";
+    TradeOverlayWireTest::dispatch(client, malformed);
+    EXPECT_EQ(TradeOverlayWireTest::ignoredFootprint(client), 3u) << "dropped before JSON parsing";
 }
 TEST_F(TradeOverlay, HistoryAndLiveShareGridAndNoHeatmapMessages) {
     auto q = request(); q.kind = Kind::FootprintHistory;
