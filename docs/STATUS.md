@@ -3,8 +3,8 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends. Keep under 8 KB.
 
-- **Updated:** 2026-11-11 ~04:45 UTC. main `9e32edba` (pushed with this commit). Conductor hand-off at a clean boundary: no writer in flight. Work order: `docs/TODO.md` Waves.
-- **Conductor:** next = a FRESH session (owner 2026-11-11: the UI audit session `local_a0b0cb41-c6cc-4e10-bd7b-a7f748a42eb6` was named, then stood down because its context was half used; it dispatched nothing). UI audit closed: approved brief `/Volumes/T7/sentinel-audit/ui-2026-11/brief.md` (Top 10 = the aesthetic pass order; lab list L-1..L-16; status of brief items at its end); hand-over note `ui-audit-handover.md` in that session's notes folder. Pending `_agent` curation from this conductor's landings (writers' MEMORY lines, in the land merge messages' slices): archive INV-021, INV-023, FM-019, FM-055 (q16 code gone); edit INV-149 (HeatmapColumnTexture deleted) and INV-028 (server publisher only); add the footprint LOD/bands, 2 px zoom-limit (`ChartSurface.hpp`), band-k-from-device-pixels and bar-cap/retention entries.
+- **Updated:** 2026-11-11 ~05:45 UTC. main `0e34bef4`. Repo split started (steps 1-2 writer in flight, see In flight). Work order: `docs/TODO.md` Waves.
+- **Conductor:** fresh Claude Opus 5.5 session, named by the owner 2026-11-11. UI audit closed: approved brief `/Volumes/T7/sentinel-audit/ui-2026-11/brief.md` (Top 10 = the aesthetic pass order; lab list L-1..L-16; status of brief items at its end); hand-over note `ui-audit-handover.md` in that session's notes folder. Pending `_agent` curation from this conductor's landings (writers' MEMORY lines, in the land merge messages' slices): archive INV-021, INV-023, FM-019, FM-055 (q16 code gone); edit INV-149 (HeatmapColumnTexture deleted) and INV-028 (server publisher only); add the footprint LOD/bands, 2 px zoom-limit (`ChartSurface.hpp`), band-k-from-device-pixels and bar-cap/retention entries.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high risk. Owner 2026-11-05: spend all Codex, including reset credits before they expire.
 
 ## Next
@@ -29,7 +29,8 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 
 ## In flight
 
-- None. Linked app sessions (notes reached the old conductor only; message by id): repo-split planner `local_9196557b-bb63-49b6-be30-fa61a90b3024` (plan done), paper-close `local_bcd47e33-f034-4a41-8375-bef0fa81e972` (landed), UI audit `local_a0b0cb41-c6cc-4e10-bd7b-a7f748a42eb6` (done; brief APPROVED). Codex threads (resumable): Astra footprint `01a1c76a-15d7-78e1-a76b-9415630a9a48`, Astra paper `01a1c8a9-6679-7283-bde0-716b73036839`, Sol cells-only `01a1c8b0-3621-7c91-9d9b-443e64a3f22a`.
+- **Repo split steps 1-2** (owner go 2026-11-11): Claude Opus writer subagent copies agent tooling to `Sentinel-Private/tools/agent/` and STATUS/TODO/AGENT_WORKFLOW to `Sentinel-Private/workflow/`, then dry-run lands in a scratch clone on T7. Writes uncommitted in Sentinel-Private; conductor commits after Codex Astra review. Freeze: public `scripts/dev/*` agent tooling unchanged until step 4; STATUS/TODO edits on main until step 5 must be re-copied to `workflow/`. Snapshot tag `pre-split-2026-11-11` (local, Sentinel-Private).
+- Linked app sessions (notes reached the old conductor only; message by id): repo-split planner `local_9196557b-bb63-49b6-be30-fa61a90b3024` (plan done), paper-close `local_bcd47e33-f034-4a41-8375-bef0fa81e972` (landed), UI audit `local_a0b0cb41-c6cc-4e10-bd7b-a7f748a42eb6` (done; brief APPROVED). Codex threads (resumable): Astra footprint `01a1c76a-15d7-78e1-a76b-9415630a9a48`, Astra paper `01a1c8a9-6679-7283-bde0-716b73036839`, Sol cells-only `01a1c8b0-3621-7c91-9d9b-443e64a3f22a`.
 
 Lab branches that never land: `lt-astra/hmc2-rollup-lab`, `lt-claude/hmc2-layout-lab` (results in `/Volumes/T7/sentinel-datalab/hmc2-*`).
 
