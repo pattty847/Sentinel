@@ -644,7 +644,7 @@ and rebuilt before proceeding.
 
 The arguments did not change for per-product connections: the new defaults
 (512 MiB pool, 2 MiB floors, `/metrics` on 8091) apply without a plist edit.
-Deploy only with `scripts/dev/deploy-runtime.sh capture`.
+Deploy only with `_private/tools/agent/deploy-runtime.sh capture`.
 
 The following is the exact `ProgramArguments` array for the seven-product service
 retaining the current service's runtime executable, working directory and defaults. No service operation is
@@ -818,8 +818,8 @@ unsent suffix must be read from the journal. It never waits for a client to drai
 Probe (no exchange connection or journal writes):
 
 ```sh
-python3 scripts/dev/fanout-tail.py BTC-USD
-python3 scripts/dev/fanout-tail.py BTC-USD --resume '{"product":"BTC-USD","run_id":"UUID","block":123,"record":4}'
+python3 _private/tools/agent/fanout-tail.py BTC-USD
+python3 _private/tools/agent/fanout-tail.py BTC-USD --resume '{"product":"BTC-USD","run_id":"UUID","block":123,"record":4}'
 ```
 
 The probe prints positions and control messages, not raw payloads. Add

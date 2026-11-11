@@ -1639,7 +1639,7 @@ struct ShadowRoller::Impl {
       p.running->set(0);
     }
   }
-  // Deploy readiness (deploy-runtime.sh), serving only: a product is healthy
+  // Deploy readiness (read from the run log after a deploy), serving only: a product is healthy
   // from the first durable checkpoint of its current writer (after the policy
   // check, leases and a committed minute) until a failure or the writer
   // closes (also at day end). "Roller serving ready" is logged when every

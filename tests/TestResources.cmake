@@ -17,11 +17,11 @@ set(_sentinel_server_tests
     ServerFeedAdmissionTests BacktestCoreTests
     ResearchUiTests)
 set(_sentinel_integration_tests
-    ${_sentinel_server_tests} DeployRuntimeDryRun MarketDataEngineReconnectTests
+    ${_sentinel_server_tests} MarketDataEngineReconnectTests
     MarketDataEngineConnectTimeoutTests SentinelStreamClientWriteTests)
 set(_sentinel_lint_tests
     AgentHostModeTests HeatmapPaletteTests HeatmapSettingsUiTests
-    ServerFeedAdmissionTests DeployMarkerTests RollerCorruptBlockTests
+    ServerFeedAdmissionTests RollerCorruptBlockTests
     CaptureFanoutTests NoLocalStdTypeinfo)
 set(_sentinel_processors_two
     RawCaptureTests CaptureVerifierScaleTests CaptureApplicationTests

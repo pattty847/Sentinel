@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run under build-queue.sh: prove each fanout regression fails without its guard.
+"""Run alone (it rebuilds the build tree): prove each fanout regression fails without its guard.
 Restores, touches and rebuilds production source after EVERY mutation.
 """
 import os

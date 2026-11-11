@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-without-fix checks. Run inside build-queue; restores source in finally.
+"""Fail-without-fix checks. Run alone (it rebuilds the build tree); restores source in finally.
 
 python3 tests/render/check_dom_mutations.py [build/mac-clang]
 DOM_MUTANTS=pulse_ limits the run to mutants whose name starts with that prefix.

@@ -45,7 +45,7 @@ The install loads three new launchd agents. It does not touch the recorder or th
 capture.
 
 1. Land the branch. Build `main` (`cmake --build --preset mac-clang`), then deploy the
-   server: `scripts/dev/deploy-runtime.sh server`. The deploy restarts the recorder, which
+   server: `_private/tools/agent/deploy-runtime.sh server`. The deploy restarts the recorder, which
    leaves one short gap in the recording.
 2. Check the endpoint: `curl -s 127.0.0.1:8090/metrics | head`.
 3. Choose a random ntfy topic, for example `sentinel-$(openssl rand -hex 8)`. Subscribe to
@@ -237,7 +237,7 @@ never waits on the I/O thread, so it answers while T7 I/O is frozen (FM-127).
 ### Capture metrics: first deploy
 
 1. Land the branch and build `main`.
-2. Deploy the capture: `scripts/dev/deploy-runtime.sh capture` (owner at the Mac, FM-127).
+2. Deploy the capture: `_private/tools/agent/deploy-runtime.sh capture` (owner at the Mac, FM-127).
 3. Check: `curl -s 127.0.0.1:8091/metrics | rg '^sentinel_capture_feed_up'` shows one line
    per product, all 1 within about 10 s (connects are paced at 1/s).
 4. Check VictoriaMetrics: `up{job="sentinel-capture"}` is 1 in vmui.

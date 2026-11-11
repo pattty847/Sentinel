@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run via scripts/dev/build-queue.sh --label lt-astra/roller-a -- python3 tests/roller/check_mutations.py.
+"""Run as python3 tests/roller/check_mutations.py while no other build uses build/mac-clang.
 Every restoration writes fresh source, touches it and rebuilds (FM-132).
 No logs/files beyond build products are written; output is a concise audit.
 """

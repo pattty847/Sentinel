@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run through build-queue. Each mutant must fail assertions, then restore/rebuild/pass."""
+"""Run alone: it rebuilds build/mac-clang. Each mutant must fail assertions, then restore/rebuild/pass."""
 import os
 from pathlib import Path
 import subprocess
