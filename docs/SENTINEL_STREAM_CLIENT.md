@@ -12,7 +12,7 @@ WebSocket → SentinelStreamClient → RemoteGridDataSource → DataProcessor �
 - **SentinelStreamClient** parses, validates, decodes, and emits typed DTOs via Qt signals.
 - **RemoteGridDataSource** owns the client instance, connects signals with `Qt::QueuedConnection`, and buffers slices before forwarding to the render pipeline.
 
-The client is a key aspect of the server–client split: it owns the network I/O and protocol parsing, but does not perform aggregation or rendering. All emitted data is already in render-ready form (dense u8 columns, q16 deltas, etc.).
+The client is a key aspect of the server–client split: it owns the network I/O and protocol parsing, but does not perform aggregation or rendering. All emitted data is already in render-ready form (dense u8 columns, etc.).
 
 ## Connection Lifecycle
 
@@ -40,7 +40,6 @@ Writes (subscribe, history requests, trade commands) are posted to `m_strand` an
 | `unsubscribe(symbol)` | `unsubscribe` | Unsubscribe |
 | `requestHeatmapChunks(...)` | `heatmap_chunk_request` | Recorded heatmap chunks (binary replies) |
 | `subscribeHeatmapLive(...)` / `unsubscribeHeatmapLive(...)` | `heatmap_live_subscribe` / `heatmap_live_unsubscribe` | The live raw tail |
-| `requestFootprintHistory(...)` | `footprint_history_request` | Historical footprint slices (the GUI no longer calls it) |
 | `requestTpoHistory(...)` | `tpo_history_request` | Historical TPO slices |
 | `requestCandleHistory(...)` | `candle_history_request` | OHLCV candle history |
 | `requestScreenerData(...)` | `screener_request` | Screener rows (crypto/stock) |
@@ -63,8 +62,7 @@ The client parses JSON by `type` and dispatches to handler methods. Each handler
 | `trade` | `handleTradeMessage` | `tradeReceived` | Trade feed |
 | `heatmap_availability` | (inline) | `heatmapAvailabilityReceived` | Recorded heatmap sources and levels |
 | `heatmap_slice`, `heatmap_history_chunk`, `heatmap_recording_live` | none | none | Retired legacy heatmap (S8a): dropped silently, no per-frame warning, until the server stops sending them (S8b) |
-| `footprint_slice` | `handleFootprintSliceMessage` | `footprintSliceReceived` | Footprint delta levels; no GUI consumer (the footprint draws from flow) |
-| `footprint_history_chunk` | `handleFootprintHistoryChunkMessage` | `footprintSliceReceived` (per column) | Historical footprint |
+| `footprint_config`, `footprint_slice`, `footprint_history_chunk` | (inline) | none | Ignored: the client reads the top-level `type` and returns before any payload field, with one debug line per client. The JSON parse cost of these frames is accepted until the server publisher is removed. |
 | `tpo_slice` | `handleTpoSliceMessage` | `tpoSliceReceived` | TPO letters → GPU |
 | `tpo_history_chunk` | `handleTpoHistoryChunkMessage` | `tpoSliceReceived` (per column) | Historical TPO |
 | `volume_profile_slice` | `handleVolumeProfileSliceMessage` | `volumeProfileSliceReceived` | Volume profile bins |
@@ -91,7 +89,7 @@ The client enforces protocol guardrails before emitting. Invalid messages are dr
 2. **Grid height** — Must be ≤ `SentinelProtocol::kMaxGridHeight` (65536).
 3. **Payload size** — Base64-decoded payloads must be ≤ `SentinelProtocol::kMaxPayloadBytes` (256 KiB). Estimate is checked before decode; actual size is checked after.
 4. **Base64 decode** — Uses `QByteArray::fromBase64(..., AbortOnBase64DecodingErrors)`. Empty or invalid decode causes a drop.
-5. **Shape validation** — Footprint/TPO/volume_profile slices validate expected byte counts (e.g. `gridHeight * sizeof(int16_t)` for footprint).
+5. **Shape validation** — TPO/volume_profile slices validate expected byte counts.
 
 Drop reasons are logged with throttling (`kSchemaLogThrottleMs` = 2 s per reason) to avoid log spam.
 
@@ -100,7 +98,6 @@ Drop reasons are logged with throttling (`kSchemaLogThrottleMs` = 2 s per reason
 Slices emitted by the client are already in formats suitable for GPU upload:
 
 - **HeatmapSlice** — `column` (u8 intensity), `liquidityColumn` (u16), `liquidityScale`; grid metadata (min/max price, tick size, time range).
-- **FootprintSlice** — `deltaLevelsQ16` (int16 delta per price level); `quantScale` for display.
 - **TpoSlice** — `letters` (ASCII TPO per level).
 - **VolumeProfileSlice** — `volumeBinsF32` (float per bin); POC, VAH, VAL.
 

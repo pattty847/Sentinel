@@ -881,15 +881,15 @@ void SentinelStreamClient::onWrite(boost::beast::error_code ec, std::size_t byte
 }
 
 void SentinelStreamClient::handleMessage(const std::string& msgStr) {
-    // The footprint draws from flow bars. Skip its frames before the JSON parse copies the payload.
-    if (msgStr.find("\"type\":\"footprint_") != std::string::npos) {
-        if (m_footprintFramesIgnored++ == 0)
-            sLog_Debug("Ignoring footprint frames: the GUI footprint is built from flow bars");
-        return;
-    }
     try {
         const auto msg = nlohmann::json::parse(msgStr);
         const std::string typeStr = msg.value("type", "unknown");
+        if (typeStr.rfind("footprint_", 0) == 0) {
+            // The footprint draws from flow bars. The parse already happened; touch no payload field.
+            if (m_footprintFramesIgnored++ == 0)
+                sLog_Debug("Ignoring footprint frames: the GUI footprint is built from flow bars");
+            return;
+        }
         const auto type = protocol::fromString(typeStr);
 
         switch (type) {

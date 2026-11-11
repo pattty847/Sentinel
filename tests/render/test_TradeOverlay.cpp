@@ -191,22 +191,27 @@ TEST_F(TradeOverlay, WireRoundTripRetainsOwnGridAndHalfOpenTradeBuckets) {
     EXPECT_DOUBLE_EQ(tpo[0].tickSize, 2); EXPECT_DOUBLE_EQ(vp[0].tickSize, 2);
     EXPECT_DOUBLE_EQ(vp[0].totalVolume, 9);
 }
-TEST_F(TradeOverlay, ClientIgnoresFootprintFramesBeforeParsingThem) {
+TEST_F(TradeOverlay, ClientDropsTopLevelFootprintFramesWithoutDecodingAndKeepsNestedOnes) {
     const auto result = build(request(), tape()); ASSERT_TRUE(result.error.empty()) << result.error;
     SentinelStreamClient client("127.0.0.1", "0");
     std::vector<TpoSlice> tpo;
     QObject::connect(&client, &SentinelStreamClient::tpoSliceReceived, &client, [&](auto s) { tpo.push_back(s); });
     int footprintFrames = 0;
     for (const auto& message : result.messages) {
-        if (message.find("\"type\":\"footprint_slice\"") != std::string::npos) ++footprintFrames;
+        if (nlohmann::json::parse(message).at("type") == "footprint_slice") ++footprintFrames;
         TradeOverlayWireTest::dispatch(client, message);
     }
     ASSERT_EQ(footprintFrames, 2);
-    EXPECT_EQ(TradeOverlayWireTest::ignoredFootprint(client), 2u) << "no parse, no decode, no signal";
+    EXPECT_EQ(TradeOverlayWireTest::ignoredFootprint(client), 2u) << "counted, never decoded";
     EXPECT_EQ(tpo.size(), 1u) << "other overlay frames still decode";
-    const std::string malformed = R"({"type":"footprint_slice","delta_levels_q16":"@@not base64@@")";
-    TradeOverlayWireTest::dispatch(client, malformed);
-    EXPECT_EQ(TradeOverlayWireTest::ignoredFootprint(client), 3u) << "dropped before JSON parsing";
+    // Not compact dump() spacing, and a malformed payload that a decode would reject.
+    TradeOverlayWireTest::dispatch(client, R"({ "type" : "footprint_history_chunk", "delta_levels_q16" : "@@" })");
+    EXPECT_EQ(TradeOverlayWireTest::ignoredFootprint(client), 3u);
+    // A footprint-looking object nested inside another frame is not a footprint frame.
+    const auto tpoFrame = nlohmann::json::parse(result.messages.back());
+    auto nested = tpoFrame; nested["note"] = {{"type", "footprint_slice"}};
+    TradeOverlayWireTest::dispatch(client, nested.dump());
+    EXPECT_EQ(TradeOverlayWireTest::ignoredFootprint(client), 3u);
 }
 TEST_F(TradeOverlay, HistoryAndLiveShareGridAndNoHeatmapMessages) {
     auto q = request(); q.kind = Kind::FootprintHistory;
