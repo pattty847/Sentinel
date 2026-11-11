@@ -53,6 +53,24 @@ void TradingAccountState::apply(const PositionUpdate& update) {
     else positions.push_back(update);
 }
 
+void TradingAccountState::apply(const RiskOrderUpdate& update) {
+    auto& risk = m_state.riskOrders;
+    const auto it = std::find_if(risk.begin(), risk.end(),
+                                 [&](const RiskOrderUpdate& r) { return r.symbol == update.symbol; });
+    if (it != risk.end()) *it = update;
+    else risk.push_back(update);
+}
+
+std::optional<RiskOrderUpdate> TradingAccountState::riskFor(const std::string& symbol) const {
+    if (!m_known) return std::nullopt;
+    for (const auto& r : m_state.riskOrders) {
+        if (r.symbol == symbol) return r;
+    }
+    RiskOrderUpdate none;
+    none.symbol = symbol;
+    return none;
+}
+
 std::vector<OrderUpdate> TradingAccountState::openOrdersFor(const std::string& symbol) const {
     std::vector<OrderUpdate> out;
     if (!m_known) return out;

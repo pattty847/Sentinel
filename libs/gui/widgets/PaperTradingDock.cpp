@@ -102,6 +102,8 @@ void PaperTradingDock::setDataSource(IGridDataSource* source) {
     if (source) {
         connect(source, &IGridDataSource::connectionStatusChanged, this,
                 [this](bool connected) {
+                    ++m_connectionGeneration;
+                    cancelStopOperation();
                     m_streamAvailable = connected;
                     m_algoActivityEligible = false;
                     if (m_algoCommandTimer) m_algoCommandTimer->stop();
@@ -394,6 +396,7 @@ void PaperTradingDock::buildAlgoTab(QWidget* parent) {
     m_algoCommandTimer->setObjectName(QStringLiteral("paperAlgoTimeout"));
     m_algoCommandTimer->setSingleShot(true);
     connect(m_algoCommandTimer, &QTimer::timeout, this, [this] {
+        cancelStopOperation(); // no acknowledgement, no flatten
         if (m_pendingAlgoAction.isEmpty()) return;
         const bool stopping = m_pendingAlgoAction == QStringLiteral("stop");
         m_pendingAlgoAction.clear();
@@ -1045,7 +1048,9 @@ void PaperTradingDock::onStopAlgoClicked() {
     setAlgoState(QStringLiteral("STOPPING / UNCONFIRMED"),
                  QStringLiteral("Awaiting the server's stop acknowledgement"), false, false);
     m_algoCommandTimer->start(5000);
-    afterAlgoStopSent();
+    // Nothing else is decided now: the acknowledgement names the positions to flatten.
+    cancelStopOperation();
+    m_stopOperation = StopOperation{m_pendingAlgoCommandId, m_connectionGeneration, m_account.epoch()};
 }
 
 QString PaperTradingDock::sendAlgoCommand(const std::string& action, const trading::AlgoParams& params,
@@ -1060,41 +1065,65 @@ paper::OnAlgoStop PaperTradingDock::onAlgoStopPolicy() const {
     return paper::onAlgoStopFromSetting(value);
 }
 
-// Every open position of the account, or the ticket's symbol before any snapshot.
-QStringList PaperTradingDock::flattenAllSymbols() const {
-    QStringList symbols;
-    if (m_account.known()) {
-        for (const auto& symbol : m_account.symbolsWithPosition()) symbols << QString::fromStdString(symbol);
-    } else if (!m_symbol.isEmpty()) {
-        symbols << m_symbol;
-    }
-    return symbols;
+bool PaperTradingDock::stopOperationCurrent(const StopOperation& op) const {
+    return op.generation == m_connectionGeneration && op.epoch == m_account.epoch();
 }
 
-// The stop command goes first on the same connection, so the server cancels the
-// algo's quotes before the flattens arrive.
-void PaperTradingDock::afterAlgoStopSent() {
-    const auto policy = onAlgoStopPolicy();
-    const QStringList symbols = flattenAllSymbols();
-    if (symbols.isEmpty()) return;
-    bool answer = false;
-    if (paper::stepAfterAlgoStop(policy) == paper::AlgoStopStep::Prompt) {
-        QMessageBox box(QMessageBox::Question, QStringLiteral("Stop algo"),
-                        QStringLiteral("Flatten all? %1").arg(symbols.join(QStringLiteral(", "))),
-                        QMessageBox::Yes | QMessageBox::No, this);
-        box.setObjectName(QStringLiteral("paperFlattenPrompt"));
-        box.setInformativeText(QStringLiteral("The algo's resting quotes are canceled. Yes closes every open "
-                                              "paper position at market; No keeps them."));
-        box.setDefaultButton(QMessageBox::No);
-        answer = box.exec() == QMessageBox::Yes;
+void PaperTradingDock::cancelStopOperation() {
+    m_stopOperation.reset();
+    if (m_flattenPrompt) {
+        // Closing it must not send anything: drop the handler first.
+        m_flattenPrompt->disconnect(this);
+        m_flattenPrompt->reject();
+        m_flattenPrompt->deleteLater();
+        m_flattenPrompt = nullptr;
     }
-    if (!paper::flattenAfterAlgoStop(policy, answer)) return;
+}
+
+// The stop's acknowledgement on the connection and server session that sent it: every
+// position still open after the stop (fills that raced it included) is a target.
+void PaperTradingDock::onStopAcknowledged(const trading::TradingSnapshot& ack) {
+    const StopOperation op = *m_stopOperation;
+    m_stopOperation.reset();
+    QStringList targets;
+    for (const auto& p : ack.positions) {
+        if (std::abs(p.positionQty) > 1e-12) targets << QString::fromStdString(p.symbol);
+    }
+    targets.sort();
+    const auto policy = onAlgoStopPolicy();
+    if (targets.isEmpty() || paper::stepAfterAlgoStop(policy) == paper::AlgoStopStep::Keep) return;
+    if (paper::stepAfterAlgoStop(policy) == paper::AlgoStopStep::Flatten) {
+        flattenSymbols(targets);
+        return;
+    }
+    auto* box = new QMessageBox(QMessageBox::Question, QStringLiteral("Stop algo"),
+                                QStringLiteral("Flatten all? %1").arg(targets.join(QStringLiteral(", "))),
+                                QMessageBox::Yes | QMessageBox::No, this);
+    box->setObjectName(QStringLiteral("paperFlattenPrompt"));
+    box->setInformativeText(QStringLiteral("The algo's resting quotes are canceled. Yes closes every open "
+                                           "paper position at market; No keeps them."));
+    box->setDefaultButton(QMessageBox::No);
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    m_flattenPrompt = box;
+    connect(box, &QMessageBox::finished, this, [this, box, op, targets](int result) {
+        if (m_flattenPrompt == box) m_flattenPrompt = nullptr;
+        if (result != QMessageBox::Yes || !stopOperationCurrent(op)) return;
+        flattenSymbols(targets);
+    });
+    box->open();
+}
+
+void PaperTradingDock::flattenSymbols(const QStringList& symbols) {
     for (const auto& symbol : symbols)
         sendManualCommand(trading::TradeAction::Flatten, trading::OrderSide::Unknown, trading::OrderType::Market,
                           false, 0.0, symbol);
 }
 
 void PaperTradingDock::onTradingSnapshot(const trading::TradingSnapshot& snapshot) {
+    if (m_stopOperation && snapshot.epoch != m_stopOperation->epoch) cancelStopOperation();
+    const bool stopAcknowledged = m_stopOperation && snapshot.reason == "algo_command"
+        && snapshot.commandId == m_stopOperation->commandId.toStdString()
+        && m_stopOperation->generation == m_connectionGeneration;
     if (m_account.replace(snapshot)) {
         // A new server session: order ids restart, so nothing shown before can be matched.
         clearOrderHistory();
@@ -1106,6 +1135,7 @@ void PaperTradingDock::onTradingSnapshot(const trading::TradingSnapshot& snapsho
         if (const auto position = m_account.positionFor(m_symbol.toStdString())) onPositionUpdated(*position);
     }
     applyAlgoSnapshot(snapshot);
+    if (stopAcknowledged) onStopAcknowledged(snapshot);
 }
 
 void PaperTradingDock::clearOrderHistory() {

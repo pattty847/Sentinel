@@ -13,6 +13,7 @@
 #include "../../core/trading/TradingSnapshot.hpp"
 #include "AlgoStopPolicy.hpp"
 
+#include <optional>
 #include <string>
 
 class QTabWidget;
@@ -26,6 +27,7 @@ class QPlainTextEdit;
 class QProcess;
 class QTimer;
 class QComboBox;
+class QMessageBox;
 class QDateEdit;
 class PnlCurveItem;
 class IGridDataSource;
@@ -86,8 +88,15 @@ private:
     void applyAlgoSnapshot(const trading::TradingSnapshot& snapshot);
     void dropOrderRowsNotIn(const trading::TradingSnapshot& snapshot);
     void clearOrderHistory();
-    void afterAlgoStopSent();
-    QStringList flattenAllSymbols() const;
+    struct StopOperation {
+        QString commandId;
+        quint64 generation = 0;
+        std::string epoch;
+    };
+    bool stopOperationCurrent(const StopOperation& op) const;
+    void cancelStopOperation();
+    void onStopAcknowledged(const trading::TradingSnapshot& ack);
+    void flattenSymbols(const QStringList& symbols);
     void refreshAlgoView(const QString& stoppedReason = {});
     paper::OnAlgoStop onAlgoStopPolicy() const;
     QString sendAlgoCommand(const std::string& action, const trading::AlgoParams& params, const QString& symbol);
@@ -145,6 +154,9 @@ private:
     QString m_pendingAlgoAction;
     QString m_pendingAlgoCommandId;
     bool m_algoRunningConfirmed = false;
+    quint64 m_connectionGeneration = 0; // advances on every connect and disconnect
+    std::optional<StopOperation> m_stopOperation;
+    QPointer<QMessageBox> m_flattenPrompt;
     trading::TradingAccountState m_account; // every symbol, latest snapshot plus updates
     QComboBox* m_onAlgoStopCombo = nullptr;
     int m_algoFillCount = 0;

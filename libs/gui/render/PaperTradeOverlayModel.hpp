@@ -94,6 +94,8 @@ private:
     };
 
     QString m_symbol;
+    trading::TradingAccountState m_account; // every symbol; the chart shows m_symbol's part
+    void showAccountSymbol();
     QPointer<QObject> m_mappingProviderObject;
     ITimeAxisMappingProvider* m_mappingProvider = nullptr;
     std::unordered_map<std::string, ManualOrderState> m_orders;

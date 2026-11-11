@@ -492,9 +492,11 @@ of the four arrays is dropped whole. `algo_order_event` still reports orders an
 algorithm emitted (activity, not a command acknowledgement; an order rejection is
 **not** a start-command rejection). Stopping an algo cancels its resting quotes on the
 server (scoped to that algo; manual TP/SL and other algos' orders stay). After a stop
-the paper ticket applies its "On algo stop" setting (Ask, default / Always / Never) and
-flattens through the ordinary `FLATTEN` `trade_command`, sent after the stop on the
-same connection. `trade_command` carries a `command_id`, but `order_update` does not
+the paper ticket waits for the stop's `algo_command` snapshot on the same connection and
+server epoch; its open positions (fills that raced the stop included) are the targets.
+It then applies its "On algo stop" setting (Ask, default / Always / Never) and sends one
+ordinary `FLATTEN` `trade_command` per target. A disconnect, reconnect, epoch change or
+a missing acknowledgement cancels the flatten. `trade_command` carries a `command_id`, but `order_update` does not
 echo it, so manual command acceptance cannot be correlated reliably (and cancel/flatten
 may emit no order update).
 The stream also does not publish base/quote increments; ticket precision preserves

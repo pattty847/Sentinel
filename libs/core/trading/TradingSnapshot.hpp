@@ -52,10 +52,13 @@ public:
     void invalidate() { m_known = false; }
     void apply(const OrderUpdate& update);
     void apply(const PositionUpdate& update);
+    void apply(const RiskOrderUpdate& update);
 
     std::vector<OrderUpdate> openOrdersFor(const std::string& symbol) const;
     // Unknown account: no orders, nullopt. Known: a symbol that never traded is flat.
     std::optional<PositionUpdate> positionFor(const std::string& symbol) const;
+    // Unknown account: nullopt. Known: no attached risk is an empty update for the symbol.
+    std::optional<RiskOrderUpdate> riskFor(const std::string& symbol) const;
     const RunningAlgo* runningAlgo(const std::string& algoId) const { return m_state.runningAlgo(algoId); }
     // Symbols with a nonzero position, sorted.
     std::vector<std::string> symbolsWithPosition() const;
