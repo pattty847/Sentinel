@@ -4,7 +4,7 @@ Current facts only: replace old facts, do not append a journal. History is `git 
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends. Keep under 8 KB.
 
 - **Updated:** 2026-11-11 ~04:45 UTC. main `9e32edba` (pushed with this commit). Conductor hand-off at a clean boundary: no writer in flight. Work order: `docs/TODO.md` Waves.
-- **Conductor:** ended 2026-11-11 ~04:45 UTC (context far past the hard limit; owner kept it until all three workstreams finished). Next conductor: owner names it.
+- **Conductor:** next = the UI audit session `local_a0b0cb41-c6cc-4e10-bd7b-a7f748a42eb6` (owner 2026-11-11, detached to top level). Previous conductor ended 2026-11-11 ~05:00 UTC. Pending `_agent` curation from this conductor's landings (writers' MEMORY lines, in the land merge messages' slices): archive INV-021, INV-023, FM-019, FM-055 (q16 code gone); edit INV-149 (HeatmapColumnTexture deleted) and INV-028 (server publisher only); add the footprint LOD/bands, 2 px zoom-limit (`ChartSurface.hpp`), band-k-from-device-pixels and bar-cap/retention entries.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high risk. Owner 2026-11-05: spend all Codex, including reset credits before they expire.
 
 ## Next
