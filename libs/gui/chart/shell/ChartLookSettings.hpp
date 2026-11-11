@@ -29,9 +29,10 @@ class ChartLookSettings : public QObject {
     Q_PROPERTY(int candleWickWidth READ candleWickWidth NOTIFY candleAppearanceChanged)
 public:
     static QColor chartBackground() { return theme::chartBackground(); }
-    static QColor footprintBid() { return QColor(38, 167, 154, 230); }
-    static QColor footprintAsk() { return QColor(238, 83, 80, 230); }
+    static QColor footprintSellAggr() { return theme::negative(); }
+    static QColor footprintBuyAggr() { return theme::positive(); }
     static QColor footprintText() { return QColor(240, 244, 248); }
+    static QColor footprintInkDark() { return QColor(11, 13, 16); }
     ChartTpoQml tpo{*this};
     std::function<bool()> tradesAboveCandlesSource;
     bool tradesAboveCandles() const { return tradesAboveCandlesSource ? tradesAboveCandlesSource() : true; }

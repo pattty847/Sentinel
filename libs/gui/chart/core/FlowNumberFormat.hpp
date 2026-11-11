@@ -91,6 +91,6 @@ inline FlowTier flowTier(double volume, double price, double maximum, double dus
     return volume > .55 * maximum ? FlowTier::Heavy : FlowTier::Normal;
 }
 inline double flowTextAlpha(FlowTier tier) {
-    return tier == FlowTier::Dust ? .22 : tier == FlowTier::Heavy ? 1 : tier == FlowTier::Normal ? .6 : 0;
+    return tier == FlowTier::Dust ? .45 : tier == FlowTier::Heavy ? 1 : tier == FlowTier::Normal ? .6 : 0;
 }
 } // namespace chart

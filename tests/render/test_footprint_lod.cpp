@@ -1,3 +1,4 @@
+#include "chart/core/FlowInk.hpp"
 #include "chart/core/FootprintLod.hpp"
 #include <gtest/gtest.h>
 #include <cstring>
@@ -149,7 +150,25 @@ TEST(FootprintLod, NotionalAndStrictSingleSideHeavyTiers) {
     EXPECT_EQ(flowTier(25, 100, 50, 2500), FlowTier::Normal);
     EXPECT_EQ(flowTier(55, 100, 100, 2500), FlowTier::Normal);
     EXPECT_EQ(flowTier(55.01, 100, 100, 2500), FlowTier::Heavy);
-    EXPECT_DOUBLE_EQ(chart::flowTextAlpha(FlowTier::Dust), .22);
+    EXPECT_DOUBLE_EQ(chart::flowTextAlpha(FlowTier::Dust), .45) << "dust prints are dimmed, not hidden";
+    EXPECT_DOUBLE_EQ(chart::flowTextAlpha(FlowTier::Normal), .6);
+    EXPECT_DOUBLE_EQ(chart::flowTextAlpha(FlowTier::Heavy), 1);
+}
+TEST(FlowInk, FillOpacityRisesWithVolumeFromTheFloor) {
+    EXPECT_DOUBLE_EQ(chart::flowFillAlpha(0, 10), chart::kFlowMinFillAlpha);
+    EXPECT_DOUBLE_EQ(chart::flowFillAlpha(10, 10), 1);
+    EXPECT_DOUBLE_EQ(chart::flowFillAlpha(99, 10), 1);
+    EXPECT_LT(chart::flowFillAlpha(2, 10), chart::flowFillAlpha(4, 10));
+    EXPECT_DOUBLE_EQ(chart::flowFillAlpha(5, 0), chart::kFlowMinFillAlpha) << "no normaliser, no volume share";
+}
+TEST(FlowInk, PicksTheInkWithTheHigherContrastAndLightWinsTies) {
+    constexpr chart::FlowRgb green{46, 189, 133}, red{246, 70, 93}, bg{15, 17, 20}, light{240, 244, 248}, dark{11, 13, 16};
+    EXPECT_FALSE(chart::flowInkIsLight(green, 1, bg, light, dark)) << "full green takes dark ink";
+    EXPECT_FALSE(chart::flowInkIsLight(red, 1, bg, light, dark)) << "full red takes dark ink";
+    EXPECT_TRUE(chart::flowInkIsLight(green, chart::kFlowMinFillAlpha, bg, light, dark)) << "a faint fill is near the background";
+    EXPECT_TRUE(chart::flowInkIsLight(red, chart::kFlowMinFillAlpha, bg, light, dark));
+    EXPECT_TRUE(chart::flowInkIsLight(green, 0, bg, light, dark)) << "no fill is the background itself";
+    EXPECT_TRUE(chart::flowInkIsLight(green, 1, bg, light, light)) << "equal contrast keeps the light ink";
 }
 TEST(FootprintLod, SpineOnlyForCoveredBarAndMatchingFrame) {
     struct Raster {

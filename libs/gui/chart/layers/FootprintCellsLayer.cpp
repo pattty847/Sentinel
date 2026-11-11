@@ -1,5 +1,6 @@
 #include "chart/layers/FootprintCellsLayer.hpp"
 #include "chart/core/ChartFrame.hpp"
+#include "chart/core/FlowInk.hpp"
 #include "chart/shell/ChartLookSettings.hpp"
 #include "render/CandlePixelGeometry.hpp"
 #include "render/ChartTextRenderer.hpp"
@@ -19,6 +20,16 @@ void rectangle(QSGGeometry::ColoredPoint2D* vertices, const QRectF& rect, const 
                              rect.topRight(), rect.bottomLeft(), rect.bottomRight()};
     for (int i = 0; i != 6; ++i) vertices[i].set(float(points[i].x()), float(points[i].y()), red, green, blue, alpha);
 }
+// Left half is sell aggression (bidVol), right half is buy aggression (askVol).
+QColor sideColour(bool sell) {
+    return sell ? ChartLookSettings::footprintSellAggr() : ChartLookSettings::footprintBuyAggr();
+}
+QColor inkColour(bool light, FlowTier tier) {
+    auto colour = light ? ChartLookSettings::footprintText() : ChartLookSettings::footprintInkDark();
+    colour.setAlpha(int(std::lround(flowTextAlpha(tier) * 255)));
+    return colour;
+}
+FlowRgb rgb(const QColor& c) { return {uint8_t(c.red()), uint8_t(c.green()), uint8_t(c.blue())}; }
 }
 FootprintCellsLayer::FootprintCellsLayer() : current_(std::make_unique<FlowSnapshot>()) {
     glyphs_.reserve(kMaxGlyphs);
@@ -68,18 +79,18 @@ void FootprintCellsLayer::rowGeometry(QSGGeometry::ColoredPoint2D* vertices, int
     const double width = cam.colPxF / cam.dpr;
     const double mid = left + (width + kFootprintCandleSpace) * .5;
     const double half = std::max(0.0, (width - kFootprintCandleSpace) * .5 - 1);
-    const double normaliser = presentation_.windowIntensity ? current_->maxRowVolume : double(bar.maxSideVol) / bar.baseScale;
     const double price = (double(cell.row) + cell.span * .5) * cam.tick;
-    for (bool bid : {true, false}) {
-        const double volume = double(bid ? cell.bidVol : cell.askVol) / bar.baseScale;
-        const auto tier = flowTier(volume, price, double(bar.maxSideVol) / bar.baseScale, presentation_.dustNotional);
-        if (tier == FlowTier::Empty || tier == FlowTier::Dust) continue;
-        const double length = half * std::clamp(volume / normaliser, 0.0, 1.0);
-        const QRectF fill(bid ? mid - .5 - length : mid + .5, rect.top(), length, rect.height());
-        rectangle(vertices + used, fill.intersected(frame.context.surfaceBounds),
-                  bid ? ChartLookSettings::footprintBid() : ChartLookSettings::footprintAsk(), 1);
+    for (bool sell : {true, false}) {
+        const double volume = double(sell ? cell.bidVol : cell.askVol) / bar.baseScale;
+        if (flowTier(volume, price, double(bar.maxSideVol) / bar.baseScale, presentation_.dustNotional) == FlowTier::Empty) continue;
+        const QRectF fill(sell ? mid - .5 - half : mid + .5, rect.top(), half, rect.height());
+        rectangle(vertices + used, fill.intersected(frame.context.surfaceBounds), sideColour(sell),
+                  flowFillAlpha(volume, normaliser(bar)));
         used += 6;
     }
+}
+double FootprintCellsLayer::normaliser(const FlowColumn& bar) const {
+    return presentation_.windowIntensity ? current_->maxRowVolume : double(bar.maxSideVol) / bar.baseScale;
 }
 // One band-wide cell: total volume intensity, tinted by the side that dominates.
 void FootprintCellsLayer::stripGeometry(QSGGeometry::ColoredPoint2D* vertices, int& used,
@@ -92,8 +103,7 @@ void FootprintCellsLayer::stripGeometry(QSGGeometry::ColoredPoint2D* vertices, i
     const auto tier = flowTier(volume, price, maximum, presentation_.dustNotional);
     if (tier == FlowTier::Empty || tier == FlowTier::Dust) return;
     const double normaliser = presentation_.windowIntensity ? current_->maxRowVolume : maximum;
-    rectangle(vertices + used, rect, cell.askVol >= cell.bidVol ? ChartLookSettings::footprintAsk()
-              : ChartLookSettings::footprintBid(), volume / normaliser);
+    rectangle(vertices + used, rect, sideColour(cell.askVol < cell.bidVol), volume / normaliser);
     used += 6;
 }
 void FootprintCellsLayer::cells(const ChartFrame& frame) {
@@ -162,7 +172,9 @@ void FootprintCellsLayer::number(const Number& value, const ChartTextAtlas& atla
     const auto& box = value.box;
     const auto tier = flowTier(value.volume, value.price, value.maximum, presentation_.dustNotional);
     if (tier == FlowTier::Empty) return;
-    auto colour = ChartLookSettings::footprintText(); colour.setAlpha(int(std::lround(flowTextAlpha(tier) * 255)));
+    const bool light = flowInkIsLight(rgb(sideColour(value.bid)), value.fillAlpha, rgb(ChartLookSettings::chartBackground()),
+                                      rgb(ChartLookSettings::footprintText()), rgb(ChartLookSettings::footprintInkDark()));
+    const auto colour = inkColour(light, tier);
     char text[24];
     const int length = std::min(23, flowNumber(value.volume, text));
     const double scale = kFootprintTextPx / atlas.fontPx();
@@ -204,8 +216,9 @@ void FootprintCellsLayer::labels(const ChartFrame& frame, const ChartTextAtlas& 
             const double maximum = double(bar.maxSideVol) / bar.baseScale;
             const QRectF bid(left + kFootprintCandleSpace + 1, rect.top(), mid - left - kFootprintCandleSpace - 3, rect.height());
             const QRectF ask(mid + 2, rect.top(), right - mid - 3, rect.height());
-            if (textBounds.contains(bid)) number({double(cell.bidVol) / bar.baseScale, price, maximum, bid, true}, atlas);
-            if (textBounds.contains(ask)) number({double(cell.askVol) / bar.baseScale, price, maximum, ask, false}, atlas);
+            const double sell = double(cell.bidVol) / bar.baseScale, buy = double(cell.askVol) / bar.baseScale;
+            if (textBounds.contains(bid)) number({sell, price, maximum, flowFillAlpha(sell, normaliser(bar)), bid, true}, atlas);
+            if (textBounds.contains(ask)) number({buy, price, maximum, flowFillAlpha(buy, normaliser(bar)), ask, false}, atlas);
         }
     }
 }
@@ -217,8 +230,7 @@ void FootprintCellsLayer::submitLabels(const ChartFrame& frame, LayerNodeContext
     if (!reserved_) {
         reserved_ = true;
         for (auto tier : {FlowTier::Dust, FlowTier::Normal, FlowTier::Heavy}) {
-            auto colour = ChartLookSettings::footprintText(); colour.setAlpha(int(std::lround(flowTextAlpha(tier) * 255)));
-            reserved_ = context.text.reserve(colour, kMaxGlyphs) && reserved_;
+            for (bool light : {true, false}) reserved_ = context.text.reserve(inkColour(light, tier), kMaxGlyphs) && reserved_;
         }
     }
     if (stage_ != FootprintStage::Numbers || context.atlas.fontPx() <= 0) {
