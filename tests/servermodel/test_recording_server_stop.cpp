@@ -6,7 +6,6 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QThread>
-#include <QtEndian>
 #include <QTemporaryDir>
 #include <QDir>
 #include <QFile>
@@ -159,7 +158,7 @@ struct RecordingServerStopTest {
         session->pumpOverlays();
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         std::set<std::string> types;
-        bool footprintHasTrade = false, tpoHasTrade = false;
+        bool tpoHasTrade = false;
         double profileVolume = 0;
         while (std::chrono::steady_clock::now() < deadline) {
             ioc.restart(); ioc.poll();
@@ -173,21 +172,15 @@ struct RecordingServerStopTest {
                     const auto letters = QByteArray::fromBase64(QByteArray::fromStdString(message.at("letters")));
                     tpoHasTrade |= std::any_of(letters.begin(), letters.end(), [](char c) { return c != 0; });
                 }
-                if (type == "footprint_slice") {
-                    const auto bytes = QByteArray::fromBase64(QByteArray::fromStdString(message.at("delta_levels_q16")));
-                    for (int row = 0; row < bytes.size() / 2; ++row)
-                        footprintHasTrade |= qFromLittleEndian<uint16_t>(bytes.constData() + row * 2) != 32768;
-                }
             }
-            if (types.contains("footprint_slice") && types.contains("tpo_slice") &&
+            if (types.contains("tpo_slice") &&
                 types.contains("volume_profile_slice")) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        EXPECT_TRUE(types.contains("footprint_slice"));
+        EXPECT_EQ(types, (std::set<std::string>{"tpo_slice", "volume_profile_slice"}));
         EXPECT_TRUE(types.contains("tpo_slice"));
         EXPECT_TRUE(types.contains("volume_profile_slice"));
         EXPECT_FALSE(types.contains("heatmap_slice"));
-        EXPECT_TRUE(footprintHasTrade);
         EXPECT_TRUE(tpoHasTrade);
         EXPECT_DOUBLE_EQ(profileVolume, 2);
         session->beginClose("overlay independence test");
@@ -210,7 +203,7 @@ struct RecordingServerStopTest {
         session->overlayState("BTC-USD").request.grid.maxPrice = 120000;
         const auto oldSelectionStopped = session->overlayStopRequested("BTC-USD");
         EXPECT_FALSE(oldSelectionStopped());
-        session->requestOverlayHistory({{"symbol", "BTC-USD"}, {"timeframe_ms", 300000}, {"count", 2}}, false);
+        session->requestOverlayHistory({{"symbol", "BTC-USD"}, {"timeframe_ms", 300000}, {"count", 2}, {"request_id", "selection"}});
         EXPECT_TRUE(oldSelectionStopped());
         const auto currentSelectionStopped = session->overlayStopRequested("BTC-USD");
         EXPECT_FALSE(currentSelectionStopped());
@@ -227,7 +220,10 @@ struct RecordingServerStopTest {
         for (int i = 0; i < 100; ++i) session->pumpOverlays();
         EXPECT_EQ(server.m_pendingHistoryTasks.load(), 3);
         nlohmann::json request = {{"symbol", "BTC-USD"}, {"timeframe_ms", 60000}, {"count", 2}};
-        for (int i = 0; i < 9; ++i) session->requestOverlayHistory(request, false);
+        for (int i = 0; i < 9; ++i) {
+            request["request_id"] = "bounded-" + std::to_string(i);
+            session->requestOverlayHistory(request);
+        }
         EXPECT_EQ(session->overlayHistory_.size(), 8);
         for (int i = 0; i < 5; ++i) EXPECT_TRUE(server.submitHistoryTask([] {}));
         EXPECT_FALSE(server.submitHistoryTask([] {})); // global admission cap is eight
@@ -940,7 +936,7 @@ TEST(RecordingServerStop, AcceptRacingStopLeavesNoSessionBehind) {
 
 // Private retained-tape invariant, shared with the trade-overlay test fixture.
 struct TradeOverlayModelTest {
-    static int64_t retention(const ServerDataModel& model) { return model.m_footprintTradeRetentionMs; }
+    static int64_t retention(const ServerDataModel& model) { return model.m_tradeRetentionMs; }
 };
 
 TEST(ServerChartConfig, NeutralKeysKeepDefaultsNormalizationAndRetention) {
@@ -962,7 +958,7 @@ TEST(ServerChartConfig, NeutralKeysKeepDefaultsNormalizationAndRetention) {
         if (wrapped) file.write("server:\n");
         for (const auto& line : QByteArray("chart:\n  timeframes_ms: [2000, -1, 1000, 2000, 0]\n"
                 "  default_timeframe_ms: 3000\ntrade_overlays:\n  retention_columns: 2048\n"
-                "  grid_width: 17\nrecording:\n  enabled: false\n").split('\n')) {
+                "  grid_width: [ignored, removed]\n  grid_height: 17\n  footprint_timeframe_ms: [ignored, removed]\nrecording:\n  enabled: false\n").split('\n')) {
             if (!line.isEmpty()) file.write(prefix + line + '\n');
         }
         file.close();
@@ -971,6 +967,7 @@ TEST(ServerChartConfig, NeutralKeysKeepDefaultsNormalizationAndRetention) {
         EXPECT_EQ(config.chart.timeframesMs, (std::vector<int64_t>{1000, 2000}));
         EXPECT_EQ(config.chart.defaultTimeframeMs, 3000);
         EXPECT_EQ(config.tradeOverlays.retentionColumns, 2048);
+        EXPECT_EQ(config.tradeOverlays.gridHeight, 17);
         ServerDataModel model(config);
         EXPECT_EQ(TradeOverlayModelTest::retention(model), 2 * 3000 * 2048);
         config.chart.defaultTimeframeMs = 0;
@@ -996,7 +993,9 @@ TEST(ServerChartConfig, WireUsesNeutralFieldsAndRetainsCapabilityFilter) {
     EXPECT_EQ(wire.at("chart").at("default_timeframe_ms"), 60000);
     EXPECT_EQ(wire.at("chart").at("served_timeframes_ms"),
               (std::vector<int64_t>{1000, 60000, 300000, 3600000, 5400000, 7200000}));
-    EXPECT_EQ(wire.at("trade_overlays").at("retention_columns"), 8192);
+    EXPECT_EQ(wire.at("trade_overlays"), (nlohmann::json{
+        {"retention_columns", 8192},
+        {"grid_height", config.tradeOverlays.gridHeight}, {"tick_size", config.tradeOverlays.tickSize}}));
     const auto& capability = wire.at("recording");
     EXPECT_TRUE(capability.at("available"));
     EXPECT_EQ(capability.at("layers"), (std::vector<std::string>{"near", "deep"}));
@@ -1028,14 +1027,13 @@ TEST(ServerChartConfig, ServedTimeframesAreEveryConfiguredTimeframeTheServerAnsw
               (std::vector<int64_t>{100, 1000, 60000, 120000}));
 }
 
-TEST(TradeOverlayServer, RetainedTradesPublishAllThreeOverlaysWithoutLegacyProducer) {
+TEST(TradeOverlayServer, RetainedTradesPublishOnlyTpoAndVolumeProfile) {
     int argc = 1;
     char name[] = "independent-overlays";
     char* argv[] = {name, nullptr};
     QCoreApplication app(argc, argv);
     ServerConfig config;
     config.recording.enabled = false;
-    config.tradeOverlays.gridWidth = 16;
     config.tradeOverlays.gridHeight = 32;
     config.tradeOverlays.tickSize = 1;
     struct ClockModel : ServerDataModel {

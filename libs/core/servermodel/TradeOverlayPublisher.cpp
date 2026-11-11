@@ -8,7 +8,7 @@
 
 namespace trade_overlay {
 bool Grid::valid() const {
-    return width > 0 && width <= kMaxGridWidth && rows > 0 && rows <= kMaxRows &&
+    return rows > 0 && rows <= kMaxRows &&
         std::isfinite(tick) && tick > 0 && tick <= 1e6 &&
         std::isfinite(maxPrice) && maxPrice > 0 && maxPrice <= 1e12 && minPrice() >= 0;
 }
@@ -59,25 +59,23 @@ std::vector<int64_t> liveBuckets(int64_t now, int64_t previous, int64_t tf, int6
     return result;
 }
 namespace {
-TimeWindow historyWindow(const Request& q, bool tpo) {
+TimeWindow historyWindow(const Request& q) {
     const auto anchor = q.endMs > 0 ? std::min(q.endMs, q.nowMs) : q.nowMs;
     const auto session = SessionManager::sessionContaining(anchor - 1, q.session);
-    const int64_t origin = tpo ? session.startMs : 0;
-    const int64_t tf = tpo ? q.tpoMs : q.footprintMs;
+    const int64_t origin = session.startMs;
+    const int64_t tf = q.tpoMs;
     if (tf <= 0 || !session.valid || anchor < origin || q.count <= 0) return {};
-    const int64_t limit = tpo ? std::min(anchor, session.endMs) : anchor;
+    const int64_t limit = std::min(anchor, session.endMs);
     const int64_t end = origin + (limit - origin) / tf * tf;
-    const int64_t width = tpo ? (session.endMs - origin) / tf : q.grid.width;
+    const int64_t width = (session.endMs - origin) / tf;
     const auto count = std::min<int64_t>({q.count, width, kMaxColumns});
-    return {std::max<int64_t>(tpo ? origin : 0, end - count * tf), end};
+    return {std::max<int64_t>(origin, end - count * tf), end};
 }
 }
 TimeWindow tradeWindow(const Request& q) {
-    if (q.kind != Kind::Live) return historyWindow(q, q.kind == Kind::TpoHistory);
-    // VP needs its UTC day; live footprint and TPO need only their last buckets.
+    if (q.kind != Kind::Live) return historyWindow(q);
+    // VP needs its session; live TPO needs only its last buckets.
     auto start = SessionManager::sessionContaining(q.nowMs, volumeProfileSession(q.session)).startMs;
-    for (const auto bucket : liveBuckets(q.nowMs, q.previousMs, q.footprintMs))
-        start = std::min(start, bucket);
     const auto tpoSession = SessionManager::sessionContaining(q.nowMs, q.session);
     if (tpoSession.valid)
         for (const auto bucket : liveBuckets(q.nowMs, q.previousMs, q.tpoMs, tpoSession.startMs))
@@ -89,7 +87,7 @@ CandleFetchResult fetchTpoCandles(const Request& q, int64_t retainedFromMs,
     CandleFetchResult result;
     result.ok = true;
     if (q.kind != Kind::TpoHistory) return result;
-    auto window = historyWindow(q, true);
+    auto window = historyWindow(q);
     const auto session = SessionManager::sessionContaining(window.startMs, q.session);
     const int64_t g = tpoCandleGranularityMs(q.tpoMs, session.valid ? session.startMs : 0);
     if (retainedFromMs > 0) {
@@ -134,7 +132,7 @@ CandleFetchResult fetchTpoCandles(const Request& q, int64_t retainedFromMs,
 }
 namespace {
 using Json = nlohmann::json;
-using Trade = ServerDataModel::FootprintTradeSample;
+using Trade = ServerDataModel::RetainedTradeSample;
 struct Builder {
     const Request& q;
     const std::vector<Trade>& trades;
@@ -157,86 +155,65 @@ struct Builder {
             if (row >= 0 && row < grid.rows) fn(static_cast<int>(row), *it);
         }
     }
-    Json column(int64_t start, int64_t tf, bool tpo) const {
-        const Grid& grid = tpo ? tpoGrid : out.grid;
+    Json column(int64_t start, int64_t tf) const {
+        const Grid& grid = tpoGrid;
         Json j = {{"time_start", start}, {"time_end", start + tf},
                   {"min_price", grid.minPrice()}, {"max_price", grid.maxPrice},
                   {"tick_size", grid.tick}};
-        if (tpo) {
-            QByteArray letters(grid.rows, '\0');
-            const auto session = SessionManager::sessionContaining(start, q.session);
-            const auto origin = session.valid ? session.startMs : 0;
-            const char letter = 'A' + ((start - origin) / tf) % 26;
-            scan(grid, start, start + tf, [&](int row, const Trade&) { letters[row] = letter; });
-            if (q.kind == Kind::TpoHistory) {
-                auto bar = std::lower_bound(candles.begin(), candles.end(), start,
-                    [](const OHLCVBar& b, int64_t time) { return b.timestamp_ms < time; });
-                for (; bar != candles.end() && bar->timestamp_ms < start + tf; ++bar) {
-                    if (retainedFromMs > 0 && bar->timestamp_ms >= retainedFromMs) continue;
-                    if (!std::isfinite(bar->high) || !std::isfinite(bar->low) || bar->high < bar->low) continue;
-                    const double first = std::floor((grid.maxPrice - bar->high) / grid.tick);
-                    const double last = std::floor((grid.maxPrice - bar->low) / grid.tick);
-                    if (last < 0 || first >= grid.rows) continue;
-                    const int lo = static_cast<int>(std::max(0.0, first));
-                    const int hi = static_cast<int>(std::min(double(grid.rows - 1), last));
-                    for (int row = lo; row <= hi; ++row) letters[row] = letter;
-                }
+        QByteArray letters(grid.rows, '\0');
+        const auto session = SessionManager::sessionContaining(start, q.session);
+        const auto origin = session.valid ? session.startMs : 0;
+        const char letter = 'A' + ((start - origin) / tf) % 26;
+        scan(grid, start, start + tf, [&](int row, const Trade&) { letters[row] = letter; });
+        if (q.kind == Kind::TpoHistory) {
+            auto bar = std::lower_bound(candles.begin(), candles.end(), start,
+                [](const OHLCVBar& b, int64_t time) { return b.timestamp_ms < time; });
+            for (; bar != candles.end() && bar->timestamp_ms < start + tf; ++bar) {
+                if (retainedFromMs > 0 && bar->timestamp_ms >= retainedFromMs) continue;
+                if (!std::isfinite(bar->high) || !std::isfinite(bar->low) || bar->high < bar->low) continue;
+                const double first = std::floor((grid.maxPrice - bar->high) / grid.tick);
+                const double last = std::floor((grid.maxPrice - bar->low) / grid.tick);
+                if (last < 0 || first >= grid.rows) continue;
+                const int lo = static_cast<int>(std::max(0.0, first));
+                const int hi = static_cast<int>(std::min(double(grid.rows - 1), last));
+                for (int row = lo; row <= hi; ++row) letters[row] = letter;
             }
-            j["letters"] = letters.toBase64().toStdString(); j["format"] = "tpo_ascii";
-        } else {
-            std::vector<double> delta(out.grid.rows, 0);
-            scan(out.grid, start, start + tf, [&](int row, const Trade& t) {
-                if (t.side == AggressorSide::Buy) delta[row] += t.size;
-                else if (t.side == AggressorSide::Sell) delta[row] -= t.size;
-            });
-            double peak = 0;
-            for (double v : delta) peak = std::max(peak, std::abs(v));
-            const double scale = peak > 0 ? std::max(1e-9, peak / 32767.0) : 1.0;
-            QByteArray data(out.grid.rows * 2, '\0');
-            for (int row = 0; row < out.grid.rows; ++row) {
-                const auto code = static_cast<uint16_t>(32768 +
-                    static_cast<int>(std::clamp(std::round(delta[row] / scale), -32768.0, 32767.0)));
-                qToLittleEndian(code, reinterpret_cast<uchar*>(data.data()) + row * 2);
-            }
-            j["delta_levels_q16"] = data.toBase64().toStdString();
-            j["quant_scale"] = scale; j["format"] = "q16_delta";
         }
+        j["letters"] = letters.toBase64().toStdString(); j["format"] = "tpo_ascii";
         return j;
     }
-    void columns(bool tpo, bool live) {
-        const int64_t tf = tpo ? q.tpoMs : q.footprintMs;
+    void columns(bool live) {
+        const int64_t tf = q.tpoMs;
         const auto anchor = q.endMs > 0 ? std::min(q.endMs, q.nowMs) : q.nowMs;
         const auto session = SessionManager::sessionContaining(live ? q.nowMs : anchor - 1, q.session);
-        if (!session.valid || (tpo && (session.endMs - session.startMs) % tf != 0)) { out.error = "invalid overlay session"; return; }
-        const int64_t origin = tpo ? session.startMs : 0;
-        const int width = tpo ? static_cast<int>((session.endMs - session.startMs + tf - 1) / tf) : out.grid.width;
+        if (!session.valid || (session.endMs - session.startMs) % tf != 0) { out.error = "invalid overlay session"; return; }
+        const int64_t origin = session.startMs;
+        const int width = static_cast<int>((session.endMs - session.startMs + tf - 1) / tf);
         if (width <= 0 || width > kMaxGridWidth) { out.error = "overlay timeframe exceeds session column budget"; return; }
         std::vector<int64_t> starts;
         if (live) {
             starts = liveBuckets(q.nowMs, q.previousMs, tf, origin);
-            if (tpo) {
-                std::erase_if(starts, [&](int64_t start) {
-                    return start < session.startMs || start >= session.endMs || start + tf > session.endMs;
-                });
-            }
+            std::erase_if(starts, [&](int64_t start) {
+                return start < session.startMs || start >= session.endMs || start + tf > session.endMs;
+            });
         } else {
-            const auto window = historyWindow(q, tpo);
+            const auto window = historyWindow(q);
             for (auto start = window.startMs; start < window.endMs; start += tf)
                 if (start > 0) starts.push_back(start);
         }
         auto columns = Json::array();
-        for (auto start : starts) columns.push_back(column(start, tf, tpo));
-        Json j = {{"type", tpo ? "tpo_history_chunk" : "footprint_history_chunk"},
-            {"schema_version", tpo ? protocol::SentinelProtocol::kTpoSchemaVersion : protocol::SentinelProtocol::kFootprintSchemaVersion},
+        for (auto start : starts) columns.push_back(column(start, tf));
+        Json j = {{"type", "tpo_history_chunk"},
+            {"schema_version", protocol::SentinelProtocol::kTpoSchemaVersion},
             {"symbol", q.symbol}, {"timeframe_ms", tf}, {"session_type", static_cast<int>(q.session)},
             {"grid_width", width}, {"grid_height", out.grid.rows},
-            {"format", tpo ? "tpo_ascii" : "q16_delta"}, {"encoding", "base64"}, {"columns", std::move(columns)}};
-        if (tpo && !live && !q.requestId.empty()) j["request_id"] = q.requestId;
+            {"format", "tpo_ascii"}, {"encoding", "base64"}, {"columns", std::move(columns)}};
+        if (!live && !q.requestId.empty()) j["request_id"] = q.requestId;
         // Live uses the existing per-column messages, preserving consumer routing.
         if (live) {
             for (auto& col : j["columns"]) {
                 auto one = j; one.erase("columns");
-                one["type"] = tpo ? "tpo_slice" : "footprint_slice";
+                one["type"] = "tpo_slice";
                 one.update(col); send(std::move(one));
             }
         } else send(std::move(j));
@@ -276,7 +253,7 @@ Result build(const Request& q, const std::vector<Trade>& trades,
              const std::vector<OHLCVBar>& candles, int64_t retainedFromMs) {
     if (retainedFromMs == 0 && !trades.empty()) retainedFromMs = trades.front().timestampMs;
     Builder b{q, trades, candles, retainedFromMs, {q.grid, {}, {}}};
-    if (q.symbol.empty() || q.nowMs <= 0 || q.footprintMs < 1000 || q.footprintMs > 86400000 ||
+    if (q.symbol.empty() || q.nowMs <= 0 ||
         q.tpoMs < 60000 || q.tpoMs > 86400000 || q.count <= 0 || trades.size() > kMaxTrades || candles.size() > 7 * 1440) {
         b.out.error = "invalid overlay request or trade budget exceeded"; return b.out;
     }
@@ -290,8 +267,7 @@ Result build(const Request& q, const std::vector<Trade>& trades,
     }
     if (!b.out.grid.valid()) { b.out.error = "overlay grid unavailable or invalid"; return b.out; }
     b.tpoGrid = tpoGridFor(b.out.grid, q.session);
-    if (q.kind != Kind::TpoHistory) b.columns(false, q.kind == Kind::Live);
-    if (q.kind != Kind::FootprintHistory) b.columns(true, q.kind == Kind::Live);
+    b.columns(q.kind == Kind::Live);
     if (q.kind == Kind::Live) b.profile();
     if (!b.out.error.empty()) b.out.messages.clear();
     return b.out;

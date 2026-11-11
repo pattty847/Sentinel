@@ -7,10 +7,8 @@ chart:
   default_timeframe_ms: 60000
 trade_overlays:
   retention_columns: 8192
-  grid_width: 512
   grid_height: 2048
   tick_size: 5
-  footprint_timeframe_ms: 60000
 orderbook:
   tick_size: 0.1  # BTC-USD live book; other products derive from exact Coinbase quote increment
   band_pct: 0.3

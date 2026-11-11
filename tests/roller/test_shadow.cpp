@@ -3410,7 +3410,7 @@ TEST_F(ShadowTest, JournalLiveFeedServerHasNoEngineAndServesCapturedProducts) {
   EXPECT_EQ(resnapshots.load(), 0);
 }
 // A4: a journal market_trades BUY (Coinbase maker side) reaches the model as
-// the aggressor Sell; the tape, footprint and candles follow it.
+// the aggressor Sell; the retained trade tape and candles follow it.
 TEST_F(ShadowTest, JournalLiveFeedServerTradesCarryTheAggressorSide) {
   JournalServer s(*this);
   ASSERT_TRUE(s.initialize());
@@ -3419,11 +3419,11 @@ TEST_F(ShadowTest, JournalLiveFeedServerTradesCarryTheAggressorSide) {
   ASSERT_TRUE(eventuallyQt([&] { return !s.trades.empty() && s.bars > 0; }));
   EXPECT_EQ(s.trades.front().trade_id, "p1");
   EXPECT_EQ(s.trades.front().side, AggressorSide::Sell);
-  std::vector<ServerDataModel::FootprintTradeSample> footprint;
-  ASSERT_TRUE(s.model().collectFootprintTrades("PEPE-USD", Epoch + 64000,
-                                               Epoch + 66000, footprint));
-  ASSERT_EQ(footprint.size(), 1u);
-  EXPECT_EQ(footprint.front().side, AggressorSide::Sell);
+  std::vector<ServerDataModel::RetainedTradeSample> retained;
+  ASSERT_TRUE(s.model().collectOverlayTrades("PEPE-USD", Epoch + 64000,
+                                               Epoch + 66000, 100, retained));
+  ASSERT_EQ(retained.size(), 1u);
+  EXPECT_EQ(retained.front().side, AggressorSide::Sell);
 }
 // A6: TransportDown invalidates; 30 s without a socket record reports the
 // product disconnected (and invalid); TransportUp plus a snapshot is ready.
@@ -4192,10 +4192,10 @@ struct RestoreServer : JournalServer {
     return std::count_if(trades.begin(), trades.end(),
                          [&](const Trade &x) { return x.trade_id == id; });
   }
-  size_t footprintAt(int64_t exchangeMs, double price) {
-    std::vector<ServerDataModel::FootprintTradeSample> out;
-    model().collectFootprintTrades("PEPE-USD", Epoch + exchangeMs - 1,
-                                   Epoch + exchangeMs + 1, out);
+  size_t retainedTradesAt(int64_t exchangeMs, double price) {
+    std::vector<ServerDataModel::RetainedTradeSample> out;
+    model().collectOverlayTrades("PEPE-USD", Epoch + exchangeMs - 1,
+                                   Epoch + exchangeMs + 1, 100, out);
     return std::count_if(out.begin(), out.end(),
                          [&](const auto &f) { return std::abs(f.price - price) < 1e-12; });
   }
@@ -4508,8 +4508,8 @@ TEST_F(ShadowTest, CandleRestoreGateDropsReconnectResendsUntilItExpires) {
   s.pepe->append(tradeAt(971000, "x", "0.00001055"));
   ASSERT_TRUE(deliveredOnce("x"));
   EXPECT_EQ(s.broadcasts("a16383"), 0u);
-  EXPECT_EQ(s.footprintAt(862000 - 250, 0.00001077), 0u);
-  EXPECT_EQ(s.footprintAt(971000 - 250, 0.00001055), 1u);
+  EXPECT_EQ(s.retainedTradesAt(862000 - 250, 0.00001077), 0u);
+  EXPECT_EQ(s.retainedTradesAt(971000 - 250, 0.00001055), 1u);
   // 256 empty ids: delivered, never counted or stored.
   for (int k = 0; k < 2; ++k) {
     std::vector<json> list;

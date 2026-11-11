@@ -23,10 +23,8 @@ struct ServerChartConfig {
 
 struct ServerTradeOverlayConfig {
     int retentionColumns = 5120;
-    int gridWidth = 512;
     int gridHeight = 2048;
     double tickSize = 5.0;
-    int64_t footprintTimeframeMs = 60000;
 };
 
 struct ServerOrderBookConfig {

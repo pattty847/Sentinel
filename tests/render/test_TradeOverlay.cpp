@@ -2,7 +2,6 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QTemporaryDir>
-#include <QtEndian>
 #include "protocol/SentinelStreamClientParseHelpers.hpp"
 #include "servermodel/TradeOverlayPublisher.hpp"
 #include "protocol/SentinelStreamClient.hpp"
@@ -24,26 +23,24 @@ struct TradeOverlayWireTest {
         else if (type == "tpo_history_chunk") client.handleTpoHistoryChunkMessage(msg);
         else if (type == "volume_profile_slice") client.handleVolumeProfileSliceMessage(msg);
     }
-    static void dispatch(SentinelStreamClient& client, const std::string& raw) { client.handleMessage(raw); }
-    static uint64_t ignoredFootprint(const SentinelStreamClient& client) { return client.m_footprintFramesIgnored; }
     static void expectTpo(SentinelStreamClient& client, const std::string& id) { client.m_expectedTpoRequestId = id; }
 };
 struct TradeOverlayModelTest {
     static void seed(ServerDataModel& model, const std::string& symbol,
-                     std::deque<ServerDataModel::FootprintTradeSample> trades) {
-        std::lock_guard<std::mutex> lock(model.m_footprintTradeMutex);
-        model.m_recentFootprintTrades[symbol] = std::move(trades);
+                     std::deque<ServerDataModel::RetainedTradeSample> trades) {
+        std::lock_guard<std::mutex> lock(model.m_tradeMutex);
+        model.m_recentTrades[symbol] = std::move(trades);
     }
 };
 namespace {
 using namespace trade_overlay;
 constexpr int64_t day = 172800000;
 Request request() {
-    Request q; q.symbol = "BTC-USD"; q.grid = {16, 10, 2, 120};
+    Request q; q.symbol = "BTC-USD"; q.grid = {10, 2, 120};
     q.nowMs = day + 120001; q.previousMs = day + 119001; q.count = 2;
     return q;
 }
-std::vector<ServerDataModel::FootprintTradeSample> tape() {
+std::vector<ServerDataModel::RetainedTradeSample> tape() {
     return {{day + 60000, 115, 3, AggressorSide::Buy},
             {day + 119999, 115, 1, AggressorSide::Sell},
             {day + 120000, 111, 5, AggressorSide::Sell}};
@@ -72,12 +69,11 @@ protected:
 }
 TEST(TradeOverlayBudget, OnlyTpoHistoryUsesNewestBudget) {
     EXPECT_EQ(overlayBudgetFor(Kind::TpoHistory), OverlayTradeBudget::Newest);
-    EXPECT_EQ(overlayBudgetFor(Kind::FootprintHistory), OverlayTradeBudget::Reject);
     EXPECT_EQ(overlayBudgetFor(Kind::Live), OverlayTradeBudget::Reject);
 }
 
 TEST_F(TradeOverlayModel, OrderedMillionTradeTapeNeedsOnlyOneHeapify) {
-    using Trade = ServerDataModel::FootprintTradeSample;
+    using Trade = ServerDataModel::RetainedTradeSample;
     constexpr size_t count = 4 * kMaxTrades;
     std::deque<Trade> retained;
     for (size_t i = 0; i < count; ++i)
@@ -100,13 +96,13 @@ TEST_F(TradeOverlayModel, OrderedMillionTradeTapeNeedsOnlyOneHeapify) {
 }
 
 TEST_F(TradeOverlayModel, UnderAndAtBudgetMatchRejectTradesCandlesAndPageBytes) {
-    using Trade = ServerDataModel::FootprintTradeSample;
+    using Trade = ServerDataModel::RetainedTradeSample;
     using FetchCall = std::tuple<int64_t, int64_t, int64_t, int>;
     constexpr int64_t hour = 3600000;
     for (const size_t count : {size_t{0}, size_t{3}, kMaxTrades}) {
         SCOPED_TRACE(count);
         auto q = request(); q.kind = Kind::TpoHistory;
-        q.footprintMs = hour; q.tpoMs = hour; q.nowMs = day + 2 * hour;
+        q.tpoMs = hour; q.nowMs = day + 2 * hour;
         q.previousMs = q.nowMs - 1;
         std::deque<Trade> retained;
         for (size_t i = count; i > 0; --i) {
@@ -155,7 +151,7 @@ TEST_F(TradeOverlayModel, UnderAndAtBudgetMatchRejectTradesCandlesAndPageBytes) 
         const int candleCount = count == 0 ? 2 : 1;
         EXPECT_EQ(originalCalls, (std::vector<FetchCall>{{day / 1000, (day + candleCount * hour) / 1000,
                                                        hour / 1000, candleCount}}));
-        for (const auto kind : {Kind::TpoHistory, Kind::FootprintHistory, Kind::Live}) {
+        for (const auto kind : {Kind::TpoHistory, Kind::Live}) {
             q.kind = kind;
             const auto expected = build(q, original, originalCandles.candles, originalFrom);
             const auto actual = build(q, selected, selectedCandles.candles, selectedFrom);
@@ -180,58 +176,32 @@ TEST_F(TradeOverlay, WireRoundTripRetainsOwnGridAndHalfOpenTradeBuckets) {
     std::vector<VolumeProfileSlice> vp;
     QObject::connect(&client, &SentinelStreamClient::tpoSliceReceived, &client, [&](auto s) { tpo.push_back(s); });
     QObject::connect(&client, &SentinelStreamClient::volumeProfileSliceReceived, &client, [&](auto s) { vp.push_back(s); });
-    int footprintFrames = 0;
     for (const auto& message : result.messages) {
         const auto json = nlohmann::json::parse(message);
-        if (json.at("type") == "footprint_slice") ++footprintFrames;
+        EXPECT_TRUE(json.at("type") == "tpo_slice" || json.at("type") == "volume_profile_slice");
         TradeOverlayWireTest::receive(client, json);
     }
-    ASSERT_EQ(footprintFrames, 2); ASSERT_EQ(tpo.size(), 1); ASSERT_EQ(vp.size(), 1);
+    ASSERT_EQ(result.messages.size(), 2u); ASSERT_EQ(tpo.size(), 1); ASSERT_EQ(vp.size(), 1);
     EXPECT_EQ(tpo[0].letters[2], 'A'); EXPECT_EQ(tpo[0].letters[4], 'A');
     EXPECT_DOUBLE_EQ(tpo[0].tickSize, 2); EXPECT_DOUBLE_EQ(vp[0].tickSize, 2);
     EXPECT_DOUBLE_EQ(vp[0].totalVolume, 9);
 }
-TEST_F(TradeOverlay, ClientDropsTopLevelFootprintFramesWithoutDecodingAndKeepsNestedOnes) {
-    const auto result = build(request(), tape()); ASSERT_TRUE(result.error.empty()) << result.error;
-    SentinelStreamClient client("127.0.0.1", "0");
-    std::vector<TpoSlice> tpo;
-    QObject::connect(&client, &SentinelStreamClient::tpoSliceReceived, &client, [&](auto s) { tpo.push_back(s); });
-    int footprintFrames = 0;
-    for (const auto& message : result.messages) {
-        if (nlohmann::json::parse(message).at("type") == "footprint_slice") ++footprintFrames;
-        TradeOverlayWireTest::dispatch(client, message);
-    }
-    ASSERT_EQ(footprintFrames, 2);
-    EXPECT_EQ(TradeOverlayWireTest::ignoredFootprint(client), 2u) << "counted, never decoded";
-    EXPECT_EQ(tpo.size(), 1u) << "other overlay frames still decode";
-    // Not compact dump() spacing, and a malformed payload that a decode would reject.
-    TradeOverlayWireTest::dispatch(client, R"({ "type" : "footprint_history_chunk", "delta_levels_q16" : "@@" })");
-    EXPECT_EQ(TradeOverlayWireTest::ignoredFootprint(client), 3u);
-    // A footprint-looking object nested inside another frame is not a footprint frame.
-    const auto tpoFrame = nlohmann::json::parse(result.messages.back());
-    auto nested = tpoFrame; nested["note"] = {{"type", "footprint_slice"}};
-    TradeOverlayWireTest::dispatch(client, nested.dump());
-    EXPECT_EQ(TradeOverlayWireTest::ignoredFootprint(client), 3u);
-}
-TEST_F(TradeOverlay, HistoryAndLiveShareGridAndNoHeatmapMessages) {
-    auto q = request(); q.kind = Kind::FootprintHistory;
+TEST_F(TradeOverlay, TpoHistoryRetainsGridAndHalfOpenBuckets) {
+    auto q = request(); q.kind = Kind::TpoHistory; q.nowMs = day + 1800001;
     const auto result = build(q, tape()); ASSERT_TRUE(result.error.empty());
-    auto j = nlohmann::json::parse(result.messages.at(0));
-    EXPECT_EQ(j.at("type"), "footprint_history_chunk"); ASSERT_EQ(j["columns"].size(), 2);
-    EXPECT_EQ(j["columns"][1]["time_start"], day + 60000);
-    EXPECT_EQ(j["columns"][1]["max_price"], q.grid.maxPrice);
-    q.kind = Kind::TpoHistory; q.nowMs = day + 1800001;
-    const auto tpo = build(q, tape()); ASSERT_TRUE(tpo.error.empty());
-    j = nlohmann::json::parse(tpo.messages.at(0));
+    ASSERT_EQ(result.messages.size(), 1u);
+    const auto j = nlohmann::json::parse(result.messages.at(0));
+    EXPECT_EQ(j.at("type"), "tpo_history_chunk"); ASSERT_EQ(j["columns"].size(), 2);
     EXPECT_EQ(j["columns"][0]["time_start"], day);
     EXPECT_EQ(j["columns"][1]["time_start"], day + 900000);
+    EXPECT_EQ(j["columns"][1]["max_price"], q.grid.maxPrice);
 }
 TEST_F(TradeOverlay, InvalidGridAndTradeBudgetNeverYieldPartialMessages) {
     auto q = request(); q.grid.tick = std::numeric_limits<double>::quiet_NaN();
     auto r = build(q, tape()); EXPECT_FALSE(r.error.empty()); EXPECT_TRUE(r.messages.empty());
     q = request(); q.grid.rows = kMaxRows + 1;
     EXPECT_FALSE(build(q, tape()).error.empty());
-    q = request(); std::vector<ServerDataModel::FootprintTradeSample> tooMany(kMaxTrades + 1);
+    q = request(); std::vector<ServerDataModel::RetainedTradeSample> tooMany(kMaxTrades + 1);
     EXPECT_FALSE(build(q, tooMany).error.empty());
     q.tpoMs = 70000; EXPECT_FALSE(build(q, tape()).error.empty());
 }
@@ -247,12 +217,9 @@ TEST_F(TradeOverlay, MappingUsesOwnBandAndClipsOnCommonViewport) {
 }
 TEST_F(TradeOverlay, AdvertisedOverlayGridIsIndependentOfRetention) {
     const auto config = protocol::clientparse::parseServerConfig({
-        {"trade_overlays", {{"retention_columns", 8192}, {"grid_width", 256}, {"grid_height", 100}, {"tick_size", 2.5},
-                            {"footprint_timeframe_ms", 300000}}}});
-    EXPECT_EQ(config.tradeOverlays.gridWidth,256);
+        {"trade_overlays", {{"retention_columns", 8192}, {"grid_height", 100}, {"tick_size", 2.5}}}});
     EXPECT_EQ(config.tradeOverlays.gridHeight,100);
     EXPECT_DOUBLE_EQ(config.tradeOverlays.tickSize,2.5);
-    EXPECT_EQ(config.tradeOverlays.footprintTimeframeMs,300000);
 }
 
 TEST_F(TradeOverlay, SnapshotBudgetsOnlyRequestedWindowAndSortsOnlyMatches) {
@@ -264,7 +231,7 @@ TEST_F(TradeOverlay, SnapshotBudgetsOnlyRequestedWindowAndSortsOnlyMatches) {
     ASSERT_TRUE(QDir::setCurrent(directory.path()));
     ServerConfig config; config.recording.enabled = false;
     ServerDataModel model(config);
-    using Trade = ServerDataModel::FootprintTradeSample;
+    using Trade = ServerDataModel::RetainedTradeSample;
     std::deque<Trade> retained(kMaxTrades + 1, Trade{day, 100, 1, AggressorSide::Buy});
     // Deliberately out of arrival order; both endpoints of the query are tested.
     retained.push_back({day + 119999, 111, 2, AggressorSide::Sell});
@@ -290,7 +257,7 @@ TEST_F(TradeOverlay, SnapshotBudgetsOnlyRequestedWindowAndSortsOnlyMatches) {
     EXPECT_EQ(retainedFrom, day + 1);
     EXPECT_EQ(trades.back().timestampMs, day + 119999);
     EXPECT_EQ(trades[trades.size() - 2].timestampMs, day + 60000);
-    auto q = request(); q.kind = Kind::FootprintHistory;
+    auto q = request(); q.kind = Kind::TpoHistory; q.tpoMs = 60000;
     EXPECT_EQ(tradeWindow(q).startMs, day); EXPECT_EQ(tradeWindow(q).endMs, day + 120000);
 }
 
@@ -413,8 +380,8 @@ TEST_F(TradeOverlay, CancelledCandleHistoryDoesNotFetchAnotherPageOrReturnPartia
     EXPECT_EQ(calls, 1); EXPECT_FALSE(result.ok); EXPECT_TRUE(result.candles.empty());
 }
 
-TEST_F(TradeOverlay, WeeklyAndMonthlyTpoUseCoarserCentredGridFootprintKeepsBase) {
-    const Grid base{16, 10, 2, 120};  // [100, 120)
+TEST_F(TradeOverlay, WeeklyAndMonthlyTpoUseCoarserCentredGridVolumeProfileKeepsBase) {
+    const Grid base{10, 2, 120};  // [100, 120)
     EXPECT_DOUBLE_EQ(tpoGridFor(base, SessionManager::SessionType::H24).tick, 2);
     const auto week = tpoGridFor(base, SessionManager::SessionType::W1);
     EXPECT_EQ(week.rows, 10);
@@ -430,11 +397,11 @@ TEST_F(TradeOverlay, WeeklyAndMonthlyTpoUseCoarserCentredGridFootprintKeepsBase)
     constexpr int64_t monday = 1790553600000;
     auto q = request(); q.kind = Kind::Live; q.session = SessionManager::SessionType::W1;
     q.tpoMs = 3600000; q.nowMs = monday + 120001; q.previousMs = monday + 119001;
-    const std::vector<ServerDataModel::FootprintTradeSample> trades{
+    const std::vector<ServerDataModel::RetainedTradeSample> trades{
         {monday + 60000, 115, 3, AggressorSide::Buy}, {monday + 119999, 111, 1, AggressorSide::Sell}};
     const auto result = build(q, trades);
     ASSERT_TRUE(result.error.empty()) << result.error;
-    bool sawTpo = false, sawFootprint = false;
+    bool sawTpo = false, sawProfile = false;
     for (const auto& message : result.messages) {
         const auto j = nlohmann::json::parse(message);
         if (j["type"] == "tpo_slice") {
@@ -445,13 +412,13 @@ TEST_F(TradeOverlay, WeeklyAndMonthlyTpoUseCoarserCentredGridFootprintKeepsBase)
             // 115 and 111 fall in row floor((160 - p) / 10) = 4.
             EXPECT_NE(letters[4], '\0');
             EXPECT_EQ(letters[3], '\0');
-        } else if (j["type"] == "footprint_slice") {
-            sawFootprint = true;
+        } else if (j["type"] == "volume_profile_slice") {
+            sawProfile = true;
             EXPECT_DOUBLE_EQ(j["tick_size"].get<double>(), 2);
         }
     }
     EXPECT_TRUE(sawTpo);
-    EXPECT_TRUE(sawFootprint);
+    EXPECT_TRUE(sawProfile);
 }
 
 TEST_F(TradeOverlay, WeekendTradeLandsInWeeklyProfileAndVolumeProfileStaysOnTheUtcDay) {

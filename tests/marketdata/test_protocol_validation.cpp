@@ -89,44 +89,6 @@ TEST(ProtocolValidation, LargeBase64EstimateExceedsBounds) {
 }
 
 // =============================================================================
-// Footprint Stub Validation (INV-020, INV-021)
-// =============================================================================
-
-TEST(ProtocolValidation, FootprintSchemaGating) {
-    const int kFpVer = protocol::SentinelProtocol::kFootprintSchemaVersion;
-
-    // Valid footprint schema
-    nlohmann::json good = {{"type", "footprint_slice"}, {"schema_version", kFpVer}};
-    EXPECT_TRUE(isSchemaCompatible(good, kFpVer));
-
-    // Wrong version
-    nlohmann::json bad = {{"type", "footprint_slice"}, {"schema_version", kFpVer + 1}};
-    EXPECT_FALSE(isSchemaCompatible(bad, kFpVer));
-
-    // Missing schema_version
-    nlohmann::json missing = {{"type", "footprint_slice"}};
-    EXPECT_FALSE(isSchemaCompatible(missing, kFpVer));
-}
-
-TEST(ProtocolValidation, FootprintQ16PayloadShape) {
-    // INV-021: footprint q16 delta = 2 bytes per price level (int16_t).
-    // Payload must be exactly gridHeight * sizeof(int16_t).
-    constexpr int bytesPerLevel = sizeof(int16_t);
-
-    // Typical grid heights
-    EXPECT_EQ(2048 * bytesPerLevel, 4096);
-    EXPECT_TRUE(isPayloadSizeValid(2048 * bytesPerLevel));
-
-    // Max valid grid at 2 bytes/level = 65536 * 2 = 128KB, under 256KB limit
-    const size_t maxPayload = protocol::SentinelProtocol::kMaxGridHeight * bytesPerLevel;
-    EXPECT_EQ(maxPayload, 131072u);
-    EXPECT_TRUE(isPayloadSizeValid(maxPayload));
-
-    // Absurd grid_height that exceeds bounds
-    EXPECT_FALSE(isGridHeightValid(protocol::SentinelProtocol::kMaxGridHeight + 1));
-}
-
-// =============================================================================
 // Heatmap Family Schema Gating (INV-020, FM-017)
 // =============================================================================
 

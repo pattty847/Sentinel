@@ -17,12 +17,12 @@ constexpr size_t kMaxRequestIdLength = 64;
 // (it fits the retained trade tape, at most 24 h); for W1/M1 it covers the UTC day.
 SessionManager::SessionType volumeProfileSession(SessionManager::SessionType tpoSession);
 struct Grid {
-    int width = 512, rows = 2048;
+    int rows = 2048;
     double tick = 5, maxPrice = 0;
     double minPrice() const { return maxPrice - rows * tick; }
     bool valid() const;
 };
-enum class Kind { Live, FootprintHistory, TpoHistory };
+enum class Kind { Live, TpoHistory };
 constexpr OverlayTradeBudget overlayBudgetFor(Kind kind) {
     return kind == Kind::TpoHistory ? OverlayTradeBudget::Newest : OverlayTradeBudget::Reject;
 }
@@ -30,7 +30,7 @@ struct Request {
     std::string symbol;
     Kind kind = Kind::Live;
     Grid grid;
-    int64_t footprintMs = 60000, tpoMs = 900000;
+    int64_t tpoMs = 900000;
     SessionManager::SessionType session = SessionManager::SessionType::H24;
     int64_t nowMs = 0, endMs = 0, previousMs = 0;
     int count = 128;
@@ -63,11 +63,11 @@ int64_t tpoCandleGranularityMs(int64_t periodMs, int64_t sessionStartMs);
 CandleFetchResult fetchTpoCandles(const Request& request, int64_t retainedFromMs,
                                 const CandleFetcher& fetch, const StopRequested& stopped = {});
 // Pure worker-side builder. Inputs are timestamp-sorted immutable snapshots.
-Result build(const Request& request, const std::vector<ServerDataModel::FootprintTradeSample>& trades,
+Result build(const Request& request, const std::vector<ServerDataModel::RetainedTradeSample>& trades,
              const std::vector<OHLCVBar>& candles = {}, int64_t retainedFromMs = 0);
 // TPO grid for a session type: the base grid for daily sessions; for W1 (x5)
 // and M1 (x10) the same rows at a coarser tick, centred on the base band, so a
-// whole week or month fits. Footprint and volume profile keep the base grid.
+// whole week or month fits. Volume profile keeps the base grid.
 Grid tpoGridFor(const Grid& base, SessionManager::SessionType session);
 // At most two buckets: previous close when crossing a boundary, then forming.
 std::vector<int64_t> liveBuckets(int64_t nowMs, int64_t previousMs, int64_t tfMs,

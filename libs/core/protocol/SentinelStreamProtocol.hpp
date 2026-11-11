@@ -21,7 +21,6 @@ constexpr int64_t kTradeHistoryMaxWindowMs = 3'600'000;
 constexpr uint32_t kTradeHistoryMaxTrades = 250'000;
 constexpr size_t kTradeHistoryMaxIdBytes = 128;
 constexpr size_t kTradeHistoryMaxFrameBytes = 48 * 1024 * 1024;
-constexpr int kFootprintSchemaVersion = 1;
 constexpr int kTpoSchemaVersion = 1;
 constexpr int kVolumeProfileSchemaVersion = 1;
 constexpr int kMaxGridHeight = 65536;
@@ -70,10 +69,6 @@ enum class MessageType {
     FlowHistoryChunk,
     TradeHistoryRequest,
     TradeHistoryChunk,
-    FootprintConfig,
-    FootprintSlice,
-    FootprintHistoryRequest,
-    FootprintHistoryChunk,
     TpoSlice,
     TpoHistoryRequest,
     TpoHistoryChunk,
@@ -113,10 +108,6 @@ inline std::string toString(MessageType t) {
         case MessageType::TradeHistoryRequest: return "trade_history_request";
         case MessageType::TradeHistoryChunk: return "trade_history_chunk";
         case MessageType::FlowBar: return "flow_bar";
-        case MessageType::FootprintConfig: return "footprint_config";
-        case MessageType::FootprintSlice: return "footprint_slice";
-        case MessageType::FootprintHistoryRequest: return "footprint_history_request";
-        case MessageType::FootprintHistoryChunk: return "footprint_history_chunk";
         case MessageType::TpoSlice: return "tpo_slice";
         case MessageType::TpoHistoryRequest: return "tpo_history_request";
         case MessageType::TpoHistoryChunk: return "tpo_history_chunk";
@@ -155,10 +146,6 @@ inline MessageType fromString(const std::string& s) {
     if (s == "trade_history_request") return MessageType::TradeHistoryRequest;
     if (s == "trade_history_chunk") return MessageType::TradeHistoryChunk;
     if (s == "flow_bar") return MessageType::FlowBar;
-    if (s == "footprint_config") return MessageType::FootprintConfig;
-    if (s == "footprint_slice") return MessageType::FootprintSlice;
-    if (s == "footprint_history_request") return MessageType::FootprintHistoryRequest;
-    if (s == "footprint_history_chunk") return MessageType::FootprintHistoryChunk;
     if (s == "tpo_slice") return MessageType::TpoSlice;
     if (s == "tpo_history_request") return MessageType::TpoHistoryRequest;
     if (s == "tpo_history_chunk") return MessageType::TpoHistoryChunk;
