@@ -481,6 +481,9 @@ TEST(LiveTradingSessionClose, ManualCancelAllWithAlgoIdKeepsOtherOrders) {
     auto algoOrder = manual;
     algoOrder.algoId = "AvendellaMM";
     engine.onCommand(algoOrder);
+    auto otherAlgoOrder = manual;
+    otherAlgoOrder.algoId = "OtherAlgo";
+    engine.onCommand(otherAlgoOrder);
 
     trading::TradeCommand cancelAlgo;
     cancelAlgo.action = trading::TradeAction::CancelAll;
@@ -488,8 +491,85 @@ TEST(LiveTradingSessionClose, ManualCancelAllWithAlgoIdKeepsOtherOrders) {
     const auto res = engine.onCommand(cancelAlgo);
     ASSERT_EQ(res.orderUpdates.size(), 1u);
     EXPECT_EQ(res.orderUpdates.front().algoId, "AvendellaMM");
-    EXPECT_EQ(engine.getOpenOrders("BTC-USD").size(), 1u);
+    EXPECT_EQ(engine.getOpenOrders("BTC-USD").size(), 2u);
     EXPECT_TRUE(engine.getOpenOrders("BTC-USD", "AvendellaMM").empty());
+    EXPECT_EQ(engine.getOpenOrders("BTC-USD", "OtherAlgo").size(), 1u)
+        << "an algo-scoped cancel must not touch another algo's orders";
+}
+
+TEST(LiveTradingSessionClose, AlgoScopedCancelKeepsManualAttachedRisk) {
+    trading::TradingEngine engine([](const std::string&) { return 100.0; }, 0.0);
+    trading::TradeCommand buy;
+    buy.action = trading::TradeAction::PlaceOrder;
+    buy.symbol = "BTC-USD";
+    buy.side = trading::OrderSide::Buy;
+    buy.orderType = trading::OrderType::Market;
+    buy.qty = 1.0;
+    engine.onCommand(buy);
+
+    trading::TradeCommand risk;
+    risk.action = trading::TradeAction::SetAttachedRisk;
+    risk.symbol = "BTC-USD";
+    risk.hasTakeProfit = true;
+    risk.takeProfitPrice = 110.0;
+    risk.hasStopLoss = true;
+    risk.stopLossPrice = 90.0;
+    ASSERT_EQ(engine.onCommand(risk).riskOrderUpdates.size(), 1u);
+
+    trading::TradeCommand algoQuote;
+    algoQuote.action = trading::TradeAction::PlaceOrder;
+    algoQuote.symbol = "BTC-USD";
+    algoQuote.side = trading::OrderSide::Buy;
+    algoQuote.orderType = trading::OrderType::Limit;
+    algoQuote.price = 80.0;
+    algoQuote.hasPrice = true;
+    algoQuote.qty = 1.0;
+    algoQuote.algoId = "AvendellaMM";
+    engine.onCommand(algoQuote);
+
+    trading::TradeCommand cancelAlgo;
+    cancelAlgo.action = trading::TradeAction::CancelAll;
+    cancelAlgo.algoId = "AvendellaMM";
+    const auto res = engine.onCommand(cancelAlgo);
+    EXPECT_TRUE(res.riskOrderUpdates.empty()) << "algo-scoped cancel must not clear manual TP/SL";
+
+    engine.onTick("BTC-USD", 89.0, 1000);  // stop loss still armed: exits the long
+    EXPECT_DOUBLE_EQ(engine.getPosition("BTC-USD")->netQty, 0.0);
+}
+
+TEST(LiveTradingSessionClose, StopRestartSameAlgoIdIsClean) {
+    trading::LiveTradingSession session([](const std::string&) { return 100.0; }, 0.0);
+    session.registerAlgo(std::make_unique<trading::AvendellaMM>());
+
+    for (int run = 0; run < 2; ++run) {
+        ASSERT_TRUE(session.startAlgo("AvendellaMM", "BTC-USD", liveAlgoParams()));
+        session.onTradeTick("BTC-USD", 100.0, 1000 + run);
+        const auto open = session.broker().snapshotFor("BTC-USD", 0).openOrders;
+        ASSERT_EQ(open.size(), 2u) << "run " << run << " must quote exactly one bid and one ask";
+        for (const auto& o : open) {
+            EXPECT_EQ(o.algoId, "AvendellaMM");
+        }
+        session.stopAlgo("AvendellaMM");
+        EXPECT_TRUE(session.broker().snapshotFor("BTC-USD", 0).openOrders.empty()) << "run " << run;
+        EXPECT_TRUE(session.runningAlgos().empty());
+    }
+    EXPECT_DOUBLE_EQ(sessionNetQty(session, "BTC-USD"), 0.0);
+}
+
+TEST(LiveTradingSessionClose, UnknownActionThroughSessionIsRejected) {
+    trading::LiveTradingSession session([](const std::string&) { return 100.0; }, 0.0);
+    std::size_t callbacks = 0;
+    session.setResultCallback([&callbacks](trading::TradingResult, std::vector<trading::AlgoOrderEvent>) {
+        ++callbacks;
+    });
+    const auto cmd = trading::parseTradeCommandJson(
+        R"({"type":"trade_command","command_id":"bogus-1","action":"BOGUS","symbol":"BTC-USD",)"
+        R"("side":"BUY","order_type":"MARKET","qty":1.0})");
+    ASSERT_EQ(cmd.action, trading::TradeAction::Unknown);
+    session.processTradeCommand(cmd);
+
+    EXPECT_EQ(callbacks, 0u) << "an unknown action must not produce order or position updates";
+    EXPECT_DOUBLE_EQ(sessionNetQty(session, "BTC-USD"), 0.0) << "an unknown action must not trade";
 }
 
 TEST(LiveTradingSessionClose, CommandRejectReasons) {

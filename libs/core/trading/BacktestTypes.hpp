@@ -42,6 +42,7 @@ enum class OrderIntentAction {
     CancelAll,
     Flatten,
     SetAttachedRisk,
+    Unknown,
 };
 
 struct OrderIntent {
@@ -134,6 +135,7 @@ inline TradeAction toTradeAction(OrderIntentAction action) {
     case OrderIntentAction::CancelAll: return TradeAction::CancelAll;
     case OrderIntentAction::Flatten: return TradeAction::Flatten;
     case OrderIntentAction::SetAttachedRisk: return TradeAction::SetAttachedRisk;
+    case OrderIntentAction::Unknown: return TradeAction::Unknown;
     }
     return TradeAction::Unknown;
 }
@@ -167,7 +169,7 @@ inline OrderIntent fromTradeCommand(const TradeCommand& command) {
     case TradeAction::CancelAll: intent.action = OrderIntentAction::CancelAll; break;
     case TradeAction::Flatten: intent.action = OrderIntentAction::Flatten; break;
     case TradeAction::SetAttachedRisk: intent.action = OrderIntentAction::SetAttachedRisk; break;
-    default: intent.action = OrderIntentAction::PlaceOrder; break;
+    default: intent.action = OrderIntentAction::Unknown; break;
     }
     intent.symbol = command.symbol;
     intent.side = command.side;
