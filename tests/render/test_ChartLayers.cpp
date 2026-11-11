@@ -174,6 +174,7 @@ TEST(HeatmapLayer, AfterRenderingWithoutHostCallbacksConsumesFrameRequest) {
 // Flow-backed footprint cells: independent of the ladder cases above.
 #include "chart/feeds/FlowFeed.hpp"
 #include "chart/layers/FootprintCellsLayer.hpp"
+#include "chart/core/FlowInk.hpp"
 #include "chart/shell/LayerVisibility.hpp"
 #include "chart/shell/ChartLookSettings.hpp"
 #include "mainwindow/ChartAgentPort.hpp"
@@ -285,15 +286,19 @@ TEST(FootprintCells, WindowNormalisationAccountsForEachBarsScale) {
     auto* v = geometry->vertexDataAsColoredPoint2D();
     EXPECT_EQ(v[0].a, 255) << "opaque card covers heatmap";
     EXPECT_FLOAT_EQ(v[0].x, 0); EXPECT_FLOAT_EQ(v[2].x, 100);
-    const double bidLength = v[14].x - v[12].x, askLength = v[20].x - v[18].x;
-    EXPECT_NEAR(bidLength / askLength, 240.0 / 440, 1e-6);
+    const auto share = [](const QSGGeometry::ColoredPoint2D& vertex) {
+        return (vertex.a / 255. - chart::kFlowMinFillAlpha) / (1 - chart::kFlowMinFillAlpha);
+    };
+    EXPECT_FLOAT_EQ(v[14].x - v[12].x, v[20].x - v[18].x) << "a side fills its whole half whatever its volume";
+    EXPECT_NEAR(share(v[12]) / share(v[18]), 240.0 / 440, .01) << "opacity tracks volume";
     EXPECT_FLOAT_EQ(v[14].x, 54.5); EXPECT_FLOAT_EQ(v[18].x, 55.5);
     EXPECT_DOUBLE_EQ(layer.cards().size(), 2);
+    const double bidShare = share(v[12]), askShare = share(v[18]);
     layer.presentation().windowIntensity = true;
     layer.sync(frame); layer.updateNodes(frame, context);
     v = geometry->vertexDataAsColoredPoint2D();
-    EXPECT_NEAR(v[14].x - v[12].x, bidLength / 2, 1e-5);
-    EXPECT_NEAR(v[20].x - v[18].x, askLength / 2, 1e-5);
+    EXPECT_NEAR(share(v[12]), bidShare / 2, .01);
+    EXPECT_NEAR(share(v[18]), askShare / 2, .01);
     EXPECT_EQ(v[0].a, 255);
 }
 TEST(FootprintCells, InvalidBarDoesNotWithdrawCompatibleBars) {
@@ -681,13 +686,89 @@ TEST(FootprintBands, StripDrawsOneTintedCellPerBandWithoutCardOrSpine) {
     EXPECT_FALSE(layer.presentation().spine(frame.context.raster));
     auto* v = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
     EXPECT_FLOAT_EQ(v[0].x, 0); EXPECT_FLOAT_EQ(v[2].x, 10) << "the band spans the whole column";
-    const auto bid = chart::ChartLookSettings::footprintBid(), ask = chart::ChartLookSettings::footprintAsk();
-    EXPECT_EQ(v[0].a, 255 * bid.alpha() / 255) << "the bid-dominant band is the bar's busiest";
-    EXPECT_EQ(v[0].g, bid.green() * v[0].a / 255);
-    EXPECT_EQ(v[6].g, ask.green() * v[6].a / 255);
+    const auto sell = chart::ChartLookSettings::footprintSellAggr(), buy = chart::ChartLookSettings::footprintBuyAggr();
+    EXPECT_EQ(v[0].a, 255 * sell.alpha() / 255) << "the sell-dominant band is the bar's busiest";
+    EXPECT_EQ(v[0].r, sell.red() * v[0].a / 255) << "sell aggression is the down colour";
+    EXPECT_EQ(v[0].g, sell.green() * v[0].a / 255);
+    EXPECT_EQ(v[6].g, buy.green() * v[6].a / 255) << "a buy-dominant band is the up colour";
     EXPECT_LT(v[12].a, v[6].a) << "intensity follows band volume";
     layer.submitLabels(frame, context);
     EXPECT_EQ(layer.glyphCount(), 0u);
+}
+namespace {
+struct CellsRig {
+    chart::FootprintCellsLayer layer;
+    std::unique_ptr<QSGNode> root;
+    ChartTextRenderer text; ChartTextAtlas atlas;
+    chart::ChartFrame frame = footprintChartFrame();
+    using Rows = decltype(FlowSeriesBuffer::Record{}.bar.rows);
+    explicit CellsRig(Rows rows, double dust = 2500) {
+        layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+        layer.presentation().dustNotional = dust;
+        auto series = footprintSeries();
+        series.bars[0].bar.rows = std::move(rows);
+        EXPECT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), series, footprintFrame()));
+        layer.mailbox().post();
+        root.reset(layer.createContainer());
+        chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
+        layer.sync(frame); layer.updateNodes(frame, context);
+    }
+    const QSGGeometry::ColoredPoint2D* vertices() const {
+        return static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
+    }
+};
+}
+TEST(FootprintAggressorColours, BuyIsGreenOnTheRightAndSellIsRedOnTheLeft) {
+    const auto buy = chart::ChartLookSettings::footprintBuyAggr(), sell = chart::ChartLookSettings::footprintSellAggr();
+    ASSERT_EQ(buy, theme::positive()); ASSERT_EQ(sell, theme::negative());
+    CellsRig onlyBuy({{0, 0, 300}}, 0);   // row = {index, bidVol, askVol}: askVol is buy aggression
+    ASSERT_EQ(onlyBuy.layer.vertexCount(), 12 + 6);
+    const auto* v = onlyBuy.vertices() + 12;
+    EXPECT_GT(v[0].x, 55) << "buy fill is the right half";
+    EXPECT_EQ(v[0].g, buy.green() * v[0].a / 255); EXPECT_EQ(v[0].r, buy.red() * v[0].a / 255);
+    EXPECT_GT(v[0].g, v[0].r) << "green, not red";
+    CellsRig onlySell({{0, 300, 0}}, 0);
+    ASSERT_EQ(onlySell.layer.vertexCount(), 12 + 6);
+    v = onlySell.vertices() + 12;
+    EXPECT_LT(v[2].x, 55) << "sell fill is the left half";
+    EXPECT_EQ(v[0].r, sell.red() * v[0].a / 255); EXPECT_EQ(v[0].g, sell.green() * v[0].a / 255);
+    EXPECT_GT(v[0].r, v[0].g) << "red, not green";
+}
+TEST(FootprintAggressorColours, FillIsFullHalfWidthAndOpacityTracksVolume) {
+    CellsRig rig({{0, 100, 200}}, 0);
+    ASSERT_EQ(rig.layer.vertexCount(), 12 + 12);
+    const auto* sell = rig.vertices() + 12; const auto* buy = rig.vertices() + 18;
+    const float sellWidth = sell[2].x - sell[0].x, buyWidth = buy[2].x - buy[0].x;
+    EXPECT_FLOAT_EQ(sellWidth, buyWidth) << "both halves are filled across, whatever the volume";
+    EXPECT_GT(sellWidth, 40);
+    EXPECT_GT(buy[0].a, sell[0].a) << "twice the volume is more opaque";
+    EXPECT_GE(sell[0].a, 45) << "the weakest fill stays visible (alpha .18)";
+    EXPECT_NEAR(sell[0].a / 255., chart::flowFillAlpha(1, 2), 1. / 255);
+}
+TEST(FootprintAggressorColours, DustDrawsItsFillAndDimsItsNumber) {
+    CellsRig rig({{0, 1, 0}});  // 0.01 contracts at ~100 is far under the 2500 notional
+    ASSERT_EQ(rig.layer.vertexCount(), 12 + 6) << "a dust cell still draws its fill";
+    EXPECT_GT(rig.vertices()[12].a, 0);
+    EXPECT_EQ(chart::flowTier(.01, 100, 1, 2500), chart::FlowTier::Dust);
+    EXPECT_DOUBLE_EQ(chart::flowTextAlpha(chart::FlowTier::Dust), .45);
+}
+TEST(FootprintBands, StripBuyDominantBandIsGreen) {
+    chart::FootprintCellsLayer layer;
+    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    layer.presentation().dustNotional = 0;
+    auto series = ladderSeries(6);
+    series.bars[0].bar.rows[0] = {0, 1, 500};
+    ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), series, stripFrame(2)));
+    layer.mailbox().post();
+    std::unique_ptr<QSGNode> root(layer.createContainer());
+    ChartTextRenderer text; ChartTextAtlas atlas;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
+    auto frame = footprintChartFrame();
+    frame.context.raster.colPxF = 10; frame.context.raster.rowPxF = 2; frame.context.raster.topF = 110 * 2;
+    layer.sync(frame); layer.updateNodes(frame, context);
+    auto* v = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
+    const auto buy = chart::ChartLookSettings::footprintBuyAggr();
+    EXPECT_EQ(v[0].g, buy.green() * v[0].a / 255); EXPECT_GT(v[0].g, v[0].r);
 }
 TEST(FootprintCells, RegistrySlotAndNoData) {
     chart::ChartLayers layers;
@@ -712,7 +793,7 @@ TEST(FootprintCells, TwoFramesAfterDataAndChangedSnapshotAllocateNothing) {
     ChartTextRenderer text; ChartTextAtlas atlas;
     chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
     layer.sync(frame); layer.updateNodes(frame, context);
-    ASSERT_TRUE(layer.drawing()); ASSERT_EQ(layer.vertexCount(), 12);
+    ASSERT_TRUE(layer.drawing()); ASSERT_EQ(layer.vertexCount(), 12 + 2 * 12) << "card, spine and a fill per side for each visible row, dust included";
     EXPECT_EQ(layer.stage(), chart::FootprintStage::Numbers);
     EXPECT_TRUE(layer.presentation().spineBar(frame.context.raster, 0));
     EXPECT_FALSE(layer.presentation().spineBar(frame.context.raster, 1000));
@@ -804,7 +885,7 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     frame.context.raster.topF = 105 * chart::kFootprintNumbersRow;
     layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
     EXPECT_EQ(layer.glyphCount(), 4u) << "13 px numbers fit at the row entry threshold with the full chart atlas";
-    for (const auto& glyph : layer.glyphs()) EXPECT_NEAR(glyph.color.alphaF(), .22, .005);
+    for (const auto& glyph : layer.glyphs()) EXPECT_NEAR(glyph.color.alphaF(), .45, .005);
     layer.presentation().dustNotional = 0;
     layer.updateNodes(frame, context); layer.submitLabels(frame, context);
     for (const auto& glyph : layer.glyphs()) EXPECT_DOUBLE_EQ(glyph.color.alphaF(), 1);

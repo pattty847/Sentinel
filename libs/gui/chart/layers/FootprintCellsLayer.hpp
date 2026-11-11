@@ -40,7 +40,8 @@ private:
     void cells(const ChartFrame&);
     double windowMaximum(const ChartFrame&) const;
     void labels(const ChartFrame&, const ChartTextAtlas&, double bottomInset);
-    struct Number { double volume, price, maximum; QRectF box; bool bid; };
+    struct Number { double volume, price, maximum, fillAlpha; QRectF box; bool bid; };
+    double normaliser(const FlowColumn&) const;
     void number(const Number&, const ChartTextAtlas&);
     QRectF cardRect(const ChartFrame&, const FlowColumn&) const;
     void rowGeometry(QSGGeometry::ColoredPoint2D*, int&, const ChartFrame&, const FlowColumn&, const FlowCell&);
