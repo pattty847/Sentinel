@@ -3,7 +3,7 @@
 Current facts only: replace old facts, do not append a journal. History is `git log --first-parent` and
 `_agent/`. Rules: `AGENTS.md`. Update at landings, deploys, owner decisions and wave ends. Keep under 8 KB.
 
-- **Updated:** 2026-11-11 ~00:30 UTC. main `cb4a178c` + docs (pushed). Footprint every-zoom and the 2 px zoom rule landed. UI aesthetic audit in its own session (`/Volumes/T7/sentinel-audit/ui-2026-11/`); brief waits on owner approval; paper-trading shots wait on the owner (agent orders would land in the owner's single paper account). Work order: `docs/TODO.md` Waves.
+- **Updated:** 2026-11-11 ~00:30 UTC. main `cb4a178c` + docs (pushed). Footprint every-zoom and the 2 px zoom rule landed. UI audit brief APPROVED 2026-11-11 (`/Volumes/T7/sentinel-audit/ui-2026-11/brief.md`, Top 10 + labs L-1..L-15; work order in TODO); paper-trading shots wait on the owner (agent orders would land in the owner's single paper account). Work order: `docs/TODO.md` Waves.
 - **Conductor:** Claude Opus 5.5 (new session 2026-11-10), wave 3.
 - **Review policy:** 1 + 1 cross-provider (AGENTS.md section 10); Fable for high risk. Owner 2026-11-05: spend all Codex, including reset credits before they expire.
 
