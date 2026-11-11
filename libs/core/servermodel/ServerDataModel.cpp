@@ -1,4 +1,5 @@
 #include "ServerDataModel.hpp"
+#include "FlowStoreLag.hpp"
 #include "SentinelLogging.hpp"
 #include "RecordingDir.hpp"
 #include "flow/FlowCodec.hpp"
@@ -1316,15 +1317,12 @@ void ServerDataModel::publishFlow() {
     for (auto& [symbol, product] : m_flowProducts) {
         if (m_flowStore) {
             const auto sealedThrough = m_flowStore->sealedThroughMs(symbol);
-            if (sealedThrough > 0 || product.firstLiveMs >= 0) {
-                const auto reference = std::max(sealedThrough,
-                    product.firstLiveMs < 0 ? int64_t{0} : product.firstLiveMs / 3'600'000 * 3'600'000);
-                const auto lag = std::max<int64_t>(0, product.clock - kFlowRolloverGraceMs) / 3'600'000 * 3'600'000 - reference;
-                if (lag > 6 * 3'600'000 &&
-                    (product.lastLagWarningClock == INT64_MIN || product.clock - product.lastLagWarningClock >= 60'000)) {
-                    sLog_Warning("Flow store lag exceeds live retention symbol=" << symbol << " lagMs=" << lag);
-                    product.lastLagWarningClock = product.clock;
-                }
+            const auto lag = sentinel::flow::storeLagMs(product.clock, sealedThrough,
+                                                        product.firstLiveMs, kFlowRolloverGraceMs);
+            if (lag && *lag > 6 * 3'600'000 &&
+                (product.lastLagWarningClock == INT64_MIN || product.clock - product.lastLagWarningClock >= 60'000)) {
+                sLog_Warning("Flow store lag exceeds live retention symbol=" << symbol << " lagMs=" << *lag);
+                product.lastLagWarningClock = product.clock;
             }
         }
         for (auto& [dayStart, day] : product.days) {
