@@ -3,11 +3,25 @@
 #include "../SentinelLogging.hpp"
 
 #include <chrono>
+#include <cstdio>
+#include <random>
 
 namespace trading {
 
+namespace {
+std::string newEpoch() {
+    std::random_device rd;
+    const uint64_t value = (static_cast<uint64_t>(rd()) << 32) ^ rd() ^
+        static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(value));
+    return buf;
+}
+} // namespace
+
 LiveTradingSession::LiveTradingSession(TradingEngine::PriceResolver resolver, double slippageBps)
-    : m_broker(std::move(resolver), std::make_unique<TradeDrivenExecutionModel>(), slippageBps) {}
+    : m_epoch(newEpoch()),
+      m_broker(std::move(resolver), std::make_unique<TradeDrivenExecutionModel>(), slippageBps) {}
 
 void LiveTradingSession::registerAlgo(std::unique_ptr<IAlgo> algo) {
     const std::string algoId = algo->id();
@@ -196,6 +210,16 @@ void LiveTradingSession::onTradeTick(const std::string& symbol, double lastTrade
 void LiveTradingSession::setResultCallback(ResultCallback cb) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_callback = std::move(cb);
+}
+
+TradingSnapshot LiveTradingSession::snapshot() const {
+    TradingSnapshot snap = m_broker.accountState();
+    snap.epoch = m_epoch;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (const auto& [algoId, adapter] : m_runningAlgos) {
+        if (adapter->isRunning()) snap.runningAlgos.push_back({algoId, adapter->symbol()});
+    }
+    return snap;
 }
 
 AlgoOrderEvent LiveTradingSession::buildAlgoEvent(const OrderUpdate& update, int64_t timestampMs) {

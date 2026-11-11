@@ -9,6 +9,7 @@
 
 #include "../../core/marketdata/model/TradeData.h"
 #include "../../core/trading/TradingTypes.hpp"
+#include "../../core/trading/TradingSnapshot.hpp"
 #include "ITimeAxisMappingProvider.hpp"
 
 #include <unordered_map>
@@ -43,6 +44,8 @@ public slots:
     void onOrderUpdated(const trading::OrderUpdate& update);
     void onPositionUpdated(const trading::PositionUpdate& update);
     void onRiskOrderUpdated(const trading::RiskOrderUpdate& update);
+    // Replaces orders, position and risk with the server's (reconnect, server restart).
+    void onTradingSnapshot(const trading::TradingSnapshot& snapshot);
     Q_INVOKABLE bool canShowRiskControls() const;
     Q_INVOKABLE bool hasStagedRiskChanges() const;
     Q_INVOKABLE bool beginRiskDrag(const QString& leg);
@@ -91,6 +94,8 @@ private:
     };
 
     QString m_symbol;
+    trading::TradingAccountState m_account; // every symbol; the chart shows m_symbol's part
+    void showAccountSymbol();
     QPointer<QObject> m_mappingProviderObject;
     ITimeAxisMappingProvider* m_mappingProvider = nullptr;
     std::unordered_map<std::string, ManualOrderState> m_orders;

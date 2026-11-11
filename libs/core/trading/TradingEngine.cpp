@@ -92,6 +92,21 @@ std::optional<Position> TradingEngine::getPosition(const std::string& symbol) co
     return m_positions.get(symbol);
 }
 
+std::vector<Order> TradingEngine::getAllOpenOrders() const {
+    return m_orders.getAllActive();
+}
+
+std::vector<Position> TradingEngine::getAllPositions() const {
+    return m_positions.all();
+}
+
+std::vector<RiskOrderUpdate> TradingEngine::getAllAttachedRisk() const {
+    std::vector<RiskOrderUpdate> out;
+    out.reserve(m_attachedRiskBySymbol.size());
+    for (const auto& [symbol, risk] : m_attachedRiskBySymbol) out.push_back(buildRiskOrderUpdate(symbol, risk));
+    return out;
+}
+
 TradingResult TradingEngine::onExternalFill(const std::string& orderId,
                                             double cumulativeFilledQty,
                                             double fillPrice) {
@@ -194,6 +209,8 @@ TradingResult TradingEngine::onTick(const std::string& symbol, double lastTradeP
                                    fillResult.positionUpdates.begin(), fillResult.positionUpdates.end());
         out.pnlSnapshots.insert(out.pnlSnapshots.end(),
                                 fillResult.pnlSnapshots.begin(), fillResult.pnlSnapshots.end());
+        out.riskOrderUpdates.insert(out.riskOrderUpdates.end(),
+                                    fillResult.riskOrderUpdates.begin(), fillResult.riskOrderUpdates.end());
     }
     return out;
 }
@@ -319,6 +336,9 @@ TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
     out.orderUpdates.insert(out.orderUpdates.end(), fillResult.orderUpdates.begin(), fillResult.orderUpdates.end());
     out.positionUpdates.insert(out.positionUpdates.end(), fillResult.positionUpdates.begin(), fillResult.positionUpdates.end());
     out.pnlSnapshots.insert(out.pnlSnapshots.end(), fillResult.pnlSnapshots.begin(), fillResult.pnlSnapshots.end());
+    // A closing fill clears the attached TP/SL; clients must hear it.
+    out.riskOrderUpdates.insert(out.riskOrderUpdates.end(), fillResult.riskOrderUpdates.begin(),
+                                fillResult.riskOrderUpdates.end());
     return out;
 }
 

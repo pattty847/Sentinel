@@ -35,7 +35,8 @@ public:
     void setCandleHistoryViewport(const QString& symbol, int64_t timeframeMs,
                                  qint64 startMs, qint64 endMs) override;
     void sendTradeCommand(const trading::TradeCommand& command) override;
-    void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params) override;
+    void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol,
+                         const trading::AlgoParams& params, const std::string& commandId) override;
     bool isConnectionActive() const override { return m_connectionActive; }
 
     const LiveOrderBook& getDirectLiveOrderBook(const std::string& productId) const override;

@@ -13,7 +13,8 @@ public:
     void cancelTpoHistory(const QString&, const QString&) override {}
     void setCandleHistoryViewport(const QString&, int64_t, qint64, qint64) override {}
     void sendTradeCommand(const trading::TradeCommand&) override {}
-    void sendAlgoCommand(const std::string&, const std::string&, const std::string&, const trading::AlgoParams&) override {}
+    void sendAlgoCommand(const std::string&, const std::string&, const std::string&, const trading::AlgoParams&,
+                         const std::string&) override {}
     bool isConnectionActive() const override { return true; }
     const LiveOrderBook& getDirectLiveOrderBook(const std::string&) const override { return book; }
 

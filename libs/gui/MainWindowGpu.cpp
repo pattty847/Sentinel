@@ -546,6 +546,8 @@ void MainWindowGPU::setupConnections() {
         if (auto* overlay = m_qquickView->rootObject()->findChild<AlgoOverlayRenderer*>("algoOverlayRenderer")) {
             connect(m_dataSource.get(), &IGridDataSource::algoOrderEventReceived,
                     overlay, &AlgoOverlayRenderer::onAlgoOrderEvent, Qt::QueuedConnection);
+            connect(m_dataSource.get(), &IGridDataSource::tradingSnapshotReceived,
+                    overlay, &AlgoOverlayRenderer::onTradingSnapshot, Qt::QueuedConnection);
         }
         if (auto* overlayModel = m_qquickView->rootObject()->findChild<PaperTradeOverlayModel*>("paperTradeOverlayModel")) {
             connect(m_dataSource.get(), &IGridDataSource::tradeReceived,
@@ -556,6 +558,8 @@ void MainWindowGPU::setupConnections() {
                     overlayModel, &PaperTradeOverlayModel::onPositionUpdated, Qt::QueuedConnection);
             connect(m_dataSource.get(), &IGridDataSource::riskOrderUpdated,
                     overlayModel, &PaperTradeOverlayModel::onRiskOrderUpdated, Qt::QueuedConnection);
+            connect(m_dataSource.get(), &IGridDataSource::tradingSnapshotReceived,
+                    overlayModel, &PaperTradeOverlayModel::onTradingSnapshot, Qt::QueuedConnection);
             connect(overlayModel, &PaperTradeOverlayModel::applyAttachedRiskRequested,
                     this,
                     [this](bool hasTakeProfit, double takeProfitPrice, bool hasStopLoss, double stopLossPrice) {

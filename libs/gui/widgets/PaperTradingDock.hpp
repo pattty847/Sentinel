@@ -6,9 +6,15 @@
 #include <QSet>
 #include <QPointer>
 #include <QString>
+#include <QStringList>
 
 #include "../../core/trading/TradingTypes.hpp"
 #include "../../core/trading/AlgoEngine.hpp"
+#include "../../core/trading/TradingSnapshot.hpp"
+#include "AlgoStopPolicy.hpp"
+
+#include <optional>
+#include <string>
 
 class QTabWidget;
 class QTableWidget;
@@ -21,6 +27,7 @@ class QPlainTextEdit;
 class QProcess;
 class QTimer;
 class QComboBox;
+class QMessageBox;
 class QDateEdit;
 class PnlCurveItem;
 class IGridDataSource;
@@ -53,6 +60,8 @@ public slots:
     void onPositionUpdated(const trading::PositionUpdate& update);
     void onAlgoOrderEvent(const trading::AlgoOrderEvent& event);
     void onPnlSnapshot(const trading::PnlSnapshot& snapshot);
+    // Replaces the ticket's orders, position and algo state with the server's.
+    void onTradingSnapshot(const trading::TradingSnapshot& snapshot);
 
 private slots:
     void onBuyMarketClicked();
@@ -76,13 +85,30 @@ private:
     void buildPnlPanel(QWidget* parent);
     void resetForSymbolChange();
     void setAlgoState(const QString& text, const QString& reason, bool canStart, bool canStop);
+    void applyAlgoSnapshot(const trading::TradingSnapshot& snapshot);
+    void dropOrderRowsNotIn(const trading::TradingSnapshot& snapshot);
+    void clearOrderHistory();
+    struct StopOperation {
+        QString commandId;
+        quint64 generation = 0;
+        std::string epoch;
+        bool acknowledged = false; // its prompt is open
+    };
+    bool stopOperationCurrent(const StopOperation& op) const;
+    void cancelStopOperation();
+    void onStopAcknowledged(const trading::TradingSnapshot& ack);
+    void flattenSymbols(const QStringList& symbols);
+    void refreshAlgoView(const QString& stoppedReason = {});
+    paper::OnAlgoStop onAlgoStopPolicy() const;
+    QString sendAlgoCommand(const std::string& action, const trading::AlgoParams& params, const QString& symbol);
     void updateNotional();
     void updatePricePrecision(double price);
     void sendManualCommand(trading::TradeAction action,
                            trading::OrderSide side,
                            trading::OrderType orderType,
                            bool hasPrice = false,
-                           double price = 0.0);
+                           double price = 0.0,
+                           const QString& symbolOverride = {});
 
     QString m_symbol;
     IGridDataSource* m_dataSource = nullptr;
@@ -127,6 +153,13 @@ private:
     QPushButton* m_stopBtn = nullptr;
     QTimer* m_algoCommandTimer = nullptr;
     QString m_pendingAlgoAction;
+    QString m_pendingAlgoCommandId;
+    bool m_algoRunningConfirmed = false;
+    quint64 m_connectionGeneration = 0; // advances on every connect and disconnect
+    std::optional<StopOperation> m_stopOperation;
+    QPointer<QMessageBox> m_flattenPrompt;
+    trading::TradingAccountState m_account; // every symbol, latest snapshot plus updates
+    QComboBox* m_onAlgoStopCombo = nullptr;
     int m_algoFillCount = 0;
     double m_algoCumPnl = 0.0;
     QSet<QString> m_countedAlgoFillIds;

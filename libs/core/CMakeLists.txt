@@ -149,6 +149,8 @@ add_library(sentinel_core
     trading/AlgoBacktestAdapter.cpp
     trading/LiveTradingSession.hpp
     trading/LiveTradingSession.cpp
+    trading/TradingSnapshot.hpp
+    trading/TradingSnapshot.cpp
 )
 
 # Find required packages

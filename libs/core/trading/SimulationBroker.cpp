@@ -1,5 +1,7 @@
 #include "SimulationBroker.hpp"
 
+#include <cmath>
+
 #include <algorithm>
 
 namespace trading {
@@ -52,6 +54,34 @@ BrokerSnapshot SimulationBroker::snapshotFor(const std::string& symbol, int64_t 
         snapshot.lastTradePrice = it->second;
     }
     return snapshot;
+}
+
+TradingSnapshot SimulationBroker::accountState() const {
+    TradingSnapshot state;
+    for (const auto& p : m_engine.getAllPositions()) {
+        // A position stores the unrealized PnL of its last fill; mark it at the latest trade.
+        double unrealized = p.unrealizedPnl;
+        if (const auto mark = m_lastTradePriceBySymbol.find(p.symbol); mark != m_lastTradePriceBySymbol.end()) {
+            unrealized = std::abs(p.netQty) > 1e-12 ? (mark->second - p.avgPrice) * p.netQty : 0.0;
+        }
+        state.positions.push_back(PositionUpdate{p.symbol, p.netQty, p.avgPrice, unrealized, p.realizedPnl});
+    }
+    for (const auto& o : m_engine.getAllOpenOrders()) {
+        OrderUpdate u;
+        u.orderId = o.id;
+        u.symbol = o.symbol;
+        u.status = o.status;
+        u.side = o.side;
+        u.qty = o.qty;
+        u.filledQty = o.filledQty;
+        u.remainingQty = o.qty - o.filledQty;
+        u.avgPrice = o.avgPrice;
+        u.limitPrice = o.limitPrice;
+        u.algoId = o.algoId;
+        state.openOrders.push_back(std::move(u));
+    }
+    state.riskOrders = m_engine.getAllAttachedRisk();
+    return state;
 }
 
 BacktestResult SimulationBroker::buildResult(const BacktestConfig& config) const {

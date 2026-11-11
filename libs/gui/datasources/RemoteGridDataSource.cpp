@@ -73,6 +73,7 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     qRegisterMetaType<trading::RiskOrderUpdate>("trading::RiskOrderUpdate");
     qRegisterMetaType<trading::AlgoOrderEvent>("trading::AlgoOrderEvent");
     qRegisterMetaType<trading::PnlSnapshot>("trading::PnlSnapshot");
+    qRegisterMetaType<trading::TradingSnapshot>("trading::TradingSnapshot");
     m_flowClock.start();
     m_flowTimer.setSingleShot(true);
     connect(&m_flowTimer, &QTimer::timeout, this, &RemoteGridDataSource::requestNextFlowPage);
@@ -209,6 +210,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             this, &IGridDataSource::positionUpdated, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::riskOrderUpdated,
             this, &IGridDataSource::riskOrderUpdated, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::tradingSnapshotReceived,
+            this, &IGridDataSource::tradingSnapshotReceived, Qt::QueuedConnection);
 }
 
 namespace {
@@ -659,13 +662,14 @@ void RemoteGridDataSource::onCandleHistoryReceived(const QString &symbol, int64_
 void RemoteGridDataSource::sendAlgoCommand(const std::string& algoId,
                                             const std::string& action,
                                             const std::string& symbol,
-                                            const trading::AlgoParams& params) {
+                                            const trading::AlgoParams& params,
+                                            const std::string& commandId) {
     // --agent-host: the dock's Start/Stop buttons reach the server's algo runner; an agent-run GUI never does.
     if (!AgentHostMode::tradingAllowed()) {
         sLog_Warning("agent-host: algo command dropped: algo=" << algoId << " action=" << action << " symbol=" << symbol);
         return;
     }
-    m_client.sendAlgoCommand(algoId, action, symbol, params);
+    m_client.sendAlgoCommand(algoId, action, symbol, params, commandId);
 }
 
 void RemoteGridDataSource::onAlgoOrderEventReceived(const trading::AlgoOrderEvent& event) {

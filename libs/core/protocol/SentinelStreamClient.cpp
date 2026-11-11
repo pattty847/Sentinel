@@ -993,6 +993,15 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
             handleTradeMessage(msg);
             return;
         }
+        if (typeStr == "trading_snapshot") {
+            if (auto snapshot = trading::parseTradingSnapshotJson(msg)) {
+                emit tradingSnapshotReceived(*snapshot);
+            } else {
+                sLog_Warning("Dropping trading_snapshot: unsupported schema_version or missing arrays version="
+                             << msg.value("schema_version", -1) << " bytes=" << msgStr.size());
+            }
+            return;
+        }
         if (typeStr == "ack") {
             sLog_Data("Server ack: symbol=" << msg.value("symbol", ""));
             if (msg.contains("symbol") && msg["symbol"].is_string())
@@ -1459,9 +1468,11 @@ void SentinelStreamClient::handlePnlSnapshotMessage(const nlohmann::json& msg) {
 void SentinelStreamClient::sendAlgoCommand(const std::string& algoId,
                                             const std::string& action,
                                             const std::string& symbol,
-                                            const trading::AlgoParams& params) {
+                                            const trading::AlgoParams& params,
+                                            const std::string& commandId) {
     nlohmann::json j;
     j["type"] = "algo_command";
+    j["command_id"] = commandId;
     j["algo_id"] = algoId;
     j["action"] = action;
     j["symbol"] = symbol;

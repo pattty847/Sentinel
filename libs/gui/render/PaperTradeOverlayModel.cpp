@@ -74,6 +74,16 @@ void PaperTradeOverlayModel::setSymbol(const QString& symbol) {
     emit openOrdersChanged();
     emit activePositionChanged();
     emitRiskStateChanged();
+    showAccountSymbol();
+}
+
+// Draws the symbol's manual orders, position and TP/SL from the account.
+void PaperTradeOverlayModel::showAccountSymbol() {
+    if (m_symbol.isEmpty() || !m_account.known()) return;
+    const std::string symbol = m_symbol.toStdString();
+    for (const auto& order : m_account.openOrdersFor(symbol)) onOrderUpdated(order);
+    if (const auto position = m_account.positionFor(symbol)) onPositionUpdated(*position);
+    if (const auto risk = m_account.riskFor(symbol)) onRiskOrderUpdated(*risk);
 }
 
 void PaperTradeOverlayModel::setMappingProvider(QObject* provider) {
@@ -195,6 +205,7 @@ void PaperTradeOverlayModel::onTradeReceived(const Trade& trade) {
 }
 
 void PaperTradeOverlayModel::onOrderUpdated(const trading::OrderUpdate& update) {
+    m_account.apply(update);
     if (!m_symbol.isEmpty() && QString::fromStdString(update.symbol) != m_symbol) {
         return;
     }
@@ -231,6 +242,7 @@ void PaperTradeOverlayModel::onOrderUpdated(const trading::OrderUpdate& update) 
 }
 
 void PaperTradeOverlayModel::onPositionUpdated(const trading::PositionUpdate& update) {
+    m_account.apply(update);
     if (!m_symbol.isEmpty() && QString::fromStdString(update.symbol) != m_symbol) {
         return;
     }
@@ -254,6 +266,7 @@ void PaperTradeOverlayModel::onPositionUpdated(const trading::PositionUpdate& up
 }
 
 void PaperTradeOverlayModel::onRiskOrderUpdated(const trading::RiskOrderUpdate& update) {
+    m_account.apply(update);
     if (!m_symbol.isEmpty() && QString::fromStdString(update.symbol) != m_symbol) {
         return;
     }
@@ -265,6 +278,13 @@ void PaperTradeOverlayModel::onRiskOrderUpdated(const trading::RiskOrderUpdate& 
         m_stagedRisk = m_activeRisk;
     }
     emitRiskStateChanged();
+}
+
+void PaperTradeOverlayModel::onTradingSnapshot(const trading::TradingSnapshot& snapshot) {
+    m_account.replace(snapshot);
+    m_orders.clear();
+    emit openOrdersChanged();
+    showAccountSymbol();
 }
 
 bool PaperTradeOverlayModel::canShowRiskControls() const {

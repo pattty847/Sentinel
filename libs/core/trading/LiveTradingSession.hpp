@@ -5,6 +5,7 @@
 #include "AvendellaMM.hpp"
 #include "SimulationBroker.hpp"
 #include "TradeDrivenExecutionModel.hpp"
+#include "TradingSnapshot.hpp"
 
 #include <functional>
 #include <memory>
@@ -30,6 +31,13 @@ public:
     void onTradeTick(const std::string& symbol, double lastTradePrice, int64_t timestampMs);
 
     void setResultCallback(ResultCallback cb);
+
+    // The whole trading state (epoch, positions, open orders, attached risk, running
+    // algos). Not thread-safe against the trading calls: the server makes every call,
+    // and takes every snapshot, on its one I/O thread, so a snapshot is ordered against
+    // every result callback.
+    TradingSnapshot snapshot() const;
+    const std::string& epoch() const { return m_epoch; }
     SimulationBroker& broker() { return m_broker; }
     const SimulationBroker& broker() const { return m_broker; }
 
@@ -47,6 +55,7 @@ private:
                                                                      int64_t timestampMs);
 
     mutable std::mutex m_mutex;
+    const std::string m_epoch;
     SimulationBroker m_broker;
     std::unordered_map<std::string, AlgoFactory> m_factories;
     std::unordered_map<std::string, std::unique_ptr<AlgoBacktestAdapter>> m_runningAlgos;

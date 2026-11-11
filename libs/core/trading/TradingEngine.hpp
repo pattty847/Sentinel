@@ -39,6 +39,9 @@ public:
     std::optional<Order> findOrder(const std::string& orderId) const;
     std::vector<Order> getOpenOrders(const std::string& symbol, const std::string& algoId = "") const;
     std::optional<Position> getPosition(const std::string& symbol) const;
+    std::vector<Order> getAllOpenOrders() const;
+    std::vector<Position> getAllPositions() const;
+    std::vector<RiskOrderUpdate> getAllAttachedRisk() const;
 
 private:
     struct AttachedRiskState {
