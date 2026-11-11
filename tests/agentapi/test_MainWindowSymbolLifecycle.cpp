@@ -115,7 +115,6 @@ public:
     }
     void subscribe(const QString&) override {}
     void unsubscribe(const QString&) override {}
-    void requestFootprintHistory(const QString&, int64_t, int64_t, int) override {}
     void requestTpoHistory(const QString&, int64_t, int, int64_t, int, const QString&) override {}
     void cancelTpoHistory(const QString&, const QString&) override {}
     void setCandleHistoryViewport(const QString& symbol, int64_t tfMs, qint64 start, qint64 end) override {
@@ -1127,22 +1126,21 @@ TEST(MainWindowLayers, FootprintVariantsApplyThroughChartPort) {
     auto* renderer = MainWindowSymbolLifecyclePeer::renderer(window);
     ASSERT_TRUE(renderer);
     const auto validated = AgentApi::validateControl({"POST", "/api/v1/layers", {},
-        R"({"footprintSource":"cells","footprintIntensity":"window","footprintCandle":"full","footprintNumbers":false})"}, std::nullopt);
+        R"({"footprintIntensity":"window","footprintCandle":"full","footprintNumbers":false})"}, std::nullopt);
     ASSERT_EQ(validated.status, 200);
     const auto applied = MainWindowSymbolLifecyclePeer::applyLayers(window, validated.body);
     ASSERT_EQ(applied.status, 200);
-    EXPECT_EQ(renderer->layers()->footprintSource(), "cells");
     EXPECT_EQ(renderer->layers()->footprintIntensity(), "window");
     EXPECT_EQ(renderer->layers()->footprintCandle(), "full");
     EXPECT_FALSE(renderer->layers()->footprintNumbers());
     const auto layers = applied.data["layers"].toObject();
-    EXPECT_EQ(layers["footprintSource"], "cells");
+    EXPECT_FALSE(layers.contains("footprintSource"));
     EXPECT_EQ(layers["footprintIntensity"], "window");
     EXPECT_EQ(layers["footprintNumbers"], false);
     const auto state = AgentApi::stateJson(MainWindowSymbolLifecyclePeer::state(window));
     EXPECT_EQ(state["data"].toObject()["layers"].toObject()["footprintIntensity"], "window");
     const auto reset = AgentApi::validateControl({"POST", "/api/v1/layers", {},
-        R"({"footprintSource":"q16","footprintIntensity":"bar","footprintCandle":"spine","footprintNumbers":true})"}, std::nullopt);
+        R"({"footprintIntensity":"bar","footprintCandle":"spine","footprintNumbers":true})"}, std::nullopt);
     ASSERT_EQ(MainWindowSymbolLifecyclePeer::applyLayers(window, reset.body).status, 200);
 }
 

@@ -4,7 +4,7 @@
  * CPU-side accumulator for Mode A (Session Volume Profile).
  *
  * Threading: ingest on data thread; snapshot / renderer read must take the
- *            internal lock (same pattern as FootprintStreamState).
+ *            internal lock.
  *
  * Value-Area math (Steidlmayer / CME standard):
  *   1. Find POC = bin with highest volume.

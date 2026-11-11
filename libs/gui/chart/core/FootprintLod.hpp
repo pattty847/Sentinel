@@ -82,7 +82,6 @@ struct FootprintCoverage {
 // A shared render-owned history makes candle and cell decisions independent of
 // item sync order, root recreation, and a temporarily hidden candle item.
 struct FootprintPresentation {
-    bool cellsSource = false;
     bool enabled = false, numbers = true, spineCandles = true, windowIntensity = false;
     double dustNotional = 2500;
     FootprintStage previous = FootprintStage::Hidden;
@@ -91,7 +90,7 @@ struct FootprintPresentation {
         previous = raster.valid && raster.dpr > 0
             ? footprintLod(raster.colPxF / raster.dpr, raster.rowPxF / raster.dpr, previous)
             : FootprintStage::Hidden;
-        if (!enabled || !cellsSource) return FootprintStage::Hidden;
+        if (!enabled) return FootprintStage::Hidden;
         return !numbers && previous == FootprintStage::Numbers ? FootprintStage::Cells : previous;
     }
     template<class Raster> bool spine(const Raster& raster) {

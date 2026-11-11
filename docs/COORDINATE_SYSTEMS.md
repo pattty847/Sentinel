@@ -7,7 +7,7 @@ This document defines the coordinate spaces used by chart rendering and the cont
 | Space | Axes | Meaning | Produced / owned by |
 |-------|------|---------|---------------------|
 | **World** | `time_ms`, `price` | Market truth; independent of viewport and texture layout | `TimeAxisMapping` inputs and helpers |
-| **Grid / texture** | `column`, `row` | Ring-buffer and texture indexing (`gridWidth` × `gridHeight`) | Stream state and upload paths (`FootprintStreamState`, `TpoStreamState`) |
+| **Grid / texture** | `column`, `row` | Ring-buffer and texture indexing (`gridWidth` × `gridHeight`) | Stream state and upload paths (`TpoStreamState`) |
 | **Screen** | `x`, `y` (pixels) | Final rendered coordinates in the QQuickItem draw area | Per-frame `drawRect` and `srcRect` mapping |
 
 ## 2. Single source of truth for world↔screen
@@ -31,10 +31,7 @@ The heatmap (`HeatmapTileNode`, S6) is not a ring texture: it draws the span sou
 for the viewport-only `TimeAxisMapping` (columns anchored to epoch multiples of the
 timeframe, rows at the drawn tick). The legacy ring heatmap went in S8a.
 
-**Footprint (`FootprintOverlayRenderer`)**  
-- Contract: ring-texture sampling over the footprint delta grid.  
-- May share `srcRect` when dimensions match the heatmap grid; computes its own wrapped time offset for ring alignment.  
-- Ring-coupled behavior is intentional; do not treat as session-timeline.
+**Footprint** is the geometry overlay `FootprintCellsLayer` (3.2): it bins flow bars onto the frame raster and owns no texture grid.
 
 **TPO (`TpoOverlayRenderer`)** is a geometry overlay: see 3.2.
 

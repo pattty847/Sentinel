@@ -46,7 +46,7 @@ TEST(LayerRegistry, DispatchPreservesRegistrationOrder) {
     registry.afterRendering();
     EXPECT_EQ(calls, (Calls{"sync:b", "sync:a", "b", "a", "after:b", "after:a"}));
 }
-TEST(ChartLayerSet, RegistersHeatmapFootprintVpTpoLadderText) {
+TEST(ChartLayerSet, RegistersHeatmapFootprintCellsVpTpoLadderText) {
     chart::ChartLayers layers;
     ASSERT_TRUE(layers.registry.precedes("heatmap", "text"));
     EXPECT_TRUE(layers.registry.precedes("TPO", "ladder"));
@@ -55,8 +55,8 @@ TEST(ChartLayerSet, RegistersHeatmapFootprintVpTpoLadderText) {
     layers.heatmap.initialize();
     QSGNode root;
     layers.registry.onRootRebuilt(&root);
-    EXPECT_EQ(root.childCount(), 7);
-    EXPECT_EQ(root.childAtIndex(5)->type(), QSGNode::OpacityNodeType) << "the ladder's gate";
+    EXPECT_EQ(root.childCount(), 6);
+    EXPECT_EQ(root.childAtIndex(4)->type(), QSGNode::OpacityNodeType) << "the ladder's gate";
     EXPECT_EQ(root.firstChild()->type(), QSGNode::OpacityNodeType);
     EXPECT_EQ(root.firstChild()->firstChild()->type(), QSGNode::RenderNodeType);
 }
@@ -94,18 +94,16 @@ struct Mailbox {
     Calls& calls;
     std::string name;
     void clearPending() { calls.push_back("clear " + name); }
-    void requestNeutralReset() { calls.push_back("neutral " + name); }
 };
-TEST(TradeOverlayFeeds, ClearQueuesProcessorBeforeMailboxesAndNeutralReset) {
+TEST(TradeOverlayFeeds, ClearQueuesProcessorBeforeMailbox) {
     Calls calls;
     auto processor = std::make_unique<Processor>(calls);
-    Mailbox footprint{calls, "footprint"}, vp{calls, "VP"};
-    chart::clearTradeOverlayFeeds(processor, footprint, vp,
-        [&](Processor*) { calls.push_back("queue clear"); });
-    EXPECT_EQ(calls, (Calls{"queue clear", "clear footprint", "clear VP", "neutral footprint"}));
+    Mailbox vp{calls, "VP"};
+    chart::clearTradeOverlayFeeds(processor, vp, [&](Processor*) { calls.push_back("queue clear"); });
+    EXPECT_EQ(calls, (Calls{"queue clear", "clear VP"}));
     processor.reset(); calls.clear();
-    chart::clearTradeOverlayFeeds(processor, footprint, vp, [&](Processor*) { ADD_FAILURE(); });
-    EXPECT_EQ(calls, (Calls{"clear footprint", "clear VP", "neutral footprint"}));
+    chart::clearTradeOverlayFeeds(processor, vp, [&](Processor*) { ADD_FAILURE(); });
+    EXPECT_EQ(calls, (Calls{"clear VP"}));
 }
 } // namespace
 
@@ -274,7 +272,7 @@ TEST(FootprintCells, WindowNormalisationAccountsForEachBarsScale) {
     ASSERT_TRUE(chart::FlowFeed::bin(*out, series, footprintFrame()));
     EXPECT_EQ(out->bars[0].maxSideVol, 440);
     chart::FootprintCellsLayer layer;
-    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    layer.presentation().enabled = true;
     layer.presentation().dustNotional = 0;
     layer.mailbox().back() = *out; layer.mailbox().post();
     std::unique_ptr<QSGNode> root(layer.createContainer());
@@ -646,7 +644,7 @@ TEST(FootprintBands, BarCapIsTheWidestSupportedView) {
 }
 TEST(FootprintBands, ThinColumnsTileWithoutOverlap) {
     chart::FootprintCellsLayer layer;
-    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    layer.presentation().enabled = true;
     layer.presentation().dustNotional = 0;
     auto series = ladderSeries(1);
     series.bars[1000] = series.bars[0]; series.bars[1000].bar.startMs = 1000;
@@ -667,7 +665,7 @@ TEST(FootprintBands, ThinColumnsTileWithoutOverlap) {
 }
 TEST(FootprintBands, StripDrawsOneTintedCellPerBandWithoutCardOrSpine) {
     chart::FootprintCellsLayer layer;
-    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    layer.presentation().enabled = true;
     layer.presentation().dustNotional = 0;
     auto series = ladderSeries(6);
     series.bars[0].bar.rows[0] = {0, 500, 1}; // bid-dominant lowest band
@@ -703,7 +701,7 @@ struct CellsRig {
     chart::ChartFrame frame = footprintChartFrame();
     using Rows = decltype(FlowSeriesBuffer::Record{}.bar.rows);
     explicit CellsRig(Rows rows, double dust = 2500) {
-        layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+        layer.presentation().enabled = true;
         layer.presentation().dustNotional = dust;
         auto series = footprintSeries();
         series.bars[0].bar.rows = std::move(rows);
@@ -770,7 +768,7 @@ TEST(FootprintAggressorColours, DustDrawsItsFillAndDimsItsNumber) {
 }
 TEST(FootprintBands, StripBuyDominantBandIsGreen) {
     chart::FootprintCellsLayer layer;
-    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    layer.presentation().enabled = true;
     layer.presentation().dustNotional = 0;
     auto series = ladderSeries(6);
     series.bars[0].bar.rows[0] = {0, 1, 500};
@@ -791,8 +789,8 @@ TEST(FootprintCells, RegistrySlotAndNoData) {
     layers.heatmap.initialize();
     QSGNode root;
     layers.registry.onRootRebuilt(&root);
-    EXPECT_EQ(root.childAtIndex(2)->type(), QSGNode::OpacityNodeType);
-    EXPECT_EQ(root.childAtIndex(2)->firstChild()->type(), QSGNode::GeometryNodeType);
+    EXPECT_EQ(root.childAtIndex(1)->type(), QSGNode::OpacityNodeType);
+    EXPECT_EQ(root.childAtIndex(1)->firstChild()->type(), QSGNode::GeometryNodeType);
     auto frame = footprintChartFrame();
     layers.footprintCells.presentation().enabled = true;
     layers.footprintCells.sync(frame);
@@ -801,7 +799,7 @@ TEST(FootprintCells, RegistrySlotAndNoData) {
 }
 TEST(FootprintCells, TwoFramesAfterDataAndChangedSnapshotAllocateNothing) {
     chart::FootprintCellsLayer layer;
-    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    layer.presentation().enabled = true;
     auto frame = footprintChartFrame();
     ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), footprintFrame()));
     layer.mailbox().post();
@@ -835,28 +833,36 @@ TEST(FootprintCells, SettingsPersistAndRejectInvalidVariantsAtomically) {
     QSettings settings(dir.filePath("chart.ini"), QSettings::IniFormat);
     heatmap::HeatmapSettingsStore store(settings);
     heatmap::HeatmapChartSettings value;
-    EXPECT_EQ(value.footprintSource, "q16");
-    EXPECT_TRUE(heatmap::applySettingsPatch(value, {{"footprintSource", "cells"}, {"footprintIntensity", "window"},
+    EXPECT_TRUE(heatmap::applySettingsPatch(value, {{"footprintIntensity", "window"},
         {"footprintCandle", "full"}, {"footprintNumbers", false}}).isEmpty());
     store.save("test", value);
     auto loaded = store.load("test", ClientHeatmapConfig{});
-    EXPECT_EQ(loaded.footprintSource, "cells");
     EXPECT_EQ(loaded.footprintIntensity, "window");
     EXPECT_EQ(loaded.footprintCandle, "full"); EXPECT_FALSE(loaded.footprintNumbers);
     EXPECT_FALSE(heatmap::applySettingsPatch(loaded, {{"footprintIntensity", "bad"}, {"footprintNumbers", true}}).isEmpty());
-    EXPECT_EQ(loaded.footprintSource, "cells");
     EXPECT_EQ(loaded.footprintIntensity, "window"); EXPECT_FALSE(loaded.footprintNumbers);
     chart::LayerVisibility visibility;
-    EXPECT_EQ(visibility.footprintSource(), "q16");
-    EXPECT_TRUE(visibility.setProperty("footprintSource", "cells"));
-    EXPECT_EQ(visibility.footprintSource(), "cells");
-    EXPECT_FALSE(heatmap::applySettingsPatch(loaded, {{"footprintSource", "unknown"}}).isEmpty());
-    EXPECT_EQ(loaded.footprintSource, "cells");
     EXPECT_TRUE(visibility.setProperty("footprintIntensity", "window"));
     EXPECT_TRUE(visibility.setProperty("footprintNumbers", false));
     EXPECT_TRUE(visibility.setProperty("footprintCandle", "full"));
     EXPECT_EQ(visibility.footprintIntensity(), "window");
     EXPECT_FALSE(visibility.footprintNumbers()); EXPECT_EQ(visibility.footprintCandle(), "full");
+}
+TEST(FootprintCells, FootprintHasNoSourceSettingAndStaleSavedKeyIsIgnored) {
+    heatmap::HeatmapChartSettings value;
+    const auto error = heatmap::applySettingsPatch(value, {{"footprintSource", "cells"}});
+    EXPECT_EQ(error, "Unknown heatmap setting: footprintSource");
+    EXPECT_FALSE(heatmap::settingsJson(value).contains("footprintSource"));
+    chart::LayerVisibility visibility;
+    EXPECT_LT(visibility.metaObject()->indexOfProperty("footprintSource"), 0);
+    QTemporaryDir dir;
+    QSettings settings(dir.filePath("chart.ini"), QSettings::IniFormat);
+    settings.setValue("heatmap/test/footprintSource", "q16");
+    settings.setValue("heatmap/test/footprintIntensity", "window");
+    heatmap::HeatmapSettingsStore store(settings);
+    const auto loaded = store.load("test", ClientHeatmapConfig{});
+    EXPECT_EQ(loaded.footprintIntensity, "window");
+    EXPECT_EQ(loaded.footprintCandle, heatmap::HeatmapChartSettings{}.footprintCandle);
 }
 } // namespace
 
@@ -874,7 +880,7 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     const double widest = chart::kFlowMagnitudeGlyphs * atlas.glyph(QChar('8')).advance * chart::kFootprintTextPx / atlas.fontPx();
     EXPECT_LE(widest, (chart::kFootprintNumbersFitColumn - chart::kFootprintCandleSpace) / 2 - 3);
     chart::FootprintCellsLayer layer;
-    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    layer.presentation().enabled = true;
     auto frame = footprintChartFrame();
     ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), footprintFrame()));
     layer.mailbox().post();
@@ -935,9 +941,11 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     EXPECT_TRUE(layer.drawing());
 }
 
-TEST(FootprintSource, RegistryDefaultsToQ16AndSwitchesExclusively) {
+TEST(FootprintSource, CellsAreTheOnlyFootprintLayerAndNeedNoSourceSetting) {
     chart::ChartLayers layers;
-    EXPECT_TRUE(layers.registry.precedes("footprint", "footprintCells"));
+    EXPECT_FALSE(layers.registry.precedes("footprint", "footprintCells"));
+    EXPECT_FALSE(layers.registry.precedes("footprint", "VP"));
+    EXPECT_TRUE(layers.registry.precedes("heatmap", "footprintCells"));
     EXPECT_TRUE(layers.registry.precedes("footprintCells", "VP"));
     auto frame = footprintChartFrame();
     auto& look = layers.footprintCells.presentation();
@@ -945,25 +953,18 @@ TEST(FootprintSource, RegistryDefaultsToQ16AndSwitchesExclusively) {
     ASSERT_TRUE(chart::FlowFeed::bin(layers.footprintCells.mailbox().back(), footprintSeries(), footprintFrame()));
     layers.footprintCells.mailbox().post();
     layers.footprintCells.sync(frame);
-    EXPECT_TRUE(layers.footprint.selected(frame));
-    EXPECT_FALSE(layers.footprintCells.drawing()) << "q16 is the default even when cells have data";
-    EXPECT_FALSE(look.spine(frame.context.raster));
-    look.cellsSource = true;
-    layers.footprintCells.sync(frame);
-    EXPECT_FALSE(layers.footprint.selected(frame));
-    EXPECT_TRUE(layers.footprintCells.drawing());
+    EXPECT_TRUE(layers.footprintCells.drawing()) << "enabled footprint draws cells with no source choice";
     EXPECT_TRUE(look.spineBar(frame.context.raster, 0));
     EXPECT_FALSE(look.spineBar(frame.context.raster, 1000));
     frame.context.overlays.footprint = false;
     layers.footprintCells.sync(frame);
-    EXPECT_FALSE(layers.footprint.selected(frame));
     EXPECT_FALSE(layers.footprintCells.drawing());
 }
 
 TEST(FootprintMotion, OverscanRetainsVisibleRowsAcrossPanAndFollowLiveWithoutAllocation) {
     chart::FootprintCellsLayer layer;
     layer.presentation().windowIntensity = true;
-    layer.presentation().enabled = true; layer.presentation().cellsSource = true;
+    layer.presentation().enabled = true;
     auto series = footprintSeries();
     for (int i : {-2, -1, 1, 2, 3}) {
         series.bars[i * 1000] = series.bars[0]; series.bars[i * 1000].bar.startMs = i * 1000;
@@ -1014,13 +1015,13 @@ TEST(CvdLayer, LazyContainerKeepsDefaultTreeAndInsertsBeforeText) {
     layers.heatmap.initialize();
     QSGNode root;
     layers.registry.onRootRebuilt(&root);
-    ASSERT_EQ(root.childCount(), 7);
+    ASSERT_EQ(root.childCount(), 6);
     auto* textRoot = root.lastChild();
     ChartTextRenderer text; ChartTextAtlas atlas;
     chart::LayerNodeContext context{nullptr, &root, text, atlas, false};
     auto frame = footprintChartFrame();
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    EXPECT_EQ(root.childCount(), 7); EXPECT_EQ(root.lastChild(), textRoot);
+    EXPECT_EQ(root.childCount(), 6); EXPECT_EQ(root.lastChild(), textRoot);
     layers.cvd.presentation().stripPx = 50;
     EXPECT_FALSE(layers.cvd.presentation().drawable(1000));
     chart::CvdFeed::build(layers.cvd.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
@@ -1028,13 +1029,13 @@ TEST(CvdLayer, LazyContainerKeepsDefaultTreeAndInsertsBeforeText) {
     EXPECT_TRUE(layers.cvd.presentation().drawable(1000));
     EXPECT_FALSE(layers.cvd.presentation().drawable(60000));
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    ASSERT_EQ(root.childCount(), 8); EXPECT_EQ(root.lastChild(), textRoot);
-    EXPECT_EQ(root.childAtIndex(6)->type(), QSGNode::OpacityNodeType);
+    ASSERT_EQ(root.childCount(), 7); EXPECT_EQ(root.lastChild(), textRoot);
+    EXPECT_EQ(root.childAtIndex(5)->type(), QSGNode::OpacityNodeType);
     EXPECT_TRUE(layers.cvd.drawing());
     layers.cvd.presentation().stripPx = 0;
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
     EXPECT_FALSE(layers.cvd.drawing());
-    EXPECT_EQ(static_cast<QSGOpacityNode*>(root.childAtIndex(6))->opacity(), 0);
+    EXPECT_EQ(static_cast<QSGOpacityNode*>(root.childAtIndex(5))->opacity(), 0);
 }
 TEST(CvdLayer, LineAreaBoundsAndFreshFramesAllocateNothing) {
     chart::CvdLayer layer;
@@ -1238,22 +1239,22 @@ TEST(FlowFooter, DefaultNodesAreIdenticalAndEnabledNodesAreLazyBeforeText) {
     ChartTextRenderer text; ChartTextAtlas atlas;
     chart::LayerNodeContext context{nullptr, &root, text, atlas, false};
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    EXPECT_EQ(root.childCount(), 7); EXPECT_EQ(layers.flowFooter.createContainer(), nullptr);
+    EXPECT_EQ(root.childCount(), 6); EXPECT_EQ(layers.flowFooter.createContainer(), nullptr);
     layers.cvd.presentation().flowFooter = true;
     chart::CvdFeed::build(layers.cvd.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
     layers.cvd.mailbox().post(); layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    EXPECT_EQ(root.childCount(), 8); EXPECT_EQ(root.lastChild(), textRoot);
+    EXPECT_EQ(root.childCount(), 7); EXPECT_EQ(root.lastChild(), textRoot);
     EXPECT_TRUE(layers.flowFooter.drawing()); EXPECT_FALSE(layers.cvd.drawing());
     layers.cvd.presentation().stripPx = 60;
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    EXPECT_EQ(root.childCount(), 9);
+    EXPECT_EQ(root.childCount(), 8);
     EXPECT_EQ(layers.flowFooter.bounds().bottom(), layers.cvd.strip().top());
     EXPECT_EQ(layers.flowFooter.bounds().top(), 85);
     EXPECT_EQ(layers.cvd.presentation().bottomInset(1000, 200), 115);
     layers.cvd.presentation().flowFooter = false;
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
     EXPECT_FALSE(layers.flowFooter.drawing());
-    EXPECT_EQ(static_cast<QSGOpacityNode*>(root.childAtIndex(7))->opacity(), 0);
+    EXPECT_EQ(static_cast<QSGOpacityNode*>(root.childAtIndex(6))->opacity(), 0);
 }
 
 TEST(FlowFooter, FreshDataPanAndLabelsAllocateNothingAfterWarmup) {
@@ -1309,7 +1310,7 @@ TEST(FlowFooter, FreshDataPanAndLabelsAllocateNothingAfterWarmup) {
     EXPECT_FALSE(footer.drawing()); EXPECT_EQ(footer.columnCount(), 0); EXPECT_TRUE(footer.glyphs().empty());
 
     chart::FootprintCellsLayer cells;
-    cells.presentation().enabled = true; cells.presentation().cellsSource = true; cells.presentation().dustNotional = 0;
+    cells.presentation().enabled = true; cells.presentation().dustNotional = 0;
     ASSERT_TRUE(chart::FlowFeed::bin(cells.mailbox().back(), footprintSeries(), footprintFrame()));
     cells.mailbox().post(); cells.sync(frame);
     std::unique_ptr<QSGNode> cellsRoot(cells.createContainer());

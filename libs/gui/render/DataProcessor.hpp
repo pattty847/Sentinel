@@ -1,4 +1,4 @@
-// Dedicated QThread processor for the trade overlays (footprint, TPO, volume profile).
+// Dedicated QThread processor for the trade overlays (TPO, volume profile).
 #pragma once
 #include "TradeOverlayMapping.hpp"
 #include <QObject>
@@ -8,7 +8,6 @@
 #include <vector>
 #include "../datasources/IGridDataSource.hpp"
 
-class FootprintStreamState;
 class TpoStreamState;
 #include "VolumeProfileState.hpp"   // for VolumeProfileState::Snapshot in signal
 struct VolumeProfileSlice;
@@ -22,7 +21,6 @@ public:
 
 public slots:
     void setActiveSymbol(const QString& symbol);
-    void onFootprintSliceReceived(const FootprintSlice& slice);
     void onTpoSliceReceived(const TpoSlice& slice);
     // Selected TPO bracket and session. Slices for any other selection (stale
     // history replies, live slices from before the server saw the selection)
@@ -39,7 +37,6 @@ public:
     bool isManualTimeframeSet() const;
 
 signals:
-    void footprintColumnReady(int x, int gridWidth, int gridHeight, QByteArray columnQ16, TradeOverlayGrid grid);
     void tpoColumnReady(int x,
                         int gridWidth,
                         int gridHeight,
@@ -57,9 +54,6 @@ private:
     std::atomic<bool> m_shuttingDown{false};
     QString m_activeSymbol;
 
-    int m_footprintGridWidth = 5120;
-    int m_footprintGridHeight = 2048;
-    std::unique_ptr<FootprintStreamState> m_footprintStream;
     int m_tpoGridWidth = 5120;
     int m_tpoGridHeight = 2048;
     uint64_t m_tpoGridGeneration = 0;

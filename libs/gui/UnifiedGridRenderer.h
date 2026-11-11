@@ -40,7 +40,6 @@
 #include "chart/shell/ChartDebugQml.hpp"
 #include "chart/shell/ChartLookSettings.hpp"
 #include "chart/feeds/TradeOverlayFeeds.hpp"
-#include "render/FootprintOverlayRenderer.hpp"
 #include "chart/feeds/TradeBubbleFeed.hpp"
 #include "chart/shell/IChartCameraSource.hpp"
 #include "render/TpoOverlayRenderer.hpp"

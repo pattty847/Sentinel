@@ -178,7 +178,7 @@ TEST(FootprintLod, SpineOnlyForCoveredBarAndMatchingFrame) {
         double drawnMinPrice = 95, drawnMaxPrice = 105;
     } raster;
     chart::FootprintPresentation look;
-    look.enabled = true; look.cellsSource = true;
+    look.enabled = true;
     look.coverage.tick = 1; look.coverage.timeframeMs = 1000;
     EXPECT_FALSE(look.spine(raster));
     look.coverage.barCount = 1; look.coverage.bars[0] = {0,1000,99,103};

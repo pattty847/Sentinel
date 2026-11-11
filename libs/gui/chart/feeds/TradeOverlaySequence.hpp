@@ -24,11 +24,9 @@ void teardownTradeOverlayFeeds(Processor& processor, Thread& thread, Stop stop, 
     thread.reset();
 }
 
-template <class Processor, class Footprint, class Vp, class QueueClear>
-void clearTradeOverlayFeeds(Processor& processor, Footprint& footprint, Vp& vp, QueueClear queueClear) {
+template <class Processor, class Vp, class QueueClear>
+void clearTradeOverlayFeeds(Processor& processor, Vp& vp, QueueClear queueClear) {
     if (processor) queueClear(processor.get());
-    footprint.clearPending();
     vp.clearPending();
-    footprint.requestNeutralReset();
 }
 } // namespace chart

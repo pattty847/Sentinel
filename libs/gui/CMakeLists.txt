@@ -106,12 +106,8 @@ set(GRID_CORE_SOURCES
     # New modular render architecture (V2)
     render/DataProcessor.hpp
     render/DataProcessor.cpp
-    render/FootprintStreamState.hpp
-    render/FootprintStreamState.cpp
     render/TpoStreamState.hpp
     render/TpoStreamState.cpp
-    render/FootprintOverlayRenderer.hpp
-    render/FootprintOverlayRenderer.cpp
     render/TpoOverlayRenderer.hpp
     render/TpoOverlayRenderer.cpp
     render/TpoProfileModel.hpp
@@ -146,10 +142,6 @@ set(GRID_CORE_SOURCES
     render/MsdfAtlas.cpp
     render/MsdfGlyphNode.hpp
     render/MsdfGlyphNode.cpp
-    render/HeatmapColumnTexture.hpp
-    render/HeatmapColumnTexture.cpp
-    render/FootprintIntensityNode.hpp
-    render/FootprintIntensityNode.cpp
     render/AlgoOverlayRenderer.hpp
     render/AlgoOverlayRenderer.cpp
     render/PaperTradeOverlayRenderer.hpp
@@ -444,8 +436,6 @@ qt_add_shaders(sentinel_gui_lib heatmap_shaders
     FILES
         render/shaders/heatmap_msdf.vert
         render/shaders/heatmap_msdf.frag
-        render/shaders/footprint_intensity.vert
-        render/shaders/footprint_intensity.frag
         render/shaders/trade_bubble.vert
         render/shaders/trade_bubble.frag
 )

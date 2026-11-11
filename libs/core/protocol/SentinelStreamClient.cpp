@@ -16,13 +16,6 @@ constexpr qint64 kSchemaLogThrottleMs = 2000;
 enum class DropReason : int {
     ServerSchema = 0,
     CandleSchema,
-    FootprintSchema,
-    FootprintGridHeight,
-    FootprintPayloadEstimate,
-    FootprintPayloadDecoded,
-    FootprintBase64Decode,
-    FootprintSliceMeta,
-    FootprintPayloadShape,
     TpoSchema,
     TpoGridHeight,
     TpoPayloadEstimate,
@@ -188,7 +181,6 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<FlowBatchPtr>("SentinelStreamClient::FlowBatchPtr");
     qRegisterMetaType<TradeHistoryPtr>("SentinelStreamClient::TradeHistoryPtr");
     qRegisterMetaType<FlowFailure>("SentinelStreamClient::FlowFailure");
-    qRegisterMetaType<FootprintSlice>("FootprintSlice");
     qRegisterMetaType<TpoSlice>("TpoSlice");
     qRegisterMetaType<CandleBar>("CandleBar");
     qRegisterMetaType<QVector<CandleBar>>("QVector<CandleBar>");
@@ -670,34 +662,6 @@ void SentinelStreamClient::unsubscribeFlowLive(quint64 sub) {
     });
 }
 
-void SentinelStreamClient::requestFootprintHistory(const std::string& symbol,
-                                                   int64_t timeframeMs,
-                                                   int64_t endTimeMs,
-                                                   int count) {
-    if (symbol.empty() || timeframeMs <= 0 || count <= 0) {
-        sLog_Warning("Footprint history request not sent: invalid args symbol=" << symbol
-                     << " tfMs=" << timeframeMs << " count=" << count);
-        return;
-    }
-    sLog_Data("Footprint history request: symbol=" << symbol << " tfMs=" << timeframeMs
-              << " end=" << endTimeMs << " count=" << count);
-    nlohmann::json msg = {
-        {"type", "footprint_history_request"},
-        {"symbol", symbol},
-        {"timeframe_ms", timeframeMs},
-        {"end_time", endTimeMs},
-        {"count", count}
-    };
-
-    std::string str = msg.dump();
-    net::post(m_strand, [this, payload = std::move(str)]() mutable {
-        m_writeQueue.push_back(std::move(payload));
-        if (m_isConnected && m_writeQueue.size() == 1) {
-            doWrite();
-        }
-    });
-}
-
 void SentinelStreamClient::requestTpoHistory(const std::string& symbol,
                                              int64_t timeframeMs,
                                              int sessionType,
@@ -920,6 +884,12 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
     try {
         const auto msg = nlohmann::json::parse(msgStr);
         const std::string typeStr = msg.value("type", "unknown");
+        if (typeStr.rfind("footprint_", 0) == 0) {
+            // The footprint draws from flow bars. The parse already happened; touch no payload field.
+            if (m_footprintFramesIgnored++ == 0)
+                sLog_Debug("Ignoring footprint frames: the GUI footprint is built from flow bars");
+            return;
+        }
         const auto type = protocol::fromString(typeStr);
 
         switch (type) {
@@ -952,15 +922,6 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
             case protocol::MessageType::CandleBarUpdate:
             case protocol::MessageType::CandleBarClosed:
                 handleCandleBarMessage(type, msg);
-                return;
-            case protocol::MessageType::FootprintConfig:
-                handleFootprintConfigMessage(msg);
-                return;
-            case protocol::MessageType::FootprintSlice:
-                handleFootprintSliceMessage(msg);
-                return;
-            case protocol::MessageType::FootprintHistoryChunk:
-                handleFootprintHistoryChunkMessage(msg);
                 return;
             case protocol::MessageType::TpoSlice:
                 handleTpoSliceMessage(msg);
@@ -1162,185 +1123,6 @@ void SentinelStreamClient::handleCandleBarMessage(protocol::MessageType type, co
         emit candleBarClosedReceived(symbolQ, timeframeMs, bucketStartMs, seq, bar, generation);
     } else {
         emit candleBarUpdateReceived(symbolQ, timeframeMs, bucketStartMs, seq, bar, generation);
-    }
-}
-
-void SentinelStreamClient::handleFootprintConfigMessage(const nlohmann::json& msg) {
-    if (!validateFamilySchema(msg,
-                              "footprint",
-                              protocol::SentinelProtocol::kFootprintSchemaVersion,
-                              DropReason::FootprintSchema)) {
-        return;
-    }
-}
-
-void SentinelStreamClient::handleFootprintSliceMessage(const nlohmann::json& msg) {
-    if (!validateFamilySchema(msg,
-                              "footprint",
-                              protocol::SentinelProtocol::kFootprintSchemaVersion,
-                              DropReason::FootprintSchema)) {
-        return;
-    }
-    const std::string symbol = msg.value("symbol", "");
-    if (symbol.empty()) {
-        return;
-    }
-    const int64_t startMs = msg.value("time_start", static_cast<int64_t>(0));
-    const int64_t endMs = msg.value("time_end", static_cast<int64_t>(0));
-    const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
-    const int gridWidth = msg.value("grid_width", 0);
-    const int gridHeight = msg.value("grid_height", 0);
-    const double minPrice = msg.value("min_price", 0.0);
-    const double maxPrice = msg.value("max_price", 0.0);
-    const double tickSize = msg.value("tick_size", 0.0);
-    const double quantScale = msg.value("quant_scale", 1.0);
-    const std::string format = msg.value("format", "q16_delta");
-    const std::string encoded = msg.value("delta_levels_q16", "");
-
-    if (!validateGridHeight("footprint_slice", gridHeight, DropReason::FootprintGridHeight)) {
-        return;
-    }
-    if (startMs <= 0 || endMs <= startMs || timeframeMs <= 0 ||
-        tickSize <= 0.0 || maxPrice <= minPrice || quantScale <= 0.0) {
-        logDroppedMessage(DropReason::FootprintSliceMeta,
-                          QString("Dropping footprint_slice: invalid metadata (start=%1 end=%2 tf=%3 tick=%4 range=[%5,%6] quant=%7)")
-                              .arg(startMs)
-                              .arg(endMs)
-                              .arg(timeframeMs)
-                              .arg(tickSize, 0, 'g', 8)
-                              .arg(minPrice, 0, 'g', 8)
-                              .arg(maxPrice, 0, 'g', 8)
-                              .arg(quantScale, 0, 'g', 8));
-        return;
-    }
-
-    QByteArray deltaLevelsQ16;
-    if (!decodeBase64WithGuardrails("footprint_slice",
-                                    "delta_levels_q16",
-                                    encoded,
-                                    DropReason::FootprintPayloadEstimate,
-                                    DropReason::FootprintBase64Decode,
-                                    DropReason::FootprintPayloadDecoded,
-                                    deltaLevelsQ16)) {
-        return;
-    }
-    const int expectedBytes = gridHeight * static_cast<int>(sizeof(int16_t));
-    if (deltaLevelsQ16.size() != expectedBytes) {
-        logDroppedMessage(DropReason::FootprintPayloadShape,
-                          QString("Dropping footprint_slice: delta_levels_q16 bytes=%1 expected=%2")
-                              .arg(deltaLevelsQ16.size())
-                              .arg(expectedBytes));
-        return;
-    }
-
-    FootprintSlice slice;
-    slice.symbol = QString::fromStdString(symbol);
-    slice.bucketStartMs = startMs;
-    slice.bucketEndMs = endMs;
-    slice.timeframeMs = timeframeMs;
-    slice.gridWidth = gridWidth;
-    slice.gridHeight = gridHeight;
-    slice.minPrice = minPrice;
-    slice.maxPrice = maxPrice;
-    slice.tickSize = tickSize;
-    slice.quantScale = quantScale;
-    slice.format = QString::fromStdString(format);
-    slice.deltaLevelsQ16 = std::move(deltaLevelsQ16);
-    sLog_Probe("footprint.recv",
-               "symbol=" << slice.symbol
-               << " t=[" << slice.bucketStartMs << ".." << slice.bucketEndMs << "]"
-               << " tfMs=" << slice.timeframeMs
-               << " grid=" << slice.gridWidth << "x" << slice.gridHeight
-               << " bytes=" << slice.deltaLevelsQ16.size());
-    emit footprintSliceReceived(slice);
-}
-
-void SentinelStreamClient::handleFootprintHistoryChunkMessage(const nlohmann::json& msg) {
-    if (!validateFamilySchema(msg,
-                              "footprint",
-                              protocol::SentinelProtocol::kFootprintSchemaVersion,
-                              DropReason::FootprintSchema)) {
-        return;
-    }
-    const std::string symbol = msg.value("symbol", "");
-    if (symbol.empty()) {
-        return;
-    }
-    const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
-    const int gridWidth = msg.value("grid_width", 0);
-    const int gridHeight = msg.value("grid_height", 0);
-    const std::string encoding = msg.value("encoding", "base64");
-    const auto columns = msg.value("columns", nlohmann::json::array());
-
-    if (!validateGridHeight("footprint_history_chunk", gridHeight, DropReason::FootprintGridHeight)) {
-        return;
-    }
-
-    if (!columns.is_array()) {
-        sLog_Warning("Dropping footprint_history_chunk: columns is not an array, symbol=" << symbol
-                     << " tfMs=" << timeframeMs);
-        return;
-    }
-
-    int emitted = 0;
-    int skipped = 0;
-    for (const auto& item : columns) {
-        const int64_t startMs = item.value("time_start", static_cast<int64_t>(0));
-        const int64_t endMs = item.value("time_end", static_cast<int64_t>(0));
-        const double minPrice = item.value("min_price", 0.0);
-        const double maxPrice = item.value("max_price", 0.0);
-        const double tickSize = item.value("tick_size", 0.0);
-        const double quantScale = item.value("quant_scale", 1.0);
-        const std::string format = item.value("format", "q16_delta");
-        const std::string encoded = item.value("delta_levels_q16", "");
-
-        if (startMs <= 0 || endMs <= startMs || timeframeMs <= 0 ||
-            tickSize <= 0.0 || maxPrice <= minPrice || quantScale <= 0.0) {
-            ++skipped;
-            continue;
-        }
-
-        QByteArray deltaLevelsQ16;
-        if (!encoded.empty() && encoding == "base64") {
-            if (!decodeBase64WithGuardrails("footprint_history_chunk",
-                                            "delta_levels_q16",
-                                            encoded,
-                                            DropReason::FootprintPayloadEstimate,
-                                            DropReason::FootprintBase64Decode,
-                                            DropReason::FootprintPayloadDecoded,
-                                            deltaLevelsQ16)) {
-                return;
-            }
-        }
-        const int expectedBytes = gridHeight * static_cast<int>(sizeof(int16_t));
-        if (deltaLevelsQ16.size() != expectedBytes) {
-            ++skipped;
-            continue;
-        }
-
-        FootprintSlice slice;
-        slice.symbol = QString::fromStdString(symbol);
-        slice.bucketStartMs = startMs;
-        slice.bucketEndMs = endMs;
-        slice.timeframeMs = timeframeMs;
-        slice.gridWidth = gridWidth;
-        slice.gridHeight = gridHeight;
-        slice.minPrice = minPrice;
-        slice.maxPrice = maxPrice;
-        slice.tickSize = tickSize;
-        slice.quantScale = quantScale;
-        slice.format = QString::fromStdString(format);
-        slice.deltaLevelsQ16 = std::move(deltaLevelsQ16);
-        emit footprintSliceReceived(slice);
-        ++emitted;
-    }
-
-    sLog_Data("Footprint history recv: symbol=" << symbol << " tfMs=" << timeframeMs
-              << " columns=" << columns.size() << " emitted=" << emitted);
-    if (skipped > 0) {
-        sLog_Warning("Footprint history recv: skipped " << skipped
-                     << " columns with invalid metadata or payload size, symbol=" << symbol
-                     << " tfMs=" << timeframeMs << " gridHeight=" << gridHeight);
     }
 }
 
