@@ -3,6 +3,7 @@
 #include "render/AlgoOrderSpans.hpp"
 #include "trading/AvendellaMM.hpp"
 #include "trading/LiveTradingSession.hpp"
+#include "trading/TradingEngine.hpp"
 #include "trading/TradingSnapshot.hpp"
 #include "widgets/AlgoStopPolicy.hpp"
 
@@ -330,4 +331,48 @@ TEST(TradingAccountState, KeepsEverySymbolAndForgetsOnDisconnect) {
     EXPECT_FALSE(account.replace(snap)) << "a reconnect to the same session is not a new epoch";
     snap.epoch = "b";
     EXPECT_TRUE(account.replace(snap));
+}
+
+namespace {
+trading::TradeCommand marketBuy() {
+    trading::TradeCommand cmd;
+    cmd.action = trading::TradeAction::PlaceOrder;
+    cmd.symbol = "BTC-USD";
+    cmd.side = trading::OrderSide::Buy;
+    cmd.orderType = trading::OrderType::Market;
+    cmd.qty = 1.0;
+    return cmd;
+}
+trading::TradeCommand flattenBtc() {
+    trading::TradeCommand cmd;
+    cmd.action = trading::TradeAction::Flatten;
+    cmd.symbol = "BTC-USD";
+    cmd.orderType = trading::OrderType::Market;
+    return cmd;
+}
+} // namespace
+
+// The fill that closes a position clears the attached TP/SL; the clear must be published,
+// or every client keeps drawing the old legs.
+TEST(AttachedRiskClear, FlattenFillPublishesTheRiskClear) {
+    trading::TradingEngine engine([](const std::string&) { return 100.0; }, 0.0);
+    engine.onCommand(marketBuy());
+    ASSERT_EQ(engine.onCommand(attachRisk(120.0, 90.0)).riskOrderUpdates.size(), 1u);
+    const auto flat = engine.onCommand(flattenBtc());
+    ASSERT_TRUE(flat.rejectReason.empty());
+    ASSERT_EQ(flat.riskOrderUpdates.size(), 1u) << "the flatten must publish the cleared TP/SL";
+    EXPECT_EQ(flat.riskOrderUpdates[0].symbol, "BTC-USD");
+    EXPECT_FALSE(flat.riskOrderUpdates[0].hasTakeProfit);
+    EXPECT_FALSE(flat.riskOrderUpdates[0].hasStopLoss);
+}
+
+TEST(AttachedRiskClear, ClosingLimitFillPublishesTheRiskClear) {
+    trading::TradingEngine engine([](const std::string&) { return 100.0; }, 0.0);
+    engine.onCommand(marketBuy());
+    engine.onCommand(attachRisk(150.0, 50.0));
+    engine.onCommand(limit("close", trading::OrderSide::Sell, 101.0));
+    const auto fill = engine.onTick("BTC-USD", 102.0, 1000);
+    ASSERT_DOUBLE_EQ(engine.getPosition("BTC-USD")->netQty, 0.0);
+    ASSERT_EQ(fill.riskOrderUpdates.size(), 1u) << "a resting order that closes the position clears TP/SL too";
+    EXPECT_FALSE(fill.riskOrderUpdates[0].hasStopLoss);
 }

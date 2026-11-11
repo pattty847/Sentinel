@@ -209,6 +209,8 @@ TradingResult TradingEngine::onTick(const std::string& symbol, double lastTradeP
                                    fillResult.positionUpdates.begin(), fillResult.positionUpdates.end());
         out.pnlSnapshots.insert(out.pnlSnapshots.end(),
                                 fillResult.pnlSnapshots.begin(), fillResult.pnlSnapshots.end());
+        out.riskOrderUpdates.insert(out.riskOrderUpdates.end(),
+                                    fillResult.riskOrderUpdates.begin(), fillResult.riskOrderUpdates.end());
     }
     return out;
 }
@@ -334,6 +336,9 @@ TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
     out.orderUpdates.insert(out.orderUpdates.end(), fillResult.orderUpdates.begin(), fillResult.orderUpdates.end());
     out.positionUpdates.insert(out.positionUpdates.end(), fillResult.positionUpdates.begin(), fillResult.positionUpdates.end());
     out.pnlSnapshots.insert(out.pnlSnapshots.end(), fillResult.pnlSnapshots.begin(), fillResult.pnlSnapshots.end());
+    // A closing fill clears the attached TP/SL; clients must hear it.
+    out.riskOrderUpdates.insert(out.riskOrderUpdates.end(), fillResult.riskOrderUpdates.begin(),
+                                fillResult.riskOrderUpdates.end());
     return out;
 }
 

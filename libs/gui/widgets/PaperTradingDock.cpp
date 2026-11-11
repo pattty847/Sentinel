@@ -1083,19 +1083,25 @@ void PaperTradingDock::cancelStopOperation() {
 // The stop's acknowledgement on the connection and server session that sent it: every
 // position still open after the stop (fills that raced it included) is a target.
 void PaperTradingDock::onStopAcknowledged(const trading::TradingSnapshot& ack) {
+    m_stopOperation->acknowledged = true;
     const StopOperation op = *m_stopOperation;
-    m_stopOperation.reset();
     QStringList targets;
     for (const auto& p : ack.positions) {
         if (std::abs(p.positionQty) > 1e-12) targets << QString::fromStdString(p.symbol);
     }
     targets.sort();
     const auto policy = onAlgoStopPolicy();
-    if (targets.isEmpty() || paper::stepAfterAlgoStop(policy) == paper::AlgoStopStep::Keep) return;
+    if (targets.isEmpty() || paper::stepAfterAlgoStop(policy) == paper::AlgoStopStep::Keep) {
+        m_stopOperation.reset();
+        return;
+    }
     if (paper::stepAfterAlgoStop(policy) == paper::AlgoStopStep::Flatten) {
+        m_stopOperation.reset();
         flattenSymbols(targets);
         return;
     }
+    // The operation stays recorded while the prompt is open, so a connection or epoch
+    // change still finds it and closes the prompt.
     auto* box = new QMessageBox(QMessageBox::Question, QStringLiteral("Stop algo"),
                                 QStringLiteral("Flatten all? %1").arg(targets.join(QStringLiteral(", "))),
                                 QMessageBox::Yes | QMessageBox::No, this);
@@ -1107,7 +1113,9 @@ void PaperTradingDock::onStopAcknowledged(const trading::TradingSnapshot& ack) {
     m_flattenPrompt = box;
     connect(box, &QMessageBox::finished, this, [this, box, op, targets](int result) {
         if (m_flattenPrompt == box) m_flattenPrompt = nullptr;
-        if (result != QMessageBox::Yes || !stopOperationCurrent(op)) return;
+        const bool current = m_stopOperation && m_stopOperation->commandId == op.commandId && stopOperationCurrent(op);
+        if (current) m_stopOperation.reset();
+        if (result != QMessageBox::Yes || !current) return;
         flattenSymbols(targets);
     });
     box->open();
@@ -1121,7 +1129,8 @@ void PaperTradingDock::flattenSymbols(const QStringList& symbols) {
 
 void PaperTradingDock::onTradingSnapshot(const trading::TradingSnapshot& snapshot) {
     if (m_stopOperation && snapshot.epoch != m_stopOperation->epoch) cancelStopOperation();
-    const bool stopAcknowledged = m_stopOperation && snapshot.reason == "algo_command"
+    const bool stopAcknowledged = m_stopOperation && !m_stopOperation->acknowledged
+        && snapshot.reason == "algo_command"
         && snapshot.commandId == m_stopOperation->commandId.toStdString()
         && m_stopOperation->generation == m_connectionGeneration;
     if (m_account.replace(snapshot)) {

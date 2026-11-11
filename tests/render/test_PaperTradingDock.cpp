@@ -1,5 +1,6 @@
 #include "widgets/PaperTradingDock.hpp"
 #include "render/PaperTradeOverlayModel.hpp"
+#include "../core/trading/LiveTradingSession.hpp"
 #include "datasources/IGridDataSource.hpp"
 #include "models/PriceUnits.hpp"
 #include <QApplication>
@@ -787,4 +788,63 @@ TEST(PaperOverlay, SwitchAwayAndBackRestoresOrdersAndRisk) {
     EXPECT_TRUE(risk.value("hasTakeProfit").toBool());
     EXPECT_DOUBLE_EQ(risk.value("takeProfitPrice").toDouble(), 125.0);
     EXPECT_DOUBLE_EQ(risk.value("stopLossPrice").toDouble(), 90.0);
+}
+
+// Flatten, reopen, switch away and back: the chart must not bring back the old TP/SL.
+// Driven by a real paper session, so the chart sees exactly what the server publishes.
+TEST(PaperOverlay, FlattenReopenSwitchShowsNoStaleRisk) {
+    trading::LiveTradingSession session([](const std::string&) { return 100.0; }, 0.0);
+    PaperTradeOverlayModel model;
+    model.setSymbol("BTC-USD");
+    session.setResultCallback([&model](trading::TradingResult r, std::vector<trading::AlgoOrderEvent>) {
+        for (const auto& u : r.orderUpdates) model.onOrderUpdated(u);
+        for (const auto& u : r.positionUpdates) model.onPositionUpdated(u);
+        for (const auto& u : r.riskOrderUpdates) model.onRiskOrderUpdated(u);
+    });
+    auto command = [](trading::TradeAction action, trading::OrderSide side = trading::OrderSide::Buy) {
+        trading::TradeCommand c;
+        c.action = action;
+        c.symbol = "BTC-USD";
+        c.side = side;
+        c.orderType = trading::OrderType::Market;
+        c.qty = 1.0;
+        return c;
+    };
+    session.processTradeCommand(command(trading::TradeAction::PlaceOrder));
+    auto risk = command(trading::TradeAction::SetAttachedRisk);
+    risk.hasTakeProfit = true;
+    risk.takeProfitPrice = 120.0;
+    risk.hasStopLoss = true;
+    risk.stopLossPrice = 90.0;
+    session.processTradeCommand(risk);
+    auto withRisk = session.snapshot();
+    model.onTradingSnapshot(withRisk);
+    ASSERT_TRUE(model.riskState().value("hasTakeProfit").toBool());
+
+    session.processTradeCommand(command(trading::TradeAction::Flatten));
+    session.processTradeCommand(command(trading::TradeAction::PlaceOrder)); // reopen, no TP/SL
+    EXPECT_TRUE(session.snapshot().riskOrders.empty()) << "server state holds no TP/SL";
+    model.setSymbol("ETH-USD");
+    model.setSymbol("BTC-USD");
+    ASSERT_TRUE(model.canShowRiskControls()) << "the reopened position is shown";
+    const auto shown = model.riskState();
+    EXPECT_FALSE(shown.value("hasTakeProfit").toBool()) << "the flattened position's TP must not return";
+    EXPECT_FALSE(shown.value("hasStopLoss").toBool());
+}
+
+// An epoch change while the Ask prompt is open closes it unsent.
+TEST(PaperStopOperation, EpochChangeWhilePromptOpenClosesItUnsent) {
+    StopRig rig("ask", {{"BTC-USD", 1.0, 100.0, 0.0, 0.0}});
+    rig.stop();
+    rig.ack({{"BTC-USD", 1.0, 100.0, 0.0, 0.0}});
+    QPointer<QMessageBox> box = flattenPrompt();
+    ASSERT_NE(box, nullptr);
+    auto restarted = snapshot("e2");
+    restarted.positions = {{"BTC-USD", 1.0, 100.0, 0.0, 0.0}};
+    emit rig.source.tradingSnapshotReceived(restarted);
+    QTest::qWait(10);
+    EXPECT_EQ(flattenPrompt(), nullptr) << "a new server session closes the prompt";
+    if (box && box->isVisible()) box->button(QMessageBox::Yes)->click();
+    QTest::qWait(10);
+    EXPECT_EQ(rig.source.sent, (std::vector<std::string>{"algo:stop"}));
 }

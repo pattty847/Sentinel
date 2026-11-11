@@ -92,6 +92,7 @@ private:
         QString commandId;
         quint64 generation = 0;
         std::string epoch;
+        bool acknowledged = false; // its prompt is open
     };
     bool stopOperationCurrent(const StopOperation& op) const;
     void cancelStopOperation();
