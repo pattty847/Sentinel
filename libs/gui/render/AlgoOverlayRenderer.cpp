@@ -48,6 +48,18 @@ void AlgoOverlayRenderer::setEnabled(bool v) {
     emit enabledChanged();
 }
 
+void AlgoOverlayRenderer::setSymbol(const QString& symbol) {
+    if (m_symbol == symbol) return;
+    m_symbol = symbol;
+    {
+        QMutexLocker lock(&m_pendingMutex);
+        m_pendingSymbol = symbol.toStdString();
+    }
+    m_dirty = true;
+    update();
+    emit symbolChanged();
+}
+
 void AlgoOverlayRenderer::onAlgoOrderEvent(const trading::AlgoOrderEvent& event) {
     QMutexLocker lock(&m_pendingMutex);
     m_pending.push_back(event);
@@ -89,6 +101,7 @@ QSGNode* AlgoOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
             else if (const auto* r = std::get_if<Reconcile>(&item)) m_spans.reconcile(r->snapshot, r->atMs);
         }
         m_pending.clear();
+        m_chartSymbol = m_pendingSymbol;
     }
 
     if (!m_dirty && oldNode) {
@@ -135,6 +148,7 @@ QSGNode* AlgoOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
 
     for (const auto& [orderId, span] : m_spans.spans()) {
         Q_UNUSED(orderId);
+        if (!AlgoOrderSpans::onChart(span.symbol, m_chartSymbol)) continue;
         if (span.price <= 0.0 || span.openedMs <= 0) continue;
 
         const float y = static_cast<float>(mapping.priceToScreenY(span.price));
@@ -169,6 +183,7 @@ QSGNode* AlgoOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     }
 
     for (const auto& ev : m_spans.markers()) {
+        if (!AlgoOrderSpans::onChart(ev.symbol, m_chartSymbol)) continue;
         if (ev.price <= 0.0) continue;
 
         const float y = static_cast<float>(mapping.priceToScreenY(ev.price));

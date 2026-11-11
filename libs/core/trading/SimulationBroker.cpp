@@ -1,5 +1,7 @@
 #include "SimulationBroker.hpp"
 
+#include <cmath>
+
 #include <algorithm>
 
 namespace trading {
@@ -57,7 +59,12 @@ BrokerSnapshot SimulationBroker::snapshotFor(const std::string& symbol, int64_t 
 TradingSnapshot SimulationBroker::accountState() const {
     TradingSnapshot state;
     for (const auto& p : m_engine.getAllPositions()) {
-        state.positions.push_back(PositionUpdate{p.symbol, p.netQty, p.avgPrice, p.unrealizedPnl, p.realizedPnl});
+        // A position stores the unrealized PnL of its last fill; mark it at the latest trade.
+        double unrealized = p.unrealizedPnl;
+        if (const auto mark = m_lastTradePriceBySymbol.find(p.symbol); mark != m_lastTradePriceBySymbol.end()) {
+            unrealized = std::abs(p.netQty) > 1e-12 ? (mark->second - p.avgPrice) * p.netQty : 0.0;
+        }
+        state.positions.push_back(PositionUpdate{p.symbol, p.netQty, p.avgPrice, unrealized, p.realizedPnl});
     }
     for (const auto& o : m_engine.getAllOpenOrders()) {
         OrderUpdate u;

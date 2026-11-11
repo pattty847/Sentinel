@@ -255,3 +255,79 @@ TEST(OnAlgoStop, SettingValuesRoundTripAndUnknownAsks) {
     EXPECT_EQ(paper::onAlgoStopFromSetting("ALWAYS"), OnAlgoStop::Ask);
     EXPECT_EQ(paper::onAlgoStopFromSetting("yes"), OnAlgoStop::Ask);
 }
+
+// m1: a position stores the unrealized PnL of its last fill; the snapshot marks it.
+TEST(TradingSnapshot, PositionPnlIsMarkedAtTheLatestTrade) {
+    trading::LiveTradingSession session([](const std::string&) { return 100.0; }, 0.0);
+    session.registerAlgo(std::make_unique<trading::AvendellaMM>());
+    session.processTradeCommand(limit("buy", trading::OrderSide::Buy, 100.0));
+    session.onTradeTick("BTC-USD", 99.0, 1000);  // trades through: fills at the 100 limit
+    session.onTradeTick("BTC-USD", 110.0, 2000);
+    session.stopAlgo("AvendellaMM");
+    const auto snap = session.snapshot();
+    const auto* p = snap.positionFor("BTC-USD");
+    ASSERT_NE(p, nullptr);
+    ASSERT_DOUBLE_EQ(p->positionQty, 1.0);
+    ASSERT_DOUBLE_EQ(p->avgPrice, 100.0);
+    EXPECT_NEAR(p->unrealizedPnl, 10.0, 1e-9);
+}
+
+// m2: a reconnect snapshot carries every symbol's algo orders; a chart shows only its own.
+TEST(AlgoStopGhosts, SnapshotLinesKeepTheirSymbolForTheChart) {
+    AlgoOrderSpans spans;
+    trading::TradingSnapshot snap;
+    snap.epoch = "a";
+    for (const char* symbol : {"BTC-USD", "ETH-USD"}) {
+        trading::OrderUpdate o;
+        o.orderId = std::string("q-") + symbol;
+        o.symbol = symbol;
+        o.algoId = "AvendellaMM";
+        o.status = trading::OrderStatus::Open;
+        o.limitPrice = 100.0;
+        snap.openOrders.push_back(o);
+    }
+    spans.reconcile(snap, 1000);
+    std::vector<std::string> onBtc;
+    for (const auto& [id, span] : spans.spans())
+        if (AlgoOrderSpans::onChart(span.symbol, "BTC-USD")) onBtc.push_back(id);
+    EXPECT_EQ(onBtc, (std::vector<std::string>{"q-BTC-USD"}));
+    EXPECT_FALSE(AlgoOrderSpans::onChart("BTC-USD", "")) << "no chart symbol draws nothing";
+
+    trading::AlgoOrderEvent fill;
+    fill.algoId = "AvendellaMM";
+    fill.orderId = "q-ETH-USD";
+    fill.symbol = "ETH-USD";
+    fill.status = trading::OrderStatus::Filled;
+    fill.price = 100.0;
+    spans.apply(fill);
+    ASSERT_EQ(spans.markers().size(), 1u);
+    EXPECT_FALSE(AlgoOrderSpans::onChart(spans.markers().front().symbol, "BTC-USD"));
+}
+
+TEST(TradingAccountState, KeepsEverySymbolAndForgetsOnDisconnect) {
+    trading::TradingAccountState account;
+    EXPECT_FALSE(account.positionFor("BTC-USD").has_value());
+    trading::TradingSnapshot snap;
+    snap.epoch = "a";
+    snap.positions = {{"BTC-USD", 1.0, 100.0, 0.0, 0.0}, {"SOL-USD", 0.0, 0.0, 0.0, 3.0}};
+    EXPECT_TRUE(account.replace(snap)) << "the first snapshot is a new epoch";
+    account.apply(trading::PositionUpdate{"ETH-USD", -2.0, 3000.0, 0.0, 0.0});
+    trading::OrderUpdate open;
+    open.orderId = "ord-1";
+    open.symbol = "ETH-USD";
+    open.status = trading::OrderStatus::Open;
+    account.apply(open);
+    EXPECT_EQ(account.symbolsWithPosition(), (std::vector<std::string>{"BTC-USD", "ETH-USD"}));
+    EXPECT_EQ(account.openOrdersFor("ETH-USD").size(), 1u);
+    EXPECT_DOUBLE_EQ(account.positionFor("DOGE-USD")->positionQty, 0.0) << "never traded is flat";
+    open.status = trading::OrderStatus::Canceled;
+    account.apply(open);
+    EXPECT_TRUE(account.openOrdersFor("ETH-USD").empty());
+
+    account.invalidate();
+    EXPECT_FALSE(account.positionFor("BTC-USD").has_value());
+    EXPECT_TRUE(account.symbolsWithPosition().empty());
+    EXPECT_FALSE(account.replace(snap)) << "a reconnect to the same session is not a new epoch";
+    snap.epoch = "b";
+    EXPECT_TRUE(account.replace(snap));
+}

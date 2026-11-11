@@ -40,6 +40,31 @@ struct TradingSnapshot {
 
 bool isActiveOrderStatus(OrderStatus status);
 
+// A client's copy of the server's paper account, independent of the symbol on screen:
+// the latest snapshot plus every order and position update after it.
+class TradingAccountState {
+public:
+    bool known() const { return m_known; }
+    const std::string& epoch() const { return m_state.epoch; }
+    // Returns true when the epoch changed (first snapshot or a server restart).
+    bool replace(const TradingSnapshot& snapshot);
+    // Disconnected: unknown until the next snapshot, which is compared with the last epoch.
+    void invalidate() { m_known = false; }
+    void apply(const OrderUpdate& update);
+    void apply(const PositionUpdate& update);
+
+    std::vector<OrderUpdate> openOrdersFor(const std::string& symbol) const;
+    // Unknown account: no orders, nullopt. Known: a symbol that never traded is flat.
+    std::optional<PositionUpdate> positionFor(const std::string& symbol) const;
+    const RunningAlgo* runningAlgo(const std::string& algoId) const { return m_state.runningAlgo(algoId); }
+    // Symbols with a nonzero position, sorted.
+    std::vector<std::string> symbolsWithPosition() const;
+
+private:
+    TradingSnapshot m_state;
+    bool m_known = false;
+};
+
 nlohmann::json tradingSnapshotJson(const TradingSnapshot& snapshot);
 // nullopt when the type, schema_version or a required array is wrong.
 std::optional<TradingSnapshot> parseTradingSnapshotJson(const nlohmann::json& msg);

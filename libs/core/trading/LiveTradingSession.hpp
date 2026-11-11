@@ -33,10 +33,10 @@ public:
     void setResultCallback(ResultCallback cb);
 
     // The whole trading state (epoch, positions, open orders, attached risk, running
-    // algos). withSnapshot runs fn while no result can be published, so whatever fn
-    // hands to a client is ordered against every result callback.
+    // algos). Not thread-safe against the trading calls: the server makes every call,
+    // and takes every snapshot, on its one I/O thread, so a snapshot is ordered against
+    // every result callback.
     TradingSnapshot snapshot() const;
-    void withSnapshot(const std::function<void(const TradingSnapshot&)>& fn) const;
     const std::string& epoch() const { return m_epoch; }
     SimulationBroker& broker() { return m_broker; }
     const SimulationBroker& broker() const { return m_broker; }
@@ -54,10 +54,6 @@ private:
     static std::vector<AlgoOrderEvent> algoEventsFromExecutionEvents(const std::vector<ExecutionEvent>& events,
                                                                      int64_t timestampMs);
 
-    TradingSnapshot snapshotLocked() const;
-
-    // Serializes every broker call and the result callback it produces; taken before m_mutex.
-    mutable std::mutex m_brokerMutex;
     mutable std::mutex m_mutex;
     const std::string m_epoch;
     SimulationBroker m_broker;

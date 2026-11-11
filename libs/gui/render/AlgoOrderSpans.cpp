@@ -7,6 +7,7 @@ void AlgoOrderSpans::apply(const trading::AlgoOrderEvent& ev) {
         m_markers.push_back(ev);
     } else {
         auto& span = m_spans[ev.orderId];
+        span.symbol = ev.symbol;
         if (ev.status == trading::OrderStatus::Open) {
             span.side = ev.side;
             span.price = ev.price;
@@ -53,6 +54,7 @@ void AlgoOrderSpans::reconcile(const trading::TradingSnapshot& snapshot, int64_t
         held.insert(order.orderId);
         auto& span = m_spans[order.orderId];
         if (span.active) continue;
+        span.symbol = order.symbol;
         span.side = order.side;
         span.price = order.limitPrice > 0.0 ? order.limitPrice : order.avgPrice;
         span.openedMs = atMs;

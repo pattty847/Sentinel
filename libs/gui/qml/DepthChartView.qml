@@ -138,6 +138,7 @@ Rectangle {
     AlgoOverlayRenderer {
         id: algoOverlayRenderer
         objectName: "algoOverlayRenderer"
+        symbol: root.symbol
         anchors.fill: unifiedGridRenderer
         clip: true
         mappingProvider: unifiedGridRenderer

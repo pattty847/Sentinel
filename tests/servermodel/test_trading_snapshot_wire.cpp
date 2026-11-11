@@ -60,9 +60,24 @@ class TradingSnapshotWire : public testing::Test {
         client->disconnectFromServer();
         client.reset();
     }
-    trading::LiveTradingSession &serverTrading() { return fixture->server->tradingSession(); }
+    // The server makes every trading call on its I/O thread; so does the test.
+    template <typename Fn> auto onServer(Fn fn) {
+        using R = decltype(fn(fixture->server->tradingSession()));
+        auto done = std::make_shared<std::promise<R>>();
+        auto result = done->get_future();
+        net::post(RecordingServerStopTest::io(*fixture->server), [this, fn, done] {
+            if constexpr (std::is_void_v<R>) {
+                fn(fixture->server->tradingSession());
+                done->set_value();
+            } else {
+                done->set_value(fn(fixture->server->tradingSession()));
+            }
+        });
+        EXPECT_TRUE(spinUntil([&] { return result.wait_for(0ms) == std::future_status::ready; }));
+        return result.get();
+    }
     void expectEqualsServer(const trading::TradingSnapshot &client) {
-        const auto server = serverTrading().snapshot();
+        const auto server = onServer([](trading::LiveTradingSession &t) { return t.snapshot(); });
         EXPECT_EQ(client.epoch, server.epoch);
         EXPECT_EQ(orderIds(client), orderIds(server));
         ASSERT_EQ(client.positions.size(), server.positions.size());
@@ -84,16 +99,17 @@ TEST_F(TradingSnapshotWire, ConnectThenAlgoAcksThenServerRestartClearsEverything
     ASSERT_FALSE(firstEpoch.empty());
 
     // Build state on server A: a long, a resting bid, a running algo with quotes.
-    auto &trading = serverTrading();
-    trading.processTradeCommand(limitBuy(100.0));
-    trading.onTradeTick("BTC-USD", 99.0, 1000);
-    trading.processTradeCommand(limitBuy(90.0));
+    onServer([](trading::LiveTradingSession &t) {
+        t.processTradeCommand(limitBuy(100.0));
+        t.onTradeTick("BTC-USD", 99.0, 1000);
+        t.processTradeCommand(limitBuy(90.0));
+    });
     client->sendAlgoCommand("AvendellaMM", "start", "BTC-USD", quoteParams(), "start-1");
     ASSERT_TRUE(spinUntil([&] { return snapshots.back().commandId == "start-1"; }, 5s))
         << "an algo command must be acknowledged by a snapshot echoing its command_id";
     EXPECT_EQ(snapshots.back().reason, "algo_command");
     ASSERT_EQ(snapshots.back().runningAlgos.size(), 1u);
-    trading.onTradeTick("BTC-USD", 99.0, 2000); // algo quotes
+    onServer([](trading::LiveTradingSession &t) { t.onTradeTick("BTC-USD", 99.0, 2000); }); // algo quotes
 
     // A second connection sees the whole state at once, equal to the server's.
     {

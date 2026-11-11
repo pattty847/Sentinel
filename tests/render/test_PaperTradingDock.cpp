@@ -32,6 +32,7 @@ public:
     std::vector<trading::TradeCommand> trades;
     std::vector<std::string> algoActions;
     std::vector<std::string> algoCommandIds;
+    std::vector<std::string> algoSymbols;
     std::vector<std::string> sent; // "algo:<action>" and "trade:<action>" in send order
     LiveOrderBook book;
     void subscribe(const QString&) override {}
@@ -41,11 +42,12 @@ public:
     void setCandleHistoryViewport(const QString&, int64_t, qint64, qint64) override {}
     void sendTradeCommand(const trading::TradeCommand& cmd) override {
         trades.push_back(cmd);
-        sent.push_back(std::string("trade:") + trading::toString(cmd.action));
+        sent.push_back(std::string("trade:") + trading::toString(cmd.action) + ":" + cmd.symbol);
     }
-    void sendAlgoCommand(const std::string&, const std::string& action, const std::string&,
+    void sendAlgoCommand(const std::string&, const std::string& action, const std::string& symbol,
                          const trading::AlgoParams&, const std::string& commandId) override {
         algoActions.push_back(action);
+        algoSymbols.push_back(symbol);
         algoCommandIds.push_back(commandId);
         sent.push_back("algo:" + action);
     }
@@ -455,7 +457,7 @@ std::shared_ptr<bool> answerPrompt(QMessageBox::StandardButton button) {
             auto* box = qobject_cast<QMessageBox*>(w);
             if (!box || box->objectName() != "paperFlattenPrompt" || !box->isVisible()) continue;
             *seen = true;
-            EXPECT_EQ(box->text(), QStringLiteral("Flatten all?"));
+            EXPECT_TRUE(box->text().startsWith(QStringLiteral("Flatten all?"))) << box->text().toStdString();
             box->button(button)->click();
         }
     });
@@ -571,12 +573,13 @@ TEST(PaperOnAlgoStop, AskFlattensOnlyOnYesAfterTheStop) {
         dock.setSymbol("BTC-USD");
         auto running = snapshot("e1");
         running.runningAlgos = {{"AvendellaMM", "BTC-USD"}};
+        running.positions = {{"BTC-USD", 1.0, 100.0, 0.0, 0.0}};
         dock.onTradingSnapshot(running);
         const auto seen = answerPrompt(button);
         dock.findChild<QPushButton*>("paperAlgoStop")->click();
         EXPECT_TRUE(*seen) << "Ask must prompt";
         if (button == QMessageBox::Yes) {
-            EXPECT_EQ(source.sent, (std::vector<std::string>{"algo:stop", "trade:FLATTEN"}))
+            EXPECT_EQ(source.sent, (std::vector<std::string>{"algo:stop", "trade:FLATTEN:BTC-USD"}))
                 << "the stop (which cancels the quotes) goes before the flatten";
             ASSERT_EQ(source.trades.size(), 1u);
             EXPECT_EQ(source.trades[0].symbol, "BTC-USD");
@@ -595,13 +598,14 @@ TEST(PaperOnAlgoStop, AlwaysFlattensWithoutAskingNeverNeither) {
         dock.setSymbol("BTC-USD");
         auto running = snapshot("e1");
         running.runningAlgos = {{"AvendellaMM", "BTC-USD"}};
+        running.positions = {{"BTC-USD", 1.0, 100.0, 0.0, 0.0}};
         dock.onTradingSnapshot(running);
         const auto seen = answerPrompt(QMessageBox::No);
         dock.findChild<QPushButton*>("paperAlgoStop")->click();
         QTest::qWait(10);
         EXPECT_FALSE(*seen) << policy << " must not prompt";
         if (std::string(policy) == "always")
-            EXPECT_EQ(source.sent, (std::vector<std::string>{"algo:stop", "trade:FLATTEN"}));
+            EXPECT_EQ(source.sent, (std::vector<std::string>{"algo:stop", "trade:FLATTEN:BTC-USD"}));
         else
             EXPECT_EQ(source.sent, (std::vector<std::string>{"algo:stop"}));
     }
@@ -624,4 +628,71 @@ TEST(PaperOnAlgoStop, SettingPersistsAndDefaultsToAsk) {
     EXPECT_EQ(settings.value("PaperTradingDock/onAlgoStop").toString(), "always");
     PaperTradingDock reopened;
     EXPECT_EQ(reopened.findChild<QComboBox*>("paperOnAlgoStop")->currentText(), "Always");
+}
+
+// The connect snapshot lands before the GUI selects a symbol; every switch keeps the account.
+TEST(PaperAccount, SnapshotBeforeFirstSymbolAndSwitchAwayAndBack) {
+    Source source;
+    PaperTradingDock dock;
+    dock.setDataSource(&source);
+    auto first = snapshot("e1");
+    first.openOrders = {order("ord-1", trading::OrderStatus::Open, "AvendellaMM")};
+    first.positions = {{"BTC-USD", 1.0, 100.0, 0.0, 0.0}};
+    first.runningAlgos = {{"AvendellaMM", "BTC-USD"}};
+    dock.onTradingSnapshot(first);
+    dock.setSymbol("BTC-USD");
+    auto* status = dock.findChild<QLabel*>("paperAlgoStatus");
+    auto* stop = dock.findChild<QPushButton*>("paperAlgoStop");
+    auto* log = dock.findChild<QTableWidget*>("paperOrderLog");
+    auto* avg = dock.findChild<QLabel*>("paperAvgPrice");
+    EXPECT_EQ(status->text(), "RUNNING");
+    EXPECT_TRUE(stop->isEnabled());
+    EXPECT_EQ(rows(log), (QStringList{"ord-1:OPEN"}));
+    EXPECT_EQ(avg->text(), QStringLiteral("$100.00"));
+
+    dock.setSymbol("ETH-USD");
+    EXPECT_EQ(status->text(), "RUNNING ON BTC-USD");
+    EXPECT_TRUE(stop->isEnabled()) << "the algo can be stopped from any symbol";
+    EXPECT_TRUE(rows(log).isEmpty());
+    // BTC changes while ETH is on screen.
+    dock.onOrderUpdated(order("ord-1", trading::OrderStatus::Filled, "AvendellaMM"));
+    dock.onOrderUpdated(order("ord-2", trading::OrderStatus::Open, "AvendellaMM"));
+    dock.onPositionUpdated({"BTC-USD", 2.0, 95.0, 0.0, 0.0});
+
+    dock.setSymbol("BTC-USD");
+    EXPECT_EQ(status->text(), "RUNNING");
+    EXPECT_EQ(rows(log), (QStringList{"ord-2:OPEN"}));
+    EXPECT_EQ(avg->text(), QStringLiteral("$95.00"));
+    // Activity on the running symbol is still evidence after the switches.
+    trading::AlgoOrderEvent activity;
+    activity.algoId = "AvendellaMM";
+    activity.symbol = "BTC-USD";
+    dock.onAlgoOrderEvent(activity);
+    EXPECT_EQ(status->text(), "RUNNING") << "a confirmed state is not downgraded by activity";
+}
+
+// Stop names the running algo's symbol; Yes/Always flattens every open position.
+TEST(PaperAccount, StopUsesTheAlgoSymbolAndFlattensEveryPosition) {
+    for (const char* policy : {"always", "ask"}) {
+        Source source;
+        PaperTradingDock dock;
+        setOnAlgoStop(dock, policy);
+        dock.setDataSource(&source);
+        auto state = snapshot("e1");
+        state.runningAlgos = {{"AvendellaMM", "BTC-USD"}};
+        state.positions = {{"BTC-USD", 1.0, 100.0, 0.0, 0.0},
+                           {"ETH-USD", -2.0, 3000.0, 0.0, 0.0},
+                           {"SOL-USD", 0.0, 0.0, 0.0, 5.0}};
+        dock.onTradingSnapshot(state);
+        dock.setSymbol("ETH-USD");
+        const auto seen = answerPrompt(QMessageBox::Yes);
+        dock.findChild<QPushButton*>("paperAlgoStop")->click();
+        QTest::qWait(10);
+        EXPECT_EQ(*seen, std::string(policy) == "ask") << policy;
+        ASSERT_EQ(source.algoSymbols.size(), 1u);
+        EXPECT_EQ(source.algoSymbols[0], "BTC-USD") << "the stop is keyed to the algo, not the ticket";
+        EXPECT_EQ(source.sent, (std::vector<std::string>{"algo:stop", "trade:FLATTEN:BTC-USD",
+                                                         "trade:FLATTEN:ETH-USD"}))
+            << policy << ": every open position, after the stop; a flat symbol is not flattened";
+    }
 }

@@ -1054,17 +1054,14 @@ public:
                     }
                 });
             m_tradingBroadcasterRegistered = true;
-            // After registering: a result published before the snapshot is in it, one
-            // published after it is queued behind it.
+            // Trading calls, their broadcasts and this snapshot all run on the server's one
+            // I/O thread: a result published before it is in it, one published after it is
+            // queued behind it.
             if (auto* tradingSession = owner_->tradingSessionPtr()) {
-                tradingSession->withSnapshot([weak](const trading::TradingSnapshot& state) {
-                    auto snapshot = state;
-                    snapshot.reason = "connect";
-                    if (auto self = weak.lock()) {
-                        self->postModelEvent([json = trading::tradingSnapshotJson(snapshot).dump()](Session& session) {
-                            session.do_write(json);
-                        });
-                    }
+                auto snapshot = tradingSession->snapshot();
+                snapshot.reason = "connect";
+                postModelEvent([json = trading::tradingSnapshotJson(snapshot).dump()](Session& session) {
+                    session.do_write(json);
                 });
             }
         }
@@ -2652,14 +2649,12 @@ void SentinelStreamServer::broadcastTradingSnapshot(const std::string& reason, c
     if (!m_tradingSession) {
         return;
     }
-    m_tradingSession->withSnapshot([&](const trading::TradingSnapshot& state) {
-        auto snapshot = state;
-        snapshot.reason = reason;
-        snapshot.commandId = commandId;
-        sLog_App("trading_snapshot broadcast: reason=" << reason << " command=" << commandId
-                 << " epoch=" << snapshot.epoch << " positions=" << snapshot.positions.size()
-                 << " openOrders=" << snapshot.openOrders.size()
-                 << " runningAlgos=" << snapshot.runningAlgos.size());
-        broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, trading::tradingSnapshotJson(snapshot).dump());
-    });
+    auto snapshot = m_tradingSession->snapshot();
+    snapshot.reason = reason;
+    snapshot.commandId = commandId;
+    sLog_App("trading_snapshot broadcast: reason=" << reason << " command=" << commandId
+             << " epoch=" << snapshot.epoch << " positions=" << snapshot.positions.size()
+             << " openOrders=" << snapshot.openOrders.size()
+             << " runningAlgos=" << snapshot.runningAlgos.size());
+    broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, trading::tradingSnapshotJson(snapshot).dump());
 }

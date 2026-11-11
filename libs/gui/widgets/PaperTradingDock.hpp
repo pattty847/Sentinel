@@ -6,6 +6,7 @@
 #include <QSet>
 #include <QPointer>
 #include <QString>
+#include <QStringList>
 
 #include "../../core/trading/TradingTypes.hpp"
 #include "../../core/trading/AlgoEngine.hpp"
@@ -86,15 +87,18 @@ private:
     void dropOrderRowsNotIn(const trading::TradingSnapshot& snapshot);
     void clearOrderHistory();
     void afterAlgoStopSent();
+    QStringList flattenAllSymbols() const;
+    void refreshAlgoView(const QString& stoppedReason = {});
     paper::OnAlgoStop onAlgoStopPolicy() const;
-    QString sendAlgoCommand(const std::string& action, const trading::AlgoParams& params);
+    QString sendAlgoCommand(const std::string& action, const trading::AlgoParams& params, const QString& symbol);
     void updateNotional();
     void updatePricePrecision(double price);
     void sendManualCommand(trading::TradeAction action,
                            trading::OrderSide side,
                            trading::OrderType orderType,
                            bool hasPrice = false,
-                           double price = 0.0);
+                           double price = 0.0,
+                           const QString& symbolOverride = {});
 
     QString m_symbol;
     IGridDataSource* m_dataSource = nullptr;
@@ -141,7 +145,7 @@ private:
     QString m_pendingAlgoAction;
     QString m_pendingAlgoCommandId;
     bool m_algoRunningConfirmed = false;
-    std::string m_tradingEpoch;
+    trading::TradingAccountState m_account; // every symbol, latest snapshot plus updates
     QComboBox* m_onAlgoStopCombo = nullptr;
     int m_algoFillCount = 0;
     double m_algoCumPnl = 0.0;

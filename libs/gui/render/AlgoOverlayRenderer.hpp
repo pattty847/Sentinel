@@ -31,6 +31,8 @@ class AlgoOverlayRenderer : public QQuickItem {
 
     Q_PROPERTY(QObject* mappingProvider READ mappingProvider WRITE setMappingProvider NOTIFY mappingProviderChanged)
     Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY enabledChanged FINAL)
+    // The chart's symbol: only that symbol's algo orders are drawn.
+    Q_PROPERTY(QString symbol READ symbol WRITE setSymbol NOTIFY symbolChanged FINAL)
 
 public:
     explicit AlgoOverlayRenderer(QQuickItem* parent = nullptr);
@@ -41,6 +43,9 @@ public:
     bool enabled() const { return m_enabled; }
     void setEnabled(bool v);
 
+    QString symbol() const { return m_symbol; }
+    void setSymbol(const QString& symbol);
+
 public slots:
     void onAlgoOrderEvent(const trading::AlgoOrderEvent& event);
     // Closes lines of orders the server no longer holds (reconnect, server restart).
@@ -50,6 +55,7 @@ public slots:
 signals:
     void mappingProviderChanged();
     void enabledChanged();
+    void symbolChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
@@ -66,7 +72,10 @@ private:
     bool m_enabled = true;
     bool m_dirty = false;
 
+    QString m_symbol; // GUI thread
     QMutex m_pendingMutex;
+    std::string m_pendingSymbol; // guarded by m_pendingMutex
+    std::string m_chartSymbol;   // render-thread only
     std::vector<std::variant<trading::AlgoOrderEvent, Reconcile>> m_pending; // GUI thread -> render thread
     AlgoOrderSpans m_spans; // render-thread only
 };

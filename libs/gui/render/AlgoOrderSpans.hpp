@@ -16,6 +16,7 @@ public:
     static constexpr size_t kMaxMarkers = 2000;
 
     struct Span {
+        std::string symbol;
         trading::OrderSide side = trading::OrderSide::Unknown;
         double price = 0.0;
         int64_t openedMs = 0;
@@ -34,6 +35,10 @@ public:
     const std::unordered_map<std::string, Span>& spans() const { return m_spans; }
     const std::deque<trading::AlgoOrderEvent>& markers() const { return m_markers; }
     size_t activeCount() const;
+    // Lines and markers belong to one chart: an empty chart symbol shows none.
+    static bool onChart(const std::string& orderSymbol, const std::string& chartSymbol) {
+        return !chartSymbol.empty() && orderSymbol == chartSymbol;
+    }
 
 private:
     std::unordered_map<std::string, Span> m_spans;

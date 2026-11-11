@@ -2,6 +2,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cmath>
+
 namespace trading {
 
 const PositionUpdate* TradingSnapshot::positionFor(const std::string& symbol) const {
@@ -20,6 +23,59 @@ const RunningAlgo* TradingSnapshot::runningAlgo(const std::string& algoId) const
 
 bool isActiveOrderStatus(OrderStatus status) {
     return status == OrderStatus::New || status == OrderStatus::Open || status == OrderStatus::Partial;
+}
+
+bool TradingAccountState::replace(const TradingSnapshot& snapshot) {
+    const bool newEpoch = snapshot.epoch != m_state.epoch;
+    m_state = snapshot;
+    m_known = true;
+    return newEpoch;
+}
+
+void TradingAccountState::apply(const OrderUpdate& update) {
+    auto& orders = m_state.openOrders;
+    const auto it = std::find_if(orders.begin(), orders.end(),
+                                 [&](const OrderUpdate& o) { return o.orderId == update.orderId; });
+    if (!isActiveOrderStatus(update.status)) {
+        if (it != orders.end()) orders.erase(it);
+    } else if (it != orders.end()) {
+        *it = update;
+    } else {
+        orders.push_back(update);
+    }
+}
+
+void TradingAccountState::apply(const PositionUpdate& update) {
+    auto& positions = m_state.positions;
+    const auto it = std::find_if(positions.begin(), positions.end(),
+                                 [&](const PositionUpdate& p) { return p.symbol == update.symbol; });
+    if (it != positions.end()) *it = update;
+    else positions.push_back(update);
+}
+
+std::vector<OrderUpdate> TradingAccountState::openOrdersFor(const std::string& symbol) const {
+    std::vector<OrderUpdate> out;
+    if (!m_known) return out;
+    for (const auto& o : m_state.openOrders) {
+        if (o.symbol == symbol) out.push_back(o);
+    }
+    return out;
+}
+
+std::optional<PositionUpdate> TradingAccountState::positionFor(const std::string& symbol) const {
+    if (!m_known) return std::nullopt;
+    if (const auto* p = m_state.positionFor(symbol)) return *p;
+    return PositionUpdate{symbol, 0.0, 0.0, 0.0, 0.0};
+}
+
+std::vector<std::string> TradingAccountState::symbolsWithPosition() const {
+    std::vector<std::string> out;
+    if (!m_known) return out;
+    for (const auto& p : m_state.positions) {
+        if (std::abs(p.positionQty) > 1e-12) out.push_back(p.symbol);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 nlohmann::json tradingSnapshotJson(const TradingSnapshot& s) {
