@@ -18,6 +18,7 @@ struct TradingResult {
     std::vector<PositionUpdate> positionUpdates;
     std::vector<PnlSnapshot> pnlSnapshots;
     std::vector<RiskOrderUpdate> riskOrderUpdates;
+    std::string rejectReason; // non-empty when a command was refused; a stable snake_case token
 };
 
 class TradingEngine {

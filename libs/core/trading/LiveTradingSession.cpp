@@ -1,5 +1,9 @@
 #include "LiveTradingSession.hpp"
 
+#include "../SentinelLogging.hpp"
+
+#include <chrono>
+
 namespace trading {
 
 LiveTradingSession::LiveTradingSession(TradingEngine::PriceResolver resolver, double slippageBps)
@@ -35,12 +39,30 @@ bool LiveTradingSession::startAlgo(const std::string& algoId, const std::string&
 }
 
 void LiveTradingSession::stopAlgo(const std::string& algoId) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_runningAlgos.find(algoId);
-    if (it != m_runningAlgos.end()) {
-        it->second->stop();
-        m_runningAlgos.erase(it);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_runningAlgos.find(algoId);
+        if (it != m_runningAlgos.end()) {
+            it->second->stop();
+            m_runningAlgos.erase(it);
+        }
     }
+    if (algoId.empty()) {
+        return;
+    }
+
+    // A stopped algo's quotes would otherwise keep resting and fill on later ticks,
+    // reopening any position the user closes.
+    OrderIntent cancel;
+    cancel.intentId = "stop-" + algoId;
+    cancel.action = OrderIntentAction::CancelAll;
+    cancel.algoId = algoId;
+    cancel.timestampMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto events = m_broker.submitIntent(cancel).events;
+    sLog_App("LiveTradingSession: algo stop canceled resting orders algo=" << algoId
+             << " canceled=" << events.size());
+    publish(events, cancel.timestampMs);
 }
 
 std::vector<std::string> LiveTradingSession::runningAlgos() const {
@@ -55,9 +77,47 @@ std::vector<std::string> LiveTradingSession::runningAlgos() const {
 }
 
 void LiveTradingSession::processTradeCommand(const TradeCommand& command) {
-    const auto events = m_broker.submitIntents({fromTradeCommand(command)});
+    const auto outcome = m_broker.submitIntent(fromTradeCommand(command));
+    logCommandOutcome(command, outcome);
+    publish(outcome.events, command.timestamp);
+}
+
+void LiveTradingSession::logCommandOutcome(const TradeCommand& command,
+                                           const SimulationBroker::IntentOutcome& outcome) {
+    if (!outcome.rejectReason.empty()) {
+        sLog_Warning("trade_command rejected: id=" << command.commandId << " action=" << toString(command.action)
+                     << " symbol=" << command.symbol << " side=" << toString(command.side)
+                     << " type=" << toString(command.orderType) << " qty=" << command.qty
+                     << " price=" << command.price << " order=" << command.targetOrderId
+                     << " algo=" << command.algoId << " reason=" << outcome.rejectReason);
+        return;
+    }
+    std::size_t orders = 0;
+    std::size_t fills = 0;
+    double positionQty = 0.0;
+    bool hasPosition = false;
+    for (const auto& event : outcome.events) {
+        if (event.orderUpdate.has_value()) {
+            ++orders;
+            if (event.orderUpdate->status == OrderStatus::Filled) {
+                ++fills;
+            }
+        }
+        if (event.positionUpdate.has_value()) {
+            positionQty = event.positionUpdate->positionQty;
+            hasPosition = true;
+        }
+    }
+    sLog_App("trade_command accepted: id=" << command.commandId << " action=" << toString(command.action)
+             << " symbol=" << command.symbol << " side=" << toString(command.side)
+             << " type=" << toString(command.orderType) << " qty=" << command.qty
+             << " price=" << command.price << " algo=" << command.algoId << " orderUpdates=" << orders
+             << " fills=" << fills << " position=" << (hasPosition ? std::to_string(positionQty) : "unchanged"));
+}
+
+void LiveTradingSession::publish(const std::vector<ExecutionEvent>& events, int64_t timestampMs) {
     auto tradingResult = tradingResultFromExecutionEvents(events);
-    auto algoEvents = algoEventsFromExecutionEvents(events, command.timestamp);
+    auto algoEvents = algoEventsFromExecutionEvents(events, timestampMs);
 
     ResultCallback cb;
     {

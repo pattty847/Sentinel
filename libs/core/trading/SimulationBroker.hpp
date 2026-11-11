@@ -10,12 +10,18 @@ namespace trading {
 
 class SimulationBroker {
 public:
+    struct IntentOutcome {
+        std::vector<ExecutionEvent> events;
+        std::string rejectReason; // empty when the engine accepted the intent
+    };
+
     SimulationBroker(TradingEngine::PriceResolver resolver,
                      std::unique_ptr<IExecutionModel> executionModel,
                      double slippageBps);
 
     std::vector<ExecutionEvent> onMarketEvent(const MarketEvent& event);
     std::vector<ExecutionEvent> submitIntents(const std::vector<OrderIntent>& intents);
+    IntentOutcome submitIntent(const OrderIntent& intent);
 
     BrokerSnapshot snapshotFor(const std::string& symbol, int64_t timestampMs) const;
     BacktestResult buildResult(const BacktestConfig& config) const;
