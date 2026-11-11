@@ -2,6 +2,7 @@
 
 #include "trading/AlgoEngine.hpp"
 #include "trading/AvendellaMM.hpp"
+#include "trading/LiveTradingSession.hpp"
 #include "trading/TradingEngine.hpp"
 #include "trading/TradingTypes.hpp"
 
@@ -386,4 +387,208 @@ TEST(AlgoEngineTest, TickOnWrongSymbolDoesNothing) {
     algoEngine.onTick("ETH-USD", 2000.0, 1000);
     EXPECT_EQ(callbackCount, 0);
     EXPECT_EQ(orderEvents, 0);
+}
+
+// ============================================================
+// LiveTradingSession — manual close after an algo run (server path)
+// ============================================================
+
+namespace {
+
+trading::AlgoParams liveAlgoParams() {
+    trading::AlgoParams p = defaultParams();
+    p.orderQty = 1.0;
+    p.maxPositionQty = 2.0;
+    return p;
+}
+
+trading::TradeCommand flattenCommand(const std::string& symbol) {
+    trading::TradeCommand cmd;
+    cmd.commandId = "flatten-1";
+    cmd.action = trading::TradeAction::Flatten;
+    cmd.symbol = symbol;
+    cmd.orderType = trading::OrderType::Market;
+    cmd.timestamp = 5000;
+    return cmd;
+}
+
+double sessionNetQty(const trading::LiveTradingSession& session, const std::string& symbol) {
+    const auto snap = session.broker().snapshotFor(symbol, 0);
+    return snap.position.has_value() ? snap.position->netQty : 0.0;
+}
+
+}  // namespace
+
+TEST(LiveTradingSessionClose, StopAlgoCancelsItsRestingQuotes) {
+    double mark = 100.0;
+    trading::LiveTradingSession session([&mark](const std::string&) { return mark; }, 0.0);
+    session.registerAlgo(std::make_unique<trading::AvendellaMM>());
+    ASSERT_TRUE(session.startAlgo("AvendellaMM", "BTC-USD", liveAlgoParams()));
+
+    session.onTradeTick("BTC-USD", 100.0, 1000);
+    ASSERT_EQ(session.broker().snapshotFor("BTC-USD", 0).openOrders.size(), 2u);
+
+    std::vector<trading::OrderUpdate> broadcast;
+    session.setResultCallback([&broadcast](trading::TradingResult r, std::vector<trading::AlgoOrderEvent>) {
+        broadcast.insert(broadcast.end(), r.orderUpdates.begin(), r.orderUpdates.end());
+    });
+    session.stopAlgo("AvendellaMM");
+
+    EXPECT_TRUE(session.broker().snapshotFor("BTC-USD", 0).openOrders.empty())
+        << "a stopped algo must not leave quotes resting in the shared paper account";
+    ASSERT_EQ(broadcast.size(), 2u) << "clients must see the quote cancellations";
+    for (const auto& u : broadcast) {
+        EXPECT_EQ(u.status, trading::OrderStatus::Canceled);
+        EXPECT_EQ(u.algoId, "AvendellaMM");
+    }
+}
+
+TEST(LiveTradingSessionClose, FlattenAfterAlgoFillStaysFlat) {
+    double mark = 100.0;
+    trading::LiveTradingSession session([&mark](const std::string&) { return mark; }, 0.0);
+    session.registerAlgo(std::make_unique<trading::AvendellaMM>());
+    ASSERT_TRUE(session.startAlgo("AvendellaMM", "BTC-USD", liveAlgoParams()));
+
+    session.onTradeTick("BTC-USD", 100.0, 1000);   // quotes 99.95 / 100.05
+    session.onTradeTick("BTC-USD", 100.10, 2000);  // ask fills -> short 1, algo requotes
+    ASSERT_DOUBLE_EQ(sessionNetQty(session, "BTC-USD"), -1.0);
+    session.stopAlgo("AvendellaMM");
+
+    mark = 100.10;
+    session.processTradeCommand(flattenCommand("BTC-USD"));
+    ASSERT_DOUBLE_EQ(sessionNetQty(session, "BTC-USD"), 0.0);
+
+    // Market moves through every price the algo ever quoted; each orphan fill would reopen.
+    session.onTradeTick("BTC-USD", 99.0, 3000);
+    EXPECT_DOUBLE_EQ(sessionNetQty(session, "BTC-USD"), 0.0)
+        << "a closed position must not reopen from the stopped algo's bid";
+    session.onTradeTick("BTC-USD", 101.0, 4000);
+    EXPECT_DOUBLE_EQ(sessionNetQty(session, "BTC-USD"), 0.0)
+        << "a closed position must not reopen from the stopped algo's ask";
+}
+
+TEST(LiveTradingSessionClose, ManualCancelAllWithAlgoIdKeepsOtherOrders) {
+    trading::TradingEngine engine([](const std::string&) { return 100.0; }, 0.0);
+    trading::TradeCommand manual;
+    manual.action = trading::TradeAction::PlaceOrder;
+    manual.symbol = "BTC-USD";
+    manual.side = trading::OrderSide::Buy;
+    manual.orderType = trading::OrderType::Limit;
+    manual.price = 90.0;
+    manual.hasPrice = true;
+    manual.qty = 1.0;
+    engine.onCommand(manual);
+    auto algoOrder = manual;
+    algoOrder.algoId = "AvendellaMM";
+    engine.onCommand(algoOrder);
+    auto otherAlgoOrder = manual;
+    otherAlgoOrder.algoId = "OtherAlgo";
+    engine.onCommand(otherAlgoOrder);
+
+    trading::TradeCommand cancelAlgo;
+    cancelAlgo.action = trading::TradeAction::CancelAll;
+    cancelAlgo.algoId = "AvendellaMM";
+    const auto res = engine.onCommand(cancelAlgo);
+    ASSERT_EQ(res.orderUpdates.size(), 1u);
+    EXPECT_EQ(res.orderUpdates.front().algoId, "AvendellaMM");
+    EXPECT_EQ(engine.getOpenOrders("BTC-USD").size(), 2u);
+    EXPECT_TRUE(engine.getOpenOrders("BTC-USD", "AvendellaMM").empty());
+    EXPECT_EQ(engine.getOpenOrders("BTC-USD", "OtherAlgo").size(), 1u)
+        << "an algo-scoped cancel must not touch another algo's orders";
+}
+
+TEST(LiveTradingSessionClose, AlgoScopedCancelKeepsManualAttachedRisk) {
+    trading::TradingEngine engine([](const std::string&) { return 100.0; }, 0.0);
+    trading::TradeCommand buy;
+    buy.action = trading::TradeAction::PlaceOrder;
+    buy.symbol = "BTC-USD";
+    buy.side = trading::OrderSide::Buy;
+    buy.orderType = trading::OrderType::Market;
+    buy.qty = 1.0;
+    engine.onCommand(buy);
+
+    trading::TradeCommand risk;
+    risk.action = trading::TradeAction::SetAttachedRisk;
+    risk.symbol = "BTC-USD";
+    risk.hasTakeProfit = true;
+    risk.takeProfitPrice = 110.0;
+    risk.hasStopLoss = true;
+    risk.stopLossPrice = 90.0;
+    ASSERT_EQ(engine.onCommand(risk).riskOrderUpdates.size(), 1u);
+
+    trading::TradeCommand algoQuote;
+    algoQuote.action = trading::TradeAction::PlaceOrder;
+    algoQuote.symbol = "BTC-USD";
+    algoQuote.side = trading::OrderSide::Buy;
+    algoQuote.orderType = trading::OrderType::Limit;
+    algoQuote.price = 80.0;
+    algoQuote.hasPrice = true;
+    algoQuote.qty = 1.0;
+    algoQuote.algoId = "AvendellaMM";
+    engine.onCommand(algoQuote);
+
+    trading::TradeCommand cancelAlgo;
+    cancelAlgo.action = trading::TradeAction::CancelAll;
+    cancelAlgo.algoId = "AvendellaMM";
+    const auto res = engine.onCommand(cancelAlgo);
+    EXPECT_TRUE(res.riskOrderUpdates.empty()) << "algo-scoped cancel must not clear manual TP/SL";
+
+    engine.onTick("BTC-USD", 89.0, 1000);  // stop loss still armed: exits the long
+    EXPECT_DOUBLE_EQ(engine.getPosition("BTC-USD")->netQty, 0.0);
+}
+
+TEST(LiveTradingSessionClose, StopRestartSameAlgoIdIsClean) {
+    trading::LiveTradingSession session([](const std::string&) { return 100.0; }, 0.0);
+    session.registerAlgo(std::make_unique<trading::AvendellaMM>());
+
+    for (int run = 0; run < 2; ++run) {
+        ASSERT_TRUE(session.startAlgo("AvendellaMM", "BTC-USD", liveAlgoParams()));
+        session.onTradeTick("BTC-USD", 100.0, 1000 + run);
+        const auto open = session.broker().snapshotFor("BTC-USD", 0).openOrders;
+        ASSERT_EQ(open.size(), 2u) << "run " << run << " must quote exactly one bid and one ask";
+        for (const auto& o : open) {
+            EXPECT_EQ(o.algoId, "AvendellaMM");
+        }
+        session.stopAlgo("AvendellaMM");
+        EXPECT_TRUE(session.broker().snapshotFor("BTC-USD", 0).openOrders.empty()) << "run " << run;
+        EXPECT_TRUE(session.runningAlgos().empty());
+    }
+    EXPECT_DOUBLE_EQ(sessionNetQty(session, "BTC-USD"), 0.0);
+}
+
+TEST(LiveTradingSessionClose, UnknownActionThroughSessionIsRejected) {
+    trading::LiveTradingSession session([](const std::string&) { return 100.0; }, 0.0);
+    std::size_t callbacks = 0;
+    session.setResultCallback([&callbacks](trading::TradingResult, std::vector<trading::AlgoOrderEvent>) {
+        ++callbacks;
+    });
+    const auto cmd = trading::parseTradeCommandJson(
+        R"({"type":"trade_command","command_id":"bogus-1","action":"BOGUS","symbol":"BTC-USD",)"
+        R"("side":"BUY","order_type":"MARKET","qty":1.0})");
+    ASSERT_EQ(cmd.action, trading::TradeAction::Unknown);
+    session.processTradeCommand(cmd);
+
+    EXPECT_EQ(callbacks, 0u) << "an unknown action must not produce order or position updates";
+    EXPECT_DOUBLE_EQ(sessionNetQty(session, "BTC-USD"), 0.0) << "an unknown action must not trade";
+}
+
+TEST(LiveTradingSessionClose, CommandRejectReasons) {
+    trading::TradingEngine engine([](const std::string&) { return 0.0; }, 0.0);
+    EXPECT_EQ(engine.onCommand(flattenCommand("BTC-USD")).rejectReason, "no_position");
+
+    trading::TradeCommand market;
+    market.action = trading::TradeAction::PlaceOrder;
+    market.symbol = "BTC-USD";
+    market.side = trading::OrderSide::Sell;
+    market.orderType = trading::OrderType::Market;
+    market.qty = 1.0;
+    EXPECT_EQ(engine.onCommand(market).rejectReason, "no_mark_price");
+
+    trading::TradeCommand cancel;
+    cancel.action = trading::TradeAction::CancelOrder;
+    cancel.targetOrderId = "ord-404";
+    EXPECT_EQ(engine.onCommand(cancel).rejectReason, "unknown_order");
+
+    trading::TradeCommand unknown;
+    EXPECT_EQ(engine.onCommand(unknown).rejectReason, "unknown_action");
 }

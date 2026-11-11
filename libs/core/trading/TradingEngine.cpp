@@ -12,6 +12,16 @@ TradingEngine::TradingEngine(PriceResolver resolver, double slippageBps)
     : m_priceResolver(std::move(resolver))
     , m_execution(slippageBps) {}
 
+namespace {
+
+TradingResult rejected(const char* reason) {
+    TradingResult out;
+    out.rejectReason = reason;
+    return out;
+}
+
+} // namespace
+
 bool TradingEngine::sameSide(double lhsQty, double rhsQty) {
     return (lhsQty > 0.0 && rhsQty > 0.0) || (lhsQty < 0.0 && rhsQty < 0.0);
 }
@@ -238,7 +248,7 @@ PnlSnapshot TradingEngine::buildSnapshot(const std::string& symbol, double markP
 TradingResult TradingEngine::onCommand(const TradeCommand& command) {
     if (!std::isfinite(command.qty) || !std::isfinite(command.price) ||
         !std::isfinite(command.takeProfitPrice) || !std::isfinite(command.stopLossPrice)) {
-        return {};
+        return rejected("non_finite_field");
     }
     switch (command.action) {
         case TradeAction::PlaceOrder: return handlePlaceOrder(command);
@@ -246,15 +256,20 @@ TradingResult TradingEngine::onCommand(const TradeCommand& command) {
         case TradeAction::CancelAll: return handleCancelAll(command);
         case TradeAction::Flatten: return handleFlatten(command);
         case TradeAction::SetAttachedRisk: return handleSetAttachedRisk(command);
-        default: return {};
+        default: return rejected("unknown_action");
     }
 }
 
 TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
     TradingResult out;
-    if (command.symbol.empty() || !std::isfinite(command.qty) || command.qty <= 0.0 ||
-        command.side == OrderSide::Unknown) {
-        return out;
+    if (command.symbol.empty()) {
+        return rejected("empty_symbol");
+    }
+    if (!std::isfinite(command.qty) || command.qty <= 0.0) {
+        return rejected("invalid_qty");
+    }
+    if (command.side == OrderSide::Unknown) {
+        return rejected("unknown_side");
     }
 
     Order order;
@@ -270,7 +285,7 @@ TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
 
     if (command.orderType == OrderType::Limit) {
         if (!command.hasPrice || !std::isfinite(command.price) || command.price <= 0.0) {
-            return out;
+            return rejected("invalid_limit_price");
         }
         // Resting limit: acknowledge as Open
         order.status = OrderStatus::Open;
@@ -283,11 +298,11 @@ TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
     // Market order: fill immediately
     const double lastPrice = m_priceResolver(command.symbol);
     if (!std::isfinite(lastPrice) || lastPrice <= 0.0) {
-        return out;
+        return rejected("no_mark_price");
     }
     const double fillPrice = m_execution.fillPrice(lastPrice, command.side);
     if (!std::isfinite(fillPrice) || fillPrice <= 0.0) {
-        return out;
+        return rejected("invalid_fill_price");
     }
 
     order.status = OrderStatus::New;
@@ -311,11 +326,11 @@ TradingResult TradingEngine::handleCancelOrder(const TradeCommand& command) {
     TradingResult out;
     auto existing = m_orders.get(command.targetOrderId);
     if (!existing.has_value()) {
-        return out;
+        return rejected("unknown_order");
     }
     Order order = *existing;
     if (order.status == OrderStatus::Filled || order.status == OrderStatus::Canceled) {
-        return out;
+        return rejected("order_not_active");
     }
     order.status = OrderStatus::Canceled;
     m_orders.upsert(order);
@@ -325,15 +340,21 @@ TradingResult TradingEngine::handleCancelOrder(const TradeCommand& command) {
     return out;
 }
 
-TradingResult TradingEngine::handleCancelAll(const TradeCommand&) {
+TradingResult TradingEngine::handleCancelAll(const TradeCommand& command) {
     TradingResult out;
     auto active = m_orders.getAllActive();
     for (auto& order : active) {
+        if (!command.algoId.empty() && order.algoId != command.algoId) {
+            continue;
+        }
         order.status = OrderStatus::Canceled;
         m_orders.upsert(order);
         out.orderUpdates.push_back(OrderUpdate{order.id, order.symbol, order.status, order.side, order.qty,
                                                order.filledQty, order.qty - order.filledQty, order.avgPrice,
                                                order.limitPrice, order.algoId});
+    }
+    if (!command.algoId.empty()) {
+        return out; // an algo-scoped cancel leaves manual attached risk alone
     }
     for (const auto& [symbol, risk] : m_attachedRiskBySymbol) {
         (void)risk;
@@ -344,10 +365,9 @@ TradingResult TradingEngine::handleCancelAll(const TradeCommand&) {
 }
 
 TradingResult TradingEngine::handleFlatten(const TradeCommand& command) {
-    TradingResult out;
     auto pos = m_positions.get(command.symbol);
-    if (!pos.has_value() || pos->netQty == 0.0) {
-        return out;
+    if (!pos.has_value() || std::abs(pos->netQty) < 1e-12) {
+        return rejected("no_position");
     }
 
     TradeCommand flatten = command;
@@ -360,8 +380,11 @@ TradingResult TradingEngine::handleFlatten(const TradeCommand& command) {
 
 TradingResult TradingEngine::handleSetAttachedRisk(const TradeCommand& command) {
     TradingResult out;
-    if (!command.algoId.empty() || command.symbol.empty()) {
-        return out;
+    if (!command.algoId.empty()) {
+        return rejected("algo_attached_risk_unsupported");
+    }
+    if (command.symbol.empty()) {
+        return rejected("empty_symbol");
     }
 
     auto position = m_positions.get(command.symbol);
@@ -374,13 +397,13 @@ TradingResult TradingEngine::handleSetAttachedRisk(const TradeCommand& command) 
     if (command.hasTakeProfit) {
         if ((isLong && command.takeProfitPrice <= position->avgPrice) ||
             (!isLong && command.takeProfitPrice >= position->avgPrice)) {
-            return out;
+            return rejected("take_profit_wrong_side");
         }
     }
     if (command.hasStopLoss) {
         if ((isLong && command.stopLossPrice >= position->avgPrice) ||
             (!isLong && command.stopLossPrice <= position->avgPrice)) {
-            return out;
+            return rejected("stop_loss_wrong_side");
         }
     }
 

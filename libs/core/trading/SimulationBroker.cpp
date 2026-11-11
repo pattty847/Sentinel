@@ -27,11 +27,18 @@ std::vector<ExecutionEvent> SimulationBroker::onMarketEvent(const MarketEvent& e
 std::vector<ExecutionEvent> SimulationBroker::submitIntents(const std::vector<OrderIntent>& intents) {
     std::vector<ExecutionEvent> out;
     for (const auto& intent : intents) {
-        auto result = m_executionModel->onIntent(m_engine, intent);
-        auto events = recordTradingResult(result, intent.timestampMs);
-        out.insert(out.end(), events.begin(), events.end());
+        auto outcome = submitIntent(intent);
+        out.insert(out.end(), outcome.events.begin(), outcome.events.end());
     }
     return out;
+}
+
+SimulationBroker::IntentOutcome SimulationBroker::submitIntent(const OrderIntent& intent) {
+    auto result = m_executionModel->onIntent(m_engine, intent);
+    IntentOutcome outcome;
+    outcome.rejectReason = std::move(result.rejectReason);
+    outcome.events = recordTradingResult(result, intent.timestampMs);
+    return outcome;
 }
 
 BrokerSnapshot SimulationBroker::snapshotFor(const std::string& symbol, int64_t timestampMs) const {

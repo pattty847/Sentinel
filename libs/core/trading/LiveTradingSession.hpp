@@ -38,6 +38,8 @@ private:
         std::function<std::unique_ptr<IAlgo>()> make;
     };
 
+    void publish(const std::vector<ExecutionEvent>& events, int64_t timestampMs);
+    static void logCommandOutcome(const TradeCommand& command, const SimulationBroker::IntentOutcome& outcome);
     static AlgoOrderEvent buildAlgoEvent(const OrderUpdate& update, int64_t timestampMs);
     static void appendTradingResult(TradingResult& dst, const TradingResult& src);
     static TradingResult tradingResultFromExecutionEvents(const std::vector<ExecutionEvent>& events);
