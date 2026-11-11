@@ -161,6 +161,3 @@ config/.client_config.yaml
 
 # Codex local project config (never commit)
 .codex/
-
-# Sandbox SentinelBar events (_private/tools/agent/sentinel-event.sh); land moves them to the journal
-.sentinel-events.jsonl
