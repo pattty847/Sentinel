@@ -8,7 +8,6 @@
 #include <QVector>
 #include "../../core/marketdata/model/TradeData.h"
 #include "../../core/protocol/SentinelStreamClient.hpp"
-#include "../../core/protocol/FootprintSlice.hpp"
 #include "../../core/protocol/TpoSlice.hpp"
 #include "../../core/protocol/VolumeProfileSlice.hpp"
 #include "../../core/trading/TradingTypes.hpp"
@@ -35,10 +34,6 @@ public:
     virtual void requestTradeHistory(const QString&, int64_t, int64_t, quint64) {}
     virtual void subscribeFlowLive(const QString&, int64_t) {}
     virtual void unsubscribeFlowLive() {}
-    virtual void requestFootprintHistory(const QString& symbol,
-                                         int64_t timeframeMs,
-                                         int64_t endTimeMs,
-                                         int count) = 0;
     virtual void requestTpoHistory(const QString& symbol,
                                    int64_t timeframeMs,
                                    int sessionType,
@@ -67,7 +62,6 @@ signals:
     void flowBarsReceived(SentinelStreamClient::FlowBatchPtr batch);
     void tradeHistoryReceived(SentinelStreamClient::TradeHistoryPtr page);
     void tradeHistoryFailed(quint64 req, const QString& message);
-    void footprintSliceReceived(const FootprintSlice& slice);
     void tpoSliceReceived(const TpoSlice& slice);
     void tpoHistoryChunkReceived(const QString& symbol, const QString& requestId, qint64 timeframeMs,
                                  int sessionType, qint64 lastEndMs, int columns);

@@ -16,7 +16,6 @@ class LayerVisibility : public QObject {
     Q_PROPERTY(int primaryField READ primaryField NOTIFY primaryFieldChanged)
     Q_PROPERTY(bool heatmapLayerEnabled READ heatmapEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool footprintLayerEnabled READ footprintEnabled NOTIFY layerVisibilityChanged)
-    Q_PROPERTY(QString footprintSource READ footprintSource WRITE writeFootprintSource NOTIFY layerVisibilityChanged)
     Q_PROPERTY(QString footprintIntensity READ footprintIntensity WRITE writeFootprintIntensity NOTIFY layerVisibilityChanged)
     Q_PROPERTY(QString footprintCandle READ footprintCandle WRITE writeFootprintCandle NOTIFY layerVisibilityChanged)
     Q_PROPERTY(double footprintDustNotional READ footprintDustNotional WRITE writeFootprintDustNotional NOTIFY layerVisibilityChanged)
@@ -90,11 +89,6 @@ public:
     int primaryField() const { return primaryField_; }
     bool heatmapEnabled() const { return heatmap_; }
     bool footprintEnabled() const { return footprint_; }
-    QString footprintSource() const { return footprintCells_ ? QStringLiteral("cells") : QStringLiteral("q16"); }
-    void setFootprintSource(const QString& value) {
-        if (value != "q16" && value != "cells") return;
-        setFootprintOption(footprintCells_, value == "cells", "footprintSource");
-    }
     QString footprintIntensity() const { return footprintWindowIntensity_ ? QStringLiteral("window") : QStringLiteral("bar"); }
     QString footprintCandle() const { return footprintSpine_ ? QStringLiteral("spine") : QStringLiteral("full"); }
     double footprintDustNotional() const { return footprintDust_; }
@@ -119,10 +113,6 @@ public:
         if (value == footprintDust_) emit footprintSettingsRequested({{"footprintDustNotional", value}});
     }
     void setFootprintNumbers(bool value) { setFootprintOption(footprintNumbers_, value, "footprintNumbers"); }
-    void writeFootprintSource(const QString& value) {
-        setFootprintSource(value);
-        if (value == footprintSource()) emit footprintSettingsRequested({{"footprintSource", value}});
-    }
     void writeFootprintIntensity(const QString& value) {
         setFootprintIntensity(value);
         if (value == footprintIntensity()) emit footprintSettingsRequested({{"footprintIntensity", value}});
@@ -284,7 +274,6 @@ private:
     int cvdStrip_ = 0;
     CvdReset cvdReset_ = CvdReset::Visible;
     bool cvdArea_ = false;
-    bool footprintCells_ = false;
     double footprintDust_ = 2500;
     bool footprintWindowIntensity_ = false, footprintSpine_ = true, footprintNumbers_ = true;
     void changed(std::string_view field, bool enabled) {

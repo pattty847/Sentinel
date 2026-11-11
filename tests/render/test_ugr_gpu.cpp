@@ -21,7 +21,6 @@
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/CandlePixelGeometry.hpp"
 #include "render/DataProcessor.hpp"
-#include "render/FootprintIntensityNode.hpp"
 #include <QSGClipNode>
 #include <typeinfo>
 #include "render/PaperTradeOverlayModel.hpp"
@@ -1005,7 +1004,6 @@ TEST(UgrCandleCpu, FootprintSpineSquareBodiesAndUncoveredFullBodiesMatchSlotGeom
     frame.raster = chart_raster::computeRaster({1000, 3000, 95, 105, {}, 1000, 1, 200, 180, 1}, {});
     frame.mapping = chart_raster::toMapping(frame.raster);
     provider.layers()->setFootprintEnabled(true);
-    provider.layers()->setFootprintSource("cells");
     provider.layers()->setFootprintCandle("spine");
     auto& coverage = provider.footprintPresentation()->coverage;
     coverage.tick = 1; coverage.timeframeMs = 1000; coverage.barCount = 1;
@@ -1605,7 +1603,6 @@ template <class Node> bool hasNode(QSGNode* node) {
 
 std::string tradeLayerNodeName(QSGNode* node, QSGNode* textRoot) {
     if (node == textRoot) return "text";
-    if (hasNode<FootprintIntensityNode>(node)) return "footprint";
     if (node->type() == QSGNode::OpacityNodeType) {
         if (node->childCount() == 1 && node->firstChild()->type() == QSGNode::GeometryNodeType)
             return "footprintCells";
@@ -1653,7 +1650,7 @@ TEST_F(UgrGpu, LateEnableKeepsRegistryOrderAndTextLast) {
     std::cout << "late-enable order:";
     for (const auto& name : order) std::cout << " " << name;
     std::cout << std::endl;
-    EXPECT_EQ(order, (std::vector<std::string>{"footprint", "footprintCells", "VP", "TPO", "ladder", "text"}));
+    EXPECT_EQ(order, (std::vector<std::string>{"footprintCells", "VP", "TPO", "ladder", "text"}));
 }
 
 // Node construction itself needs a window but no initialized RHI or GPU draw.
@@ -1699,7 +1696,7 @@ TEST(TradeLayerNodes, LateEnableKeepsRegistryOrderAndTextLast) {
     std::cout << "\nnode-only late-enable order:";
     for (const auto& name : order) std::cout << " " << name;
     std::cout << std::endl;
-    EXPECT_EQ(order, (std::vector<std::string>{"heatmap", "footprint", "footprintCells", "VP", "TPO", "ladder", "text"}));
+    EXPECT_EQ(order, (std::vector<std::string>{"heatmap", "footprintCells", "VP", "TPO", "ladder", "text"}));
 }
 
 TEST(TradeLayerNodes, FixedHeatmapVpLabelsStructure) {
@@ -1729,8 +1726,8 @@ TEST(TradeLayerNodes, FixedHeatmapVpLabelsStructure) {
         std::cout << "] ";
     }
     std::cout << std::endl;
-    ASSERT_EQ(root.childCount(), 7);
-    EXPECT_EQ(tradeLayerNodeName(root.childAtIndex(2), root.lastChild()), "footprintCells");
+    ASSERT_EQ(root.childCount(), 6);
+    EXPECT_EQ(tradeLayerNodeName(root.childAtIndex(1), root.lastChild()), "footprintCells");
     EXPECT_EQ(root.firstChild()->type(), QSGNode::OpacityNodeType);
     EXPECT_TRUE(hasNode<ChartTextNode>(root.lastChild()));
 }

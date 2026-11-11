@@ -287,7 +287,7 @@ TEST(AgentHostModeSources, NoNativeFormatQSettingsInTheGui) {
 // or (c) a new outbound method appears that nobody has classified.
 TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
     // The legacy heatmap requests (heatmap history, recording view and history) went in S8a.
-    const QSet<QString> guarded{"subscribe", "requestFootprintHistory", "requestCandleHistory",
+    const QSet<QString> guarded{"subscribe", "requestCandleHistory",
                                 "requestTpoHistory", "subscribeFlowLive", "requestFlowHistory", "requestTradeHistory",
                                 "sendTradeCommand", "sendAlgoCommand"};
     // Connection management, releases, cancels and the local generation lookup:

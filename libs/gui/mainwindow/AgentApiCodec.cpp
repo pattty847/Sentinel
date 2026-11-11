@@ -469,11 +469,6 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
                 result.body.layers.insert(key, v);
                 continue;
             }
-            if (key == "footprintSource") {
-                if (v != "q16" && v != "cells") return reject("invalid_layer", "footprintSource must be q16 or cells");
-                result.body.layers.insert(key, v);
-                continue;
-            }
             if (key == "footprintCandle" || key == "footprintDustNotional") {
                 heatmap::HeatmapChartSettings settings;
                 const auto error = heatmap::applySettingsPatch(settings, {{key, v}});
@@ -592,14 +587,13 @@ QJsonObject stateJson(const StateSnapshot& s) {
                 {"tickSize", number(s.candleTickSize)}}}}},
         {"lastReceivedAtMs", QJsonObject{{"heatmap", integer(s.heatmapReceivedAtMs)},
             {"candles", integer(s.candlesReceivedAtMs)}, {"book", integer(s.bookReceivedAtMs)},
-            {"trades", integer(s.tradesReceivedAtMs)}, {"footprint", integer(s.footprintReceivedAtMs)},
+            {"trades", integer(s.tradesReceivedAtMs)},
             {"tpo", integer(s.tpoReceivedAtMs)}, {"volumeProfile", integer(s.volumeProfileReceivedAtMs)}}},
         {"layers", QJsonObject{{"heatmap", boolean(s.heatmapLayer)}, {"candles", boolean(s.candlesLayer)},
             {"footprint", boolean(s.footprintLayer)},
             {"flowFooter", s.footprintSettings.value("flowFooter")},
             {"cvdStripPx", s.footprintSettings.value("cvdStripPx")},
             {"cvdReset", s.footprintSettings.value("cvdReset")}, {"cvdStyle", s.footprintSettings.value("cvdStyle")},
-            {"footprintSource", s.footprintSettings.value("footprintSource")},
             {"footprintIntensity", s.footprintSettings.value("footprintIntensity")},
             {"footprintCandle", s.footprintSettings.value("footprintCandle")},
             {"footprintDustNotional", s.footprintSettings.value("footprintDustNotional")},

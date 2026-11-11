@@ -4,7 +4,7 @@ The GUI listens on `127.0.0.1` at `gui.api_port` (default `17100`). `api_port=0`
 
 | Method | Route | Result |
 |---|---|---|
-| GET | `/api/v1/state` | Connection, advertised server configuration, active layers, receive times (`lastReceivedAtMs`: `heatmap`, `candles`, `book`, `trades`, and since S8a the trade overlays `footprint`, `tpo`, `volumeProfile`) and chart render statistics. |
+| GET | `/api/v1/state` | Connection, advertised server configuration, active layers, receive times (`lastReceivedAtMs`: `heatmap`, `candles`, `book`, `trades`, and since S8a the trade overlays `tpo`, `volumeProfile`; there is no `footprint` entry because the footprint is drawn from flow, not a pushed slice) and chart render statistics. |
 | GET | `/api/v1/viewport` | Active chart bounds, linked heatmap/candle timeframe, follow mode, auto price scale (`autoScale`), lock to mid (`lockMid`), dimensions, zoom, viewport version and the last frame's drawn window (`drawn`). |
 | GET | `/api/v1/docks` | Every available dock ID and its visible boolean. |
 | GET | `/api/v1/candles?startMs=...&endMs=...&timeframeMs=...&limit=500` | Locally held candle bars and `nextStartMs` for pagination. `limit` maximum 2,000. |
@@ -99,7 +99,7 @@ curl -s -H 'Content-Type: application/json' -d '{"kind":"wheel","target":"chart"
 curl -s 'http://127.0.0.1:17100/api/v1/screenshot?name=wheel&target=heatmap&afterOperation=o3&waitMs=5000'
 ```
 
-## Footprint source and cells
+## Footprint cells
 
 `POST /api/v1/layers` accepts the following persistent chart settings. The same
 keys work in `POST /api/v1/heatmap/settings` (including `persist:false`) and appear
@@ -108,7 +108,6 @@ in `GET /api/v1/state` under `layers`. QML exposes them on
 
 | Key | Values / default | Settings → Chart |
 | --- | --- | --- |
-| `footprintSource` | `q16` (default), `cells` | Footprint → Source |
 | `footprintIntensity` | `bar` (default), `window` | Footprint → Volume scale |
 | `footprintCandle` | `spine` (default), `full` | Footprint → Candle |
 | `footprintNumbers` | boolean, true | Footprint → Show numbers |
@@ -118,8 +117,9 @@ in `GET /api/v1/state` under `layers`. QML exposes them on
 | `cvdReset` | `visible` (default), `utcDay`, `tpoSession` | Order flow → Reset |
 | `cvdStyle` | `line` (default), `area` | Order flow → Style |
 
-`footprint:true` shows the selected source. `q16` preserves the default picture.
-The cells feed runs only when footprint is visible and source is `cells`.
+`footprint:true` shows the footprint cells; there is no source choice. The former
+`footprintSource` key is gone: a request carrying it gets the normal unknown-field
+`422` on both routes. The cells feed runs only when footprint is visible.
 Cells enter at 24 logical px per column and 6 per row. Numbers enter at 96.013/17,
 calculated from two maximum-width five-glyph labels at 13 px, their centre gaps,
 and the candle space, plus the retention margin. Both stages retain a 2 px
@@ -147,7 +147,7 @@ single-side cell volume. `footprintNumbers:false` keeps the Cells stage.
 The removed hollow-candle setting is rejected by the API.
 
 ```sh
-curl -s -H 'Content-Type: application/json' -d '{"footprint":true,"footprintSource":"cells","footprintIntensity":"bar","footprintCandle":"spine","footprintNumbers":true,"footprintDustNotional":2500}' http://127.0.0.1:17115/api/v1/layers
+curl -s -H 'Content-Type: application/json' -d '{"footprint":true,"footprintIntensity":"bar","footprintCandle":"spine","footprintNumbers":true,"footprintDustNotional":2500}' http://127.0.0.1:17115/api/v1/layers
 ```
 
 ## Cumulative volume delta strip
@@ -164,7 +164,7 @@ curl -s -H 'Content-Type: application/json' -d '{"footprint":true,"footprintSour
 Both routes report the current knobs; `GET /api/v1/state` includes them under `layers`.
 Layer-route and QML writes persist, including writes of the current value. The heatmap
 settings route supports `persist:false` for lab comparisons without changing saved settings.
-CVD works with footprint off or either footprint source and has no footprint zoom gate.
+CVD works with footprint on or off and has no footprint zoom gate.
 Sub-second charts use the loaded 1 s flow series.
 The default `visible` mode anchors at zero on the first bar whose start time is at
 or after the drawn window's left edge (`drawnStartMs`), then accumulates subsequent

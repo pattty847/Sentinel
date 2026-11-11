@@ -1,17 +1,16 @@
 /*
 Sentinel — DataProcessor
-Role: stages the trade overlays (footprint, TPO, volume profile) on their own
+Role: stages the trade overlays (TPO, volume profile) on their own
       grids (INV-068) and emits ready columns for the chart's overlay renderers.
-Inputs/Outputs: receives overlay slices; emits footprint/TPO columns and VP bins.
+Inputs/Outputs: receives overlay slices; emits TPO columns and VP bins.
 Threading: Lives on a worker QThread; slots are invoked via queued connections.
 Integration: Owned by UnifiedGridRenderer. The heatmap itself is the GPU layer's
       (HeatmapGpuLayer); nothing here touches it since S8a.
-Observability: per-slice detail via probes (footprint.*, tpo.*).
+Observability: per-slice detail via probes (tpo.*).
 Related: DataProcessor.hpp.
 */
 #include "DataProcessor.hpp"
 
-#include "FootprintStreamState.hpp"
 #include "TpoStreamState.hpp"
 #include "VolumeProfileState.hpp"
 #include "SentinelLogging.hpp"
@@ -22,8 +21,6 @@ Related: DataProcessor.hpp.
 DataProcessor::DataProcessor(QObject* parent)
     : QObject(parent) {
     qRegisterMetaType<TradeOverlayGrid>();
-    m_footprintStream = std::make_unique<FootprintStreamState>();
-    m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
     m_tpoStream = std::make_unique<TpoStreamState>();
     m_tpoStream->reset(m_tpoGridWidth, m_tpoGridHeight);
     m_vpStream = std::make_unique<VolumeProfileState>();
@@ -50,9 +47,6 @@ void DataProcessor::clearData() {
     ++m_tpoGridGeneration;
     m_tpoMaxPrice = 0;
     m_tpoTickSize = 0;
-    if (m_footprintStream) {
-        m_footprintStream->clear();
-    }
     if (m_tpoStream) {
         m_tpoStream->clear();
     }
@@ -69,87 +63,6 @@ void DataProcessor::setActiveSymbol(const QString& symbol) {
     sLog_Data("DataProcessor symbol: " << m_activeSymbol << "->" << normalized << " (stream state cleared)");
     m_activeSymbol = normalized;
     clearData();
-}
-
-void DataProcessor::onFootprintSliceReceived(const FootprintSlice& slice) {
-    if (!m_activeSymbol.isEmpty() && slice.symbol != m_activeSymbol) return;
-    if (m_shuttingDown.load()) {
-        return;
-    }
-    if (!m_footprintStream) {
-        return;
-    }
-    if (slice.deltaLevelsQ16.isEmpty()) {
-        return;
-    }
-    if (slice.format.trimmed().compare(QStringLiteral("q16_delta"), Qt::CaseInsensitive) != 0) {
-        sLog_DataN(5000, "Footprint slice dropped: unsupported format=" << slice.format
-                   << " symbol=" << slice.symbol << " tf=" << slice.timeframeMs);
-        return;
-    }
-
-    const int resolvedWidth = (slice.gridWidth > 0) ? slice.gridWidth : m_footprintGridWidth;
-    const int resolvedHeight = (slice.gridHeight > 0) ? slice.gridHeight : m_footprintGridHeight;
-    if (resolvedWidth <= 0 || resolvedHeight <= 0) {
-        sLog_DataN(5000, "Footprint slice dropped: no grid size symbol=" << slice.symbol
-                   << " grid=" << resolvedWidth << "x" << resolvedHeight);
-        return;
-    }
-
-    if (resolvedWidth != m_footprintGridWidth || resolvedHeight != m_footprintGridHeight) {
-        sLog_Render("Footprint grid resize: " << m_footprintGridWidth << "x" << m_footprintGridHeight
-                    << "->" << resolvedWidth << "x" << resolvedHeight << " symbol=" << slice.symbol);
-        m_footprintGridWidth = resolvedWidth;
-        m_footprintGridHeight = resolvedHeight;
-        m_footprintStream->setGridDimensions(m_footprintGridWidth, m_footprintGridHeight);
-    }
-
-    const bool ok = m_footprintStream->ingestSlice(slice.bucketStartMs,
-                                                   slice.bucketEndMs,
-                                                   slice.timeframeMs,
-                                                   m_footprintGridWidth,
-                                                   m_footprintGridHeight,
-                                                   slice.minPrice,
-                                                   slice.maxPrice,
-                                                   slice.tickSize,
-                                                   slice.deltaLevelsQ16);
-    if (!ok) {
-        // ingestSlice rejects only malformed slices (bad times, size, price band).
-        sLog_DataN(5000, "Footprint slice dropped at staging: symbol=" << slice.symbol
-                   << " start=" << slice.bucketStartMs << " end=" << slice.bucketEndMs
-                   << " tf=" << slice.timeframeMs
-                   << " grid=" << m_footprintGridWidth << "x" << m_footprintGridHeight
-                   << " bytes=" << slice.deltaLevelsQ16.size()
-                   << " price=[" << slice.minPrice << ".." << slice.maxPrice << "]"
-                   << " tick=" << slice.tickSize);
-        return;
-    }
-
-    std::vector<FootprintStreamState::PendingUpload> pendingUploads;
-    m_footprintStream->takePendingUploads(pendingUploads);
-    if (pendingUploads.empty()) {
-        return;
-    }
-
-    const auto snap = m_footprintStream->snapshot();
-    sLog_Probe("footprint.stage", "symbol=" << slice.symbol << " start=" << slice.bucketStartMs
-               << " tf=" << slice.timeframeMs << " pending=" << pendingUploads.size()
-               << " grid=" << snap.gridWidth << "x" << snap.gridHeight
-               << " write=" << snap.writeColumn << " filled=" << snap.filledColumns);
-    for (const auto& upload : pendingUploads) {
-        QByteArray columnQ16;
-        if (!m_footprintStream->copyColumnForUpload(upload.x, columnQ16)) {
-            sLog_DataN(1000, "Footprint upload dropped: copy failed x=" << upload.x
-                       << " start=" << upload.bucketStartMs << " grid=" << snap.gridWidth
-                       << "x" << snap.gridHeight);
-            continue;
-        }
-        sLog_Probe("footprint.upload", "x=" << upload.x << " start=" << upload.bucketStartMs
-                   << " bytes=" << columnQ16.size());
-        const auto end = snap.lastSliceStartMs + snap.timeframeMs;
-        emit footprintColumnReady(upload.x, snap.gridWidth, snap.gridHeight, std::move(columnQ16),
-            {end - snap.gridWidth * snap.timeframeMs, end, snap.maxPrice, snap.tickSize, snap.resetGeneration});
-    }
 }
 
 void DataProcessor::setTpoSelection(qint64 timeframeMs, int sessionType) {

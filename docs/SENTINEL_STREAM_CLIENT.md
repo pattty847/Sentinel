@@ -40,7 +40,7 @@ Writes (subscribe, history requests, trade commands) are posted to `m_strand` an
 | `unsubscribe(symbol)` | `unsubscribe` | Unsubscribe |
 | `requestHeatmapChunks(...)` | `heatmap_chunk_request` | Recorded heatmap chunks (binary replies) |
 | `subscribeHeatmapLive(...)` / `unsubscribeHeatmapLive(...)` | `heatmap_live_subscribe` / `heatmap_live_unsubscribe` | The live raw tail |
-| `requestFootprintHistory(...)` | `footprint_history_request` | Historical footprint slices |
+| `requestFootprintHistory(...)` | `footprint_history_request` | Historical footprint slices (the GUI no longer calls it) |
 | `requestTpoHistory(...)` | `tpo_history_request` | Historical TPO slices |
 | `requestCandleHistory(...)` | `candle_history_request` | OHLCV candle history |
 | `requestScreenerData(...)` | `screener_request` | Screener rows (crypto/stock) |
@@ -63,7 +63,7 @@ The client parses JSON by `type` and dispatches to handler methods. Each handler
 | `trade` | `handleTradeMessage` | `tradeReceived` | Trade feed |
 | `heatmap_availability` | (inline) | `heatmapAvailabilityReceived` | Recorded heatmap sources and levels |
 | `heatmap_slice`, `heatmap_history_chunk`, `heatmap_recording_live` | none | none | Retired legacy heatmap (S8a): dropped silently, no per-frame warning, until the server stops sending them (S8b) |
-| `footprint_slice` | `handleFootprintSliceMessage` | `footprintSliceReceived` | Footprint delta levels → GPU |
+| `footprint_slice` | `handleFootprintSliceMessage` | `footprintSliceReceived` | Footprint delta levels; no GUI consumer (the footprint draws from flow) |
 | `footprint_history_chunk` | `handleFootprintHistoryChunkMessage` | `footprintSliceReceived` (per column) | Historical footprint |
 | `tpo_slice` | `handleTpoSliceMessage` | `tpoSliceReceived` | TPO letters → GPU |
 | `tpo_history_chunk` | `handleTpoHistoryChunkMessage` | `tpoSliceReceived` (per column) | Historical TPO |

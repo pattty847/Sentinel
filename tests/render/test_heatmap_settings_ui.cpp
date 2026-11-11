@@ -1033,7 +1033,7 @@ TEST(FlowSettingsDialog, EveryControlAppliesPersistsAndResets) {
     TempStore t;
     HeatmapSettingsModel model(t.store, "main", t.config);
     HeatmapSettingsDialog dialog(&model, nullptr);
-    const QJsonObject patch{{"footprintSource", "cells"}, {"footprintIntensity", "window"},
+    const QJsonObject patch{{"footprintIntensity", "window"},
         {"footprintCandle", "full"}, {"footprintNumbers", false}, {"footprintDustNotional", 123.45},
         {"flowFooter", true}, {"cvdStripPx", 128}, {"cvdReset", "utcDay"}, {"cvdStyle", "area"}};
     for (auto it = patch.begin(); it != patch.end(); ++it) {

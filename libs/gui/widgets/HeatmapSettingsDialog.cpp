@@ -304,7 +304,7 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
     if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelMinPx", "labelMaxPx",
-                                "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleWickWidth", "footprintSource", "footprintIntensity", "footprintCandle", "footprintNumbers",
+                                "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleWickWidth", "footprintIntensity", "footprintCandle", "footprintNumbers",
                                 "footprintDustNotional", "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
@@ -789,7 +789,6 @@ void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
     };
     auto* footprint = new QGroupBox("Footprint", page);
     auto* rows = new QFormLayout(footprint);
-    combo(rows, footprint, "footprintSource", "Source", {"q16", "cells"}, "Select the recorded q16 picture or detailed trade-flow cells.");
     combo(rows, footprint, "footprintIntensity", "Volume scale", {"bar", "window"}, "Scale outward bars against the largest single-side cell in this candle or visible window.");
     combo(rows, footprint, "footprintCandle", "Candle", {"spine", "full"}, "Use a narrow candle at the left of each flow card, or the full candle appearance.");
     auto* numbers = new QCheckBox("Show numbers", footprint); numbers->setObjectName("footprintNumbers");
@@ -817,7 +816,7 @@ void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
 }
 void HeatmapSettingsDialog::refreshFlowControls() {
     const auto values = heatmap::settingsJson(m_model->settings());
-    for (const auto* key : {"footprintSource", "footprintIntensity", "footprintCandle", "cvdReset", "cvdStyle"}) {
+    for (const auto* key : {"footprintIntensity", "footprintCandle", "cvdReset", "cvdStyle"}) {
         auto* control = findChild<QComboBox*>(key); const QSignalBlocker block(control);
         control->setCurrentIndex(control->findData(values[key].toString()));
     }

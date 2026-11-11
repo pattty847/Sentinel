@@ -258,7 +258,6 @@ MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
             connect(renderer->view(), &chart::ChartViewQml::timeframeChanged, this, [this]() {
                 ++m_agentApiSelectionEpoch;
                 m_candlesReceivedAtMs.reset();
-                m_footprintReceivedAtMs.reset(); // footprint columns follow the chart timeframe
                 requestCandleHistoryForSymbol(m_currentSymbol);
             });
             connect(renderer->layers(), &chart::LayerVisibility::cvdHistoryChanged, this, [this]() {
@@ -921,8 +920,7 @@ void MainWindowGPU::selectTimeframe(int ms) {
     if (m_heatmapDock && m_heatmapDock->toolbar()) m_heatmapDock->toolbar()->setTimeframeMs(ms);
     if (m_connected && m_userSubscribed) {
         requestCandleHistoryForSymbol(m_currentSymbol);
-        if (m_modeController && m_modeController->primaryField() == 1) requestFootprintHistoryForSymbol(m_currentSymbol);
-        else if (m_modeController && (m_modeController->primaryField() == 2 || m_modeController->primaryField() == 3))
+        if (m_modeController && (m_modeController->primaryField() == 2 || m_modeController->primaryField() == 3))
             requestTpoHistoryForSymbol(m_currentSymbol);
     }
 }
@@ -946,7 +944,6 @@ void MainWindowGPU::resetReceivedAt() {
     m_candlesReceivedAtMs.reset();
     m_bookReceivedAtMs.reset();
     m_tradesReceivedAtMs.reset();
-    m_footprintReceivedAtMs.reset();
     m_tpoReceivedAtMs.reset();
     m_volumeProfileReceivedAtMs.reset();
 }
@@ -960,26 +957,7 @@ void MainWindowGPU::requestConfiguredHistoryForSymbol(const QString& symbol) {
     if (!canRequestConfiguredHistoryForSymbol(symbol)) {
         return;
     }
-    requestFootprintHistoryForSymbol(symbol);
     requestCandleHistoryForSymbol(symbol);
-}
-
-void MainWindowGPU::requestFootprintHistoryForSymbol(const QString& symbol) {
-    if (!canRequestConfiguredHistoryForSymbol(symbol)) {
-        return;
-    }
-    int64_t timeframeMs = 0;
-    if (m_qmlController) {
-        if (auto* renderer = m_qmlController->getUnifiedGridRenderer()) {
-            timeframeMs = renderer->view()->getCurrentTimeframe();
-        }
-    }
-    const auto& overlays = GuiConfigStore::instance().serverConfig().tradeOverlays;
-    if (timeframeMs <= 0) timeframeMs = overlays.footprintTimeframeMs;
-    const int count = std::clamp(overlays.gridWidth, 1, 256);
-    sLog_Data("Footprint history request: symbol=" << symbol << " tfMs=" << timeframeMs
-              << " count=" << count);
-    m_dataSource->requestFootprintHistory(symbol, timeframeMs, 0, count);
 }
 
 void MainWindowGPU::requestTpoHistoryForSymbol(const QString& symbol) {
@@ -1245,8 +1223,6 @@ void MainWindowGPU::connectMarketDataSignals() {
         });
     }
     if (dataProcessor) {
-        connect(m_dataSource.get(), &IGridDataSource::footprintSliceReceived,
-                dataProcessor, &DataProcessor::onFootprintSliceReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::tpoSliceReceived,
                 dataProcessor, &DataProcessor::onTpoSliceReceived, Qt::QueuedConnection);
         connect(m_dataSource.get(), &IGridDataSource::volumeProfileSliceReceived,
@@ -1259,10 +1235,6 @@ void MainWindowGPU::connectMarketDataSignals() {
     
     // Agent API lastReceivedAtMs of the trade overlays (FM-079: they stay live on
     // the server's trade-overlay publisher, without the legacy heatmap stream).
-    connect(m_dataSource.get(), &IGridDataSource::footprintSliceReceived, this,
-            [this](const FootprintSlice& slice) {
-                if (slice.symbol == m_currentSymbol) m_footprintReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
-            });
     connect(m_dataSource.get(), &IGridDataSource::tpoSliceReceived, this,
             [this](const TpoSlice& slice) {
                 if (slice.symbol == m_currentSymbol) m_tpoReceivedAtMs = QDateTime::currentMSecsSinceEpoch();
@@ -1560,7 +1532,6 @@ AgentApi::StateSnapshot MainWindowGPU::agentApiStateSnapshot() const {
     s.candlesReceivedAtMs = m_candlesReceivedAtMs;
     s.bookReceivedAtMs = m_bookReceivedAtMs;
     s.tradesReceivedAtMs = m_tradesReceivedAtMs;
-    s.footprintReceivedAtMs = m_footprintReceivedAtMs;
     s.tpoReceivedAtMs = m_tpoReceivedAtMs;
     s.volumeProfileReceivedAtMs = m_volumeProfileReceivedAtMs;
     if (m_qmlController) {

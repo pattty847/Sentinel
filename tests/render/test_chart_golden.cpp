@@ -10,6 +10,8 @@
 // A mismatch dumps PNGs to SENTINEL_GOLDEN_OUT_DIR (<build>/golden-out).
 #include "UnifiedGridRenderer.h"
 #include "SyntheticHmc2Fixture.hpp"
+#include "GoldenFlowSource.hpp"
+#include "mainwindow/ChartAgentPort.hpp"
 #include "datasources/CandleSeriesBuffer.hpp"
 #include "lab/LabData.hpp"
 #include "lab/OffscreenQuick.hpp"
@@ -318,23 +320,19 @@ std::vector<Scene> scenes() {
         h.settle("vp", false);
         if (pixels(h.image) == plain) throw Failure("the volume profile drew nothing");
     }});
-    s.push_back({"08.footprint", [](Harness& h) {
-        useViewport(h);
+    s.push_back({"08.footprint", [](Harness& h) { // cells source: 64 x 20 px cells with numbers
+        h.view(viewLo, viewLo + 10 * minute, 100'000, 100'016);
+        h.settle("footprint viewport");
         h.ugr->layers()->setFootprintEnabled(true);
-        h.settle("footprint plain", false);
+        GoldenFlowSource source;
+        h.ugr->agentPort().bindFlowSource(source);
+        h.settle("footprint plain");
         const QByteArray plain = pixels(h.image);
-        const auto grid = gridOf(viewLo, viewLo + 40 * minute, 100'300, 4);
-        for (int x = 0; x < 40; ++x) {
-            QByteArray column(100 * 2, '\0');
-            for (int r = 0; r < 100; ++r) {
-                const int v = int(16000.0 * std::sin((r + 3 * x) * 0.21) * std::cos(x * 0.17));
-                const uint16_t u = uint16_t(int16_t(v));
-                column[2 * r] = char(u & 0xff); column[2 * r + 1] = char(u >> 8);
-            }
-            emit h.ugr->getDataProcessor()->footprintColumnReady(x, 40, 100, column, grid);
-        }
-        h.settle("footprint", false);
-        if (pixels(h.image) == plain) throw Failure("the footprint columns drew nothing");
+        source.deliver(viewLo - minute, 12, 100'000, 16);
+        QElapsedTimer wait; wait.start();
+        while (wait.elapsed() < 300) QCoreApplication::processEvents(QEventLoop::AllEvents, 10); // the 67 ms feed timer
+        h.settle("footprint");
+        if (pixels(h.image) == plain) throw Failure("the footprint cells drew nothing");
     }});
     s.push_back({"09.labels", [](Harness& h) {
         h.view(viewLo, viewLo + 10 * minute, 100'000, 100'016); // $1 cells of 64 x 20 px: room for labels
@@ -396,7 +394,7 @@ int main(int argc, char** argv) {
     QString error;
     lab::selectQuickSceneGraph(&error);
     Q_INIT_RESOURCE(sentinel_ui_fonts);
-    Q_INIT_RESOURCE(heatmap_shaders); // trade_bubble / msdf / footprint qsb: static lib resource
+    Q_INIT_RESOURCE(heatmap_shaders); // trade_bubble / msdf qsb: static lib resource
     try {
         std::printf("[sentinel] %s\n", lab::describeRhi().toStdString().c_str());
         const bool owner =

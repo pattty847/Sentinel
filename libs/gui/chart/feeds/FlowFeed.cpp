@@ -181,14 +181,13 @@ void FlowFeed::bind(ChartViewController& view, const PublishedFrame& published,
     coverageChanged_ = [&visibility] { emit visibility.layerVisibilityChanged(); };
     const auto apply = [this, &visibility, &presentation] {
         presentation.enabled = visibility.footprintEnabled();
-        presentation.cellsSource = visibility.footprintSource() == "cells";
         presentation.numbers = visibility.footprintNumbers();
         const bool numbersChanged = numbers_ != presentation.numbers;
         numbers_ = presentation.numbers;
         presentation.spineCandles = visibility.footprintCandle() == "spine";
         presentation.dustNotional = visibility.footprintDustNotional();
         presentation.windowIntensity = visibility.footprintIntensity() == "window";
-        setEnabled(presentation.enabled && presentation.cellsSource);
+        setEnabled(presentation.enabled);
         if (numbersChanged) onFrameChanged(); // band height follows the numbers setting
     };
     connect(&visibility, &LayerVisibility::layerVisibilityChanged, this, apply);

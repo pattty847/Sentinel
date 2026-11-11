@@ -247,11 +247,11 @@ TEST(AgentApiCodec, EnvelopeAndUnknowns) {
     EXPECT_TRUE(heatmap.value("retentionColumns").isNull());
     EXPECT_EQ(heatmap.value("servedTimeframesMs").toArray().size(), 1);
     EXPECT_TRUE(data.value("lastReceivedAtMs").toObject().value("trades").isNull());
-    for (const char* overlay : {"footprint", "tpo", "volumeProfile"})
+    for (const char* overlay : {"tpo", "volumeProfile"})
         EXPECT_TRUE(data.value("lastReceivedAtMs").toObject().value(overlay).isNull()) << overlay;
-    s.footprintReceivedAtMs = 11; s.tpoReceivedAtMs = 12; s.volumeProfileReceivedAtMs = 13;
+    s.tpoReceivedAtMs = 12; s.volumeProfileReceivedAtMs = 13;
     const auto received = stateJson(s).value("data").toObject().value("lastReceivedAtMs").toObject();
-    EXPECT_EQ(received.value("footprint").toInteger(), 11);
+    EXPECT_FALSE(received.contains("footprint"));
     EXPECT_EQ(received.value("tpo").toInteger(), 12);
     EXPECT_EQ(received.value("volumeProfile").toInteger(), 13);
     EXPECT_TRUE(data.value("layers").toObject().value("heatmap").isNull());
@@ -584,13 +584,10 @@ TEST(AgentApiControls, FootprintVariantsHaveStrictTypes) {
     EXPECT_EQ(check(R"({"footprintNumbers":1})").status, 422);
 }
 
-TEST(AgentApiControls, FootprintSourceHasStrictTypesOnBothRoutes) {
-    for (const auto* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
-        for (const auto* body : {R"({"footprintSource":"q16"})", R"({"footprintSource":"cells"})"})
-            EXPECT_EQ(validateControl({"POST", path, {}, body}, std::nullopt).status, 200);
-        for (const auto* body : {R"({"footprintSource":"other"})", R"({"footprintSource":true})"})
-            EXPECT_EQ(validateControl({"POST", path, {}, body}, std::nullopt).status, 422);
-    }
+TEST(AgentApiControls, FootprintSourceIsAnUnknownFieldOnBothRoutes) {
+    for (const auto* path : {"/api/v1/layers", "/api/v1/heatmap/settings"})
+        for (const auto* body : {R"({"footprintSource":"q16"})", R"({"footprintSource":"cells"})", R"({"footprintSource":true})"})
+            EXPECT_EQ(validateControl({"POST", path, {}, body}, std::nullopt).status, 422) << path << " " << body;
 }
 
 TEST(AgentApiControls, CvdKnobsValidateBothRoutesAtomically) {

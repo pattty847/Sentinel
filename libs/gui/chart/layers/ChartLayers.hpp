@@ -12,7 +12,6 @@ namespace chart {
 struct ChartLayers {
     HeatmapLayer heatmap;
     FootprintCellsLayer footprintCells;
-    FootprintLayer footprint{&footprintCells.presentation()};
     CvdLayer cvd;
     VolumeProfileLayer vp{&cvd.presentation()};
     TpoLayer tpo{&cvd.presentation()};

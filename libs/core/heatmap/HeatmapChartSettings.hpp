@@ -46,7 +46,6 @@ struct HeatmapChartSettings {
     int cvdStripPx = 0;
     std::string cvdReset = "visible", cvdStyle = "line";
     // Flow-backed footprint presentation.
-    std::string footprintSource = "q16";
     std::string footprintIntensity = "bar";
     std::string footprintCandle = "spine";
     double footprintDustNotional = 2500;

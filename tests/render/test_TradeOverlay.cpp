@@ -13,7 +13,6 @@
 #include <cmath>
 #include <utility>
 #include <tuple>
-#include "render/FootprintStreamState.hpp"
 #include "render/TpoStreamState.hpp"
 #include "render/DataProcessor.hpp"
 
@@ -232,40 +231,6 @@ TEST_F(TradeOverlay, MappingUsesOwnBandAndClipsOnCommonViewport) {
     const auto disjoint = mapTradeOverlay(grid, 2,10,0,30000,90,130,{0,0,800,400});
     EXPECT_TRUE(disjoint.draw.isEmpty());
 }
-TEST_F(TradeOverlay, FootprintGridResetAndSkippedBucketsDoNotStretchTime) {
-    FootprintStreamState ring; QByteArray data(20,'\0');
-    ASSERT_TRUE(ring.ingestSlice(60000,120000,60000,4,10,100,120,2,data));
-    auto first = ring.snapshot();
-    ASSERT_TRUE(ring.ingestSlice(180000,240000,60000,4,10,100,120,2,data));
-    EXPECT_EQ(ring.snapshot().filledColumns,3);
-    QByteArray gap; ASSERT_TRUE(ring.copyColumnForUpload(1,gap));
-    EXPECT_EQ(qFromLittleEndian<uint16_t>(reinterpret_cast<const uchar*>(gap.constData())), 0x8000);
-    ASSERT_TRUE(ring.ingestSlice(180000,240000,60000,4,10,110,130,2,data));
-    EXPECT_GT(ring.snapshot().resetGeneration,first.resetGeneration);
-    EXPECT_EQ(ring.snapshot().filledColumns,1);
-    EXPECT_DOUBLE_EQ(ring.snapshot().maxPrice,130);
-    ASSERT_TRUE(ring.ingestSlice(180000,360000,180000,4,10,110,130,2,data));
-    EXPECT_EQ(ring.snapshot().timeframeMs,180000);
-}
-// The footprint grid is the overlay's own (INV-068): a repeated slice keeps its
-// metadata; a chart timeframe change on the processor does not reset it either.
-TEST_F(TradeOverlay, DataProcessorPublishesStableFootprintGridMetadata) {
-    DataProcessor processor; processor.setActiveSymbol("BTC-USD");
-    TradeOverlayGrid grid; int uploads = 0;
-    QObject::connect(&processor, &DataProcessor::footprintColumnReady, &processor,
-        [&](int,int,int,QByteArray,TradeOverlayGrid g) { grid = g; ++uploads; });
-    FootprintSlice s; s.symbol="BTC-USD"; s.timeframeMs=60000;
-    s.bucketStartMs=60000; s.bucketEndMs=120000; s.gridWidth=16; s.gridHeight=10;
-    s.minPrice=100; s.maxPrice=120; s.tickSize=2; s.format="q16_delta"; s.deltaLevelsQ16=QByteArray(20,'\0');
-    processor.onFootprintSliceReceived(s); ASSERT_EQ(uploads,1); const auto before=grid;
-    processor.setTimeframe(300000);
-    processor.onFootprintSliceReceived(s); ASSERT_EQ(uploads,2);
-    EXPECT_EQ(grid.startMs,before.startMs); EXPECT_EQ(grid.endMs,before.endMs);
-    EXPECT_EQ(grid.maxPrice,before.maxPrice); EXPECT_EQ(grid.tick,before.tick);
-    EXPECT_EQ(grid.generation,before.generation);
-    s.symbol="ETH-USD"; processor.onFootprintSliceReceived(s); EXPECT_EQ(uploads,2);
-}
-
 TEST_F(TradeOverlay, AdvertisedOverlayGridIsIndependentOfRetention) {
     const auto config = protocol::clientparse::parseServerConfig({
         {"trade_overlays", {{"retention_columns", 8192}, {"grid_width", 256}, {"grid_height", 100}, {"tick_size", 2.5},

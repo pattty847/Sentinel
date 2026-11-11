@@ -140,7 +140,6 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"candleWickWidth", s.candleWickWidth},
         {"flowFooter", s.flowFooter}, {"cvdStripPx", s.cvdStripPx}, {"cvdReset", QString::fromStdString(s.cvdReset)},
         {"cvdStyle", QString::fromStdString(s.cvdStyle)},
-        {"footprintSource", QString::fromStdString(s.footprintSource)},
         {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
         {"footprintCandle", QString::fromStdString(s.footprintCandle)}, {"footprintDustNotional", s.footprintDustNotional}, {"footprintNumbers", s.footprintNumbers},
         {"showLadder", s.showLadder},
@@ -169,7 +168,6 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
             return "cvdStripPx must be an integer";
         if (key == "cvdReset" && v != "visible" && v != "utcDay" && v != "tpoSession") return "cvdReset must be visible, utcDay or tpoSession";
         if (key == "cvdStyle" && v != "line" && v != "area") return "cvdStyle must be line or area";
-        if (key == "footprintSource" && v != "q16" && v != "cells") return "footprintSource must be q16 or cells";
         if (key == "footprintCandle" && v != "spine" && v != "full") return "footprintCandle must be spine or full";
         if (key == "footprintDustNotional" && v.toDouble() < 0) return "footprintDustNotional must be nonnegative";
         if (key == "footprintIntensity" && v != "bar" && v != "window") return "footprintIntensity must be bar or window";
@@ -216,7 +214,6 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.cvdStripPx = int(std::clamp(merged["cvdStripPx"].toDouble(), 0.0, 400.0));
     out.cvdReset = merged["cvdReset"].toString().toStdString();
     out.cvdStyle = merged["cvdStyle"].toString().toStdString();
-    out.footprintSource = merged["footprintSource"].toString().toStdString();
     out.footprintIntensity = merged["footprintIntensity"].toString().toStdString();
     out.footprintCandle = merged["footprintCandle"].toString().toStdString();
     out.footprintDustNotional = merged["footprintDustNotional"].toDouble();

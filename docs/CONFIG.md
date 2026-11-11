@@ -189,7 +189,6 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | (settings only) `candleWickColor` | `auto` | `auto` follows each body colour; `#RRGGBB` overrides both wicks. |
 | (settings only) `candleBodyOpacity` | 1 | 0..1; 1 is fully opaque. |
 | (settings only) `candleWickWidth` | 1 | Integer 1..3 device pixels, independent of zoom and display scale. |
-| (settings only) `footprintSource` | `q16` | Selects the existing q16 footprint or flow-backed `cells`. Only the selected source draws when footprint is on. |
 | (settings only) `footprintIntensity` | `bar` | `bar` normalises each side volume to the bar maximum single-side cell volume; `window` uses the visible-window maximum. Also writable through the layer API. |
 | (settings only) `footprintCandle` | spine | `spine`: left 6 px body pill and 1.5 px wick on cells-covered bars; `full`: chosen candle appearance. |
 | (settings only) `footprintDustNotional` | 2500 | Quote-currency side threshold: below it, no volume fill and 22% text alpha. |

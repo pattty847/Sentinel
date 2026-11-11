@@ -65,7 +65,6 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     : IGridDataSource(parent)
     , m_client(host.toStdString(), port.toStdString(), caFile.toStdString())
 {
-    qRegisterMetaType<FootprintSlice>("FootprintSlice");
     qRegisterMetaType<TpoSlice>("TpoSlice");
     qRegisterMetaType<BookDelta>("BookDelta");
     qRegisterMetaType<std::vector<BookDelta>>("BookDeltaVector");
@@ -119,8 +118,6 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     connect(&m_bookSnapshotTimer, &QTimer::timeout, this, [this] {
         processBookSnapshotDeadlines(QDateTime::currentMSecsSinceEpoch());
     });
-    connect(&m_client, &SentinelStreamClient::footprintSliceReceived,
-            this, &RemoteGridDataSource::onFootprintSliceReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::tpoSliceReceived,
             this, &RemoteGridDataSource::onTpoSliceReceived, Qt::QueuedConnection);
     // Queued after the chunk's slices, so pacing never outruns their delivery.
@@ -304,14 +301,6 @@ void RemoteGridDataSource::processBookSnapshotDeadlines(qint64 nowMs) {
     }
     if (std::all_of(m_pendingBookSnapshots.begin(), m_pendingBookSnapshots.end(),
         [](const auto& entry) { return entry.second.stale; })) m_bookSnapshotTimer.stop();
-}
-
-void RemoteGridDataSource::requestFootprintHistory(const QString& symbol,
-                                                   int64_t timeframeMs,
-                                                   int64_t endTimeMs,
-                                                   int count) {
-    if (!symbolPermitted(symbol.toStdString(), "footprint history")) return;
-    m_client.requestFootprintHistory(symbol.toStdString(), timeframeMs, endTimeMs, count);
 }
 
 void RemoteGridDataSource::requestTradeHistory(const QString& symbol, int64_t startMs,
@@ -562,10 +551,6 @@ void RemoteGridDataSource::onL2UpdateReceivedAt(const QString& productId,
     if (!deltas.empty()) {
         emit liveOrderBookUpdated(productId, deltas);
     }
-}
-
-void RemoteGridDataSource::onFootprintSliceReceived(const FootprintSlice& slice) {
-    emit footprintSliceReceived(slice);
 }
 
 void RemoteGridDataSource::onTpoSliceReceived(const TpoSlice& slice) {

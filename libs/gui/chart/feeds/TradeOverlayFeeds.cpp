@@ -4,7 +4,6 @@
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
 #include <QThread>
-#include <limits>
 
 namespace chart {
 TradeOverlayFeeds::TradeOverlayFeeds(ChartLayers& layers, QObject* context, std::function<void()> update)
@@ -25,33 +24,12 @@ void TradeOverlayFeeds::startProcessing() {
     QMetaObject::invokeMethod(processor_.get(), &DataProcessor::startProcessing, Qt::QueuedConnection);
 }
 void TradeOverlayFeeds::clearData() {
-    clearTradeOverlayFeeds(processor_, layers_.footprint.renderer, layers_.vp.renderer, [](DataProcessor* processor) {
+    clearTradeOverlayFeeds(processor_, layers_.vp.renderer, [](DataProcessor* processor) {
         QMetaObject::invokeMethod(processor, &DataProcessor::clearData, Qt::QueuedConnection);
     });
 }
 
 void TradeOverlayFeeds::connectDataProcessorSignals() {
-    connect(processor_.get(), &DataProcessor::footprintColumnReady,
-            context_,
-            [this](int x, int gridWidth, int gridHeight, QByteArray columnQ16, TradeOverlayGrid grid) {
-                const bool validGrid = gridWidth > 0 && gridHeight > 0 &&
-                    gridHeight <= (std::numeric_limits<int>::max() / static_cast<int>(sizeof(uint16_t)));
-                const int expectedBytes = validGrid ? gridHeight * static_cast<int>(sizeof(uint16_t)) : 0;
-                if (!validGrid || columnQ16.size() != expectedBytes || x < 0 || x >= gridWidth) {
-                    sLog_RenderN(1000, "footprint column dropped: x=" << x
-                                 << " grid=" << gridWidth << "x" << gridHeight
-                                 << " bytes=" << columnQ16.size() << " expectedBytes=" << expectedBytes);
-                    return;
-                }
-
-                layers_.footprint.renderer.enqueue(
-                    FootprintOverlayRenderer::PendingUpload{x, gridWidth, gridHeight, std::move(columnQ16), grid});
-                sLog_Probe("footprint.queue",
-                           "x=" << x << " grid=" << gridWidth << "x" << gridHeight);
-                update_();
-            },
-            Qt::QueuedConnection);
-
     connect(processor_.get(), &DataProcessor::tpoColumnReady,
             context_,
             [this](int x, int gridWidth, int gridHeight, QByteArray letters,

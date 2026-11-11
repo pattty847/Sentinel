@@ -25,10 +25,6 @@ public:
     void subscribeFlowLive(const QString& symbol, int64_t timeframeMs) override;
     void unsubscribeFlowLive() override;
     const FlowSeriesBuffer& flowBuffer() const { return m_flowBuffer; }
-    void requestFootprintHistory(const QString& symbol,
-                                 int64_t timeframeMs,
-                                 int64_t endTimeMs,
-                                 int count) override;
     void requestTpoHistory(const QString& symbol,
                            int64_t timeframeMs,
                            int sessionType,
@@ -55,7 +51,6 @@ private slots:
                             quint64 deliveryGeneration, const QString& status, uint64_t bookVersion);
     void onL2UpdateReceived(const QString& productId, const std::vector<BookLevelUpdate>& updates,
                             double tickSize, quint64 deliveryGeneration, uint64_t bookVersion = 0);
-    void onFootprintSliceReceived(const FootprintSlice& slice);
     void onTpoSliceReceived(const TpoSlice& slice);
     void onVolumeProfileSliceReceived(const VolumeProfileSlice& slice);
     void onCandleBarUpdateReceived(const QString &symbol, int64_t timeframeMs, int64_t bucketStartMs, int64_t seq,
