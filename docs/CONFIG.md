@@ -284,7 +284,7 @@ RAM history is empty after a restart. There is no knob for the rebuild.
 `trade_overlays.retention_columns` defaults to 5120 (8192 in the checked-in config).
 Retained execution history uses exactly
 `clamp(2 * max(1000, default_timeframe_ms, timeframes_ms...) * max(1024, retention_columns), 300000, 86400000)`
-milliseconds. It is independent of the overlay display `grid_width` (default 512).
+milliseconds.
 These sections may be at the YAML root or under `server`. Server `heatmap.*` keys
 are retired, with no aliases. Existing `data/heatmap` archives are untouched and
 no longer read or written. Deploying this change requires the owner present.
