@@ -102,8 +102,7 @@ Measured on the maintainer's always-on setup unless a row says otherwise: Mac mi
 16 GB), macOS 26, services built from `main`, recording seven products (BTC, ETH, SOL, FARTCOIN,
 PEPE, DOGE and AVAX against USD), journal on an external USB SSD. Production rows come from
 Prometheus metrics scraped every 15 s over the 7 days to 2026-10-21. CPU is a share of one core.
-Every number, with its query or command and its date, is in
-[docs/README_CLAIMS.md](docs/README_CLAIMS.md).
+Every number has a dated query or command in the maintainer's evidence ledger.
 
 | What | Result |
 | --- | --- |
@@ -118,7 +117,7 @@ Every number, with its query or command and its date, is in
 | Test suite at the last landing | 116 CTest tests pass with a real GPU required (Metal) |
 
 The client's frame rate and frame time are not in this table: there is no repeatable GUI benchmark
-yet ([docs/TODO.md](docs/TODO.md)).
+yet.
 
 ## Architecture
 
@@ -237,9 +236,9 @@ Render tests include CPU view-trace goldens and Metal frame-hash goldens. See
 
 ## Contributing
 
-Most changes are written and cross-reviewed by coding agents under the rules in
-[AGENTS.md](AGENTS.md). The ownership boundaries there (core stays free of GUI Qt) apply to every
-change.
+Read [CONTRIBUTING.md](CONTRIBUTING.md): build and test commands, ownership boundaries (core stays
+free of GUI Qt), threading, hot paths, chart-core rules and commit style apply to every change, whether
+a person or a coding agent writes it. Coding agents start at [AGENTS.md](AGENTS.md).
 
 ## License
 

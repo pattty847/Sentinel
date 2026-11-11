@@ -8,19 +8,6 @@ set_tests_properties(FlowBarTests PROPERTIES LABELS "core")
 add_executable(flow_store_size_bench EXCLUDE_FROM_ALL flow_store_size_bench.cpp)
 target_link_libraries(flow_store_size_bench PRIVATE sentinel_core)
 
-add_test(NAME DeployRuntimeDryRun
-    COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_deploy_runtime_dry_run.sh
-            ${CMAKE_SOURCE_DIR}/scripts/dev/deploy-runtime.sh)
-set_tests_properties(DeployRuntimeDryRun PROPERTIES LABELS "core")
-
-add_test(NAME AgentWorktreeLandTests
-    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/dev/test_agent_worktree.sh ${CMAKE_SOURCE_DIR})
-set_tests_properties(AgentWorktreeLandTests PROPERTIES LABELS "core" TIMEOUT 300)
-
-add_test(NAME DocHealthTests
-    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/dev/test_doc_health.sh ${CMAKE_SOURCE_DIR})
-set_tests_properties(DocHealthTests PROPERTIES LABELS "core" TIMEOUT 60)
-
 # Test Target: test_log_throttle
 add_executable(test_log_throttle test_log_throttle.cpp)
 target_include_directories(test_log_throttle PRIVATE

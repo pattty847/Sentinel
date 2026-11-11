@@ -139,6 +139,8 @@ CLAUDE.md
 # AGENTS.md
 GEMINI.md
 _agent
+# Symlink to the owner's private sibling repository (workflow docs, agent tooling)
+_private
 .cursor/
 
 # Private and historical local documentation
@@ -159,6 +161,3 @@ config/.client_config.yaml
 
 # Codex local project config (never commit)
 .codex/
-
-# Sandbox SentinelBar events (scripts/dev/sentinel-event.sh); land moves them to the journal
-.sentinel-events.jsonl

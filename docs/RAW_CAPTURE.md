@@ -644,7 +644,7 @@ and rebuilt before proceeding.
 
 The arguments did not change for per-product connections: the new defaults
 (512 MiB pool, 2 MiB floors, `/metrics` on 8091) apply without a plist edit.
-Deploy only with `scripts/dev/deploy-runtime.sh capture`.
+A new capture binary takes effect only after the service is restarted with it.
 
 The following is the exact `ProgramArguments` array for the seven-product service
 retaining the current service's runtime executable, working directory and defaults. No service operation is
@@ -815,16 +815,9 @@ reason counters remain available on `/metrics`. Shutdown drains the disk
 sessions first, makes one bounded send attempt and closes all clients; any
 unsent suffix must be read from the journal. It never waits for a client to drain.
 
-Probe (no exchange connection or journal writes):
-
-```sh
-python3 scripts/dev/fanout-tail.py BTC-USD
-python3 scripts/dev/fanout-tail.py BTC-USD --resume '{"product":"BTC-USD","run_id":"UUID","block":123,"record":4}'
-```
-
-The probe prints positions and control messages, not raw payloads. Add
-`--resnapshot` only for an intentional upstream resnapshot check; this affects
-that product's capture. `--socket PATH` selects a fixture socket.
+A probe client sends the `hello` (optionally with `pos`) described above and prints
+positions and control messages, not raw payloads; a `resnapshot` request affects
+that product's capture.
 
 `CaptureFanoutTests` uses temporary roots and local sockets. It covers exact
 writer bytes and positions across blocks/hour rotation, cursor-exclusive resume,

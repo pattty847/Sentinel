@@ -360,7 +360,6 @@ Cross-thread communication uses `Qt::QueuedConnection` exclusively.
 | `docs/CONFIG.md` | Server and client config files and options |
 | `docs/PAPER_TRADING_QUICKSTART.md` | Paper trading setup and usage |
 | `docs/README.md` | Documentation index and maintenance scope |
-| `docs/TODO.md` | Feature scope and current priorities |
 
 ## Trade overlays and recording heatmaps
 

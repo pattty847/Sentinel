@@ -53,7 +53,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# The main checkout (not the worktree this copy lives in), as scripts/dev/agent-worktree.sh finds it.
+# The main checkout (not the worktree this copy lives in): the parent of the common git dir.
 REPO = os.path.dirname(os.path.realpath(subprocess.run(
     ["git", "-C", HERE, "rev-parse", "--path-format=absolute", "--git-common-dir"],
     capture_output=True, text=True, check=True).stdout.strip()))

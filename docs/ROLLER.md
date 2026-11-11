@@ -5,13 +5,11 @@ and deep-hour series. It neither opens an exchange connection nor changes the
 running server/capture. The existing live recorder API behavior, timer, queue-overflow policy,
 writer defaults and server configuration are unchanged. Cutover remains slice D.
 
-Build and invoke through the machine queue:
+Build and invoke:
 
 ```sh
-scripts/dev/build-queue.sh --label lt-astra/roller-a -- \
-  cmake --build --preset mac-clang -j 4 --target sentinel_roll hmc2_diff
-scripts/dev/build-queue.sh --label lt-astra/roller-a -- \
-  build/mac-clang/apps/sentinel-roll/sentinel-roll \
+cmake --build --preset mac-clang -j 4 --target sentinel_roll hmc2_diff
+build/mac-clang/apps/sentinel-roll/sentinel-roll \
   /Volumes/T7/sentinel-data/raw-l2 "$PWD/roll-out/example" \
   --products BTC-USD,PEPE-USD --from 2026-10-02 --to 2026-10-03
 ```
@@ -261,7 +259,7 @@ older than one hour of filesystem wall time are removed, including midnight
 **temporaries**; completed `0000.anchor` files and fresh temporaries are retained.
 Unknown filenames and non-quarter-hour names are untouched.
 
-Validation commands (all through `scripts/dev/build-queue.sh`, build `-j 2`):
+Validation commands (build `-j 2`):
 
 - `ctest --test-dir build/mac-clang --output-on-failure -R '^JournalAnchorTests$'`
   runs synthetic boundary, fallback, retention, CLI rebuild, feed state, recorder
@@ -402,8 +400,7 @@ last-record-wins appends alone only provide decoded idempotence.
 ## Decoded comparison and controlled tick-schedule tolerance
 
 ```sh
-scripts/dev/build-queue.sh --label lt-astra/roller-a -- \
-  build/mac-clang/apps/sentinel-roll/hmc2_diff ROOT_A ROOT_B BTC-USD near \
+build/mac-clang/apps/sentinel-roll/hmc2_diff ROOT_A ROOT_B BTC-USD near \
   2026-10-01T16:00:00Z 2026-10-01T17:00:00Z
 ```
 
@@ -586,7 +583,7 @@ Corruption acceptance in `RollerCorruptBlockTests` includes an env-gated real-ho
 test: set `SENTINEL_CORRUPTION_HOUR` to a read-only BTC hour containing recovery
 snapshots (the acceptance run uses `2026/10/05/17.rawl2`). The test copies it to
 scratch before changing bytes; without that variable the real-hour cases skip.
-`tests/roller/corrupt_block_mutations.py` is a Mac dev tool: run it inside
-`scripts/dev/build-queue.sh`, with the real-hour variable set for those cases. It
+`tests/roller/corrupt_block_mutations.py` is a Mac dev tool: run it alone (no other
+build in `build/mac-clang`), with the real-hour variable set for those cases. It
 builds the `mac-clang` preset at `-j 2`, restores each source mutation and rebuilds
 before checking the restored baseline.

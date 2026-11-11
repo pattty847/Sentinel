@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mac dev tool. Run inside build-queue.sh; restore/rebuild each mutant before proceeding."""
+"""Mac dev tool. Run alone (it rebuilds build/mac-clang); restore/rebuild each mutant before proceeding."""
 import os
 from pathlib import Path
 import subprocess

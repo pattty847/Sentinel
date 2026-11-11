@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in live-provider benchmark; run through build-queue.sh, never CTest.
+"""Opt-in live-provider benchmark; run alone (no parallel build), never CTest.
 
 Starts only the supplied branch binary, with fresh scratch configuration, no
 recording/roller, an offline loopback market-data endpoint, and non-production ports. Uses public REST

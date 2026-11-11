@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run inside build-queue; mutations restore, touch, rebuild and re-pass (FM-132)."""
+"""Run alone (it rebuilds build/mac-clang); mutations restore, touch, rebuild and re-pass (FM-132)."""
 import os
 import re
 import sys
@@ -15,19 +15,12 @@ def command(args):
     return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 def build(target):
-    if target is None:
-        return
-    # Caller holds the FIFO build queue; use the owner-approved six jobs.
+    # Six jobs: a higher default can exhaust 16 GB with the Qt and Boost units.
     p = command(['cmake', '--build', '--preset', 'mac-clang', '-j', '6', '--target', target.split('/')[-1]])
     if p.returncode:
         raise RuntimeError(p.stdout[-10000:])
 
 def test(name, target, fail=False):
-    if name.startswith('sh:'):
-        p = command(['bash', name[3:], str(ROOT)])
-        if p.returncode != (1 if fail else 0):
-            raise RuntimeError(p.stdout[-12000:])
-        return
     exe = target if '/' in target else f'roller/{target}'
     p = command([f'build/mac-clang/tests/{exe}', '--gtest_filter=' + name])
     if (p.returncode != (1 if fail else 0)) or (fail and '[  FAILED  ]' not in p.stdout):
@@ -135,9 +128,6 @@ mutations = [
     ('product lease may write the served root', 'libs/core/roller/RollCli.cpp',
      '!o.productWriterLease && server["roller_shadow"]', 'server["roller_shadow"]',
      'Roller.RollCliProductLeaseMayWriteRollerServedRoot', ROLLER),
-    ('A9 deploy marker accepts the serving roller', 'scripts/dev/deploy-runtime.sh',
-     '/Roller serving ready products=/ {ready = 1}', '',
-     'sh:tests/roller/deploy_marker_test.sh', None),
     # Review round 1.
     ('r1-1 lead drop withdraws its provisional minutes', SR,
      'cfg.retractLive(product);', ';',
@@ -148,15 +138,6 @@ mutations = [
     ('r1-1 withdrawal advances the series revision', 'libs/core/servermodel/RecordingLive.cpp',
      'it->second.withdrawn = true; ++it->second.revision;', 'it->second.withdrawn = true;',
      'ShadowTest.WithdrawnRecoverySnapshotLeavesLiveServiceSubscribers'),
-    ('r1-2 started line is not a deploy marker', 'scripts/dev/deploy-runtime.sh',
-     '/Recording v2 started/ {primary = 1}', '/Recording v2 started|mode=live/ {primary = 1}',
-     'sh:tests/roller/deploy_marker_test.sh', None),
-    ('r1-2 deploy log must carry the deployed exe', 'scripts/dev/deploy-runtime.sh',
-     '''head -n 5 <<<"$content" | awk -v exe="exe=$4" '$1 == "#" && $2 == exe {ok = 1} END {exit !ok}' || continue''', '',
-     'sh:tests/roller/deploy_marker_test.sh', None),
-    ('r1-2 deploy log must carry the restarted PID', 'scripts/dev/deploy-runtime.sh',
-     '''head -n 1 <<<"$content" | awk -v pid="pid=$3" '$NF == pid {ok = 1} END {exit !ok}' || continue''', '',
-     'sh:tests/roller/deploy_marker_test.sh', None),
     ('r1-3 merged config names the served root', 'libs/core/roller/RollCli.cpp',
      'effective.recording.source == "roller" &&', 'false &&',
      'Roller.RollCliRefusesRollerRootFromSplitOverride', ROLLER),
@@ -177,22 +158,6 @@ mutations = [
     ('r2-2 failure or close revokes readiness', SR,
      'if (!std::exchange(p.healthy, false)) return;', 'return;',
      'ShadowTest.ServingReadinessNeedsEveryProductHealthyAtOnce'),
-    ('r2-2 deploy check takes the latest readiness transition', 'scripts/dev/deploy-runtime.sh',
-     '/Roller serving not ready product=/ {ready = 0}', '',
-     'sh:tests/roller/deploy_marker_test.sh', None),
-    ('r2-3 accept only if launchd still runs the read PID', 'scripts/dev/deploy-runtime.sh',
-     '[[ $(service_pid "$label") == "$pid" ]] || continue', '',
-     'sh:tests/roller/deploy_marker_test.sh', None),
-    ('r2-3 one read of a regular non-symlink file', 'scripts/dev/deploy-runtime.sh',
-     '[[ -f $1 && ! -L $1 ]] || return 1', 'cat -- "$1"; return',
-     'sh:tests/roller/deploy_marker_test.sh', None),
-    # Review round 3.
-    ('r3-2 a failed log read fails', 'scripts/dev/deploy-runtime.sh',
-     'content=$(cat <&3 && printf x) || status=1', 'content=$(cat <&3 && printf x)',
-     'sh:tests/roller/deploy_marker_test.sh', None),
-    ('r3-2 a short log read fails', 'scripts/dev/deploy-runtime.sh',
-     '[[ $status == 0 && ${#content} -ge $size ]] || return 1', '[[ $status == 0 ]] || return 1',
-     'sh:tests/roller/deploy_marker_test.sh', None),
     # Slice D-b1 (recording.live_feed: journal; one per check, then extras).
     ('db1-A1 the tip hands over one synthesized snapshot', SR,
      'if (live.valid) show(live); else hide("journal book invalid at the tip");',
@@ -604,7 +569,7 @@ for arg in sys.argv:
             raise SystemExit(f'--from: no mutation named {arg[7:]!r}')
         mutations = mutations[names.index(arg[7:]):]
 if "--r1" in sys.argv:
-    mutations = [m for m in mutations if m[0].startswith(('r1-', 'r2-', 'r3-', 'A9', 'A11'))]
+    mutations = [m for m in mutations if m[0].startswith(('r1-', 'r2-', 'A11'))]
 for entry in mutations:
     name, path, before, after, case = entry[:5]
     target = entry[5] if len(entry) > 5 else SHADOW
