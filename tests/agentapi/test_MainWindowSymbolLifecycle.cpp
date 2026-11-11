@@ -121,7 +121,8 @@ public:
         requests.push_back({symbol, tfMs, start, end});
     }
     void sendTradeCommand(const trading::TradeCommand&) override {}
-    void sendAlgoCommand(const std::string&, const std::string&, const std::string&, const trading::AlgoParams&) override {}
+    void sendAlgoCommand(const std::string&, const std::string&, const std::string&, const trading::AlgoParams&,
+                         const std::string&) override {}
     const LiveOrderBook& getDirectLiveOrderBook(const std::string&) const override { return book_; }
 private:
     LiveOrderBook book_;

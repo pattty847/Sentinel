@@ -2,6 +2,7 @@
 
 #include "BacktestTypes.hpp"
 #include "IExecutionModel.hpp"
+#include "TradingSnapshot.hpp"
 
 #include <memory>
 #include <unordered_map>
@@ -24,6 +25,8 @@ public:
     IntentOutcome submitIntent(const OrderIntent& intent);
 
     BrokerSnapshot snapshotFor(const std::string& symbol, int64_t timestampMs) const;
+    // Positions, open orders and attached risk of every symbol (no algo state, no epoch).
+    TradingSnapshot accountState() const;
     BacktestResult buildResult(const BacktestConfig& config) const;
 
 private:

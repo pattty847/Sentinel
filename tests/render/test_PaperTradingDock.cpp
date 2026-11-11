@@ -6,6 +6,8 @@
 #include <QFocusEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
+#include <QSettings>
 #include <QComboBox>
 #include <QTabWidget>
 #include <QDateTime>
@@ -29,18 +31,34 @@ public:
     bool connected = true;
     std::vector<trading::TradeCommand> trades;
     std::vector<std::string> algoActions;
+    std::vector<std::string> algoCommandIds;
+    std::vector<std::string> sent; // "algo:<action>" and "trade:<action>" in send order
     LiveOrderBook book;
     void subscribe(const QString&) override {}
     void unsubscribe(const QString&) override {}
     void requestTpoHistory(const QString&, int64_t, int, int64_t, int, const QString&) override {}
     void cancelTpoHistory(const QString&, const QString&) override {}
     void setCandleHistoryViewport(const QString&, int64_t, qint64, qint64) override {}
-    void sendTradeCommand(const trading::TradeCommand& cmd) override { trades.push_back(cmd); }
-    void sendAlgoCommand(const std::string&, const std::string& action,
-                         const std::string&, const trading::AlgoParams&) override { algoActions.push_back(action); }
+    void sendTradeCommand(const trading::TradeCommand& cmd) override {
+        trades.push_back(cmd);
+        sent.push_back(std::string("trade:") + trading::toString(cmd.action));
+    }
+    void sendAlgoCommand(const std::string&, const std::string& action, const std::string&,
+                         const trading::AlgoParams&, const std::string& commandId) override {
+        algoActions.push_back(action);
+        algoCommandIds.push_back(commandId);
+        sent.push_back("algo:" + action);
+    }
     bool isConnectionActive() const override { return connected; }
     const LiveOrderBook& getDirectLiveOrderBook(const std::string&) const override { return book; }
 };
+
+void setOnAlgoStop(PaperTradingDock& dock, const char* value) {
+    auto* combo = dock.findChild<QComboBox*>("paperOnAlgoStop");
+    ASSERT_NE(combo, nullptr);
+    combo->setCurrentIndex(combo->findData(QString::fromLatin1(value)));
+    ASSERT_EQ(combo->currentData().toString(), QString::fromLatin1(value));
+}
 
 Trade tick(const char* symbol, double price) {
     return {std::chrono::system_clock::now(), symbol, "1", AggressorSide::Buy, price, 1.0};
@@ -240,6 +258,7 @@ TEST(PaperTicket, SubmittedPriceUsesDisplayedPrecision) {
 TEST(PaperTicket, AlgoActivityIsEvidenceButNoAckTimesOut) {
     Source source;
     PaperTradingDock dock;
+    setOnAlgoStop(dock, "never");
     dock.setDataSource(&source);
     dock.setSymbol("DOGE-USD");
     auto* status = dock.findChild<QLabel*>("paperAlgoStatus");
@@ -364,6 +383,10 @@ TEST(PaperTicket, R7BacktestModeStatusAndEmptyRangeError) {
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
+    // The dock persists "On algo stop"; never touch the user's settings.
+    QTemporaryDir settingsDir;
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
@@ -395,4 +418,210 @@ TEST(PaperTicket, PricesFollowALaterDisplayUnit) {
     EXPECT_EQ(avg->text(), QStringLiteral("5.00 x1M"));
     EXPECT_EQ(log->item(0, 4)->text(), QStringLiteral("4.97 x1M"));
     PriceUnits::instance().clearForTest();
+}
+
+namespace {
+trading::OrderUpdate order(const char* id, trading::OrderStatus status, const char* algo = "") {
+    trading::OrderUpdate u;
+    u.orderId = id;
+    u.symbol = "BTC-USD";
+    u.side = trading::OrderSide::Buy;
+    u.qty = 1.0;
+    u.limitPrice = 90.0;
+    u.status = status;
+    u.algoId = algo;
+    return u;
+}
+
+trading::TradingSnapshot snapshot(const char* epoch, const char* reason = "connect", std::string commandId = {}) {
+    trading::TradingSnapshot s;
+    s.epoch = epoch;
+    s.reason = reason;
+    s.commandId = std::move(commandId);
+    return s;
+}
+
+QStringList rows(QTableWidget* log) {
+    QStringList out;
+    for (int r = 0; r < log->rowCount(); ++r) out << log->item(r, 0)->text() + ":" + log->item(r, 5)->text();
+    return out;
+}
+
+// Answers the modal flatten prompt with button; the flag says whether one appeared.
+std::shared_ptr<bool> answerPrompt(QMessageBox::StandardButton button) {
+    auto seen = std::make_shared<bool>(false);
+    QTimer::singleShot(0, [seen, button] {
+        for (auto* w : QApplication::topLevelWidgets()) {
+            auto* box = qobject_cast<QMessageBox*>(w);
+            if (!box || box->objectName() != "paperFlattenPrompt" || !box->isVisible()) continue;
+            *seen = true;
+            EXPECT_EQ(box->text(), QStringLiteral("Flatten all?"));
+            box->button(button)->click();
+        }
+    });
+    return seen;
+}
+} // namespace
+
+// The server restarted (or this client missed updates): the snapshot is the truth.
+TEST(PaperSnapshot, ReplacesStalePositionAndDropsGhostOrders) {
+    Source source;
+    PaperTradingDock dock;
+    dock.setDataSource(&source);
+    dock.setSymbol("BTC-USD");
+    auto* log = dock.findChild<QTableWidget*>("paperOrderLog");
+    ASSERT_TRUE(log);
+    auto first = snapshot("e1");
+    first.openOrders = {order("ord-1", trading::OrderStatus::Open)};
+    first.positions = {{"BTC-USD", 2.0, 100.0, 0.0, 0.0}};
+    dock.onTradingSnapshot(first);
+    dock.onOrderUpdated(order("ord-2", trading::OrderStatus::Open));
+    dock.onOrderUpdated(order("ord-3", trading::OrderStatus::Filled));
+    ASSERT_EQ(rows(log), (QStringList{"ord-1:OPEN", "ord-2:OPEN", "ord-3:FILLED"}));
+
+    auto same = snapshot("e1");
+    same.openOrders = {order("ord-1", trading::OrderStatus::Open)};
+    dock.onTradingSnapshot(same);
+    EXPECT_EQ(rows(log), (QStringList{"ord-1:OPEN", "ord-3:FILLED"}))
+        << "a working order the server no longer holds is a ghost; history stays";
+    bool flat = false;
+    for (auto* label : dock.findChildren<QLabel*>()) flat |= label->text() == QStringLiteral("0.00000000");
+    EXPECT_TRUE(flat) << "a symbol missing from the snapshot is flat";
+
+    // ord-3 is updated by the server after the drop: the row index map must still be right.
+    dock.onOrderUpdated(order("ord-1", trading::OrderStatus::Canceled));
+    EXPECT_EQ(rows(log), (QStringList{"ord-1:CANCELED", "ord-3:FILLED"}));
+
+    auto restarted = snapshot("e2");
+    restarted.openOrders = {order("ord-1", trading::OrderStatus::Open)};
+    dock.onTradingSnapshot(restarted);
+    EXPECT_EQ(rows(log), (QStringList{"ord-1:OPEN"})) << "a new server session's ids restart; old rows go";
+}
+
+// Item: "algo panel stuck UNCONFIRMED". Without a correlated acknowledgement the stop ends
+// at UNCONFIRMED after the timeout; the server's algo_command snapshot settles it.
+TEST(PaperSnapshot, AlgoCommandsAreAcknowledgedBySnapshot) {
+    Source source;
+    PaperTradingDock dock;
+    setOnAlgoStop(dock, "never");
+    dock.setDataSource(&source);
+    dock.setSymbol("BTC-USD");
+    auto* status = dock.findChild<QLabel*>("paperAlgoStatus");
+    auto* start = dock.findChild<QPushButton*>("paperAlgoStart");
+    auto* stop = dock.findChild<QPushButton*>("paperAlgoStop");
+    ASSERT_TRUE(status && start && stop);
+
+    start->click();
+    ASSERT_EQ(source.algoCommandIds.size(), 1u);
+    ASSERT_FALSE(source.algoCommandIds[0].empty());
+    auto other = snapshot("e1", "algo_command", "someone-else");
+    emit source.tradingSnapshotReceived(other);
+    QTest::qWait(10);
+    EXPECT_EQ(status->text(), "START PENDING") << "another client's acknowledgement is not ours";
+    auto started = snapshot("e1", "algo_command", source.algoCommandIds[0]);
+    started.runningAlgos = {{"AvendellaMM", "BTC-USD"}};
+    emit source.tradingSnapshotReceived(started);
+    QTest::qWait(10);
+    EXPECT_EQ(status->text(), "RUNNING");
+    EXPECT_TRUE(stop->isEnabled());
+    EXPECT_FALSE(start->isEnabled());
+
+    stop->click();
+    ASSERT_EQ(source.algoCommandIds.size(), 2u);
+    EXPECT_EQ(status->text(), "STOPPING / UNCONFIRMED");
+    emit source.tradingSnapshotReceived(snapshot("e1", "algo_command", source.algoCommandIds[1]));
+    QTest::qWait(10);
+    EXPECT_EQ(status->text(), "STOPPED");
+    EXPECT_TRUE(start->isEnabled());
+    EXPECT_FALSE(stop->isEnabled());
+
+    // A refused start (nothing running in the acknowledgement) is reported, not left pending.
+    start->click();
+    emit source.tradingSnapshotReceived(snapshot("e1", "algo_command", source.algoCommandIds[2]));
+    QTest::qWait(10);
+    EXPECT_EQ(status->text(), "STOPPED");
+    EXPECT_TRUE(status->toolTip().contains("did not start"));
+}
+
+TEST(PaperSnapshot, ReconnectSnapshotRestoresAlgoState) {
+    Source source;
+    PaperTradingDock dock;
+    dock.setDataSource(&source);
+    dock.setSymbol("BTC-USD");
+    auto* status = dock.findChild<QLabel*>("paperAlgoStatus");
+    emit source.connectionStatusChanged(false);
+    emit source.connectionStatusChanged(true);
+    auto running = snapshot("e1");
+    running.runningAlgos = {{"AvendellaMM", "BTC-USD"}};
+    emit source.tradingSnapshotReceived(running);
+    QTest::qWait(10);
+    EXPECT_EQ(status->text(), "RUNNING") << "the reconnect reset must not overwrite the snapshot after it";
+    emit source.connectionStatusChanged(true);
+    emit source.tradingSnapshotReceived(snapshot("e2"));
+    QTest::qWait(10);
+    EXPECT_EQ(status->text(), "STOPPED") << "a restarted server runs no algo";
+}
+
+TEST(PaperOnAlgoStop, AskFlattensOnlyOnYesAfterTheStop) {
+    for (const auto button : {QMessageBox::Yes, QMessageBox::No}) {
+        Source source;
+        PaperTradingDock dock;
+        setOnAlgoStop(dock, "ask");
+        dock.setDataSource(&source);
+        dock.setSymbol("BTC-USD");
+        auto running = snapshot("e1");
+        running.runningAlgos = {{"AvendellaMM", "BTC-USD"}};
+        dock.onTradingSnapshot(running);
+        const auto seen = answerPrompt(button);
+        dock.findChild<QPushButton*>("paperAlgoStop")->click();
+        EXPECT_TRUE(*seen) << "Ask must prompt";
+        if (button == QMessageBox::Yes) {
+            EXPECT_EQ(source.sent, (std::vector<std::string>{"algo:stop", "trade:FLATTEN"}))
+                << "the stop (which cancels the quotes) goes before the flatten";
+            ASSERT_EQ(source.trades.size(), 1u);
+            EXPECT_EQ(source.trades[0].symbol, "BTC-USD");
+        } else {
+            EXPECT_EQ(source.sent, (std::vector<std::string>{"algo:stop"}));
+        }
+    }
+}
+
+TEST(PaperOnAlgoStop, AlwaysFlattensWithoutAskingNeverNeither) {
+    for (const char* policy : {"always", "never"}) {
+        Source source;
+        PaperTradingDock dock;
+        setOnAlgoStop(dock, policy);
+        dock.setDataSource(&source);
+        dock.setSymbol("BTC-USD");
+        auto running = snapshot("e1");
+        running.runningAlgos = {{"AvendellaMM", "BTC-USD"}};
+        dock.onTradingSnapshot(running);
+        const auto seen = answerPrompt(QMessageBox::No);
+        dock.findChild<QPushButton*>("paperAlgoStop")->click();
+        QTest::qWait(10);
+        EXPECT_FALSE(*seen) << policy << " must not prompt";
+        if (std::string(policy) == "always")
+            EXPECT_EQ(source.sent, (std::vector<std::string>{"algo:stop", "trade:FLATTEN"}));
+        else
+            EXPECT_EQ(source.sent, (std::vector<std::string>{"algo:stop"}));
+    }
+}
+
+TEST(PaperOnAlgoStop, SettingPersistsAndDefaultsToAsk) {
+    {
+        QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+        settings.remove("PaperTradingDock/onAlgoStop");
+    }
+    {
+        PaperTradingDock dock;
+        auto* combo = dock.findChild<QComboBox*>("paperOnAlgoStop");
+        ASSERT_NE(combo, nullptr);
+        EXPECT_EQ(combo->currentText(), "Ask");
+        EXPECT_EQ(combo->count(), 3);
+        setOnAlgoStop(dock, "always");
+    }
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+    EXPECT_EQ(settings.value("PaperTradingDock/onAlgoStop").toString(), "always");
+    PaperTradingDock reopened;
+    EXPECT_EQ(reopened.findChild<QComboBox*>("paperOnAlgoStop")->currentText(), "Always");
 }

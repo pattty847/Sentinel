@@ -6,6 +6,7 @@
 #include <QSGGeometryNode>
 #include <QSGFlatColorMaterial>
 #include <QSGNode>
+#include <QDateTime>
 #include <cmath>
 
 AlgoOverlayRenderer::AlgoOverlayRenderer(QQuickItem* parent)
@@ -54,6 +55,13 @@ void AlgoOverlayRenderer::onAlgoOrderEvent(const trading::AlgoOrderEvent& event)
     QMetaObject::invokeMethod(this, "update", Qt::QueuedConnection);
 }
 
+void AlgoOverlayRenderer::onTradingSnapshot(const trading::TradingSnapshot& snapshot) {
+    QMutexLocker lock(&m_pendingMutex);
+    m_pending.push_back(Reconcile{snapshot, QDateTime::currentMSecsSinceEpoch()});
+    m_dirty = true;
+    QMetaObject::invokeMethod(this, "update", Qt::QueuedConnection);
+}
+
 void AlgoOverlayRenderer::onMappingChanged() {
     m_dirty = true;
     update();
@@ -73,40 +81,14 @@ QSGNode* AlgoOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         return nullptr;
     }
 
-    // Drain pending events from GUI thread and maintain active order spans.
+    // Drain pending events and snapshots from the GUI thread, in arrival order.
     {
         QMutexLocker lock(&m_pendingMutex);
-        for (auto& ev : m_pending) {
-            if (!ev.orderId.empty()) {
-                auto& span = m_orderSpans[ev.orderId];
-                if (ev.status == trading::OrderStatus::Open) {
-                    span.side = ev.side;
-                    span.price = ev.price;
-                    span.openedMs = ev.timestampMs;
-                    span.closedMs = 0;
-                    span.terminalStatus = trading::OrderStatus::New;
-                    span.active = true;
-                } else if (ev.status == trading::OrderStatus::Filled ||
-                           ev.status == trading::OrderStatus::Canceled ||
-                           ev.status == trading::OrderStatus::Rejected) {
-                    if (!span.active && span.openedMs == 0) {
-                        span.side = ev.side;
-                        span.price = ev.price;
-                        span.openedMs = ev.timestampMs;
-                    }
-                    span.closedMs = ev.timestampMs;
-                    span.terminalStatus = ev.status;
-                    span.active = false;
-                    m_markers.push_back(ev);
-                }
-            } else {
-                m_markers.push_back(ev);
-            }
+        for (const auto& item : m_pending) {
+            if (const auto* ev = std::get_if<trading::AlgoOrderEvent>(&item)) m_spans.apply(*ev);
+            else if (const auto* r = std::get_if<Reconcile>(&item)) m_spans.reconcile(r->snapshot, r->atMs);
         }
         m_pending.clear();
-    }
-    while (static_cast<int>(m_markers.size()) > kMaxEvents) {
-        m_markers.pop_front();
     }
 
     if (!m_dirty && oldNode) {
@@ -151,7 +133,7 @@ QSGNode* AlgoOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
     ColoredVerts cancelLines{cancelColor, {}, QSGGeometry::DrawLines};
     ColoredVerts fills{fillColor, {}, QSGGeometry::DrawTriangles};
 
-    for (const auto& [orderId, span] : m_orderSpans) {
+    for (const auto& [orderId, span] : m_spans.spans()) {
         Q_UNUSED(orderId);
         if (span.price <= 0.0 || span.openedMs <= 0) continue;
 
@@ -186,7 +168,7 @@ QSGNode* AlgoOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeD
         target.verts.push_back({x1, y});
     }
 
-    for (const auto& ev : m_markers) {
+    for (const auto& ev : m_spans.markers()) {
         if (ev.price <= 0.0) continue;
 
         const float y = static_cast<float>(mapping.priceToScreenY(ev.price));

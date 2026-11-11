@@ -142,6 +142,8 @@ set(GRID_CORE_SOURCES
     render/MsdfAtlas.cpp
     render/MsdfGlyphNode.hpp
     render/MsdfGlyphNode.cpp
+    render/AlgoOrderSpans.hpp
+    render/AlgoOrderSpans.cpp
     render/AlgoOverlayRenderer.hpp
     render/AlgoOverlayRenderer.cpp
     render/PaperTradeOverlayRenderer.hpp
@@ -178,6 +180,7 @@ set(WIDGET_SOURCES
     "widgets/StockChartDock.cpp"
     "widgets/ResearchProcess.cpp"
     "widgets/ResearchProcess.hpp"
+    "widgets/AlgoStopPolicy.hpp"
     "widgets/PaperTradingDock.hpp"
     "widgets/PaperTradingDock.cpp"
 )
@@ -332,6 +335,8 @@ qt6_add_qml_module(sentinel_gui_lib
         render/TradeBubbleOverlayItem.cpp
         render/CandlestickOverlayItem.hpp
         render/CandlestickOverlayItem.cpp
+        render/AlgoOrderSpans.hpp
+        render/AlgoOrderSpans.cpp
         render/AlgoOverlayRenderer.hpp
         render/AlgoOverlayRenderer.cpp
         render/PaperTradeOverlayRenderer.hpp

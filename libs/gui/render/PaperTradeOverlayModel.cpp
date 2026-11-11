@@ -267,6 +267,22 @@ void PaperTradeOverlayModel::onRiskOrderUpdated(const trading::RiskOrderUpdate& 
     emitRiskStateChanged();
 }
 
+void PaperTradeOverlayModel::onTradingSnapshot(const trading::TradingSnapshot& snapshot) {
+    m_orders.clear();
+    for (const auto& order : snapshot.openOrders) onOrderUpdated(order);
+    emit openOrdersChanged();
+    if (m_symbol.isEmpty()) return;
+    const std::string symbol = m_symbol.toStdString();
+    const auto* position = snapshot.positionFor(symbol);
+    onPositionUpdated(position ? *position : trading::PositionUpdate{symbol, 0.0, 0.0, 0.0, 0.0});
+    trading::RiskOrderUpdate risk;
+    risk.symbol = symbol;
+    for (const auto& r : snapshot.riskOrders) {
+        if (r.symbol == symbol) risk = r;
+    }
+    onRiskOrderUpdated(risk);
+}
+
 bool PaperTradeOverlayModel::canShowRiskControls() const {
     return m_hasPosition && std::abs(m_position.positionQty) > 1e-12;
 }

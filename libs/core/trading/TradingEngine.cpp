@@ -92,6 +92,21 @@ std::optional<Position> TradingEngine::getPosition(const std::string& symbol) co
     return m_positions.get(symbol);
 }
 
+std::vector<Order> TradingEngine::getAllOpenOrders() const {
+    return m_orders.getAllActive();
+}
+
+std::vector<Position> TradingEngine::getAllPositions() const {
+    return m_positions.all();
+}
+
+std::vector<RiskOrderUpdate> TradingEngine::getAllAttachedRisk() const {
+    std::vector<RiskOrderUpdate> out;
+    out.reserve(m_attachedRiskBySymbol.size());
+    for (const auto& [symbol, risk] : m_attachedRiskBySymbol) out.push_back(buildRiskOrderUpdate(symbol, risk));
+    return out;
+}
+
 TradingResult TradingEngine::onExternalFill(const std::string& orderId,
                                             double cumulativeFilledQty,
                                             double fillPrice) {

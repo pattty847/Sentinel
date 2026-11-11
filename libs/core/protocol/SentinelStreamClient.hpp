@@ -32,6 +32,7 @@
 #include "TradeHistoryWire.hpp"
 #include "../config/ConfigTypes.hpp"
 #include "../trading/TradingTypes.hpp"
+#include "../trading/TradingSnapshot.hpp"
 #include "../trading/IAlgo.hpp"
 #include "../trading/AlgoEngine.hpp"
 
@@ -147,7 +148,9 @@ public:
                              int limit = 50,
                              double minVolume = 0.0);
     void sendTradeCommand(const trading::TradeCommand& command);
-    void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params);
+    // commandId is echoed by the trading_snapshot the server broadcasts after it processed the command.
+    void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol,
+                         const trading::AlgoParams& params, const std::string& commandId);
 
 signals:
     // Repeated lifecycle notifications: connected fires on each successful handshake;
@@ -210,6 +213,7 @@ signals:
     void riskOrderUpdated(const trading::RiskOrderUpdate& update);
     void algoOrderEventReceived(const trading::AlgoOrderEvent& event);
     void pnlSnapshotReceived(const trading::PnlSnapshot& snapshot);
+    void tradingSnapshotReceived(const trading::TradingSnapshot& snapshot);
     void coinbaseLatencyReceived(int milliseconds);
 
 private:

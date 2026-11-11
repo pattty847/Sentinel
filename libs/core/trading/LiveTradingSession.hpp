@@ -5,6 +5,7 @@
 #include "AvendellaMM.hpp"
 #include "SimulationBroker.hpp"
 #include "TradeDrivenExecutionModel.hpp"
+#include "TradingSnapshot.hpp"
 
 #include <functional>
 #include <memory>
@@ -30,6 +31,13 @@ public:
     void onTradeTick(const std::string& symbol, double lastTradePrice, int64_t timestampMs);
 
     void setResultCallback(ResultCallback cb);
+
+    // The whole trading state (epoch, positions, open orders, attached risk, running
+    // algos). withSnapshot runs fn while no result can be published, so whatever fn
+    // hands to a client is ordered against every result callback.
+    TradingSnapshot snapshot() const;
+    void withSnapshot(const std::function<void(const TradingSnapshot&)>& fn) const;
+    const std::string& epoch() const { return m_epoch; }
     SimulationBroker& broker() { return m_broker; }
     const SimulationBroker& broker() const { return m_broker; }
 
@@ -46,7 +54,12 @@ private:
     static std::vector<AlgoOrderEvent> algoEventsFromExecutionEvents(const std::vector<ExecutionEvent>& events,
                                                                      int64_t timestampMs);
 
+    TradingSnapshot snapshotLocked() const;
+
+    // Serializes every broker call and the result callback it produces; taken before m_mutex.
+    mutable std::mutex m_brokerMutex;
     mutable std::mutex m_mutex;
+    const std::string m_epoch;
     SimulationBroker m_broker;
     std::unordered_map<std::string, AlgoFactory> m_factories;
     std::unordered_map<std::string, std::unique_ptr<AlgoBacktestAdapter>> m_runningAlgos;

@@ -44,7 +44,8 @@ public:
     virtual void setCandleHistoryViewport(const QString& symbol, int64_t timeframeMs,
                                          qint64 startMs, qint64 endMs) = 0;
     virtual void sendTradeCommand(const trading::TradeCommand& command) = 0;
-    virtual void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol, const trading::AlgoParams& params) = 0;
+    virtual void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol,
+                                 const trading::AlgoParams& params, const std::string& commandId) = 0;
     // GUI-thread snapshot for widgets attached after the last connection signal.
     virtual bool isConnectionActive() const { return false; }
 
@@ -78,6 +79,8 @@ signals:
     void riskOrderUpdated(const trading::RiskOrderUpdate& update);
     void algoOrderEventReceived(const trading::AlgoOrderEvent& event);
     void pnlSnapshotReceived(const trading::PnlSnapshot& snapshot);
+    // The server's whole trading state: on every (re)connect and after each algo command.
+    void tradingSnapshotReceived(const trading::TradingSnapshot& snapshot);
 };
 
 Q_DECLARE_METATYPE(trading::OrderUpdate)
@@ -85,3 +88,4 @@ Q_DECLARE_METATYPE(trading::PositionUpdate)
 Q_DECLARE_METATYPE(trading::RiskOrderUpdate)
 Q_DECLARE_METATYPE(trading::AlgoOrderEvent)
 Q_DECLARE_METATYPE(trading::PnlSnapshot)
+Q_DECLARE_METATYPE(trading::TradingSnapshot)

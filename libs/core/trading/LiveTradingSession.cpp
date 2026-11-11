@@ -3,11 +3,25 @@
 #include "../SentinelLogging.hpp"
 
 #include <chrono>
+#include <cstdio>
+#include <random>
 
 namespace trading {
 
+namespace {
+std::string newEpoch() {
+    std::random_device rd;
+    const uint64_t value = (static_cast<uint64_t>(rd()) << 32) ^ rd() ^
+        static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(value));
+    return buf;
+}
+} // namespace
+
 LiveTradingSession::LiveTradingSession(TradingEngine::PriceResolver resolver, double slippageBps)
-    : m_broker(std::move(resolver), std::make_unique<TradeDrivenExecutionModel>(), slippageBps) {}
+    : m_epoch(newEpoch()),
+      m_broker(std::move(resolver), std::make_unique<TradeDrivenExecutionModel>(), slippageBps) {}
 
 void LiveTradingSession::registerAlgo(std::unique_ptr<IAlgo> algo) {
     const std::string algoId = algo->id();
@@ -24,6 +38,7 @@ void LiveTradingSession::registerAlgo(std::unique_ptr<IAlgo> algo) {
 }
 
 bool LiveTradingSession::startAlgo(const std::string& algoId, const std::string& symbol, const AlgoParams& params) {
+    std::lock_guard<std::mutex> brokerLock(m_brokerMutex);
     std::lock_guard<std::mutex> lock(m_mutex);
     auto fit = m_factories.find(algoId);
     if (fit == m_factories.end()) {
@@ -39,6 +54,7 @@ bool LiveTradingSession::startAlgo(const std::string& algoId, const std::string&
 }
 
 void LiveTradingSession::stopAlgo(const std::string& algoId) {
+    std::lock_guard<std::mutex> brokerLock(m_brokerMutex);
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_runningAlgos.find(algoId);
@@ -77,6 +93,7 @@ std::vector<std::string> LiveTradingSession::runningAlgos() const {
 }
 
 void LiveTradingSession::processTradeCommand(const TradeCommand& command) {
+    std::lock_guard<std::mutex> brokerLock(m_brokerMutex);
     const auto outcome = m_broker.submitIntent(fromTradeCommand(command));
     logCommandOutcome(command, outcome);
     publish(outcome.events, command.timestamp);
@@ -138,6 +155,7 @@ void LiveTradingSession::publish(const std::vector<ExecutionEvent>& events, int6
 }
 
 void LiveTradingSession::onTradeTick(const std::string& symbol, double lastTradePrice, int64_t timestampMs) {
+    std::lock_guard<std::mutex> brokerLock(m_brokerMutex);
     MarketEvent event;
     event.type = MarketEventType::Trade;
     event.timestampMs = timestampMs;
@@ -196,6 +214,26 @@ void LiveTradingSession::onTradeTick(const std::string& symbol, double lastTrade
 void LiveTradingSession::setResultCallback(ResultCallback cb) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_callback = std::move(cb);
+}
+
+TradingSnapshot LiveTradingSession::snapshot() const {
+    std::lock_guard<std::mutex> brokerLock(m_brokerMutex);
+    return snapshotLocked();
+}
+
+void LiveTradingSession::withSnapshot(const std::function<void(const TradingSnapshot&)>& fn) const {
+    std::lock_guard<std::mutex> brokerLock(m_brokerMutex);
+    fn(snapshotLocked());
+}
+
+TradingSnapshot LiveTradingSession::snapshotLocked() const {
+    TradingSnapshot snap = m_broker.accountState();
+    snap.epoch = m_epoch;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (const auto& [algoId, adapter] : m_runningAlgos) {
+        if (adapter->isRunning()) snap.runningAlgos.push_back({algoId, adapter->symbol()});
+    }
+    return snap;
 }
 
 AlgoOrderEvent LiveTradingSession::buildAlgoEvent(const OrderUpdate& update, int64_t timestampMs) {

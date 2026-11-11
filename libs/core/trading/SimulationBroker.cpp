@@ -54,6 +54,29 @@ BrokerSnapshot SimulationBroker::snapshotFor(const std::string& symbol, int64_t 
     return snapshot;
 }
 
+TradingSnapshot SimulationBroker::accountState() const {
+    TradingSnapshot state;
+    for (const auto& p : m_engine.getAllPositions()) {
+        state.positions.push_back(PositionUpdate{p.symbol, p.netQty, p.avgPrice, p.unrealizedPnl, p.realizedPnl});
+    }
+    for (const auto& o : m_engine.getAllOpenOrders()) {
+        OrderUpdate u;
+        u.orderId = o.id;
+        u.symbol = o.symbol;
+        u.status = o.status;
+        u.side = o.side;
+        u.qty = o.qty;
+        u.filledQty = o.filledQty;
+        u.remainingQty = o.qty - o.filledQty;
+        u.avgPrice = o.avgPrice;
+        u.limitPrice = o.limitPrice;
+        u.algoId = o.algoId;
+        state.openOrders.push_back(std::move(u));
+    }
+    state.riskOrders = m_engine.getAllAttachedRisk();
+    return state;
+}
+
 BacktestResult SimulationBroker::buildResult(const BacktestConfig& config) const {
     BacktestResult result = m_result;
     result.summary.symbol = config.symbol;

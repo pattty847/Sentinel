@@ -79,6 +79,8 @@ public:
     void broadcastPnlSnapshot(const trading::PnlSnapshot& snapshot);
     bool startAlgo(const std::string& algoId, const std::string& symbol, const trading::AlgoParams& params);
     void stopAlgo(const std::string& algoId);
+    // Sends the whole trading state to every trading client (an algo command's acknowledgement).
+    void broadcastTradingSnapshot(const std::string& reason, const std::string& commandId);
     trading::LiveTradingSession& tradingSession() { return *m_tradingSession; }
     trading::LiveTradingSession* tradingSessionPtr() const { return m_tradingSession.get(); }
     // Open client sessions; takes the sessions mutex briefly (metrics scrape).

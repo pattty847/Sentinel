@@ -9,6 +9,10 @@
 
 #include "../../core/trading/TradingTypes.hpp"
 #include "../../core/trading/AlgoEngine.hpp"
+#include "../../core/trading/TradingSnapshot.hpp"
+#include "AlgoStopPolicy.hpp"
+
+#include <string>
 
 class QTabWidget;
 class QTableWidget;
@@ -53,6 +57,8 @@ public slots:
     void onPositionUpdated(const trading::PositionUpdate& update);
     void onAlgoOrderEvent(const trading::AlgoOrderEvent& event);
     void onPnlSnapshot(const trading::PnlSnapshot& snapshot);
+    // Replaces the ticket's orders, position and algo state with the server's.
+    void onTradingSnapshot(const trading::TradingSnapshot& snapshot);
 
 private slots:
     void onBuyMarketClicked();
@@ -76,6 +82,12 @@ private:
     void buildPnlPanel(QWidget* parent);
     void resetForSymbolChange();
     void setAlgoState(const QString& text, const QString& reason, bool canStart, bool canStop);
+    void applyAlgoSnapshot(const trading::TradingSnapshot& snapshot);
+    void dropOrderRowsNotIn(const trading::TradingSnapshot& snapshot);
+    void clearOrderHistory();
+    void afterAlgoStopSent();
+    paper::OnAlgoStop onAlgoStopPolicy() const;
+    QString sendAlgoCommand(const std::string& action, const trading::AlgoParams& params);
     void updateNotional();
     void updatePricePrecision(double price);
     void sendManualCommand(trading::TradeAction action,
@@ -127,6 +139,10 @@ private:
     QPushButton* m_stopBtn = nullptr;
     QTimer* m_algoCommandTimer = nullptr;
     QString m_pendingAlgoAction;
+    QString m_pendingAlgoCommandId;
+    bool m_algoRunningConfirmed = false;
+    std::string m_tradingEpoch;
+    QComboBox* m_onAlgoStopCombo = nullptr;
     int m_algoFillCount = 0;
     double m_algoCumPnl = 0.0;
     QSet<QString> m_countedAlgoFillIds;

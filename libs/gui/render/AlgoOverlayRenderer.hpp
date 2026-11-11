@@ -21,6 +21,9 @@ Threading: Slot called on GUI thread; updatePaintNode on render thread.
 
 #include "ITimeAxisMappingProvider.hpp"
 #include "../../core/trading/AlgoEngine.hpp"
+#include "AlgoOrderSpans.hpp"
+
+#include <variant>
 
 class AlgoOverlayRenderer : public QQuickItem {
     Q_OBJECT
@@ -30,8 +33,6 @@ class AlgoOverlayRenderer : public QQuickItem {
     Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY enabledChanged FINAL)
 
 public:
-    static constexpr int kMaxEvents = 2000; // rolling buffer size
-
     explicit AlgoOverlayRenderer(QQuickItem* parent = nullptr);
 
     QObject* mappingProvider() const { return m_mappingProvider; }
@@ -42,6 +43,8 @@ public:
 
 public slots:
     void onAlgoOrderEvent(const trading::AlgoOrderEvent& event);
+    // Closes lines of orders the server no longer holds (reconnect, server restart).
+    void onTradingSnapshot(const trading::TradingSnapshot& snapshot);
     void onMappingChanged();
 
 signals:
@@ -53,13 +56,9 @@ protected:
     void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
 
 private:
-    struct OrderSpan {
-        trading::OrderSide side = trading::OrderSide::Unknown;
-        double price = 0.0;
-        int64_t openedMs = 0;
-        int64_t closedMs = 0;
-        trading::OrderStatus terminalStatus = trading::OrderStatus::New;
-        bool active = false;
+    struct Reconcile {
+        trading::TradingSnapshot snapshot;
+        int64_t atMs = 0;
     };
 
     QPointer<QObject> m_mappingProvider;
@@ -68,7 +67,6 @@ private:
     bool m_dirty = false;
 
     QMutex m_pendingMutex;
-    std::vector<trading::AlgoOrderEvent> m_pending; // GUI thread -> render thread
-    std::unordered_map<std::string, OrderSpan> m_orderSpans; // render-thread only
-    std::deque<trading::AlgoOrderEvent> m_markers; // render-thread only
+    std::vector<std::variant<trading::AlgoOrderEvent, Reconcile>> m_pending; // GUI thread -> render thread
+    AlgoOrderSpans m_spans; // render-thread only
 };

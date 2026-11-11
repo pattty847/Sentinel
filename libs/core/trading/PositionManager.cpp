@@ -79,4 +79,12 @@ std::optional<Position> PositionManager::get(const std::string& symbol) const {
     return it->second;
 }
 
+std::vector<Position> PositionManager::all() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::vector<Position> out;
+    out.reserve(m_positions.size());
+    for (const auto& [_, position] : m_positions) out.push_back(position);
+    return out;
+}
+
 } // namespace trading

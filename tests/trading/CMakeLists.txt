@@ -51,3 +51,19 @@ set_tests_properties(BacktestCoreTests PROPERTIES LABELS "trading")
 
 add_dependencies(test_backtest_core sentinel_backtest)
 target_compile_definitions(test_backtest_core PRIVATE BACKTEST_CLI="$<TARGET_FILE:sentinel_backtest>")
+
+# Trading snapshot wire, overlay order lines and the On-algo-stop policy (Qt-free)
+add_executable(test_trading_snapshot
+    test_trading_snapshot.cpp
+    ${CMAKE_SOURCE_DIR}/libs/gui/render/AlgoOrderSpans.cpp
+)
+target_include_directories(test_trading_snapshot PRIVATE
+    ${CMAKE_SOURCE_DIR}/libs/core
+    ${CMAKE_SOURCE_DIR}/libs/gui
+)
+target_link_libraries(test_trading_snapshot PRIVATE
+    sentinel_core
+    GTest::gtest_main
+)
+add_test(NAME TradingSnapshotTests COMMAND test_trading_snapshot)
+set_tests_properties(TradingSnapshotTests PROPERTIES LABELS "trading")

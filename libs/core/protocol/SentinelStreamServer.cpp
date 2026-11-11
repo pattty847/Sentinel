@@ -1054,6 +1054,19 @@ public:
                     }
                 });
             m_tradingBroadcasterRegistered = true;
+            // After registering: a result published before the snapshot is in it, one
+            // published after it is queued behind it.
+            if (auto* tradingSession = owner_->tradingSessionPtr()) {
+                tradingSession->withSnapshot([weak](const trading::TradingSnapshot& state) {
+                    auto snapshot = state;
+                    snapshot.reason = "connect";
+                    if (auto self = weak.lock()) {
+                        self->postModelEvent([json = trading::tradingSnapshotJson(snapshot).dump()](Session& session) {
+                            session.do_write(json);
+                        });
+                    }
+                });
+            }
         }
         armOverlayTimer();
         armAvailabilityTimer();
@@ -1298,6 +1311,7 @@ public:
                     try {
                         const std::string algoId = j.value("algo_id", "");
                         const std::string action  = j.value("action", "");
+                        const std::string commandId = j.value("command_id", "");
                         const std::string symbol  = j.value("symbol", "");
                         auto paramsJ = j.value("params", nlohmann::json::object());
                         trading::AlgoParams params;
@@ -1322,6 +1336,7 @@ public:
                             sLog_Warning("algo_command ignored: unknown action=" << action
                                          << " algo=" << algoId);
                         }
+                        owner_->broadcastTradingSnapshot("algo_command", commandId);
                     } catch (const std::exception& ex) {
                         sLog_Error("algo_command error: peer=" << peer_ << " error=" << ex.what());
                     }
@@ -2631,4 +2646,20 @@ void SentinelStreamServer::broadcastPnlSnapshot(const trading::PnlSnapshot& ps) 
     j["total_pnl"] = ps.totalPnl;
     j["algo_id"] = ps.algoId;
     broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, j.dump());
+}
+
+void SentinelStreamServer::broadcastTradingSnapshot(const std::string& reason, const std::string& commandId) {
+    if (!m_tradingSession) {
+        return;
+    }
+    m_tradingSession->withSnapshot([&](const trading::TradingSnapshot& state) {
+        auto snapshot = state;
+        snapshot.reason = reason;
+        snapshot.commandId = commandId;
+        sLog_App("trading_snapshot broadcast: reason=" << reason << " command=" << commandId
+                 << " epoch=" << snapshot.epoch << " positions=" << snapshot.positions.size()
+                 << " openOrders=" << snapshot.openOrders.size()
+                 << " runningAlgos=" << snapshot.runningAlgos.size());
+        broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, trading::tradingSnapshotJson(snapshot).dump());
+    });
 }

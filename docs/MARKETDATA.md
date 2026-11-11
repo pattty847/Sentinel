@@ -466,17 +466,36 @@ totals; the GUI replica applies them as absolute quantities.
 The stream protocol includes a paper-trading vertical:
 
 - **Client → Server:** `trade_command` — `PLACE_ORDER`, `CANCEL_ORDER`, `CANCEL_ALL`, `FLATTEN`.
-- **Server → Client:** `order_update` (order lifecycle), `position_update` (position and unrealized PnL).
+- **Server → Client:** `order_update` (order lifecycle), `position_update` (position and unrealized PnL), `risk_order_update`, `algo_order_event`, `pnl_snapshot`, `trading_snapshot` (whole state, below).
 
-`algo_command` (`start`/`stop`) is also accepted, but the server only logs success,
-refusal, or exceptions. It sends no correlated command acknowledgement, rejection,
-stop event, or current running-algo snapshot. `algo_order_event` reports an order
-emitted by an algorithm and can prove activity; an order rejection is **not** a
-start-command rejection. Silence cannot confirm either a successful start or stop.
-The paper ticket therefore labels these commands pending/unconfirmed, and shows
-running only after observing an algo order event. `trade_command` carries a
-`command_id`, but `order_update` does not echo it, so manual command acceptance
-cannot be correlated reliably (and cancel/flatten may emit no order update).
+**`trading_snapshot` (server -> client, schema 1).** The server's whole paper-trading
+state: `{"type":"trading_snapshot","schema_version":1,"epoch":..,"reason":..,"command_id":..,
+"positions":[..],"open_orders":[..],"risk_orders":[..],"running_algos":[{"algo_id","symbol"}]}`.
+`positions` lists every symbol the session has traded (`position_update` fields; a symbol
+not listed is flat), `open_orders` every New/Open/Partial order (`order_update` fields,
+manual and algo), `risk_orders` the attached TP/SL per symbol (`risk_order_update`
+fields). `epoch` names one `LiveTradingSession`; a new epoch means the server restarted
+and order ids (`ord-N`) restart. It is pushed, like `server_config`, never requested:
+- `reason: "connect"`: once to each new connection, after it is registered for trading
+  broadcasts. It is built under the session's broker lock, so a result published
+  before it is contained in it and one published after it follows it on the wire.
+- `reason: "algo_command"`: broadcast to every trading client after each `algo_command`
+  (`start`, `stop`, or unknown action) is processed, with `command_id` echoing the
+  command's `command_id`. A client correlates its own start/stop by that id; a
+  running algo listed confirms a start, its absence confirms a stop or a refused start.
+
+A client replaces its trading state from every snapshot: an order, position, TP/SL or
+running algo that is not listed does not exist on the server, so nothing stale survives
+a reconnect or a server restart. A message with another `schema_version` or without one
+of the four arrays is dropped whole. `algo_order_event` still reports orders an
+algorithm emitted (activity, not a command acknowledgement; an order rejection is
+**not** a start-command rejection). Stopping an algo cancels its resting quotes on the
+server (scoped to that algo; manual TP/SL and other algos' orders stay). After a stop
+the paper ticket applies its "On algo stop" setting (Ask, default / Always / Never) and
+flattens through the ordinary `FLATTEN` `trade_command`, sent after the stop on the
+same connection. `trade_command` carries a `command_id`, but `order_update` does not
+echo it, so manual command acceptance cannot be correlated reliably (and cancel/flatten
+may emit no order update).
 The stream also does not publish base/quote increments; ticket precision preserves
 eight decimal places, rounds submitted limits to the editor's displayed decimals,
 and displays small prices without truncation. A symbol switch clears the ticket's

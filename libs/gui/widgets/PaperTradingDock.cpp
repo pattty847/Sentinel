@@ -23,7 +23,9 @@
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
+#include <QSettings>
 #include <QDoubleSpinBox>
 #include <QToolButton>
 #include <QButtonGroup>
@@ -104,16 +106,21 @@ void PaperTradingDock::setDataSource(IGridDataSource* source) {
                     m_algoActivityEligible = false;
                     if (m_algoCommandTimer) m_algoCommandTimer->stop();
                     m_pendingAlgoAction.clear();
+                    m_pendingAlgoCommandId.clear();
+                    m_algoRunningConfirmed = false;
                     setAlgoState(connected ? QStringLiteral("UNCONFIRMED")
                                            : QStringLiteral("UNAVAILABLE"),
-                                 connected ? QStringLiteral("No lifecycle snapshot after reconnect")
+                                 connected ? QStringLiteral("Awaiting the server's trading snapshot")
                                            : QStringLiteral("Trading stream disconnected"),
                                  connected && !m_symbol.isEmpty(), false);
                 }, Qt::QueuedConnection);
+        // Queued like the connection status, so a reconnect's snapshot lands after its reset.
+        connect(source, &IGridDataSource::tradingSnapshotReceived, this,
+                &PaperTradingDock::onTradingSnapshot, Qt::QueuedConnection);
     }
     setAlgoState(m_streamAvailable ? QStringLiteral("UNCONFIRMED") : QStringLiteral("UNAVAILABLE"),
                  !source ? QStringLiteral("No data source")
-                         : m_streamAvailable ? QStringLiteral("No lifecycle snapshot is provided by the server")
+                         : m_streamAvailable ? QStringLiteral("Awaiting the server's trading snapshot")
                                              : QStringLiteral("Trading stream disconnected"),
                  m_streamAvailable && !m_symbol.isEmpty(), false);
     refreshMarketHealth();
@@ -340,6 +347,26 @@ void PaperTradingDock::buildAlgoTab(QWidget* parent) {
     addParam(0, QStringLiteral("Spread (bps):"), m_spreadSpin, 1.0, 500.0, 1.0, 10.0, QStringLiteral(" bps"));
     addParam(1, QStringLiteral("Order Qty:"),    m_orderQtySpin, 0.0001, 100.0, 0.001, 0.01, {});
     addParam(2, QStringLiteral("Max Pos:"),      m_maxPosSpin,   0.001, 100.0, 0.01,  0.1,  {});
+
+    paramGrid->addWidget(new QLabel(QStringLiteral("On algo stop:"), algoGroup), 3, 0);
+    m_onAlgoStopCombo = new QComboBox(algoGroup);
+    m_onAlgoStopCombo->setObjectName(QStringLiteral("paperOnAlgoStop"));
+    m_onAlgoStopCombo->addItem(QStringLiteral("Ask"), QString::fromLatin1(paper::settingValue(paper::OnAlgoStop::Ask)));
+    m_onAlgoStopCombo->addItem(QStringLiteral("Always"), QString::fromLatin1(paper::settingValue(paper::OnAlgoStop::Always)));
+    m_onAlgoStopCombo->addItem(QStringLiteral("Never"), QString::fromLatin1(paper::settingValue(paper::OnAlgoStop::Never)));
+    m_onAlgoStopCombo->setToolTip(QStringLiteral(
+        "After Stop: Ask offers to flatten the position, Always flattens it, Never keeps it."));
+    {
+        QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+        const auto stored = settings.value("PaperTradingDock/onAlgoStop").toString().toStdString();
+        const QString value = QString::fromLatin1(paper::settingValue(paper::onAlgoStopFromSetting(stored)));
+        m_onAlgoStopCombo->setCurrentIndex(std::max(0, m_onAlgoStopCombo->findData(value)));
+    }
+    connect(m_onAlgoStopCombo, &QComboBox::currentIndexChanged, this, [this] {
+        QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+        settings.setValue("PaperTradingDock/onAlgoStop", m_onAlgoStopCombo->currentData().toString());
+    });
+    paramGrid->addWidget(m_onAlgoStopCombo, 3, 1);
 
     algoLayout->addLayout(paramGrid);
 
@@ -699,6 +726,8 @@ void PaperTradingDock::resetForSymbolChange() {
     if (m_algoPnlLabel) m_algoPnlLabel->setText(QStringLiteral("PnL: awaiting update"));
     if (m_algoCommandTimer) m_algoCommandTimer->stop();
     m_pendingAlgoAction.clear();
+    m_pendingAlgoCommandId.clear();
+    m_algoRunningConfirmed = false;
     setAlgoState(m_streamAvailable ? QStringLiteral("UNCONFIRMED") : QStringLiteral("UNAVAILABLE"),
                  m_streamAvailable ? QStringLiteral("No lifecycle snapshot for this symbol")
                                    : QStringLiteral("Trading stream unavailable"),
@@ -883,6 +912,8 @@ void PaperTradingDock::onAlgoOrderEvent(const trading::AlgoOrderEvent& event) {
     // An order event proves algo execution, including an order rejection. It does not
     // acknowledge the command or confirm a stop request.
     if (m_pendingAlgoAction == QStringLiteral("stop")) return;
+    // The server's snapshot already confirmed it; activity adds nothing.
+    if (m_algoRunningConfirmed && m_pendingAlgoAction.isEmpty()) return;
     if (m_algoCommandTimer) m_algoCommandTimer->stop();
     m_pendingAlgoAction.clear();
     setAlgoState(QStringLiteral("RUNNING / ACTIVITY OBSERVED"),
@@ -942,11 +973,12 @@ void PaperTradingDock::onStartAlgoClicked() {
     params.orderQty = m_orderQtySpin ? m_orderQtySpin->value() : 0.01;
     params.maxPositionQty = m_maxPosSpin ? m_maxPosSpin->value() : 0.1;
 
-    m_dataSource->sendAlgoCommand("AvendellaMM", "start", m_symbol.toStdString(), params);
+    m_pendingAlgoCommandId = sendAlgoCommand("start", params);
     m_algoActivityEligible = true;
+    m_algoRunningConfirmed = false;
     m_pendingAlgoAction = QStringLiteral("start");
     setAlgoState(QStringLiteral("START PENDING"),
-                 QStringLiteral("Awaiting observable algo activity; no command acknowledgement exists"),
+                 QStringLiteral("Awaiting the server's acknowledgement or algo activity"),
                  false, true);
     m_algoCommandTimer->start(5000);
     m_algoFillCount = 0;
@@ -958,14 +990,121 @@ void PaperTradingDock::onStartAlgoClicked() {
 
 void PaperTradingDock::onStopAlgoClicked() {
     if (!m_dataSource || !m_streamAvailable || m_symbol.isEmpty()) return;
-    trading::AlgoParams params{};
-    m_dataSource->sendAlgoCommand("AvendellaMM", "stop", m_symbol.toStdString(), params);
+    m_pendingAlgoCommandId = sendAlgoCommand("stop", trading::AlgoParams{});
     m_algoActivityEligible = false;
+    m_algoRunningConfirmed = false;
 
     m_pendingAlgoAction = QStringLiteral("stop");
     setAlgoState(QStringLiteral("STOPPING / UNCONFIRMED"),
-                 QStringLiteral("Server sends no stop acknowledgement"), false, false);
+                 QStringLiteral("Awaiting the server's stop acknowledgement"), false, false);
     m_algoCommandTimer->start(5000);
+    afterAlgoStopSent();
+}
+
+QString PaperTradingDock::sendAlgoCommand(const std::string& action, const trading::AlgoParams& params) {
+    const QString commandId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_dataSource->sendAlgoCommand("AvendellaMM", action, m_symbol.toStdString(), params, commandId.toStdString());
+    return commandId;
+}
+
+paper::OnAlgoStop PaperTradingDock::onAlgoStopPolicy() const {
+    const auto value = m_onAlgoStopCombo ? m_onAlgoStopCombo->currentData().toString().toStdString() : std::string();
+    return paper::onAlgoStopFromSetting(value);
+}
+
+// The stop command goes first on the same connection, so the server cancels the
+// algo's quotes before the flatten arrives.
+void PaperTradingDock::afterAlgoStopSent() {
+    const auto policy = onAlgoStopPolicy();
+    bool answer = false;
+    if (paper::stepAfterAlgoStop(policy) == paper::AlgoStopStep::Prompt) {
+        QMessageBox box(QMessageBox::Question, QStringLiteral("Stop algo"), QStringLiteral("Flatten all?"),
+                        QMessageBox::Yes | QMessageBox::No, this);
+        box.setObjectName(QStringLiteral("paperFlattenPrompt"));
+        box.setInformativeText(QStringLiteral("The algo's resting quotes are canceled. Yes closes the %1 paper "
+                                              "position at market; No keeps it.").arg(m_symbol));
+        box.setDefaultButton(QMessageBox::No);
+        answer = box.exec() == QMessageBox::Yes;
+    }
+    if (paper::flattenAfterAlgoStop(policy, answer)) onFlattenClicked();
+}
+
+void PaperTradingDock::onTradingSnapshot(const trading::TradingSnapshot& snapshot) {
+    if (snapshot.epoch != m_tradingEpoch) {
+        // A new server session: order ids restart, so nothing shown before can be matched.
+        m_tradingEpoch = snapshot.epoch;
+        clearOrderHistory();
+    } else {
+        dropOrderRowsNotIn(snapshot);
+    }
+    for (const auto& order : snapshot.openOrders) onOrderUpdated(order);
+    if (!m_symbol.isEmpty()) {
+        const std::string symbol = m_symbol.toStdString();
+        const auto* position = snapshot.positionFor(symbol);
+        onPositionUpdated(position ? *position : trading::PositionUpdate{symbol, 0.0, 0.0, 0.0, 0.0});
+    }
+    applyAlgoSnapshot(snapshot);
+}
+
+void PaperTradingDock::clearOrderHistory() {
+    if (m_orderLog) m_orderLog->setRowCount(0);
+    m_orderIdToRow.clear();
+    if (m_pnlCurve) m_pnlCurve->clear();
+    m_algoFillCount = 0;
+    m_algoCumPnl = 0.0;
+    m_countedAlgoFillIds.clear();
+    if (m_algoFillCountLabel) m_algoFillCountLabel->setText(QStringLiteral("Fills: 0"));
+    if (m_algoPnlLabel) {
+        m_algoPnlLabel->setStyleSheet(QStringLiteral("QLabel { color: #aaa; }"));
+        m_algoPnlLabel->setText(QStringLiteral("PnL: $0.00"));
+    }
+}
+
+// Rows still shown as working that the server no longer holds were filled or canceled
+// while this client was not listening; the snapshot cannot say which, so they go.
+void PaperTradingDock::dropOrderRowsNotIn(const trading::TradingSnapshot& snapshot) {
+    if (!m_orderLog) return;
+    QSet<QString> open;
+    for (const auto& order : snapshot.openOrders) open.insert(QString::fromStdString(order.orderId));
+    bool removed = false;
+    for (int row = m_orderLog->rowCount() - 1; row >= 0; --row) {
+        const auto* id = m_orderLog->item(row, 0);
+        const auto* status = m_orderLog->item(row, 5);
+        if (!id || !status || open.contains(id->text())) continue;
+        if (!trading::isActiveOrderStatus(trading::orderStatusFromString(status->text().toStdString()))) continue;
+        m_orderLog->removeRow(row);
+        removed = true;
+    }
+    if (!removed) return;
+    m_orderIdToRow.clear();
+    for (int row = 0; row < m_orderLog->rowCount(); ++row)
+        if (const auto* id = m_orderLog->item(row, 0)) m_orderIdToRow.insert(id->text(), row);
+}
+
+void PaperTradingDock::applyAlgoSnapshot(const trading::TradingSnapshot& snapshot) {
+    const bool acknowledges = !m_pendingAlgoCommandId.isEmpty() && snapshot.reason == "algo_command"
+        && snapshot.commandId == m_pendingAlgoCommandId.toStdString();
+    // A command in flight waits for its own acknowledgement (or the timeout).
+    if (!m_pendingAlgoAction.isEmpty() && !acknowledges) return;
+    const bool startAcknowledged = acknowledges && m_pendingAlgoAction == QStringLiteral("start");
+    if (m_algoCommandTimer) m_algoCommandTimer->stop();
+    m_pendingAlgoAction.clear();
+    m_pendingAlgoCommandId.clear();
+    const auto* algo = snapshot.runningAlgo("AvendellaMM");
+    if (!algo) {
+        m_algoActivityEligible = false;
+        m_algoRunningConfirmed = false;
+        setAlgoState(QStringLiteral("STOPPED"),
+                     startAcknowledged ? QStringLiteral("The server did not start the algo")
+                                  : QStringLiteral("The server reports the algo is not running"),
+                     m_streamAvailable && !m_symbol.isEmpty(), false);
+        return;
+    }
+    const QString algoSymbol = QString::fromStdString(algo->symbol);
+    m_algoActivityEligible = algoSymbol == m_symbol;
+    m_algoRunningConfirmed = true;
+    setAlgoState(algoSymbol == m_symbol ? QStringLiteral("RUNNING") : QStringLiteral("RUNNING ON %1").arg(algoSymbol),
+                 QStringLiteral("The server reports the algo running on %1").arg(algoSymbol), false, true);
 }
 
 void PaperTradingDock::sendManualCommand(trading::TradeAction action,
