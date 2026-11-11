@@ -2617,7 +2617,7 @@ TEST(FootprintFlowFeed, HiddenLodDoesNotArmOrPublishAndResumesFromSourceBuffer) 
     MappingFrameContext frame;
     frame.activeTimeframeMs = 1000;
     frame.raster.valid = true; frame.raster.dpr = 1; frame.raster.tick = 1; frame.raster.tfMs = 1000;
-    frame.raster.colPxF = 1; frame.raster.rowPxF = 3;
+    frame.raster.colPxF = 0; frame.raster.rowPxF = 3; // no drawable column: Hidden
     int updates = 0;
     feed.setPorts({[&] { return frame; }, [] { return QString("BTC-USD"); }, [&] { ++updates; }});
     feed.setEnabled(true);
@@ -2626,11 +2626,11 @@ TEST(FootprintFlowFeed, HiddenLodDoesNotArmOrPublishAndResumesFromSourceBuffer) 
     feed.publishRows(); EXPECT_EQ(updates, 0);
     frame.raster.colPxF = 24; frame.raster.rowPxF = 6;
     feed.onFrameChanged(); EXPECT_TRUE(feed.pending());
-    frame.raster.colPxF = 1.4; frame.raster.rowPxF = .5;
+    frame.raster.colPxF = 0; frame.raster.rowPxF = .5;
     feed.onFrameChanged(); EXPECT_FALSE(feed.pending());
-    frame.raster.colPxF = 2;
-    feed.onFrameChanged(); EXPECT_TRUE(feed.pending()) << "Strip arms at 2 px columns with sub-pixel rows";
-    frame.raster.colPxF = 1.4;
+    frame.raster.colPxF = 1;
+    feed.onFrameChanged(); EXPECT_TRUE(feed.pending()) << "Strip arms at 1 device px columns with sub-pixel rows";
+    frame.raster.valid = false;
     feed.onFrameChanged(); EXPECT_FALSE(feed.pending());
     QTest::qWait(100); EXPECT_EQ(updates, 0);
 }
@@ -2665,7 +2665,7 @@ TEST(FootprintFlowFeed, EarlyNewSymbolHistorySurvivesSelectionAndHiddenLod) {
     ASSERT_TRUE(layer.mailbox().take(current)); ASSERT_TRUE(current->valid);
     EXPECT_EQ(current->cellCount, 1); EXPECT_EQ(layer.presentation().coverage.barCount, 1);
     // Hidden/source-off callbacks do no merging; authoritative remote history remains available.
-    frame.raster.colPxF = 1; feed.onFrameChanged();
+    frame.raster.colPxF = 0; feed.onFrameChanged();
     bar.rows[0].bidVol = 40; FlowDataSourceTest::deliver(source, batch);
     frame.raster.colPxF = 56; feed.onFrameChanged(); feed.publishRows();
     ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->cells[0].bidVol, 40);

@@ -183,7 +183,7 @@ void LabItem::loadReal(int hours) {
             const int64_t edge = followLive_ ? end + heatmap::kMinuteMs : end;
             const double right = double(recording::floorDiv(edge + tf - 1, tf) * tf) + (followLive_ ? 2.0 * tf : 0.0);
             const double span = std::min(initialTimeSpanMs_ > 0 ? initialTimeSpanMs_ : double(hours_) * heatmap::kHourMs,
-                                         heatmap::maxTimeSpanMs(std::max(1.0, width()) * devicePixelRatio(), tf));
+                                         heatmap::maxTimeSpanMs(std::max(1.0, width()), tf));
             view_.timeHiMs = right;
             view_.timeLoMs = right - span;
             view_.priceLo = 0;
@@ -315,14 +315,13 @@ void LabItem::setGpuCapBytes(uint64_t bytes) {
 }
 
 // ------------------------------------------------------------------ tick policy
-// Spec rules 1, 2 and 9: time zoom-out stops at one column per physical pixel;
-// in Manual, price zoom-out stops at one row per physical pixel.
+// Spec rules 1, 2 and 9: time zoom-out stops at one column per two logical px;
+// in Manual, price zoom-out stops at one row per two logical px.
 void LabItem::clampView() {
     if (!(width() > 0) || !(height() > 0)) return;
-    const double dpr = devicePixelRatio();
-    heatmap::clampSpan(view_.timeLoMs, view_.timeHiMs, heatmap::maxTimeSpanMs(width() * dpr, tfMs()));
+    heatmap::clampSpan(view_.timeLoMs, view_.timeHiMs, heatmap::maxTimeSpanMs(width(), tfMs()));
     if (manualMode_ && priceKnown_)
-        heatmap::clampSpan(view_.priceLo, view_.priceHi, heatmap::maxManualPriceSpan(height() * dpr, manualTick_));
+        heatmap::clampSpan(view_.priceLo, view_.priceHi, heatmap::maxManualPriceSpan(height(), manualTick_));
 }
 
 void LabItem::loadTickMemory() {
@@ -470,11 +469,10 @@ double LabItem::commonTickInView() const {
 void LabItem::zoom(double steps, bool priceOnly, double anchorX, double anchorY) {
     if (!hasContent()) return;
     const double factor = std::exp(-steps * 0.12);
-    const double dpr = devicePixelRatio();
     if (!priceOnly) {
-        // The timeframe never changes on zoom; zoom-out stops at one column per pixel.
+        // The timeframe never changes on zoom; zoom-out stops at one column per two logical px.
         const double span = view_.timeHiMs - view_.timeLoMs;
-        const double maximum = heatmap::maxTimeSpanMs(std::max(1.0, width()) * dpr, tfMs());
+        const double maximum = heatmap::maxTimeSpanMs(std::max(1.0, width()), tfMs());
         const double wanted = std::min(std::max(60'000.0, span * factor), maximum);
         const double a = std::clamp(anchorX, 0.0, 1.0);
         const double center = view_.timeLoMs + a * span;
@@ -485,7 +483,7 @@ void LabItem::zoom(double steps, bool priceOnly, double anchorX, double anchorY)
     const double finest = std::max(commonTickInView(), 0.01);
     double desired = std::max(finest * 4, priceSpan * factor);
     if (manualMode_) {
-        const double maximum = heatmap::maxManualPriceSpan(std::max(1.0, height()) * dpr, manualTick_);
+        const double maximum = heatmap::maxManualPriceSpan(std::max(1.0, height()), manualTick_);
         if (maximum > 0) desired = std::min(desired, maximum);
     }
     const double a = 1.0 - std::clamp(anchorY, 0.0, 1.0);

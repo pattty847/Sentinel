@@ -321,7 +321,7 @@ void HeatmapGpuLayer::restoreTick() {
 double HeatmapGpuLayer::priceScale() const { return snapshot_ ? snapshot_->priceScale : 100.0; }
 
 double HeatmapGpuLayer::maxTimeSpanMs() const {
-    return active_ ? heatmap::maxTimeSpanMs(widthPx_ * dpr_, tfMs_) : 0.0;
+    return active_ ? heatmap::maxTimeSpanMs(widthPx_, tfMs_) : 0.0;
 }
 
 bool HeatmapGpuLayer::priceScaleCurrent() const {
@@ -331,7 +331,7 @@ bool HeatmapGpuLayer::priceScaleCurrent() const {
 
 double HeatmapGpuLayer::maxPriceSpan() const {
     if (!active_ || !manualTickLocked() || !isPresetUnits(manualUnits_) || !priceScaleCurrent()) return 0.0;
-    return maxManualPriceSpan(heightPx_ * dpr_, fromUnits(manualUnits_, priceScale()));
+    return maxManualPriceSpan(heightPx_, fromUnits(manualUnits_, priceScale()));
 }
 
 double HeatmapGpuLayer::minTimeSpanMs() const { return active_ && tfMs_ > 0 ? double(kMinZoomColumns) * double(tfMs_) : 0.0; }

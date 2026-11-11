@@ -23,27 +23,28 @@ TEST(FootprintLod, ThresholdDerivedFromThirteenPixelMagnitudeWidth) {
     EXPECT_EQ(footprintLod(std::numeric_limits<double>::quiet_NaN(), height), FootprintStage::Hidden);
 }
 TEST(FootprintLod, StripKeepsFootprintAtEveryDrawableColumn) {
-    EXPECT_EQ(chart::kFootprintStripColumn, 2);
     EXPECT_EQ(chart::kFootprintCellsColumn, 24);
-    EXPECT_EQ(footprintLod(1.99, 6), FootprintStage::Hidden);
+    EXPECT_EQ(footprintLod(1.99, 6), FootprintStage::Strip) << "no zoom floor: thin columns stay Strip";
+    EXPECT_EQ(footprintLod(.5, 6), FootprintStage::Strip) << "one device px at dpr 2";
+    EXPECT_EQ(footprintLod(1e-6, 6), FootprintStage::Strip);
     EXPECT_EQ(footprintLod(2, 6), FootprintStage::Strip);
     EXPECT_EQ(footprintLod(2, .01), FootprintStage::Strip) << "thin rows merge; they never hide";
     EXPECT_EQ(footprintLod(23.99, 1), FootprintStage::Strip);
     EXPECT_EQ(footprintLod(24, .5), FootprintStage::Cells);
     EXPECT_EQ(footprintLod(chart::kFootprintNumbersColumn, .5), FootprintStage::Numbers);
     EXPECT_EQ(footprintLod(10, 0), FootprintStage::Hidden);
+    EXPECT_EQ(footprintLod(0, 6), FootprintStage::Hidden);
+    EXPECT_EQ(footprintLod(-1, 6), FootprintStage::Hidden);
     for (auto previous : {FootprintStage::Hidden, FootprintStage::Strip, FootprintStage::Cells, FootprintStage::Numbers})
         for (double row : {.01, 1., 6., 100.})
-            for (double column = 2; column < 400; column += .25)
+            for (double column = 1.0 / 64; column < 400; column *= 1.01)
                 ASSERT_NE(footprintLod(column, row, previous), FootprintStage::Hidden) << column << ' ' << row;
 }
 TEST(FootprintLod, HysteresisAtEveryBoundary) {
     const auto numbers = chart::kFootprintNumbersColumn;
-    // Strip <-> Hidden: enters at 2, held to 1.5.
-    EXPECT_EQ(footprintLod(1.6, 6, FootprintStage::Strip), FootprintStage::Strip);
-    EXPECT_EQ(footprintLod(1.6, 6, FootprintStage::Cells), FootprintStage::Strip);
-    EXPECT_EQ(footprintLod(1.4, 6, FootprintStage::Strip), FootprintStage::Hidden);
-    EXPECT_EQ(footprintLod(1.9, 6, FootprintStage::Hidden), FootprintStage::Hidden);
+    // Strip has no lower boundary, from any previous stage.
+    EXPECT_EQ(footprintLod(.3, 6, FootprintStage::Hidden), FootprintStage::Strip);
+    EXPECT_EQ(footprintLod(.3, 6, FootprintStage::Cells), FootprintStage::Strip);
     // Cells <-> Strip: enters at 24, held to 22.
     EXPECT_EQ(footprintLod(22.1, 6, FootprintStage::Cells), FootprintStage::Cells);
     EXPECT_EQ(footprintLod(22.1, 6, FootprintStage::Numbers), FootprintStage::Cells);
