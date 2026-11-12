@@ -281,10 +281,11 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
         return QStringLiteral(
             "QPushButton { background-color: %1; color: %2; border: 1px solid %3; "
             "border-radius: 3px; padding: 3px 8px; }"
-            "QPushButton:hover { background-color: %4; border-width: 2px; }"
+            "QPushButton:hover { background-color: %4; border-color: %6; }"
             "QPushButton:pressed { background-color: %5; color: #E6EDF3; }"
             "QPushButton:disabled { background-color: transparent; color: #6E7580; border-color: #2B3138; }")
-            .arg(fill, ink.name(), color, fillAt(market ? 64 : 24), fillAt(market ? 96 : 48));
+            .arg(fill, ink.name(), color, fillAt(market ? 64 : 24),
+                 fillAt(market ? 96 : 48), side.lighter(130).name());
     };
     m_buyMarketBtn->setStyleSheet(orderStyle(theme::positive(), theme::positive(), true));
     m_buyLimitBtn->setStyleSheet(orderStyle(theme::positive(), theme::positive(), false));

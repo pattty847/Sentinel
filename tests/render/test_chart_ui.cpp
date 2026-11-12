@@ -1093,7 +1093,9 @@ TEST(ChartTooltips, WidgetTextWrapsBeforeTheWidthLimit) {
     EXPECT_TRUE(wrapped.startsWith("<span"));
     EXPECT_FALSE(wrapped.contains("<script"));
     QTextDocument document;
-    document.setDefaultFont(QToolTip::font());
+    QFont font = QToolTip::font();
+    font.setPixelSize(11);
+    document.setDefaultFont(font);
     document.setDocumentMargin(0);
     document.setHtml(wrapped);
     EXPECT_LE(document.idealWidth() + 14, 360);
@@ -1112,6 +1114,28 @@ TEST(ChartTooltips, PlainMenuActionDoesNotAcquireTooltip) {
     QCoreApplication::sendEvent(&menu, &help);
     QCoreApplication::processEvents();
     EXPECT_FALSE(QToolTip::isVisible());
+    menu.hide();
+    qApp->removeEventFilter(filter);
+    delete filter;
+}
+
+TEST(ChartTooltips, EllipsisMenuActionDoesNotRepeatItsLabel) {
+    auto* filter = WidgetToolTips::install(qApp);
+    QMenu menu;
+    menu.setToolTipsVisible(true);
+    QAction* ascii = menu.addAction("Edit liquidity range...");
+    QAction* unicode = menu.addAction(QStringLiteral("Edit liquidity range…"));
+    menu.show();
+    QCoreApplication::processEvents();
+    for (QAction* action : {ascii, unicode}) {
+        QToolTip::hideText();
+        QCoreApplication::processEvents();
+        const QPoint point = menu.actionGeometry(action).center();
+        QHelpEvent help(QEvent::ToolTip, point, menu.mapToGlobal(point));
+        QCoreApplication::sendEvent(&menu, &help);
+        QCoreApplication::processEvents();
+        EXPECT_FALSE(QToolTip::isVisible()) << action->text().toStdString();
+    }
     menu.hide();
     qApp->removeEventFilter(filter);
     delete filter;

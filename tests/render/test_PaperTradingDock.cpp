@@ -91,6 +91,9 @@ TEST(PaperTicket, DirectionButtonsShareColoursAndWidths) {
     EXPECT_TRUE(buyLimit->styleSheet().contains("background-color: transparent"));
     EXPECT_TRUE(buyLimit->styleSheet().contains("rgba(46, 189, 133, 24)"));
     EXPECT_TRUE(sellLimit->styleSheet().contains("rgba(246, 70, 93, 24)"));
+    EXPECT_TRUE(buyMarket->styleSheet().contains("border-color: " + theme::positive().lighter(130).name()));
+    EXPECT_TRUE(sellMarket->styleSheet().contains("border-color: " + theme::negative().lighter(130).name()));
+    EXPECT_FALSE(buyMarket->styleSheet().contains("border-width: 2px"));
     EXPECT_EQ(buyMarket->width(), sellMarket->width());
     EXPECT_EQ(buyMarket->width(), buyLimit->width());
     EXPECT_EQ(sellMarket->width(), sellLimit->width());

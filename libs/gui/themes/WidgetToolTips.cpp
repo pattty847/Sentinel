@@ -23,7 +23,9 @@ WidgetToolTips* WidgetToolTips::install(QApplication* app) {
 
 QString WidgetToolTips::wrappedText(const QString& text) {
     constexpr int contentWidth = 344;
-    const QFontMetrics metrics(QToolTip::font());
+    QFont font = QToolTip::font();
+    font.setPixelSize(11);
+    const QFontMetrics metrics(font);
     QStringList lines;
     for (const QString& paragraph : text.split('\n')) {
         QString line;
@@ -74,7 +76,9 @@ bool WidgetToolTips::eventFilter(QObject* watched, QEvent* event) {
         if (!menu->toolTipsVisible()) return false;
         QAction* action = menu->actionAt(help->pos());
         if (!action) return false;
-        const QString label = QString(action->text()).remove('&');
+        QString label = QString(action->text()).remove('&');
+        if (label.endsWith(QStringLiteral("..."))) label.chop(3);
+        else if (label.endsWith(QChar(0x2026))) label.chop(1);
         const QString actionTip = action->toolTip();
         if (actionTip.isEmpty() || actionTip == label) return false;
         tip = actionTip;
