@@ -3,15 +3,17 @@
 #include "chart/core/ChartFrame.hpp"
 #include "chart/shell/ChartLookSettings.hpp"
 #include "render/ChartTextRenderer.hpp"
+#include "render/AxisTextService.hpp"
 #include <QSGOpacityNode>
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 namespace chart {
 namespace {
 using Vertex = QSGGeometry::ColoredPoint2D;
-constexpr int kVertices = CvdSeries::kCapacity * 18 + 12;
+constexpr int kVertices = CvdSeries::kCapacity * 18 + 18;
 void triangle(Vertex*& out, QPointF a, QPointF b, QPointF c, QColor color) {
     const auto alpha = color.alpha();
     for (const auto p : {a, b, c}) {
@@ -31,21 +33,22 @@ void segment(Vertex*& out, QPointF a, QPointF b, double zero, bool area, double 
         triangle(out, a, {a.x(), zero}, b, fill);
         triangle(out, b, {a.x(), zero}, {b.x(), zero}, fill);
     } else {
-        // A one-logical-pixel ribbon stays deterministic on every QSG backend.
+        // A logical-pixel ribbon stays deterministic on every QSG backend.
         triangle(out, a, a + QPointF(0, stroke), b, color);
         triangle(out, b, a + QPointF(0, stroke), b + QPointF(0, stroke), color);
     }
 }
-void signedSegment(Vertex*& out, QPointF a, QPointF b, double zero, const QRectF& strip, bool area) {
+void signedSegment(Vertex*& out, QPointF a, QPointF b, double zero, const QRectF& strip, std::pair<bool, double> ink) {
+    const auto [area, stroke] = ink;
     if (b.x() <= strip.left() || a.x() >= strip.right() || b.x() <= a.x()) return;
     const double slope = (b.y() - a.y()) / (b.x() - a.x());
     if (a.x() < strip.left()) a = {strip.left(), a.y() + (strip.left() - a.x()) * slope};
     if (b.x() > strip.right()) b = {strip.right(), b.y() + (strip.right() - b.x()) * slope};
     if ((a.y() < zero && b.y() > zero) || (a.y() > zero && b.y() < zero)) {
         const QPointF cross(a.x() + (b.x() - a.x()) * (zero - a.y()) / (b.y() - a.y()), zero);
-        segment(out, a, cross, zero, area, std::min(1.0, strip.height()));
-        segment(out, cross, b, zero, area, std::min(1.0, strip.height()));
-    } else segment(out, a, b, zero, area, std::min(1.0, strip.height()));
+        segment(out, a, cross, zero, area, std::min(stroke, strip.height()));
+        segment(out, cross, b, zero, area, std::min(stroke, strip.height()));
+    } else segment(out, a, b, zero, area, std::min(stroke, strip.height()));
 }
 }
 CvdLayer::CvdLayer() : current_(std::make_unique<CvdSnapshot>()) { glyphs_.reserve(128); }
@@ -67,6 +70,7 @@ QSGNode* CvdLayer::createContainer() {
 }
 void CvdLayer::sync(const ChartFrame& frame) {
     captured_ = presentation_;
+    if (!(capturedStyle_ == style_)) { capturedStyle_ = style_; dirty_ = true; }
     bottomInset_ = frame.context.raster.valid ? captured_.bottomInset(frame.context.time.activeTimeframeMs, frame.context.surfaceBounds.height()) : 0;
     if (mailbox_.take(current_)) { dirty_ = true; ++revision_; }
     drawing_ = captured_.stripPx > 0 && frame.context.raster.valid && frame.context.raster.dpr > 0 &&
@@ -77,15 +81,22 @@ void CvdLayer::geometry(const ChartFrame& frame) {
     auto* geom = node_->geometry();
     auto* begin = geom->vertexDataAsColoredPoint2D();
     auto* out = begin;
-    quad(out, strip_, QColor(16, 20, 26, 220));
+    auto background = theme::bg0(); background.setAlphaF(capturedStyle_.fillAlpha);
+    auto panel = strip_; panel.setRight(gutter_.right());
+    quad(out, panel, background);
+    quad(out, {panel.left(), panel.top(), panel.width(), std::min(capturedStyle_.dividerPx, panel.height())}, theme::line());
     scale_ = current_->series.scale(frame.context.raster.drawnStartMs, frame.context.raster.drawnEndMs, current_->timeframeMs);
-    const double stroke = std::min(1.0, strip_.height());
-    const double padding = std::min(2.0, (strip_.height() - stroke) * 0.25);
+    values_ = CvdGutterValues::visible(current_->series, frame.context.raster.drawnStartMs,
+                                      frame.context.raster.drawnEndMs, current_->timeframeMs);
+    const double stroke = std::min(capturedStyle_.linePx, strip_.height());
+    const double padding = std::min(capturedStyle_.paddingPx, (strip_.height() - stroke) * 0.25);
+    const double titleHeight = strip_.height() >= 2 * capturedStyle_.labelRowPx + 4 * padding
+        ? capturedStyle_.labelRowPx + 2 * padding : 0;
     const auto y = [&](double value) {
-        return strip_.bottom() - stroke - padding - std::clamp(scale_.fraction(value), 0.0, 1.0) * (strip_.height() - stroke - 2 * padding);
+        return strip_.bottom() - stroke - padding - std::clamp(scale_.fraction(value), 0.0, 1.0) * (strip_.height() - titleHeight - stroke - 2 * padding);
     };
     const double zero = y(0);
-    quad(out, QRectF(strip_.left(), zero, strip_.width(), stroke), QColor(160, 170, 180, 100));
+    quad(out, QRectF(strip_.left(), zero, strip_.width(), stroke), theme::line());
     const auto& cam = frame.context.raster;
     const auto x = [&](double time) { return frame.context.surfaceBounds.left() + cam.xDev(time) / cam.dpr; };
     const auto& series = current_->series;
@@ -96,8 +107,8 @@ void CvdLayer::geometry(const ChartFrame& frame) {
             p.timeMs - series.points[size_t(i - 1)].timeMs == current_->timeframeMs;
         if (connected) {
             const auto& previous = series.points[size_t(i - 1)];
-            signedSegment(out, {x(double(previous.timeMs) + current_->timeframeMs * 0.5), y(previous.value)}, b, zero, strip_, captured_.area);
-        } else signedSegment(out, {x(double(p.timeMs)), b.y()}, b, zero, strip_, captured_.area);
+            signedSegment(out, {x(double(previous.timeMs) + current_->timeframeMs * 0.5), y(previous.value)}, b, zero, strip_, {captured_.area, stroke});
+        } else signedSegment(out, {x(double(p.timeMs)), b.y()}, b, zero, strip_, {captured_.area, stroke});
     }
     const int used = int(out - begin);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
@@ -108,27 +119,43 @@ void CvdLayer::geometry(const ChartFrame& frame) {
     vertices_ = used; geom->markVertexDataDirty(); node_->markDirty(QSGNode::DirtyGeometry);
 }
 void CvdLayer::updateNodes(const ChartFrame& frame, LayerNodeContext&) {
-    if (!gate_) return;
     strip_ = frame.context.surfaceBounds;
     const double height = std::min(double(captured_.stripPx), strip_.height());
     strip_.setTop(strip_.bottom() - height);
+    const double axisWidth = axes_ ? axes_->renderPriceAxisWidth() : AxisLayout::kPriceAxisMinWidthPx;
+    gutter_ = {frame.context.itemBounds.right() + frame.context.rightGutterPx, strip_.top(), axisWidth, height};
+    if (axes_) axes_->setPricePaneTop(drawing_ && !strip_.isEmpty() ? strip_.top() : -1);
+    if (!gate_) return;
     gate_->setOpacity(drawing_ && !strip_.isEmpty() ? 1 : 0);
     if (!drawing_ || strip_.isEmpty()) return;
     const auto& cam = frame.context.raster;
-    const Key key{cam.leftF, cam.colPxF, cam.tfMs, cam.dpr, cam.drawnStartMs, cam.drawnEndMs, strip_, captured_.area};
+    const Key key{cam.leftF, cam.colPxF, cam.tfMs, cam.dpr, cam.drawnStartMs, cam.drawnEndMs, strip_, gutter_, captured_.area};
     if (!dirty_ && key == key_) return;
     key_ = key; dirty_ = false;
     geometry(frame);
 }
 void CvdLayer::addLabel(const char* text, const QRectF& box, const ChartTextAtlas& atlas) {
-    if (box.height() < 13 || box.width() <= 0) return;
-    const double scale = 13 / double(atlas.fontPx());
-    double pen = box.left();
+    if (box.height() < capturedStyle_.labelPx || box.width() <= 0) return;
+    const double scale = capturedStyle_.labelPx / double(atlas.fontPx());
+    double pen = 0;
+    QRectF bounds;
+    for (const char* c = text; *c; ++c) {
+        const auto& g = atlas.glyph(QChar(*c));
+        if (*c != ' ')
+            bounds = bounds.united(QRectF(pen + g.bounds.left() * scale, g.bounds.top() * scale,
+                                         g.bounds.width() * scale, g.bounds.height() * scale));
+        pen += g.advance * scale;
+    }
+    // Fit the whole run before placing it; comparing local extents also avoids
+    // cancellation at the box edges when its origin is fractional.
+    if (bounds.width() > box.width() || bounds.height() > box.height()) return;
+    pen = 0;
     for (const char* c = text; *c && glyphs_.size() < 128; ++c) {
         const auto& g = atlas.glyph(QChar(*c));
-        if (pen + g.advance * scale > box.right()) break;
+        if (*c == ' ') { pen += g.advance * scale; continue; }
         ChartGlyphInstance glyph;
-        glyph.rect = QRectF(pen + g.bounds.left() * scale, box.top() - atlas.glyphTopPx() * scale + g.bounds.top() * scale,
+        glyph.rect = QRectF(box.left() + (pen + g.bounds.left() * scale - bounds.left()),
+                            box.top() + (g.bounds.top() * scale - bounds.top()),
                             g.bounds.width() * scale, g.bounds.height() * scale);
         glyph.uv = g.uv; glyph.color = ChartLookSettings::footprintText();
         glyphs_.push_back(glyph); pen += g.advance * scale;
@@ -138,15 +165,21 @@ void CvdLayer::submitLabels(const ChartFrame&, LayerNodeContext& context) {
     if (!drawing_ || !context.atlasReady || context.atlas.fontPx() <= 0) return;
     if (!reserved_) reserved_ = context.text.reserve(ChartLookSettings::footprintText(), 128);
     glyphs_.clear();
-    const char* label = current_->label.data();
-    addLabel(label, {strip_.left() + 4, strip_.top() + 2, std::max(0.0, strip_.width() - 110), strip_.height() - 4}, context.atlas);
-    char value[24];
-    const double width = std::min(100.0, strip_.width() - 8);
-    const double left = strip_.right() - width - 4;
-    flowNumber(scale_.max, value, FlowNumberContext::SignedLabel);
-    addLabel(value, {left, strip_.top() + 2, width, strip_.height() - 4}, context.atlas);
-    flowNumber(scale_.min, value, FlowNumberContext::SignedLabel);
-    if (strip_.height() >= 32) addLabel(value, {left, strip_.bottom() - 15, width, 13}, context.atlas);
+    const double pad = capturedStyle_.paddingPx, label = capturedStyle_.labelRowPx;
+    if (strip_.height() >= 2 * label + 4 * pad)
+        addLabel(current_->label.data(), {strip_.left() + 4, strip_.top() + pad, strip_.width() - 8, label}, context.atlas);
+    if (values_.valid && gutter_.height() >= 3 * label + 4 * pad) {
+        const auto box = gutter_.adjusted(4, pad, -4, -pad);
+        char value[24];
+        CvdGutterValues::format(values_.max, value);
+        addLabel(value, {box.left(), box.top(), box.width(), label}, context.atlas);
+        CvdGutterValues::format(values_.min, value);
+        addLabel(value, {box.left(), box.bottom() - label, box.width(), label}, context.atlas);
+        CvdGutterValues::format(values_.last, value);
+        const double desired = box.bottom() - scale_.fraction(values_.last) * box.height() - label / 2;
+        const double top = std::clamp(desired, box.top() + label + pad, box.bottom() - 2 * label - pad);
+        addLabel(value, {box.left(), top, box.width(), label}, context.atlas);
+    }
     context.text.submitGlyphs(glyphs_, ChartTextRenderer::Priority::High);
 }
 } // namespace chart

@@ -18,6 +18,9 @@ constexpr int kTimeAxisMinHeightPx = 24;
 constexpr int kTimeAxisMaxHeightPx = 40;
 constexpr int kAxisDimensionHysteresisPx = 4;
 
+// A negative pane top means no bottom pane. Coordinates remain in chart space.
+QRectF priceLabelRect(double canvasWidth, double canvasHeight, double gutter,
+                      double axisWidth, double paneTop = -1);
 int clampAxisLabelPx(int px);
 int resolveAutoAxisLabelPx(double logicalDpiY);
 int resolveEffectiveAxisLabelPx(double logicalDpiY,

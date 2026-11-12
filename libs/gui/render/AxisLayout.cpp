@@ -14,6 +14,12 @@ int clampDimension(int value, int minValue, int maxValue) {
 
 } // namespace
 
+QRectF priceLabelRect(double canvasWidth, double canvasHeight, double gutter,
+                      double axisWidth, double paneTop) {
+    const double bottom = paneTop < 0 ? canvasHeight : std::clamp(paneTop, 0.0, canvasHeight);
+    return {canvasWidth + gutter + 4, 0, std::max(0.0, axisWidth - 8), bottom};
+}
+
 int clampAxisLabelPx(int px) {
     return clampDimension(px, kAutoAxisLabelMinPx, kAutoAxisLabelMaxPx);
 }

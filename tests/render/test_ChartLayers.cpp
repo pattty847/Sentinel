@@ -1058,7 +1058,7 @@ TEST(CvdLayer, LineAreaBoundsAndFreshFramesAllocateNothing) {
     EXPECT_EQ(layer.strip(), QRectF(0, 50, 112, 50));
     auto* geometry = static_cast<QSGGeometryNode*>(root->firstChild())->geometry();
     auto* vertices = geometry->vertexDataAsColoredPoint2D();
-    const auto lineVertex = vertices[13];
+    const auto lineVertex = vertices[19];
     layer.presentation().area = true;
     for (int i = 0; i < 2; ++i) {
         chart::CvdFeed::build(layer.mailbox().back(), series, footprintFrame(), chart::CvdReset::UtcDay, 4);
@@ -1068,10 +1068,10 @@ TEST(CvdLayer, LineAreaBoundsAndFreshFramesAllocateNothing) {
         footprintCounting = false;
         EXPECT_EQ(footprintAllocations.load(), 0u);
     }
-    EXPECT_NE(vertices[13].y, lineVertex.y); EXPECT_EQ(vertices[13].a, 110);
+    EXPECT_NE(vertices[19].y, lineVertex.y); EXPECT_EQ(vertices[19].a, 110);
     bool green = false, red = false;
     for (int i = 0; i < layer.vertexCount(); ++i) {
-        EXPECT_GE(vertices[i].x, 0); EXPECT_LE(vertices[i].x, 112);
+        EXPECT_GE(vertices[i].x, 0); EXPECT_LE(vertices[i].x, i < 12 ? layer.gutter().right() : 112);
         EXPECT_GE(vertices[i].y, 50); EXPECT_LE(vertices[i].y, 100);
         green |= vertices[i].g > vertices[i].r;
         red |= vertices[i].r > vertices[i].g;
@@ -1117,6 +1117,7 @@ TEST(CvdLayer, LabelsAreBoundedAndFreshDataFramesAllocateNothing) {
     chart::CvdLayer layer;
     layer.presentation().stripPx = 80;
     auto frame = footprintChartFrame(); frame.context.surfaceBounds.setWidth(400);
+    frame.context.itemBounds = frame.context.surfaceBounds;
     auto labelledSeries = footprintSeries();
     labelledSeries.bars[1000] = labelledSeries.bars[0];
     labelledSeries.bars[1000].bar.startMs = 1000;
@@ -1126,8 +1127,19 @@ TEST(CvdLayer, LabelsAreBoundedAndFreshDataFramesAllocateNothing) {
     ChartTextRenderer text;
     chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
     layer.updateNodes(frame, context); layer.submitLabels(frame, context);
-    ASSERT_EQ(text.submittedGlyphs(), int(std::strlen(layer.current().label.data())) + 5)
-        << "3.00 maximum and exact zero minimum must both have glyphs";
+    const std::string_view title(layer.current().label.data());
+    const size_t titleCount = std::count_if(title.begin(), title.end(), [](char c) { return c != ' '; });
+    ASSERT_EQ(text.submittedGlyphs(), int(titleCount) + 9)
+        << "3.00 maximum, zero minimum and 3.00 last must all have glyphs";
+    const auto glyphs = layer.labelGlyphs();
+    QRectF maximum, minimum, last;
+    for (size_t i = titleCount; i < glyphs.size(); ++i) {
+        EXPECT_TRUE(layer.gutter().contains(glyphs[i].rect));
+        EXPECT_FALSE(layer.strip().intersects(glyphs[i].rect));
+        auto& box = i < titleCount + 4 ? maximum : i < titleCount + 5 ? minimum : last;
+        box = box.united(glyphs[i].rect);
+    }
+    EXPECT_FALSE(maximum.intersects(last)); EXPECT_FALSE(minimum.intersects(last));
     for (int i = 0; i < 2; ++i) {
         auto series = footprintSeries(); series.bars[0].bar.delta += i + 1;
         chart::CvdFeed::build(layer.mailbox().back(), series, footprintFrame(), chart::CvdReset::Visible, 4);
@@ -1443,5 +1455,78 @@ TEST(FlowFooter, TpoAndVpSubtreesRespectTheCombinedPaneWithoutAllocating) {
         presentation.flowFooter = false; presentation.stripPx = 0;
         layer->sync(frame); layer->updateNodes(frame, context);
         EXPECT_EQ(label->parent(), root.get());
+    }
+}
+
+TEST(CvdLayer, OpaqueThemePanelDividerAndLineDefaultsReachGeometry) {
+    chart::CvdLayer layer;
+    layer.presentation().stripPx = 80;
+    auto frame = footprintChartFrame();
+    chart::CvdFeed::build(layer.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
+    layer.mailbox().post(); layer.sync(frame);
+    std::unique_ptr<QSGNode> root(layer.createContainer());
+    ChartTextRenderer text; ChartTextAtlas atlas;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
+    layer.updateNodes(frame, context);
+    const auto* vertices = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
+    for (int i = 0; i < 12; ++i) {
+        const auto color = i < 6 ? theme::bg0() : theme::line();
+        EXPECT_EQ(vertices[i].a, 255);
+        EXPECT_EQ(vertices[i].r, color.red()); EXPECT_EQ(vertices[i].g, color.green()); EXPECT_EQ(vertices[i].b, color.blue());
+    }
+    EXPECT_FLOAT_EQ(vertices[7].y - vertices[6].y, 1.0f);
+    EXPECT_FLOAT_EQ(vertices[19].y - vertices[18].y, 1.5f);
+    EXPECT_DOUBLE_EQ(layer.style().fillAlpha, 1.0);
+    EXPECT_EQ(layer.gutterValues().min, 0); EXPECT_EQ(layer.gutterValues().max, 0); EXPECT_EQ(layer.gutterValues().last, 0);
+}
+
+#include "render/ChartTextLayout.hpp"
+namespace {
+class CvdPriceTicks final : public AxisModel {
+public:
+    CvdPriceTicks() { m_ticks = {{1, 50, "1"}, {2, 120, "2"}, {3, 180, "3"}}; }
+    void recalculateTicks() override {}
+private:
+    void calculateTicks() override {}
+    QString formatLabel(double) const override { return {}; }
+};
+}
+TEST(CvdLayer, PriceLabelRectsStopAboveStripAndReturnToFullHeightWhenHidden) {
+    ChartTextAtlas atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 48; params.charset = " $0123456789.";
+    ASSERT_TRUE(atlas.build(params));
+    CvdPriceTicks ticks;
+    AxisTextService axes(atlas); axes.setPriceAxisSource(&ticks);
+    chart::CvdLayer layer; layer.bindAxes(&axes);
+    auto frame = footprintChartFrame();
+    frame.context.surfaceBounds = frame.context.itemBounds = QRectF(0, 0, 400, 200);
+    ChartTextRenderer text;
+    chart::LayerNodeContext context{nullptr, nullptr, text, atlas, false};
+    chart::CvdFeed::build(layer.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
+    layer.mailbox().post(); layer.presentation().stripPx = 80; layer.sync(frame);
+    std::unique_ptr<QSGNode> root(layer.createContainer()); context.root = root.get();
+    for (int stripHeight : {80, 0, 80, 0}) {
+        layer.presentation().stripPx = stripHeight; layer.sync(frame); layer.updateNodes(frame, context);
+        const auto safe = AxisLayout::priceLabelRect(400, 200, 0, axes.renderPriceAxisWidth(), axes.pricePaneTop());
+        EXPECT_EQ(safe.bottom(), 200 - stripHeight);
+        text.beginFrame(root.get(), nullptr, atlas);
+        axes.submitAxisText(text, atlas, 400, 200);
+        EXPECT_EQ(text.submittedGlyphs(), stripHeight ? 1 : 3);
+        text.endFrame();
+        int belowStrip = 0, accepted = 0;
+        for (int y = 0; y < 200; ++y) {
+            ChartTextRun run; run.text = "$12.3"; run.anchor = {safe.left() + 1, double(y)};
+            run.hAlign = ChartTextRun::HorizontalAlign::Left;
+            run.scale = 13.0f / atlas.fontPx(); run.useStableMetrics = true; run.pixelSnap = true;
+            QRectF rect;
+            if (!AxisLayout::runFitsRect(atlas, run, safe, &rect)) continue;
+            ++accepted;
+            if (stripHeight) EXPECT_FALSE(rect.intersects(layer.gutter()));
+            if (rect.top() > 120) ++belowStrip;
+        }
+        EXPECT_GT(accepted, 0);
+        if (stripHeight) EXPECT_EQ(belowStrip, 0); else EXPECT_GT(belowStrip, 0);
     }
 }

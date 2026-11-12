@@ -199,6 +199,11 @@ void AxisTextService::refreshAxisLayout() {
     emit needsUpdate();
 }
 
+int AxisTextService::renderPriceAxisWidth() const {
+    std::lock_guard<std::mutex> lock(m_axisLayoutMutex);
+    return m_axisLayoutSnapshot.priceAxisWidthPx;
+}
+
 void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
                                      const ChartTextAtlas& atlas,
                                      qreal canvasWidth,
@@ -307,15 +312,10 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
         }
     }
 
-    const qreal priceInsetLeft = 4.0;
-    const qreal priceInsetRight = 4.0;
     const qreal timeInsetTop = 2.0;
     const qreal timeInsetBottom = 2.0;
-    const QRectF priceSafeRect(
-        canvasWidth + priceGutter + priceInsetLeft, 0.0,
-        std::max(0.0, static_cast<double>(axisLayout.priceAxisWidthPx) -
-                          (priceInsetLeft + priceInsetRight)),
-        canvasHeight);
+    const QRectF priceSafeRect = AxisLayout::priceLabelRect(
+        canvasWidth, canvasHeight, priceGutter, axisLayout.priceAxisWidthPx, m_pricePaneTop);
     const QRectF timeSafeRect(
         0.0, canvasHeight + timeInsetTop, canvasWidth,
         std::max(0.0, static_cast<double>(axisLayout.timeAxisHeightPx) -
