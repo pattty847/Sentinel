@@ -31,6 +31,8 @@
 #include "../config/ConfigTypes.hpp"
 #include "../roller/CandleRestore.hpp"
 
+namespace trade_overlay { struct Request; struct LiveSnapshot; }
+
 namespace sentinel::metrics { class MetricsRegistry; }
 
 // Immutable after registration except active (any thread) and initial (model thread).
@@ -106,6 +108,8 @@ public:
                               OverlayTradeBudget budget = OverlayTradeBudget::Reject,
                               bool* budgetExceeded = nullptr,
                               size_t* heapOperations = nullptr) const;
+    // Worker-only O(rows) snapshot: scan under the tape lock, encode after release.
+    trade_overlay::LiveSnapshot collectLiveOverlay(const trade_overlay::Request& request) const;
     virtual int64_t exchangeNowMs() const;
     recording::LiveService* recordingLive() const { return m_recordingLive.get(); }
     // The journal roller is attached.

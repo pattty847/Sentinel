@@ -1,3 +1,4 @@
+#include "TradeOverlayPublisher.hpp"
 #include "ServerDataModel.hpp"
 #include "FlowStoreLag.hpp"
 #include "SentinelLogging.hpp"
@@ -465,6 +466,13 @@ std::vector<OHLCVBar> ServerDataModel::getHistory(const std::string& symbol, int
                                                   int64_t endMs, size_t limit) const {
     if (m_aggregator) return m_aggregator->getHistory(symbol, timeframeMs, endMs, limit);
     return {};
+}
+
+trade_overlay::LiveSnapshot ServerDataModel::collectLiveOverlay(const trade_overlay::Request& request) const {
+    std::lock_guard lock(m_tradeMutex);
+    const auto it = m_recentTrades.find(request.symbol);
+    static const std::deque<RetainedTradeSample> empty;
+    return trade_overlay::aggregateLive(request, it == m_recentTrades.end() ? empty : it->second);
 }
 
 // Worker-only bounded snapshot. False means over budget, never a partial tape.

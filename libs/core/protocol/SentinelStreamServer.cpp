@@ -739,12 +739,13 @@ class Session : public std::enable_shared_from_this<Session> {
                 const auto window = trade_overlay::tradeWindow(q);
                 int64_t retainedFromMs = 0;
                 bool budgetExceeded = false;
-                const auto budget = trade_overlay::overlayBudgetFor(q.kind);
                 if (stopped()) {
                     result.error = "overlay history cancelled";
+                } else if (q.kind == trade_overlay::Kind::Live) {
+                    result = trade_overlay::buildLive(model->collectLiveOverlay(q));
                 } else if (!model->collectOverlayTrades(q.symbol, window.startMs, window.endMs,
                                                  trade_overlay::kMaxTrades, trades, &retainedFromMs,
-                                                 budget, &budgetExceeded)) {
+                                                 OverlayTradeBudget::Newest, &budgetExceeded)) {
                     result.error = "overlay trade budget exceeded";
                 } else {
                     if (budgetExceeded)
@@ -785,7 +786,7 @@ class Session : public std::enable_shared_from_this<Session> {
                 if (!q.requestId.empty()) self->tpoRequestCancel_.erase(q.requestId);
                 if (!result.error.empty()) {
                     sLog_DataN(5000, "Trade overlay not published: symbol=" << q.symbol << " error=" << result.error);
-                    if (q.kind != trade_overlay::Kind::Live) self->send_overlay_error(q.symbol, q.requestId, result.error);
+                    self->send_overlay_error(q.symbol, q.requestId, result.error);
                     return;
                 }
                 it->second.request.grid = result.grid;
@@ -796,7 +797,7 @@ class Session : public std::enable_shared_from_this<Session> {
             });
         });
         overlayBusy_ = queued;
-        if (!queued && q.kind != trade_overlay::Kind::Live) {
+        if (!queued) {
             tpoRequestCancel_.erase(q.requestId);
             send_overlay_error(q.symbol, q.requestId, "overlay worker queue full");
         }

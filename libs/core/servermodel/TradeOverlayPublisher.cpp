@@ -133,6 +133,58 @@ CandleFetchResult fetchTpoCandles(const Request& q, int64_t retainedFromMs,
 namespace {
 using Json = nlohmann::json;
 using Trade = ServerDataModel::RetainedTradeSample;
+// The only storage proportional to input size is the existing retained tape.
+// Scan the retained tape so late trades participate; no sorted copy or timestamp cursor.
+template<class Trades>
+LiveSnapshot aggregateLiveTape(const Request& q, const Trades& trades) {
+    LiveSnapshot out{q, q.grid, {}, {}, {}};
+    if (q.kind != Kind::Live || q.symbol.empty() || q.nowMs <= 0 ||
+        q.tpoMs < 60000 || q.tpoMs > 86400000 || q.count <= 0) {
+        out.error = "invalid overlay request"; return out;
+    }
+    const auto window = tradeWindow(q);
+    if (out.grid.maxPrice == 0) {
+        // Match the last trade in a stable timestamp sort, including arrival-order ties.
+        const Trade* latest = nullptr;
+        for (const auto& t : trades)
+            if (t.timestampMs >= window.startMs && t.timestampMs < window.endMs &&
+                (!latest || t.timestampMs >= latest->timestampMs)) latest = &t;
+        if (latest && std::isfinite(latest->price) && latest->price > 0 &&
+            std::isfinite(out.grid.tick) && out.grid.tick > 0) {
+            const double bottom = std::max(0.0, std::floor(latest->price / out.grid.tick) - out.grid.rows / 2);
+            out.grid.maxPrice = (bottom + out.grid.rows) * out.grid.tick;
+        }
+    }
+    if (!out.grid.valid()) { out.error = "overlay grid unavailable or invalid"; return out; }
+    const auto vp = SessionManager::sessionContaining(q.nowMs, volumeProfileSession(q.session));
+    const auto tpo = SessionManager::sessionContaining(q.nowMs, q.session);
+    if (!vp.valid || !tpo.valid || (tpo.endMs - tpo.startMs) % q.tpoMs != 0) {
+        out.error = "invalid overlay session"; return out;
+    }
+    if ((tpo.endMs - tpo.startMs) / q.tpoMs > kMaxGridWidth) {
+        out.error = "overlay timeframe exceeds session column budget"; return out;
+    }
+    const auto tpoGrid = tpoGridFor(out.grid, q.session);
+    out.volumeBins.resize(out.grid.rows, 0);
+    for (auto start : liveBuckets(q.nowMs, q.previousMs, q.tpoMs, tpo.startMs))
+        if (start >= tpo.startMs && start + q.tpoMs <= tpo.endMs)
+            out.columns.emplace_back(start, QByteArray(tpoGrid.rows, '\0'));
+    for (const auto& t : trades) {
+        if (t.timestampMs < window.startMs || t.timestampMs >= window.endMs ||
+            !std::isfinite(t.price) || !std::isfinite(t.size) || t.size <= 0) continue;
+        if (t.timestampMs >= vp.startMs && t.timestampMs < vp.endMs) {
+            const double row = std::floor((out.grid.maxPrice - t.price) / out.grid.tick);
+            if (row >= 0 && row < out.grid.rows) out.volumeBins[static_cast<int>(row)] += t.size;
+        }
+        for (auto& [start, letters] : out.columns) {
+            if (t.timestampMs < start || t.timestampMs >= start + q.tpoMs) continue;
+            const double row = std::floor((tpoGrid.maxPrice - t.price) / tpoGrid.tick);
+            if (row >= 0 && row < tpoGrid.rows)
+                letters[static_cast<int>(row)] = 'A' + ((start - tpo.startMs) / q.tpoMs) % 26;
+        }
+    }
+    return out;
+}
 struct Builder {
     const Request& q;
     const std::vector<Trade>& trades;
@@ -141,6 +193,7 @@ struct Builder {
     Result out;
     Grid tpoGrid;
     size_t bytes = 0;
+    const LiveSnapshot* live = nullptr;
     void send(Json j) {
         auto data = j.dump();
         if (bytes + data.size() > kMaxBytes) { out.error = "overlay output budget exceeded"; return; }
@@ -164,7 +217,10 @@ struct Builder {
         const auto session = SessionManager::sessionContaining(start, q.session);
         const auto origin = session.valid ? session.startMs : 0;
         const char letter = 'A' + ((start - origin) / tf) % 26;
-        scan(grid, start, start + tf, [&](int row, const Trade&) { letters[row] = letter; });
+        if (live) {
+            for (const auto& [bucket, data] : live->columns)
+                if (bucket == start) { letters = data; break; }
+        } else scan(grid, start, start + tf, [&](int row, const Trade&) { letters[row] = letter; });
         if (q.kind == Kind::TpoHistory) {
             auto bar = std::lower_bound(candles.begin(), candles.end(), start,
                 [](const OHLCVBar& b, int64_t time) { return b.timestamp_ms < time; });
@@ -222,8 +278,7 @@ struct Builder {
         const auto vpSession = volumeProfileSession(q.session);
         const auto session = SessionManager::sessionContaining(q.nowMs, vpSession);
         if (!session.valid) return;
-        std::vector<double> bins(out.grid.rows, 0);
-        scan(out.grid, session.startMs, session.endMs, [&](int row, const Trade& t) { bins[row] += t.size; });
+        const auto& bins = live->volumeBins;
         double total = 0; int poc = 0;
         for (int i = 0; i < out.grid.rows; ++i) { total += bins[i]; if (bins[i] > bins[poc]) poc = i; }
         int lo = poc, hi = poc; double covered = bins[poc];
@@ -249,8 +304,24 @@ struct Builder {
     }
 };
 }
+LiveSnapshot aggregateLive(const Request& q, const std::deque<Trade>& trades) {
+    return aggregateLiveTape(q, trades);
+}
+Result buildLive(const LiveSnapshot& snapshot) {
+    if (!snapshot.error.empty()) return {snapshot.grid, {}, snapshot.error};
+    const std::vector<Trade> trades;
+    const std::vector<OHLCVBar> candles;
+    Builder b{snapshot.request, trades, candles, 0, {snapshot.grid, {}, {}}};
+    b.live = &snapshot;
+    b.tpoGrid = tpoGridFor(snapshot.grid, snapshot.request.session);
+    b.columns(true);
+    b.profile();
+    if (!b.out.error.empty()) b.out.messages.clear();
+    return b.out;
+}
 Result build(const Request& q, const std::vector<Trade>& trades,
              const std::vector<OHLCVBar>& candles, int64_t retainedFromMs) {
+    if (q.kind == Kind::Live) return buildLive(aggregateLiveTape(q, trades));
     if (retainedFromMs == 0 && !trades.empty()) retainedFromMs = trades.front().timestampMs;
     Builder b{q, trades, candles, retainedFromMs, {q.grid, {}, {}}};
     if (q.symbol.empty() || q.nowMs <= 0 ||
@@ -267,8 +338,7 @@ Result build(const Request& q, const std::vector<Trade>& trades,
     }
     if (!b.out.grid.valid()) { b.out.error = "overlay grid unavailable or invalid"; return b.out; }
     b.tpoGrid = tpoGridFor(b.out.grid, q.session);
-    b.columns(q.kind == Kind::Live);
-    if (q.kind == Kind::Live) b.profile();
+    b.columns(false);
     if (!b.out.error.empty()) b.out.messages.clear();
     return b.out;
 }
