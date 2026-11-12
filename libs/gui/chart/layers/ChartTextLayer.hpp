@@ -17,6 +17,7 @@ class CvdLayer;
 class FlowFooterLayer;
 class ChartViewController;
 class CandleBufferSource;
+class LayerVisibility;
 class ChartTextLayer final : public IChartLayer {
 public:
     ChartTextLayer(HeatmapLayer& heatmap, LadderLayer& ladder, FootprintCellsLayer& footprint,
@@ -29,8 +30,9 @@ public:
     QSGNode* createContainer() override { return renderer.createRoot(); }
     void updateNodes(const ChartFrame&, LayerNodeContext&) override;
     void sync(const ChartFrame&) override;
-    void bindCandles(ChartViewController&, CandleBufferSource&);
+    void bindCandles(ChartViewController&, CandleBufferSource&, LayerVisibility&);
     void refreshCandles();
+    uint64_t candleRefreshCount() const { return candleRefreshCount_; }
     void candlesDirty(const QString& symbol, int64_t timeframeMs, int64_t start, int64_t end);
     void setCandleEnvelope(std::vector<CandleBar> bars, int64_t end);
     void buildMsdfAtlas();
@@ -49,6 +51,8 @@ private:
     std::vector<CandleBar> captureCandles_, pendingCandles_, candles_;
     int64_t pendingEnd_ = 0, candleEnd_ = 0;
     bool candlePending_ = false;
+    bool candleCaptureEnabled_ = false;
+    uint64_t candleRefreshCount_ = 0;
     ChartViewController* candleView_ = nullptr;
     CandleBufferSource* candleSource_ = nullptr;
     HeatmapLayer& heatmap_;

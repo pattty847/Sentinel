@@ -84,7 +84,6 @@ Added addBar(FlowSnapshot& out, const sentinel::flow::FlowBar& bar, FlatRows& ro
         return Added::Full;
     out.bars[size_t(out.barCount++)] = column;
     const bool visibleBar = barTouches(bar, visible);
-    if (visibleBar) ++out.visibleBarCount;
     for (int i = 0; i < count; ++i) {
         const auto& cell = rows[size_t(i)];
         if (!inPrice(cell, out.tick, out.low, out.high)) continue;
@@ -119,6 +118,7 @@ Budget budget(const chart_raster::RasterCamera& cam, int64_t timeframeMs, double
 }
 Added visit(FlowSnapshot& out, const sentinel::flow::FlowBar& bar, FlatRows& rows,
             const chart_raster::RasterCamera& cam, int64_t band, VisibleTime visible) {
+    if (barTouches(bar, visible)) ++out.visibleBarCount;
     const auto result = bar.timeframeMs == out.timeframeMs ? addBar(out, bar, rows, cam, band, visible) : Added::Invalid;
     if (result == Added::Invalid) ++out.skippedBars;
     if (result == Added::Oversized || result == Added::Full) ++out.truncatedBars;

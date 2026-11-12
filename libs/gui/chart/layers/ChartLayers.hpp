@@ -26,7 +26,7 @@ struct ChartLayers {
         cvd.bindAxes(text.axes.get());
         flowFeed.bind(view, frames, visibility, footprintCells.presentation());
         cvdFeed.bind(view, frames, visibility, tpoSettings);
-        text.bindCandles(view, candles);
+        text.bindCandles(view, candles, visibility);
     }
     void onFlowFrameChanged() { flowFeed.onFrameChanged(); cvdFeed.onFrameChanged(); }
     ChartLayers() { registerChartLayers(registry, *this); }

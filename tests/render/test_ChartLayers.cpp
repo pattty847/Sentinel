@@ -854,6 +854,13 @@ TEST(FootprintEmptyState, MessageRequiresProvenEmptyVisibleWindow) {
     EXPECT_EQ(layer.mailbox().back().maxRowVolume, 0);
     layer.mailbox().post(); layer.sync(chartPriceFrame);
     EXPECT_TRUE(layer.emptyStateText(chartPriceFrame).isEmpty());
+    ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(0.6), footprintFrame()));
+    EXPECT_EQ(layer.mailbox().back().barCount, 0);
+    EXPECT_EQ(layer.mailbox().back().skippedBars, 1);
+    EXPECT_EQ(layer.mailbox().back().visibleBarCount, 1) << "invalid geometry still means recorded trade data";
+    layer.mailbox().back().windowState = chart::FlowSnapshot::WindowState::Ready;
+    layer.mailbox().post(); layer.sync(frame);
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty());
     auto timeFrame = footprintFrame();
     timeFrame.viewportTimeStart = 1000; timeFrame.viewportTimeEnd = 2000;
     ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), timeFrame));

@@ -9,6 +9,7 @@
 #include "chart/core/ChartFrame.hpp"
 #include "chart/core/ChartViewController.hpp"
 #include "chart/shell/CandleBufferSource.hpp"
+#include "chart/shell/LayerVisibility.hpp"
 #include "render/FrameProfiler.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "SentinelLogging.hpp"
@@ -71,18 +72,26 @@ bool fitsEmptyRun(const FrameContext& frame, const ChartTextAtlas& atlas, const 
 } // namespace
 
 namespace chart {
-void ChartTextLayer::bindCandles(ChartViewController& view, CandleBufferSource& source) {
+void ChartTextLayer::bindCandles(ChartViewController& view, CandleBufferSource& source, LayerVisibility& visibility) {
     candleView_ = &view;
     candleSource_ = &source;
-    auto refresh = [this] { refreshCandles(); };
+    auto refresh = [this] { if (candleCaptureEnabled_) refreshCandles(); };
     QObject::connect(view.viewPtr(), &GridViewState::viewportChanged, &view, refresh);
     QObject::connect(view.viewPtr(), &GridViewState::panVisualOffsetChanged, &view, refresh);
     QObject::connect(&view, &ChartViewController::timeframeChanged, &view, refresh);
-    refreshCandles();
+    auto onVisibility = [this, &visibility] {
+        const bool enabled = visibility.footprintEnabled() || visibility.volumeProfileEnabled();
+        const bool wasEnabled = candleCaptureEnabled_;
+        candleCaptureEnabled_ = enabled;
+        if (enabled && !wasEnabled) refreshCandles();
+    };
+    QObject::connect(&visibility, &LayerVisibility::layerVisibilityChanged, &view, onVisibility);
+    onVisibility();
 }
 
 void ChartTextLayer::refreshCandles() {
-    if (!candleView_ || !candleSource_) return;
+    if (!candleCaptureEnabled_ || !candleView_ || !candleSource_) return;
+    ++candleRefreshCount_;
     auto* view = candleView_->viewPtr();
     const auto [start, end] = view->displayedTimeWindow();
     const int64_t tf = candleView_->session().timeframeMs;
@@ -96,7 +105,8 @@ void ChartTextLayer::refreshCandles() {
 }
 
 void ChartTextLayer::candlesDirty(const QString& symbol, int64_t timeframeMs, int64_t start, int64_t end) {
-    if (!candleView_ || symbol != candleView_->session().symbol || timeframeMs != candleView_->session().timeframeMs) return;
+    if (!candleCaptureEnabled_ || !candleView_ || symbol != candleView_->session().symbol ||
+        timeframeMs != candleView_->session().timeframeMs) return;
     const auto [visibleStart, visibleEnd] = candleView_->viewPtr()->displayedTimeWindow();
     if (end > visibleStart && start < visibleEnd) refreshCandles();
 }

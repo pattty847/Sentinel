@@ -294,11 +294,11 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
               << " symbol=" << normalized);
   m_view->zoomGlide().land();
   m_view->priceCarry().capture();
-  m_view->session().setSymbol(normalized); m_layers.text.refreshCandles();
+  m_view->session().setSymbol(normalized);
+  m_layers.text.refreshCandles();
   m_layers.ladderFeed.beginGeneration(); // no rows of the previous symbol survive the switch
-  // The controller serial switches the heatmap (the node holds the old picture
-  // until the new spans are ready); clearData() resets the trade overlays. The
-  // next book top centres the new price.
+  // The controller switches heatmap spans; clearData() resets trade overlays.
+  // The next book top centres the new price.
   m_view->priceCarry().stop(); // the live-only wait is per symbol
   // Reseed first: the layer's limitsChanged (setSymbol) must not apply a pending carry
   // before the new symbol has a price of its own.
@@ -314,7 +314,6 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
                               Qt::QueuedConnection);
   }
 }
-
 // ── GPU heatmap renderer ──
 void UnifiedGridRenderer::setHeatmapService(heatmap::HeatmapDataService* service) {
   if (!m_layers.heatmap.gpu) return;
@@ -342,7 +341,6 @@ void UnifiedGridRenderer::syncGpuSurface() {
   m_layers.heatmap.gpu->setSurface(width(), height(), dpr);
   refitAutoPrice(); // raw row height and candidate pixel phases follow the surface
 }
-
 // ── Auto-fit ────────────────────────────────────────────────────────────────
 QObject* UnifiedGridRenderer::candleBuffer() const { return m_candleSource.buffer(); }
 
@@ -350,7 +348,8 @@ void UnifiedGridRenderer::setCandleBuffer(QObject* buffer) {
   auto* candles = qobject_cast<CandleSeriesBuffer*>(buffer);
   if (m_candleSource.buffer() == candles) return;
   if (m_connections.candleDirty) disconnect(m_connections.candleDirty);
-  m_candleSource.setBuffer(candles); m_layers.text.refreshCandles();
+  m_candleSource.setBuffer(candles);
+  m_layers.text.refreshCandles();
   m_view->priceFitter().setCandleSource(candles ? &m_candleSource : nullptr);
   if (candles) {
     // Auto price scale: a candle update or history page in view refits price (a few
@@ -358,7 +357,8 @@ void UnifiedGridRenderer::setCandleBuffer(QObject* buffer) {
     m_connections.candleDirty = connect(candles, &CandleSeriesBuffer::candlesDirty, this,
                                 [this](const QString& symbol, int64_t timeframeMs, qint64 dirtyStart,
                                        qint64 dirtyEnd) {
-                                  m_view->priceFitter().candlesDirty(symbol, timeframeMs, dirtyStart, dirtyEnd); m_layers.text.candlesDirty(symbol, timeframeMs, dirtyStart, dirtyEnd);
+                                  m_view->priceFitter().candlesDirty(symbol, timeframeMs, dirtyStart, dirtyEnd);
+                                  m_layers.text.candlesDirty(symbol, timeframeMs, dirtyStart, dirtyEnd);
                                 });
   }
   refitAutoPrice();
