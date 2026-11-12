@@ -18,7 +18,7 @@ struct TradingResult {
     std::vector<PositionUpdate> positionUpdates;
     std::vector<PnlSnapshot> pnlSnapshots;
     std::vector<RiskOrderUpdate> riskOrderUpdates;
-    std::string rejectReason; // non-empty when a command was refused; a stable snake_case token
+    std::string rejectReason; // non-empty when a command or triggered exit was refused; a stable snake_case token
 };
 
 class TradingEngine {
@@ -80,6 +80,7 @@ private:
     PositionManager m_positions;
     PaperExecutionAdapter m_execution;
     std::unordered_map<std::string, AttachedRiskState> m_attachedRiskBySymbol;
+    std::unordered_map<std::string, double> m_rejectedRiskMarkBySymbol;
 };
 
 TradeCommand parseTradeCommandJson(const std::string& raw);

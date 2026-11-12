@@ -27,6 +27,17 @@ trading::TradeCommand limitBuy(double qty = 2.0, double price = 99.0) {
     return cmd;
 }
 
+trading::TradeCommand attachedRisk(bool takeProfit, double price) {
+    trading::TradeCommand cmd;
+    cmd.action = trading::TradeAction::SetAttachedRisk;
+    cmd.symbol = "BTC-USD";
+    cmd.hasTakeProfit = takeProfit;
+    cmd.takeProfitPrice = takeProfit ? price : 0.0;
+    cmd.hasStopLoss = !takeProfit;
+    cmd.stopLossPrice = takeProfit ? 0.0 : price;
+    return cmd;
+}
+
 constexpr std::array<double, 3> nonFiniteValues{
     std::numeric_limits<double>::quiet_NaN(),
     std::numeric_limits<double>::infinity(),
@@ -291,6 +302,114 @@ TEST(TradingEngineTest, AttachedRiskTriggersExitAndCancelAllClearsIt) {
     ASSERT_EQ(cleared.riskOrderUpdates.size(), 1u);
     EXPECT_FALSE(cleared.riskOrderUpdates.front().hasTakeProfit);
     EXPECT_TRUE(engine.onTick("BTC-USD", 111.0, 1235).orderUpdates.empty());
+}
+
+TEST(TradingEngineTest, InvalidTakeProfitExitKeepsOrderPositionAndRiskIntact) {
+    trading::TradingEngine engine([](const std::string&) { return 100.0; }, 0.0);
+    auto shortOrder = marketBuy(1.0);
+    shortOrder.side = trading::OrderSide::Sell;
+    engine.onCommand(shortOrder);
+    ASSERT_EQ(engine.onCommand(attachedRisk(true, 0.0)).riskOrderUpdates.size(), 1u);
+
+    auto algoFlip = marketBuy(2.0);
+    algoFlip.algoId = "algo";
+    engine.onCommand(algoFlip); // Algo fills leave manual risk attached after a side flip.
+    ASSERT_DOUBLE_EQ(engine.getPosition("BTC-USD")->netQty, 1.0);
+
+    const auto first = engine.onTick("BTC-USD", 101.0, 1234);
+    EXPECT_EQ(first.rejectReason, "invalid_fill_price");
+    EXPECT_TRUE(first.orderUpdates.empty());
+    EXPECT_TRUE(first.riskOrderUpdates.empty());
+    EXPECT_TRUE(engine.getOpenOrders("BTC-USD").empty());
+    EXPECT_FALSE(engine.findOrder("ord-3").has_value());
+    EXPECT_DOUBLE_EQ(engine.getPosition("BTC-USD")->netQty, 1.0);
+    ASSERT_EQ(engine.getAllAttachedRisk().size(), 1u);
+    EXPECT_TRUE(engine.getAllAttachedRisk().front().hasTakeProfit);
+    EXPECT_DOUBLE_EQ(engine.getAllAttachedRisk().front().takeProfitPrice, 0.0);
+
+    const auto repeated = engine.onTick("BTC-USD", 101.0, 1235);
+    EXPECT_TRUE(repeated.rejectReason.empty());
+    EXPECT_TRUE(repeated.orderUpdates.empty());
+    EXPECT_TRUE(repeated.riskOrderUpdates.empty());
+    ASSERT_EQ(repeated.positionUpdates.size(), 1u); // Ordinary mark-to-market still runs.
+    EXPECT_FALSE(engine.findOrder("ord-3").has_value());
+
+    const auto changedPrice = engine.onTick("BTC-USD", 102.0, 1236);
+    EXPECT_EQ(changedPrice.rejectReason, "invalid_fill_price");
+    EXPECT_TRUE(changedPrice.orderUpdates.empty());
+}
+
+TEST(TradingEngineTest, InvalidMarketStopLossExitKeepsOrderPositionAndRiskIntact) {
+    trading::TradingEngine engine([](const std::string&) { return 100.0; }, 10000.0);
+    engine.onCommand(marketBuy(1.0)); // Buy fills at 200 with 100% slippage.
+    ASSERT_EQ(engine.onCommand(attachedRisk(false, 150.0)).riskOrderUpdates.size(), 1u);
+
+    const auto rejectedExit = engine.onTick("BTC-USD", 140.0, 1234); // Sell fill would be zero.
+    EXPECT_EQ(rejectedExit.rejectReason, "invalid_fill_price");
+    EXPECT_TRUE(rejectedExit.orderUpdates.empty());
+    EXPECT_TRUE(rejectedExit.riskOrderUpdates.empty());
+    EXPECT_TRUE(engine.getOpenOrders("BTC-USD").empty());
+    EXPECT_FALSE(engine.findOrder("ord-2").has_value());
+    EXPECT_DOUBLE_EQ(engine.getPosition("BTC-USD")->netQty, 1.0);
+    ASSERT_EQ(engine.getAllAttachedRisk().size(), 1u);
+    EXPECT_TRUE(engine.getAllAttachedRisk().front().hasStopLoss);
+
+    const auto repeated = engine.onTick("BTC-USD", 140.0, 1235);
+    EXPECT_TRUE(repeated.rejectReason.empty());
+    EXPECT_TRUE(repeated.orderUpdates.empty());
+    EXPECT_TRUE(repeated.riskOrderUpdates.empty());
+
+    engine.onCommand(attachedRisk(false, 150.0)); // Repeating the same settings does not re-arm.
+    EXPECT_TRUE(engine.onTick("BTC-USD", 140.0, 1236).rejectReason.empty());
+    engine.onCommand(attachedRisk(false, 160.0));
+    const auto changedRisk = engine.onTick("BTC-USD", 140.0, 1237);
+    EXPECT_EQ(changedRisk.rejectReason, "invalid_fill_price");
+    EXPECT_TRUE(changedRisk.orderUpdates.empty());
+}
+
+TEST(TradingEngineTest, NonFiniteMarketStopLossFillDoesNotCreateExitOrder) {
+    trading::TradingEngine engine([](const std::string&) { return 100.0; },
+                                  std::numeric_limits<double>::infinity());
+    const auto placed = engine.onCommand(limitBuy(1.0, 99.0));
+    ASSERT_EQ(placed.orderUpdates.size(), 1u);
+    engine.onExternalFill(placed.orderUpdates.front().orderId, 1.0, 100.0);
+    engine.onCommand(attachedRisk(false, 90.0));
+
+    const auto rejectedExit = engine.onTick("BTC-USD", 89.0, 1234);
+    EXPECT_EQ(rejectedExit.rejectReason, "invalid_fill_price");
+    EXPECT_TRUE(rejectedExit.orderUpdates.empty());
+    EXPECT_FALSE(engine.findOrder("ord-2").has_value());
+    EXPECT_DOUBLE_EQ(engine.getPosition("BTC-USD")->netQty, 1.0);
+    ASSERT_EQ(engine.getAllAttachedRisk().size(), 1u);
+    EXPECT_TRUE(engine.getAllAttachedRisk().front().hasStopLoss);
+}
+
+TEST(TradingEngineTest, ValidTakeProfitAndStopLossKeepNewThenFilledSequence) {
+    for (const bool takeProfit : {true, false}) {
+        trading::TradingEngine engine([](const std::string&) { return 100.0; }, 0.0);
+        engine.onCommand(marketBuy(1.0));
+        engine.onCommand(attachedRisk(takeProfit, takeProfit ? 110.0 : 90.0));
+
+        const auto exit = engine.onTick("BTC-USD", takeProfit ? 111.0 : 89.0, 1234);
+        EXPECT_TRUE(exit.rejectReason.empty());
+        ASSERT_EQ(exit.orderUpdates.size(), 2u);
+        EXPECT_EQ(exit.orderUpdates[0].status, trading::OrderStatus::New);
+        EXPECT_EQ(exit.orderUpdates[1].status, trading::OrderStatus::Filled);
+        EXPECT_EQ(exit.orderUpdates[0].orderId, exit.orderUpdates[1].orderId);
+        EXPECT_EQ(exit.orderUpdates[0].orderId, "ord-2");
+        EXPECT_EQ(exit.orderUpdates[0].side, trading::OrderSide::Sell);
+        EXPECT_DOUBLE_EQ(exit.orderUpdates[0].qty, 1.0);
+        EXPECT_DOUBLE_EQ(exit.orderUpdates[0].limitPrice, takeProfit ? 110.0 : 0.0);
+        EXPECT_DOUBLE_EQ(exit.orderUpdates[1].avgPrice, takeProfit ? 110.0 : 89.0);
+        ASSERT_EQ(exit.positionUpdates.size(), 2u);
+        EXPECT_DOUBLE_EQ(exit.positionUpdates[0].positionQty, 1.0);
+        EXPECT_DOUBLE_EQ(exit.positionUpdates[1].positionQty, 0.0);
+        ASSERT_EQ(exit.pnlSnapshots.size(), 2u);
+        ASSERT_EQ(exit.riskOrderUpdates.size(), 1u);
+        EXPECT_FALSE(exit.riskOrderUpdates[0].hasTakeProfit);
+        EXPECT_FALSE(exit.riskOrderUpdates[0].hasStopLoss);
+        EXPECT_EQ(engine.findOrder("ord-2")->status, trading::OrderStatus::Filled);
+    }
 }
 
 TEST(TradingEngineTest, ParseCommandJsonAndIgnoreUnknownAction) {

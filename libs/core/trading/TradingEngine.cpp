@@ -1,4 +1,5 @@
 #include "TradingEngine.hpp"
+#include "SentinelLogging.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -59,6 +60,7 @@ void TradingEngine::appendRiskUpdate(TradingResult& out, const std::string& symb
 }
 
 bool TradingEngine::clearAttachedRiskIfPresent(TradingResult& out, const std::string& symbol) {
+    m_rejectedRiskMarkBySymbol.erase(symbol);
     auto it = m_attachedRiskBySymbol.find(symbol);
     if (it == m_attachedRiskBySymbol.end()) {
         return false;
@@ -161,6 +163,10 @@ TradingResult TradingEngine::onTick(const std::string& symbol, double lastTradeP
     if (!std::isfinite(lastTradePrice) || lastTradePrice <= 0.0) {
         return out;
     }
+    if (auto it = m_rejectedRiskMarkBySymbol.find(symbol);
+        it != m_rejectedRiskMarkBySymbol.end() && it->second != lastTradePrice) {
+        m_rejectedRiskMarkBySymbol.erase(it);
+    }
 
     // Mark-to-market position update (no fill)
     {
@@ -183,6 +189,7 @@ TradingResult TradingEngine::onTick(const std::string& symbol, double lastTradeP
                                     riskResult.pnlSnapshots.begin(), riskResult.pnlSnapshots.end());
             out.riskOrderUpdates.insert(out.riskOrderUpdates.end(),
                                         riskResult.riskOrderUpdates.begin(), riskResult.riskOrderUpdates.end());
+            out.rejectReason = std::move(riskResult.rejectReason);
             if (!riskResult.orderUpdates.empty() || !riskResult.positionUpdates.empty()) {
                 return out;
             }
@@ -381,6 +388,7 @@ TradingResult TradingEngine::handleCancelAll(const TradeCommand& command) {
         appendRiskUpdate(out, symbol, AttachedRiskState{});
     }
     m_attachedRiskBySymbol.clear();
+    m_rejectedRiskMarkBySymbol.clear();
     return out;
 }
 
@@ -438,6 +446,14 @@ TradingResult TradingEngine::handleSetAttachedRisk(const TradeCommand& command) 
         return out;
     }
 
+    if (auto previous = m_attachedRiskBySymbol.find(command.symbol);
+        previous == m_attachedRiskBySymbol.end() ||
+        previous->second.hasTakeProfit != next.hasTakeProfit ||
+        previous->second.takeProfitPrice != next.takeProfitPrice ||
+        previous->second.hasStopLoss != next.hasStopLoss ||
+        previous->second.stopLossPrice != next.stopLossPrice) {
+        m_rejectedRiskMarkBySymbol.erase(command.symbol);
+    }
     m_attachedRiskBySymbol[command.symbol] = next;
     appendRiskUpdate(out, command.symbol, next);
     return out;
@@ -463,11 +479,27 @@ TradingResult TradingEngine::handleTriggeredRiskExit(const std::string& symbol,
     if (!tpTriggered && !slTriggered) {
         return out;
     }
+    if (m_rejectedRiskMarkBySymbol.find(symbol) != m_rejectedRiskMarkBySymbol.end()) {
+        return out;
+    }
+
+    const OrderSide exitSide = isLong ? OrderSide::Sell : OrderSide::Buy;
+    const double fillPrice = tpTriggered
+        ? risk.takeProfitPrice
+        : m_execution.fillPrice(lastTradePrice, exitSide);
+    if (!std::isfinite(fillPrice) || fillPrice <= 0.0) {
+        m_rejectedRiskMarkBySymbol.emplace(symbol, lastTradePrice);
+        sLog_Warning("paper risk exit rejected: symbol=" << symbol << " trigger="
+                     << (tpTriggered ? "take_profit" : "stop_loss")
+                     << " mark=" << lastTradePrice << " fill=" << fillPrice
+                     << " reason=invalid_fill_price");
+        return rejected("invalid_fill_price");
+    }
 
     Order exitOrder;
     exitOrder.id = nextOrderId();
     exitOrder.symbol = symbol;
-    exitOrder.side = isLong ? OrderSide::Sell : OrderSide::Buy;
+    exitOrder.side = exitSide;
     exitOrder.qty = std::abs(position.netQty);
     exitOrder.algoId.clear();
 
@@ -483,9 +515,6 @@ TradingResult TradingEngine::handleTriggeredRiskExit(const std::string& symbol,
     out.orderUpdates.push_back(OrderUpdate{exitOrder.id, exitOrder.symbol, exitOrder.status, exitOrder.side,
                                            exitOrder.qty, 0.0, exitOrder.qty, 0.0, exitOrder.limitPrice, ""});
 
-    const double fillPrice = tpTriggered
-        ? risk.takeProfitPrice
-        : m_execution.fillPrice(lastTradePrice, exitOrder.side);
     auto fillResult = fillOrder(exitOrder, fillPrice, fillPrice, timestampMs);
     out.orderUpdates.insert(out.orderUpdates.end(), fillResult.orderUpdates.begin(), fillResult.orderUpdates.end());
     out.positionUpdates.insert(out.positionUpdates.end(), fillResult.positionUpdates.begin(), fillResult.positionUpdates.end());
