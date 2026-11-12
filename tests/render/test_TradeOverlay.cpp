@@ -30,6 +30,10 @@ struct TradeOverlayWireTest {
 struct TradeOverlayModelTest {
     static void seed(ServerDataModel& model, const std::string& symbol,
                      std::deque<ServerDataModel::RetainedTradeSample> trades) {
+        // Match onTrade's timestamp ordering, preserving arrival order for ties.
+        std::stable_sort(trades.begin(), trades.end(), [](const auto& a, const auto& b) {
+            return a.timestampMs < b.timestampMs;
+        });
         std::lock_guard<std::mutex> lock(model.m_tradeMutex);
         model.m_recentTrades[symbol] = std::move(trades);
     }
@@ -73,10 +77,13 @@ namespace {
 using OverlayTrade = ServerDataModel::RetainedTradeSample;
 std::deque<OverlayTrade> busyTape() {
     std::deque<OverlayTrade> trades;
-    // A busy, unordered full UTC day, with exact binary fractions for the oracle.
+    // A busy full UTC day, with exact binary fractions for the oracle.
     for (size_t i = 0; i < kMaxTrades + 50001; ++i)
         trades.push_back({day + static_cast<int64_t>((i * 7919) % 86400000),
                           100.0 + (i % 24), .125 * (1 + i % 7), AggressorSide::Buy});
+    std::stable_sort(trades.begin(), trades.end(), [](const auto& a, const auto& b) {
+        return a.timestampMs < b.timestampMs;
+    });
     return trades;
 }
 void expectLiveProfile(const Result& result, const Request& q, const std::deque<OverlayTrade>& trades) {
@@ -123,7 +130,10 @@ TEST_F(TradeOverlayModel, BusyDayLiveProfileIsExactAndSnapshotStorageIsIndepende
     for (const auto& [_, letters] : snapshot.columns) letterCells += letters.size();
     EXPECT_EQ(letterCells, 2 * q.grid.rows); // No retained raw-trade vector in this snapshot.
     expectLiveProfile(buildLive(snapshot), q, trades);
-    // Exercise the pure builder too: the previous kMaxTrades gate must be absent.
+    // The pure builder has the same sorted-input contract as the model tape.
+    std::stable_sort(trades.begin(), trades.end(), [](const auto& a, const auto& b) {
+        return a.timestampMs < b.timestampMs;
+    });
     expectLiveProfile(build(q, {trades.begin(), trades.end()}), q, trades);
 }
 
@@ -186,6 +196,29 @@ TEST_F(TradeOverlayModel, LiveUnanchoredGridUsesNewestTimestampAndArrivalTie) {
     const auto live = buildLive(model->collectLiveOverlay(q));
     EXPECT_EQ(live.grid.maxPrice, 124);
     expectLiveProfile(live, q, trades);
+}
+
+
+TEST_F(TradeOverlayModel, LiveWindowAnchorsOnlyInsideHalfOpenSessionRange) {
+    constexpr int64_t hour = 3600000;
+    auto q = request(); q.session = SessionManager::SessionType::NY;
+    q.nowMs = day + 15 * hour; q.tpoMs = hour; q.grid.maxPrice = 0;
+    const auto window = tradeWindow(q);
+    const std::deque<OverlayTrade> trades{
+        {window.startMs - 1, 900, 100, AggressorSide::Buy},
+        {window.startMs, 111, 3, AggressorSide::Buy},
+        {window.endMs - 1, 115, 5, AggressorSide::Buy},
+        {window.endMs - 1, 117, 7, AggressorSide::Buy},
+        {window.endMs, 800, 100, AggressorSide::Buy}};
+    TradeOverlayModelTest::seed(*model, q.symbol, trades);
+    const auto result = buildLive(model->collectLiveOverlay(q));
+    EXPECT_EQ(result.grid.maxPrice, 126);
+    expectLiveProfile(result, q, trades);
+    // Lower bounds coincide when all retained trades lie outside the window.
+    TradeOverlayModelTest::seed(*model, q.symbol, {trades.front(), trades.back()});
+    const auto empty = model->collectLiveOverlay(q);
+    EXPECT_EQ(empty.error, "overlay grid unavailable or invalid");
+    EXPECT_TRUE(empty.volumeBins.empty());
 }
 
 

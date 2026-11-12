@@ -198,21 +198,50 @@ struct RecordingServerStopTest {
         state.request.grid.tick = 0; // Force a worker failure without sockets or REST.
         session->write_queue_.push_back({"in-flight", false});
         session->pendingWriteBytes_ = 9;
-        if (queueFull) server.m_pendingHistoryTasks = 8;
-        session->pumpOverlays();
-        server.m_historyWorkers->join();
-        ioc.poll();
-        if (queueFull) server.m_pendingHistoryTasks = 0;
-        EXPECT_EQ(session->write_queue_.size(), 2);
-        if (session->write_queue_.size() == 2) {
-            const auto message = nlohmann::json::parse(session->write_queue_.back().payload);
-            EXPECT_EQ(message["type"], "error");
+        const auto pump = [&](bool refuse) {
+            if (refuse) server.m_pendingHistoryTasks = 8;
+            session->pumpOverlays();
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (session->overlayBusy_ && std::chrono::steady_clock::now() < deadline) {
+                ioc.restart(); ioc.poll();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            EXPECT_FALSE(session->overlayBusy_);
+            // Immediate refusals also post their write onto the session executor.
+            ioc.restart(); ioc.poll();
+            if (refuse) server.m_pendingHistoryTasks = 0;
+        };
+        const auto errors = [&] {
+            std::vector<nlohmann::json> result;
+            for (const auto& write : session->write_queue_) {
+                if (write.payload == "in-flight") continue;
+                auto message = nlohmann::json::parse(write.payload);
+                if (message["type"] == "error") result.push_back(std::move(message));
+            }
+            return result;
+        };
+        for (int i = 0; i < 3; ++i) pump(queueFull);
+        EXPECT_EQ(errors().size(), 1);
+        if (errors().size() == 1) {
+            const auto message = errors().front();
             EXPECT_EQ(message["context"], "trade_overlay");
             EXPECT_EQ(message["symbol"], "BTC-USD");
             EXPECT_FALSE(message.contains("request_id"));
             EXPECT_EQ(message["message"], queueFull ? "overlay worker queue full" : "overlay grid unavailable or invalid");
         }
         EXPECT_EQ(state.request.previousMs, 0);
+        // A different failure reports immediately, then also deduplicates.
+        for (int i = 0; i < 3; ++i) pump(!queueFull);
+        EXPECT_EQ(errors().size(), 2);
+        // A successful publish rearms the same error, for both failure paths.
+        state.request.grid = {32, 1, 120};
+        pump(false);
+        EXPECT_GT(state.request.previousMs, 0);
+        EXPECT_TRUE(state.lastLiveError.empty());
+        EXPECT_EQ(errors().size(), 2);
+        state.request.grid.tick = 0;
+        for (int i = 0; i < 3; ++i) pump(!queueFull);
+        EXPECT_EQ(errors().size(), 3);
         session->beginClose("live overlay error test");
         server.stop();
         ioc.restart(); ioc.poll();

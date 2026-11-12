@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <map>
 
 namespace trade_overlay {
@@ -143,12 +144,12 @@ LiveSnapshot aggregateLiveTape(const Request& q, const Trades& trades) {
         out.error = "invalid overlay request"; return out;
     }
     const auto window = tradeWindow(q);
+    const auto before = [](const Trade& t, int64_t ms) { return t.timestampMs < ms; };
+    const auto first = std::lower_bound(trades.begin(), trades.end(), window.startMs, before);
+    const auto end = std::lower_bound(first, trades.end(), window.endMs, before);
     if (out.grid.maxPrice == 0) {
-        // Match the last trade in a stable timestamp sort, including arrival-order ties.
-        const Trade* latest = nullptr;
-        for (const auto& t : trades)
-            if (t.timestampMs >= window.startMs && t.timestampMs < window.endMs &&
-                (!latest || t.timestampMs >= latest->timestampMs)) latest = &t;
+        // The tape is timestamp-sorted, with arrival order preserved for ties.
+        const Trade* latest = first != end ? &*std::prev(end) : nullptr;
         if (latest && std::isfinite(latest->price) && latest->price > 0 &&
             std::isfinite(out.grid.tick) && out.grid.tick > 0) {
             const double bottom = std::max(0.0, std::floor(latest->price / out.grid.tick) - out.grid.rows / 2);
@@ -169,9 +170,9 @@ LiveSnapshot aggregateLiveTape(const Request& q, const Trades& trades) {
     for (auto start : liveBuckets(q.nowMs, q.previousMs, q.tpoMs, tpo.startMs))
         if (start >= tpo.startMs && start + q.tpoMs <= tpo.endMs)
             out.columns.emplace_back(start, QByteArray(tpoGrid.rows, '\0'));
-    for (const auto& t : trades) {
-        if (t.timestampMs < window.startMs || t.timestampMs >= window.endMs ||
-            !std::isfinite(t.price) || !std::isfinite(t.size) || t.size <= 0) continue;
+    for (auto it = first; it != end; ++it) {
+        const auto& t = *it;
+        if (!std::isfinite(t.price) || !std::isfinite(t.size) || t.size <= 0) continue;
         if (t.timestampMs >= vp.startMs && t.timestampMs < vp.endMs) {
             const double row = std::floor((out.grid.maxPrice - t.price) / out.grid.tick);
             if (row >= 0 && row < out.grid.rows) out.volumeBins[static_cast<int>(row)] += t.size;

@@ -589,6 +589,7 @@ class Session : public std::enable_shared_from_this<Session> {
     struct OverlayState {
         trade_overlay::Request request;
         uint64_t generation = 0;
+        std::string lastLiveError;
         std::shared_ptr<std::atomic_bool> cancelled = std::make_shared<std::atomic_bool>(false);
     };
     std::map<std::string, OverlayState> overlays_;
@@ -653,6 +654,14 @@ class Session : public std::enable_shared_from_this<Session> {
                      << " request_id=" << requestId << " message=" << message);
         do_write(nlohmann::json{{"type", "error"}, {"context", "trade_overlay"}, {"symbol", symbol},
                                 {"request_id", requestId}, {"message", message}}.dump());
+    }
+    void send_overlay_publish_error(const trade_overlay::Request& q, const std::string& message) {
+        if (q.kind == trade_overlay::Kind::Live) {
+            auto& previous = overlays_.at(q.symbol).lastLiveError;
+            if (previous == message) return;
+            previous = message;
+        }
+        send_overlay_error(q.symbol, q.requestId, message);
     }
     void requestOverlayHistory(const nlohmann::json& j) {
         const auto symbol = j.value("symbol", std::string{});
@@ -786,11 +795,14 @@ class Session : public std::enable_shared_from_this<Session> {
                 if (!q.requestId.empty()) self->tpoRequestCancel_.erase(q.requestId);
                 if (!result.error.empty()) {
                     sLog_DataN(5000, "Trade overlay not published: symbol=" << q.symbol << " error=" << result.error);
-                    self->send_overlay_error(q.symbol, q.requestId, result.error);
+                    self->send_overlay_publish_error(q, result.error);
                     return;
                 }
                 it->second.request.grid = result.grid;
-                if (q.kind == trade_overlay::Kind::Live) it->second.request.previousMs = q.nowMs;
+                if (q.kind == trade_overlay::Kind::Live) {
+                    it->second.request.previousMs = q.nowMs;
+                    it->second.lastLiveError.clear();
+                }
                 for (const auto& message : result.messages) self->do_write(message);
                 sLog_Probe("overlay.publish", "symbol=" << q.symbol << " messages=" << result.messages.size()
                            << " tf=" << q.tpoMs << " tick=" << result.grid.tick);
@@ -799,7 +811,7 @@ class Session : public std::enable_shared_from_this<Session> {
         overlayBusy_ = queued;
         if (!queued) {
             tpoRequestCancel_.erase(q.requestId);
-            send_overlay_error(q.symbol, q.requestId, "overlay worker queue full");
+            send_overlay_publish_error(q, "overlay worker queue full");
         }
     }
 

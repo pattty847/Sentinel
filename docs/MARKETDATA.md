@@ -778,12 +778,14 @@ Live jobs stream-aggregate the requested retained-tape window directly into one
 VP array and at most two TPO letter arrays (at most 2,048 rows each). They do not
 materialize, sort, truncate or cap a raw-trade snapshot: a session exceeding
 250,000 trades still contributes every retained, valid, in-grid trade through
-`now_ms` to VP. Aggregation takes O(retained trades + rows) time per publish and
-O(rows) additional memory, independent of session trade count. It runs under the
-tape mutex on the history worker; JSON/base64 encoding runs after releasing the
-mutex. The already-retained model tape is not duplicated. An initially unanchored
-grid requires an extra pass to find the newest exchange timestamp (last arrival
-wins ties); subsequent publishes use the selected grid and need one pass.
+`now_ms` to VP. The timestamp-sorted tape is located with binary searches at the
+requested window boundaries; aggregation then takes O(trades in the session
+window + rows) time per publish, with O(log retained trades) boundary lookup and
+O(rows) additional memory. The scan runs on the history worker under
+`m_tradeMutex`, which is shared by all symbols; JSON/base64 encoding runs after
+releasing the mutex. The already-retained model tape is not duplicated. An
+initially unanchored grid uses the last trade before the window end (last arrival
+wins timestamp ties), without an extra scan.
 
 There is no running VP cache: each publish rebuilds for its symbol, current
 session, tick and price grid. Session rollover excludes the preceding session;
@@ -792,9 +794,7 @@ Late and out-of-order arrivals, including trades sharing a timestamp, contribute
 on the next refresh if still retained and inside the requested window. Restart
 starts from the new process's retained tape, with no carried-over aggregates;
 this does not recover trades lost before restart or before the retention cutoff.
-Aggregation preserves double-precision volume sums and float32 wire bins. It
-traverses the retained tape directly (timestamp ordered in production); an
-unordered input can differ from a sorted sum by floating-point roundoff.
+Aggregation preserves double-precision volume sums and float32 wire bins.
 
 Every job produces at most 8 MiB. TPO history alone copies at most 250,000 trades
 inside its requested half-open time window. Trades outside that window do not
@@ -805,7 +805,9 @@ ties at candle boundaries). The seven-day candle input budget remains in force,
 and each limited page logs its symbol, window and kept trade count. History pages
 contain at most 512 columns. A failed job or worker-queue refusal, including Live,
 sends an `error` with context `trade_overlay` and the symbol; history errors also
-echo their request ID. The current GUI client logs uncorrelated Live errors but
+echo their request ID. Per client and symbol, identical consecutive Live errors
+are sent only once; a changed error sends again, and a successful Live publish
+clears the remembered error. The current GUI client logs uncorrelated Live errors but
 does not display an overlay-specific status or disturb its history pager. Live
 refreshes coalesce until the next timer turn and retry after failures. A live
 refresh sends the forming bucket and, when a boundary was crossed, the preceding

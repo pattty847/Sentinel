@@ -69,12 +69,12 @@ struct LiveSnapshot {
     std::vector<std::pair<int64_t, QByteArray>> columns;
     std::string error;
 };
-// Caller keeps the tape stable; aggregation does no I/O or wire encoding.
+// Caller keeps the timestamp-sorted tape stable; aggregation does no I/O or wire encoding.
 LiveSnapshot aggregateLive(const Request& request,
                            const std::deque<ServerDataModel::RetainedTradeSample>& trades);
 Result buildLive(const LiveSnapshot& snapshot);
-// Pure worker-side builder. History inputs are timestamp-sorted immutable snapshots.
-// Live accepts arbitrary arrival order and has no raw-trade count limit.
+// Pure worker-side builder. Inputs are timestamp-sorted immutable snapshots.
+// Live has no raw-trade count limit.
 Result build(const Request& request, const std::vector<ServerDataModel::RetainedTradeSample>& trades,
              const std::vector<OHLCVBar>& candles = {}, int64_t retainedFromMs = 0);
 // TPO grid for a session type: the base grid for daily sessions; for W1 (x5)
