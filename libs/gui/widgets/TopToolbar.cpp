@@ -913,6 +913,7 @@ TopToolbar::ControlVisibility TopToolbar::controlVisibility(const ModeState &mod
 
 void TopToolbar::setModeState(const ModeState &mode) {
     m_mode = mode;
+    setLayerToggleStates(mode.heatmap, mode.footprint, mode.tpo, mode.volumeProfile);
     if (m_candleAction && m_candleAction->isChecked() != mode.candles) {
         const QSignalBlocker block(m_candleAction);
         m_candleAction->setChecked(mode.candles);

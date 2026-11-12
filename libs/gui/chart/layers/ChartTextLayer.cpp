@@ -2,6 +2,7 @@
 #include "chart/layers/HeatmapLayer.hpp"
 #include "chart/layers/LadderLayer.hpp"
 #include "chart/layers/FootprintCellsLayer.hpp"
+#include "chart/layers/TradeLayers.hpp"
 #include "chart/layers/CvdLayer.hpp"
 #include "chart/layers/FlowFooterLayer.hpp"
 #include "chart/layers/RenderSequence.hpp"
@@ -71,6 +72,35 @@ void ChartTextLayer::submitOverlayLabels(const ChartFrame& frame, LayerNodeConte
     }
     heatmap_.submitLabels(frame, context, {occlusion_.data(), count});
     footprint_.submitLabels(frame, context, inset);
+    submitEmptyLabels(frame, context);
+}
+
+void ChartTextLayer::submitEmptyLabels(const ChartFrame& frame, LayerNodeContext& context) {
+    emptyGlyphs_.clear();
+    if (!context.atlasReady || context.atlas.fontPx() <= 0) return;
+    const QString footprint = footprint_.emptyStateText(frame);
+    const QString vp = vp_.emptyStateText(frame);
+    const int lines = int(!footprint.isEmpty()) + int(!vp.isEmpty());
+    if (!lines) return;
+    const auto bounds = frame.context.surfaceBounds;
+    const double bottom = bounds.bottom() - cvd_.bottomInset();
+    if (bounds.width() <= 0 || bottom <= bounds.top()) return;
+    const double centerY = (bounds.top() + bottom) * 0.5;
+    const auto add = [&](const QString& label, double y) {
+        if (label.isEmpty()) return;
+        ChartTextRun run;
+        run.text = label;
+        run.anchor = {bounds.center().x(), y};
+        run.color = QColor(143, 163, 184);
+        run.scale = 14.0f / context.atlas.fontPx();
+        run.pixelSnap = true;
+        QRectF box;
+        if (ChartTextLayout::measureRunRect(context.atlas, run, box) && bounds.contains(box) &&
+            box.bottom() <= bottom) ChartTextLayout::appendRun(context.atlas, run, emptyGlyphs_);
+    };
+    add(footprint, centerY - (lines == 2 ? 10.0 : 0.0));
+    add(vp, centerY + (lines == 2 ? 10.0 : 0.0));
+    context.text.submitGlyphs(emptyGlyphs_, ChartTextRenderer::Priority::High);
 }
 
 void ChartTextLayer::buildMsdfAtlas() {

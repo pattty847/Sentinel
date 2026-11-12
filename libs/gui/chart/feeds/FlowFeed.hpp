@@ -26,11 +26,14 @@ struct FlowColumn {
     int64_t maxSideVol = 0, lowRow = 0, highRow = 0;
 };
 struct FlowSnapshot {
+    enum class WindowState { Loading, Unavailable, Ready };
     static constexpr int kMaxBars = kFootprintMaxBars, kMaxCells = 65536;
     uint64_t serial = 0;
     bool valid = false;
+    WindowState windowState = WindowState::Loading;
     int64_t timeframeMs = 0;
     double tick = 0, fromMs = 0, toMs = 0, low = 0, high = 0, maxRowVolume = 0;
+    double windowFromMs = 0, windowToMs = 0, windowLow = 0, windowHigh = 0;
     int barCount = 0, cellCount = 0;
     int skippedBars = 0, truncatedBars = 0;
     int64_t bandRows = 1; // drawn rows per band in this snapshot
@@ -72,6 +75,7 @@ public:
     static bool bin(FlowSnapshot&, const FlowSeriesBuffer::Series&, const MappingFrameContext&, FootprintStage,
                     int64_t previousBand = 0);
     static bool bin(FlowSnapshot&, const FlowSeriesBuffer::Series&, const MappingFrameContext&);
+    static FlowSnapshot::WindowState windowState(const FlowSeriesBuffer::Series&, double fromMs, double toMs);
 private:
     void selectSymbol();
     void withdraw();

@@ -5,6 +5,7 @@
 #include "render/ChartTextPrimitives.hpp"
 #include <span>
 #include <QSGGeometry>
+#include <QString>
 
 class QSGOpacityNode;
 class QSGGeometryNode;
@@ -23,6 +24,7 @@ public:
     FootprintStage stage() const { return stage_; }
     const FlowSnapshot& current() const { return *current_; }
     bool drawing() const { return drawing_; }
+    QString emptyStateText(const ChartFrame&) const;
     int vertexCount() const { return vertices_; }
     size_t glyphCount() const { return glyphs_.size(); }
     std::span<const QRectF> cards() const { return {cards_.data(), drawing_ ? cardCount_ : 0}; }

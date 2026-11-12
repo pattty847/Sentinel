@@ -17,7 +17,7 @@ struct ChartLayers {
     TpoLayer tpo{&cvd.presentation()};
     FlowFooterLayer flowFooter{cvd};
     LadderLayer ladder{&cvd.presentation()};
-    ChartTextLayer text{heatmap, ladder, footprintCells, cvd, flowFooter};
+    ChartTextLayer text{heatmap, ladder, footprintCells, vp, cvd, flowFooter};
     LayerRegistry registry;
     BookLadderFeed ladderFeed{ladder.mailbox()};
     FlowFeed flowFeed{footprintCells.mailbox()};

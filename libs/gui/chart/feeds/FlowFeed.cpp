@@ -215,7 +215,8 @@ void FlowFeed::post() {
 }
 void FlowFeed::withdraw() {
     auto& out = mailbox_.back();
-    out.valid = false; out.barCount = 0; out.cellCount = 0; out.serial = ++serial_;
+    out.valid = false; out.windowState = FlowSnapshot::WindowState::Loading;
+    out.barCount = 0; out.cellCount = 0; out.serial = ++serial_;
     post();
 }
 void FlowFeed::receive(SentinelStreamClient::FlowBatchPtr batch) {
@@ -256,9 +257,12 @@ bool FlowFeed::bin(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, co
 bool FlowFeed::bin(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, const MappingFrameContext& frame,
                    FootprintStage stage, int64_t previousBand) {
     const auto& cam = frame.raster;
-    out.valid = false; out.barCount = 0; out.cellCount = 0; out.maxRowVolume = 0;
+    out.valid = false; out.windowState = FlowSnapshot::WindowState::Loading;
+    out.barCount = 0; out.cellCount = 0; out.maxRowVolume = 0;
     out.skippedBars = 0; out.truncatedBars = 0; out.bandRows = 1;
     out.tick = cam.tick; out.timeframeMs = frame.activeTimeframeMs;
+    out.windowFromMs = cam.drawnStartMs; out.windowToMs = cam.drawnEndMs;
+    out.windowLow = cam.drawnMinPrice; out.windowHigh = cam.drawnMaxPrice;
     const double width = cam.drawnEndMs - cam.drawnStartMs, height = cam.drawnMaxPrice - cam.drawnMinPrice;
     if (!validWindow(out, cam, width, height)) return false;
     const auto plan = budget(cam, out.timeframeMs, width, height, stage, previousBand);
@@ -272,6 +276,25 @@ bool FlowFeed::bin(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, co
               [](const auto& a, const auto& b) { return a.startMs < b.startMs; });
     out.valid = true;
     return true;
+}
+FlowSnapshot::WindowState FlowFeed::windowState(const FlowSeriesBuffer::Series& series,
+                                                 double fromMs, double toMs) {
+    using Status = SentinelStreamClient::FlowStatus;
+    if (!std::isfinite(fromMs) || !std::isfinite(toMs) || toMs <= fromMs)
+        return FlowSnapshot::WindowState::Loading;
+    double cursor = fromMs;
+    while (cursor < toMs) {
+        const auto next = series.coverage.upper_bound(int64_t(std::floor(cursor)));
+        if (next == series.coverage.begin()) return FlowSnapshot::WindowState::Loading;
+        const auto& range = std::prev(next)->second;
+        if (double(range.fromMs) > cursor || double(range.toMs) <= cursor)
+            return FlowSnapshot::WindowState::Loading;
+        if (range.status == Status::Refused) return FlowSnapshot::WindowState::Unavailable;
+        if (range.status == Status::Building || range.status == Status::Partial)
+            return FlowSnapshot::WindowState::Loading;
+        cursor = double(range.toMs);
+    }
+    return FlowSnapshot::WindowState::Ready;
 }
 void FlowFeed::report(const FlowSnapshot& out) {
     sLog_Probe("footprint.feed", "symbol=" << symbol_ << " bars=" << out.barCount << " cells=" << out.cellCount
@@ -294,7 +317,10 @@ void FlowFeed::publishRows() {
     const auto* series = buffer_.series(symbol_, frame.activeTimeframeMs);
     // Numbers off caps the stage at Cells, as the layer does, so bands stay at the Cells height.
     const auto stage = !numbers_ && lod_ == FootprintStage::Numbers ? FootprintStage::Cells : lod_;
-    if (series && bin(out, *series, frame, stage, band_)) band_ = out.bandRows;
+    if (series && bin(out, *series, frame, stage, band_)) {
+        band_ = out.bandRows;
+        out.windowState = windowState(*series, frame.raster.drawnStartMs, frame.raster.drawnEndMs);
+    }
     report(out);
     post();
     if (ports_.update) ports_.update();

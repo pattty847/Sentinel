@@ -645,6 +645,16 @@ TEST(ChartToolbar, AllHiddenControlsKeepToolbarOrderAndSeparatorGroups) {
     EXPECT_FALSE(toolbar.rangeSlider()->isVisible());
 }
 
+TEST(ChartToolbar, VolumeProfileModeStateChecksAndClearsItsButton) {
+    TopToolbar toolbar;
+    auto* vp = toolbar.findChild<QToolButton*>("chartVolumeProfileButton");
+    ASSERT_TRUE(vp);
+    toolbar.setModeState({false, false, false, true, true});
+    EXPECT_TRUE(vp->isChecked());
+    toolbar.setModeState({true, false, false, false, true});
+    EXPECT_FALSE(vp->isChecked());
+}
+
 TEST(ChartToolbar, WideningRestoresInlineControlAndRemovesOverflowEntryPerChart) {
     TopToolbar narrow, wide;
     wide.resize(1920, 44);
