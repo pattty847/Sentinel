@@ -569,6 +569,37 @@ TEST(CandleStyleTest, WideBodiesScaleAndSmallRestWidthsStayUnchanged) {
     EXPECT_FLOAT_EQ(spine.lo, 12);
 }
 
+TEST(CandleStyleTest, BodySettingsApplyAtSmallColumnsWithoutZoomInShrinkage) {
+    for (double dpr : {1.0, 2.0}) {
+        for (double fraction : {0.3, 0.5, 0.85, 1.0}) {
+            for (int maxBody : {5, 71, 120}) {
+                double previousSnapped = 0, previousFree = 0;
+                // C2 -> C3 intentionally narrows under the preserved one-pixel-per-side gap rule.
+                for (int columns = 3; columns <= 120; ++columns) {
+                    const auto snapped = candle_pixels::body(0, columns / dpr, 10, 20, dpr,
+                                                               true, true, fraction, maxBody);
+                    const auto free = candle_pixels::body(0, columns / dpr, 10, 20, dpr,
+                                                            false, true, fraction, maxBody);
+                    const double snappedWidth = (snapped.x.hi - snapped.x.lo) * dpr;
+                    const double freeWidth = (free.x.hi - free.x.lo) * dpr;
+                    SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr
+                                                      << " f=" << fraction << " max=" << maxBody);
+                    EXPECT_GE(snappedWidth + 1e-4, previousSnapped);
+                    EXPECT_GE(freeWidth + 1e-4, previousFree);
+                    previousSnapped = snappedWidth;
+                    previousFree = freeWidth;
+                }
+            }
+        }
+    }
+    const auto capped = candle_pixels::body(0, 10, 10, 20, 1, true, true, 0.85, 5);
+    const auto cappedFree = candle_pixels::body(0, 10, 10, 20, 1, false, true, 0.85, 5);
+    EXPECT_FLOAT_EQ(capped.x.hi - capped.x.lo, 5);
+    EXPECT_FLOAT_EQ(cappedFree.x.hi - cappedFree.x.lo, 5);
+    const auto fractional = candle_pixels::body(0, 10, 10, 20, 1, true, true, 0.3, 120);
+    EXPECT_FLOAT_EQ(fractional.x.hi - fractional.x.lo, 3);
+}
+
 // Exercise the actual overlay vertex submission without a QRhi/Metal device.
 class CandleFrameProvider : public UnifiedGridRenderer {
 public:
@@ -639,8 +670,10 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
             ASSERT_EQ(rest.colPx, columns);
             const auto* v = submit(rest);
             ASSERT_NE(v, nullptr);
-            const double width = columns <= 14 ? std::max(1, columns - (columns >= 3 ? 2 : 0))
-                : std::min({double(columns - 2), double(std::lround(columns * 0.85)), double(std::lround(71 * dpr))});
+            const double gap = columns >= 3 ? 1.0 : 0.0;
+            const double width = std::max(1.0, std::min({columns - 2 * gap,
+                double(std::lround(columns * candle_pixels::kCandleBodyFraction)),
+                double(std::lround(candle_pixels::kCandleMaxBodyLogicalPx * dpr))}));
             const double inset = std::floor((columns - width) * 0.5);
             EXPECT_NEAR(v[0].x * dpr, rest.xDev(time) + inset, 1e-5);
             EXPECT_NEAR(v[2].x * dpr, rest.xDev(time) + inset + width, 1e-5);
@@ -684,10 +717,9 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
             ASSERT_NE(v, nullptr);
             const double gapF = std::clamp(mid.colPxF - 2.0, 0.0, 1.0);
             const double c = mid.colPxF;
-            const double desired = c <= 14 ? c - 2 * gapF
-                : c < 15 ? 12 + (c - 14) * (std::min(15 * 0.85, 71 * dpr) - 12)
-                : std::min(c * 0.85, 71 * dpr);
-            const double glideWidth = std::max(1.0, std::min(c - 2.0 * gapF, desired));
+            const double glideWidth = std::max(1.0, std::min({c - 2.0 * gapF,
+                candle_pixels::kCandleBodyFraction * c,
+                candle_pixels::kCandleMaxBodyLogicalPx * dpr}));
             EXPECT_NEAR(v[0].x * dpr, mid.xDev(time + tf * 0.5) - glideWidth * 0.5, 1e-4);
             EXPECT_NEAR(v[2].x * dpr, mid.xDev(time + tf * 0.5) + glideWidth * 0.5, 1e-4);
             wick = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
@@ -719,17 +751,14 @@ TEST(CandleStyleTest, BodyWidthIsContinuousDuringTimeGlide) {
             return candle_pixels::body(left / dpr, (left + c) / dpr, 17.2 / dpr, 23.1 / dpr, dpr, false, true);
         };
         const auto atTwo = sample(2.0);
-        const auto restTwo = candle_pixels::body(left / dpr, (left + 2.0) / dpr, 17.2 / dpr, 23.1 / dpr, dpr, true, true);
-        EXPECT_NEAR((atTwo.x.hi - atTwo.x.lo) * dpr, (restTwo.x.hi - restTwo.x.lo) * dpr, 1e-5)
-            << "C2 has no gap in either the continuous or rest frame";
+        EXPECT_NEAR((atTwo.x.hi - atTwo.x.lo) * dpr, 2 * candle_pixels::kCandleBodyFraction, 1e-5);
         for (double columns : {1.0, 2.0, 2.001, 2.7, 3.0, 3.01, 14.7, 15.0, 15.01, 27.7, 28.0, 28.01, 32.37, 60.2}) {
             SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
             const auto b = sample(columns);
             const double gapF = std::clamp(columns - 2.0, 0.0, 1.0);
-            const double desired = columns <= 14 ? columns - 2 * gapF
-                : columns < 15 ? 12 + (columns - 14) * (std::min(15 * 0.85, 71 * dpr) - 12)
-                : std::min(columns * 0.85, 71 * dpr);
-            const double width = std::max(1.0, std::min(columns - 2.0 * gapF, desired));
+            const double width = std::max(1.0, std::min({columns - 2.0 * gapF,
+                columns * candle_pixels::kCandleBodyFraction,
+                candle_pixels::kCandleMaxBodyLogicalPx * dpr}));
             EXPECT_NEAR(b.x.lo * dpr, left + (columns - width) * 0.5, 1e-5);
             EXPECT_NEAR(b.x.hi * dpr, left + (columns + width) * 0.5, 1e-5);
             EXPECT_FLOAT_EQ(b.y.lo * dpr, 17);

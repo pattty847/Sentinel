@@ -192,7 +192,7 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | (settings only) `candleBodyOpacity` | 1 | 0..1; 1 is fully opaque. |
 | (settings only) `candleWickWidth` | 1 | Integer 1..3 device pixels, independent of zoom and display scale. |
 | `candle_body_fraction` / `candleBodyFraction` | 0.85 | YAML default / per-chart setting. Body share of a column, clamped to 0.3..1.0. |
-| `candle_max_body_px` / `candleMaxBodyPx` | 71 | YAML default / per-chart setting. Body width cap in logical pixels, clamped to 5..120. Columns of 1..14 device px retain their previous widths. |
+| `candle_max_body_px` / `candleMaxBodyPx` | 71 | YAML default / per-chart setting. Body width cap in logical pixels, clamped to 5..120. At default settings, snapped columns of 1..14 device px retain their previous rest widths; custom settings also apply there. |
 
 | (settings only) `footprintIntensity` | `bar` | `bar` normalises each side volume to the bar maximum single-side cell volume; `window` uses the visible-window maximum. Also writable through the layer API. |
 | (settings only) `footprintCandle` | spine | `spine`: left 6 px body pill and 1.5 px wick on cells-covered bars; `full`: chosen candle appearance. |

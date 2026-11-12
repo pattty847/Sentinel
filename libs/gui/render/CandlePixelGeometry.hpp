@@ -11,6 +11,11 @@ inline constexpr double kCandleBodyFraction = 0.85;
 inline constexpr double kCandleMaxBodyLogicalPx = 71.0;
 struct Span { float lo, hi; };
 inline Span footprintSpine(double columnLeft) { return {float(columnLeft + 2), float(columnLeft + 8)}; }
+inline double snappedBodyWidth(double columns, double scale, double fraction, double maxBodyLogicalPx) {
+    const double gap = columns >= 3 ? 1.0 : 0.0;
+    return std::max(1.0, std::min({columns - 2.0 * gap, double(std::lround(fraction * columns)),
+                                   double(std::lround(maxBodyLogicalPx * scale))}));
+}
 inline int capacityFor(int current, int required) {
     int capacity = std::max(6, current);
     while (capacity < required) capacity *= 2;
@@ -62,14 +67,11 @@ inline Body body(double columnLeft, double columnRight, double openY, double clo
     double bottom = std::max(openY, closeY) * scale;
     if (!snapX) {
         const double columns = right - left;
-        // Fade the gap between C2 (no gap) and C3 (one pixel per side),
-        // so the continuous width reaches each small-column rest width.
+        // Fade the gap between C2 (no gap) and C3 (one pixel per side)
+        // while the moving axis retains continuous edges.
         const double gapF = std::clamp(columns - 2.0, 0.0, 1.0);
-        const double wide = std::min(fraction * columns, maxBodyLogicalPx * scale);
-        const double atFifteen = std::min(15.0 * fraction, maxBodyLogicalPx * scale);
-        const double desired = columns <= 14.0 ? columns - 2.0 * gapF
-            : columns < 15.0 ? 12.0 + (columns - 14.0) * (atFifteen - 12.0) : wide;
-        const double width = std::max(1.0, std::min(columns - 2.0 * gapF, desired));
+        const double width = std::max(1.0, std::min({columns - 2.0 * gapF, fraction * columns,
+                                                     maxBodyLogicalPx * scale}));
         const double mid = (left + right) * 0.5;
         left = mid - width * 0.5;
         right = mid + width * 0.5;
@@ -77,10 +79,7 @@ inline Body body(double columnLeft, double columnRight, double openY, double clo
         left = std::round(left);
         right = std::round(right);
         const double columns = std::max(1.0, right - left);
-        const double gap = columns >= 3 ? 1.0 : 0.0;
-        const double desired = columns <= 14.0 ? columns - 2.0 * gap
-            : std::min(double(std::lround(fraction * columns)), double(std::lround(maxBodyLogicalPx * scale)));
-        const double width = std::max(1.0, std::min(columns - 2.0 * gap, desired));
+        const double width = snappedBodyWidth(columns, scale, fraction, maxBodyLogicalPx);
         // Opposite column/body parity has two equally close whole-pixel
         // positions. Choose the left one while keeping the requested width.
         left += std::floor((columns - width) * 0.5);
