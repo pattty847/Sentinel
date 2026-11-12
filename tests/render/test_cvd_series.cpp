@@ -125,3 +125,24 @@ TEST(CvdGutter, FlatPositiveNegativeAndZeroSamplesAreNotPaddedScaleEndpoints) {
     CvdGutterValues::format(0, text); EXPECT_STREQ(text, "0");
     CvdGutterValues::format(-.001, text); EXPECT_STREQ(text, "-<.01");
 }
+
+TEST(CvdStripLayout, ValuesTakePriorityAtEveryRowThreshold) {
+    for (const auto [height, rows] : {std::pair{20., 0}, {21., 1}, {39., 1},
+                                    {40., 2}, {58., 2}, {59., 3}, {77., 3}, {78., 3}}) {
+        const CvdStripLayout layout{height, {}};
+        EXPECT_EQ(layout.valueRows(), rows) << height;
+        EXPECT_EQ(layout.titleFits(), height >= 78) << height;
+    }
+}
+TEST(CvdStripLayout, LastUsesCurveMappingAndClampsClearOfOtherRows) {
+    const CvdStripLayout titled{100, {}};
+    EXPECT_DOUBLE_EQ(titled.lineY(.6), 52.4);
+    EXPECT_DOUBLE_EQ(titled.lastTop(.6) + 8.5, titled.lineY(.6));
+    EXPECT_DOUBLE_EQ(titled.lastTop(1), 21); // max row plus its gap
+    EXPECT_DOUBLE_EQ(titled.lastTop(0), 62); // stop above min row and its gap
+    const CvdStripLayout single{39, {}};
+    EXPECT_FALSE(single.titleFits());
+    EXPECT_DOUBLE_EQ(single.lastTop(.5) + 8.5, single.lineY(.5));
+    EXPECT_DOUBLE_EQ(single.lastTop(1), 2);
+    EXPECT_DOUBLE_EQ(single.lastTop(0), 20);
+}

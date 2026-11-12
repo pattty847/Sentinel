@@ -88,13 +88,9 @@ void CvdLayer::geometry(const ChartFrame& frame) {
     scale_ = current_->series.scale(frame.context.raster.drawnStartMs, frame.context.raster.drawnEndMs, current_->timeframeMs);
     values_ = CvdGutterValues::visible(current_->series, frame.context.raster.drawnStartMs,
                                       frame.context.raster.drawnEndMs, current_->timeframeMs);
-    const double stroke = std::min(capturedStyle_.linePx, strip_.height());
-    const double padding = std::min(capturedStyle_.paddingPx, (strip_.height() - stroke) * 0.25);
-    const double titleHeight = strip_.height() >= 2 * capturedStyle_.labelRowPx + 4 * padding
-        ? capturedStyle_.labelRowPx + 2 * padding : 0;
-    const auto y = [&](double value) {
-        return strip_.bottom() - stroke - padding - std::clamp(scale_.fraction(value), 0.0, 1.0) * (strip_.height() - titleHeight - stroke - 2 * padding);
-    };
+    const CvdStripLayout layout{strip_.height(), capturedStyle_};
+    const double stroke = layout.stroke();
+    const auto y = [&](double value) { return strip_.top() + layout.lineY(scale_.fraction(value)); };
     const double zero = y(0);
     quad(out, QRectF(strip_.left(), zero, strip_.width(), stroke), theme::line());
     const auto& cam = frame.context.raster;
@@ -155,7 +151,7 @@ void CvdLayer::addLabel(const char* text, const QRectF& box, const ChartTextAtla
         if (*c == ' ') { pen += g.advance * scale; continue; }
         ChartGlyphInstance glyph;
         glyph.rect = QRectF(box.left() + (pen + g.bounds.left() * scale - bounds.left()),
-                            box.top() + (g.bounds.top() * scale - bounds.top()),
+                            box.top() + (box.height() - bounds.height()) / 2 + (g.bounds.top() * scale - bounds.top()),
                             g.bounds.width() * scale, g.bounds.height() * scale);
         glyph.uv = g.uv; glyph.color = ChartLookSettings::footprintText();
         glyphs_.push_back(glyph); pen += g.advance * scale;
@@ -166,19 +162,23 @@ void CvdLayer::submitLabels(const ChartFrame&, LayerNodeContext& context) {
     if (!reserved_) reserved_ = context.text.reserve(ChartLookSettings::footprintText(), 128);
     glyphs_.clear();
     const double pad = capturedStyle_.paddingPx, label = capturedStyle_.labelRowPx;
-    if (strip_.height() >= 2 * label + 4 * pad)
+    const CvdStripLayout layout{strip_.height(), capturedStyle_};
+    if (layout.titleFits())
         addLabel(current_->label.data(), {strip_.left() + 4, strip_.top() + pad, strip_.width() - 8, label}, context.atlas);
-    if (values_.valid && gutter_.height() >= 3 * label + 4 * pad) {
+    if (values_.valid && layout.valueRows() > 0) {
         const auto box = gutter_.adjusted(4, pad, -4, -pad);
         char value[24];
-        CvdGutterValues::format(values_.max, value);
-        addLabel(value, {box.left(), box.top(), box.width(), label}, context.atlas);
-        CvdGutterValues::format(values_.min, value);
-        addLabel(value, {box.left(), box.bottom() - label, box.width(), label}, context.atlas);
-        CvdGutterValues::format(values_.last, value);
-        const double desired = box.bottom() - scale_.fraction(values_.last) * box.height() - label / 2;
-        const double top = std::clamp(desired, box.top() + label + pad, box.bottom() - 2 * label - pad);
-        addLabel(value, {box.left(), top, box.width(), label}, context.atlas);
+        if (layout.valueRows() >= 2) {
+            CvdGutterValues::format(values_.max, value);
+            addLabel(value, {box.left(), box.top(), box.width(), label}, context.atlas);
+            CvdGutterValues::format(values_.min, value);
+            addLabel(value, {box.left(), box.bottom() - label, box.width(), label}, context.atlas);
+        }
+        if (layout.valueRows() != 2) {
+            CvdGutterValues::format(values_.last, value);
+            const double top = strip_.top() + layout.lastTop(scale_.fraction(values_.last));
+            addLabel(value, {box.left(), top, box.width(), label}, context.atlas);
+        }
     }
     context.text.submitGlyphs(glyphs_, ChartTextRenderer::Priority::High);
 }

@@ -136,8 +136,8 @@ notation). Values round decimal half-up with carries across magnitude and suffix
 Suffixed values use three significant digits and trim trailing fractional zeros
 (including carries such as `999.6 → 1k`). Magnitudes rounding to one trillion or
 above use `>999B` to retain the width bound without understating the value.
-CVD extrema share this formatter, with a minus sign for negative values and `0`
-for exact zero or magnitudes below .01.
+CVD gutter min/max/last values share this formatter, with a minus sign for negative
+values and `0` for exact zero. Nonzero magnitudes below .01 use `<.01` or `-<.01`.
 
 Dust sides (below the quote threshold or below .01 base units) have no fill and
 22% text alpha. Other text is muted, or bright above 55% of the bar's maximum
@@ -191,10 +191,17 @@ The removed `none` value is rejected by both API routes; QML writes leave the
 current value unchanged. A persisted `none` is normalized to `visible` on load,
 including saved layouts.
 
-The semi-opaque strip overlays the bottom of the chart surface, leaving price mapping
-unchanged and excluding the time axis, price axis and ladder gutters. `area` fills to
-zero in green above and red below; `line` draws the cumulative curve. Min/max and reset
-labels use 13 px MSDF text within the strip, with labels omitted where the strip is too small to fit.
+The opaque `bg0` strip overlays the bottom of the chart surface and spans the plot,
+ladder gutter and price gutter, leaving price mapping unchanged and excluding the time
+axis. A 1 px `line` divider marks its top; price-axis labels stop above that edge.
+`area` fills to zero in green above and red below; `line` draws a 1.5 px cumulative curve.
+The price gutter shows maximum, minimum and last CVD values from visible samples,
+not the endpoints of the zero-inclusive plot scale. The last-value label follows the
+curve's vertical mapping, clamped to the gutter and clear of the extrema labels.
+Labels use 13 px MSDF text in 17 px rows with 2 px spacing: from 21 px strip height,
+show last only; from 40 px, show min/max; from 59 px, show all three. The reset title
+gets a separate plot band only from 78 px, after the three value rows fit. A label
+that exceeds the available width is omitted whole.
 The optional footer uses three 13 px rows (55 px including padding), docked above the
 strip or at the surface bottom when the strip is off. DELTA uses signed flow-bar
 delta with an explicit positive `+` (magnitudes below .01 show `0` without a pill),

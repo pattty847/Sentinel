@@ -1140,6 +1140,19 @@ TEST(CvdLayer, LabelsAreBoundedAndFreshDataFramesAllocateNothing) {
         box = box.united(glyphs[i].rect);
     }
     EXPECT_FALSE(maximum.intersects(last)); EXPECT_FALSE(minimum.intersects(last));
+    for (int height : {20, 21, 39, 40, 58, 59, 77, 78, 80}) {
+        SCOPED_TRACE(height);
+        layer.presentation().stripPx = height;
+        layer.sync(frame); layer.updateNodes(frame, context);
+        text.beginFrame(root.get(), nullptr, atlas);
+        layer.submitLabels(frame, context);
+        const int values = height >= 59 ? 9 : height >= 40 ? 5 : height >= 21 ? 4 : 0;
+        const int titleGlyphs = height >= 78 ? int(titleCount) : 0;
+        EXPECT_EQ(text.submittedGlyphs(), values + titleGlyphs);
+        for (const auto& glyph : layer.labelGlyphs())
+            EXPECT_TRUE(layer.strip().contains(glyph.rect) || layer.gutter().contains(glyph.rect));
+        text.endFrame();
+    }
     for (int i = 0; i < 2; ++i) {
         auto series = footprintSeries(); series.bars[0].bar.delta += i + 1;
         chart::CvdFeed::build(layer.mailbox().back(), series, footprintFrame(), chart::CvdReset::Visible, 4);
@@ -1528,5 +1541,59 @@ TEST(CvdLayer, PriceLabelRectsStopAboveStripAndReturnToFullHeightWhenHidden) {
         }
         EXPECT_GT(accepted, 0);
         if (stripHeight) EXPECT_EQ(belowStrip, 0); else EXPECT_GT(belowStrip, 0);
+    }
+}
+
+TEST(CvdLayer, LastLabelTracksCurveEndpointAndClampsClearOfExtrema) {
+    QTemporaryDir cache;
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error));
+    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
+    ChartTextAtlas atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 64; params.charset = " 0123456789.-CVD";
+    ASSERT_TRUE(atlas.build(params));
+    chart::CvdLayer layer;
+    layer.presentation().stripPx = 100;
+    auto frame = footprintChartFrame();
+    frame.context.surfaceBounds.setWidth(400); frame.context.itemBounds = frame.context.surfaceBounds;
+    frame.context.raster.drawnEndMs = 3000;
+    layer.sync(frame);
+    std::unique_ptr<QSGNode> root(layer.createContainer());
+    ChartTextRenderer text;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
+    for (int height : {39, 70, 100, 160}) {
+        for (double fraction : {0., .2, .4, .6, .8, 1.}) {
+            SCOPED_TRACE(height);
+            SCOPED_TRACE(fraction);
+            auto& snapshot = layer.mailbox().back();
+            snapshot.series.clear(); snapshot.timeframeMs = 1000; snapshot.reset = chart::CvdReset::Visible;
+            std::strcpy(snapshot.label.data(), "CVD");
+            snapshot.series.push(0, -10, 0, true);
+            snapshot.series.push(1000, 20, 0, true);
+            const double value = fraction * 20 - 10;
+            snapshot.series.push(2000, value - 10, 0, true);
+            layer.mailbox().post(); layer.presentation().stripPx = height;
+            layer.sync(frame); layer.updateNodes(frame, context);
+            text.beginFrame(root.get(), nullptr, atlas); layer.submitLabels(frame, context);
+            char formatted[24]; chart::CvdGutterValues::format(value, formatted);
+            const auto glyphs = layer.labelGlyphs();
+            const size_t count = std::strlen(formatted);
+            ASSERT_GE(glyphs.size(), count);
+            QRectF last;
+            for (const auto& glyph : glyphs.last(count)) last = last.united(glyph.rect);
+            const auto* vertices = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
+            // The final ribbon's second triangle starts at its endpoint (before stroke thickness).
+            const double endpoint = vertices[layer.vertexCount() - 3].y;
+            const double separation = height >= 59 ? 19 : 0;
+            const double low = layer.strip().top() + 2 + separation + 8.5;
+            const double high = layer.strip().bottom() - 2 - separation - 8.5;
+            EXPECT_NEAR(last.center().y(), std::clamp(endpoint, low, high), 1e-4);
+            for (const auto& glyph : glyphs.first(glyphs.size() - count))
+                EXPECT_FALSE(last.intersects(glyph.rect));
+            EXPECT_TRUE(layer.gutter().contains(last));
+            text.endFrame();
+        }
     }
 }
