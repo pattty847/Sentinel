@@ -324,6 +324,17 @@ void CandlestickOverlayItem::setWickWidth(int value) {
     if (m_wickWidth == value) return;
     m_wickWidth = value; markGeometryDirty(); emit appearanceChanged();
 }
+void CandlestickOverlayItem::setBodyFraction(double value) {
+    if (!std::isfinite(value)) return;
+    value = std::clamp(value, 0.3, 1.0);
+    if (m_bodyFraction == value) return;
+    m_bodyFraction = value; markGeometryDirty(); emit appearanceChanged();
+}
+void CandlestickOverlayItem::setMaxBodyPx(int value) {
+    value = std::clamp(value, 5, 120);
+    if (m_maxBodyPx == value) return;
+    m_maxBodyPx = value; markGeometryDirty(); emit appearanceChanged();
+}
 
 void CandlestickOverlayItem::connectCandleSignals() {
     if (!m_candleBuffer) {
@@ -649,8 +660,9 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         const double yOpen = mapping.priceToScreenY(c.open);
         const double yClose = mapping.priceToScreenY(c.close);
         const bool spine = footprintSpine && footprint->spineBar(frame.raster, double(c.timeStartMs));
-        auto body = candle_pixels::body(x, xEnd, yOpen, yClose, dpr, snap.x, snap.y);
-        if (spine) body.x = {float(x + 2), float(x + 8)};
+        auto body = candle_pixels::body(x, xEnd, yOpen, yClose, dpr, snap.x, snap.y,
+                                        m_bodyFraction, m_maxBodyPx);
+        if (spine) body.x = candle_pixels::footprintSpine(x);
         const float bodyX0 = body.x.lo, bodyX1 = body.x.hi;
         const float bodyY0 = body.y.lo, bodyY1 = body.y.hi;
         const float bodyWidth = bodyX1 - bodyX0;
@@ -682,7 +694,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
             addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, br, bg, bb, ba);
         } else if (isHollow && bullish && c.open != c.close) {
             // Hollow bullish: border outline only (4 quads)
-            const float bw = std::max(1.0f, bodyWidth * 0.12f);
+            const float bw = std::max(1.0f, std::min(bodyWidth * 0.12f, 3.0f));
             addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY0 + bw, br, bg, bb, ba); // top
             addQuad(bodyVerts, bodyX0, bodyY1 - bw, bodyX1, bodyY1, br, bg, bb, ba); // bottom
             addQuad(bodyVerts, bodyX0, bodyY0, bodyX0 + bw, bodyY1, br, bg, bb, ba); // left

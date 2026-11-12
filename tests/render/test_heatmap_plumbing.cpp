@@ -456,6 +456,20 @@ TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     ini.setValue("heatmap/budgets/cpuCeiling", 1);
     EXPECT_TRUE(store.loadBudgets(config.heatmap).valid());
 }
+TEST_F(HeatmapPlumbing, CandleBodyYamlDefaultsClampBeforeRendering) {
+    QTemporaryDir dir;
+    QFile yaml(dir.filePath("client.yaml"));
+    ASSERT_TRUE(yaml.open(QIODevice::WriteOnly));
+    yaml.write("heatmap:\n  candle_body_fraction: 2.0\n  candle_max_body_px: 999\n");
+    yaml.close();
+    ClientConfig config;
+    ASSERT_TRUE(ConfigLoader::loadClientConfig(yaml.fileName().toStdString(), &config));
+    QSettings ini(dir.filePath("test.ini"), QSettings::IniFormat);
+    HeatmapSettingsStore store(ini);
+    const auto settings = store.load("main", config.heatmap);
+    EXPECT_DOUBLE_EQ(settings.candleBodyFraction, 1.0);
+    EXPECT_EQ(settings.candleMaxBodyPx, 120);
+}
 
 TEST_F(HeatmapPlumbing, TopLevelServerIsIgnoredWithPathWarning) {
     QTemporaryDir dir;

@@ -41,6 +41,8 @@ struct HeatmapChartSettings {
     std::string candleWickColor = "auto"; // auto follows each candle's body color
     double candleBodyOpacity = 1;
     int candleWickWidth = 1; // device pixels
+    double candleBodyFraction = 0.85;
+    int candleMaxBodyPx = 71; // logical pixels
     // Cumulative volume delta strip; height in logical px, 0..400 (0 disables).
     bool flowFooter = false;
     int cvdStripPx = 0;

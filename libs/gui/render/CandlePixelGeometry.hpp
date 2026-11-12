@@ -7,8 +7,10 @@
 #include "ChartRaster.hpp"
 
 namespace candle_pixels {
-inline constexpr double kCandleMaxBodyLogicalPx = 13.0;
+inline constexpr double kCandleBodyFraction = 0.85;
+inline constexpr double kCandleMaxBodyLogicalPx = 71.0;
 struct Span { float lo, hi; };
+inline Span footprintSpine(double columnLeft) { return {float(columnLeft + 2), float(columnLeft + 8)}; }
 inline int capacityFor(int current, int required) {
     int capacity = std::max(6, current);
     while (capacity < required) capacity *= 2;
@@ -50,8 +52,11 @@ struct Body { Span x, y; };
 // Logical coordinates from the frame mapping. Snap only an axis that matches
 // its whole-pixel camera; the moving axis keeps continuous edges.
 inline Body body(double columnLeft, double columnRight, double openY, double closeY,
-                 double dpr, bool snapX = true, bool snapY = true) {
+                 double dpr, bool snapX = true, bool snapY = true,
+                 double fraction = kCandleBodyFraction, double maxBodyLogicalPx = kCandleMaxBodyLogicalPx) {
     const double scale = std::isfinite(dpr) && dpr > 0 ? dpr : 1.0;
+    fraction = std::isfinite(fraction) ? std::clamp(fraction, 0.3, 1.0) : kCandleBodyFraction;
+    maxBodyLogicalPx = std::isfinite(maxBodyLogicalPx) ? std::clamp(maxBodyLogicalPx, 5.0, 120.0) : kCandleMaxBodyLogicalPx;
     double left = columnLeft * scale, right = columnRight * scale;
     double top = std::min(openY, closeY) * scale;
     double bottom = std::max(openY, closeY) * scale;
@@ -60,7 +65,11 @@ inline Body body(double columnLeft, double columnRight, double openY, double clo
         // Fade the gap between C2 (no gap) and C3 (one pixel per side),
         // so the continuous width reaches each small-column rest width.
         const double gapF = std::clamp(columns - 2.0, 0.0, 1.0);
-        const double width = std::max(1.0, std::min(columns - 2.0 * gapF, kCandleMaxBodyLogicalPx * scale));
+        const double wide = std::min(fraction * columns, maxBodyLogicalPx * scale);
+        const double atFifteen = std::min(15.0 * fraction, maxBodyLogicalPx * scale);
+        const double desired = columns <= 14.0 ? columns - 2.0 * gapF
+            : columns < 15.0 ? 12.0 + (columns - 14.0) * (atFifteen - 12.0) : wide;
+        const double width = std::max(1.0, std::min(columns - 2.0 * gapF, desired));
         const double mid = (left + right) * 0.5;
         left = mid - width * 0.5;
         right = mid + width * 0.5;
@@ -69,8 +78,9 @@ inline Body body(double columnLeft, double columnRight, double openY, double clo
         right = std::round(right);
         const double columns = std::max(1.0, right - left);
         const double gap = columns >= 3 ? 1.0 : 0.0;
-        const double maxBody = std::max(1L, std::lround(kCandleMaxBodyLogicalPx * scale));
-        const double width = std::max(1.0, std::min(columns - 2.0 * gap, maxBody));
+        const double desired = columns <= 14.0 ? columns - 2.0 * gap
+            : std::min(double(std::lround(fraction * columns)), double(std::lround(maxBodyLogicalPx * scale)));
+        const double width = std::max(1.0, std::min(columns - 2.0 * gap, desired));
         // Opposite column/body parity has two equally close whole-pixel
         // positions. Choose the left one while keeping the requested width.
         left += std::floor((columns - width) * 0.5);

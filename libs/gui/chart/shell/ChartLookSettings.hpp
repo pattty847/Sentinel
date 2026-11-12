@@ -30,6 +30,8 @@ class ChartLookSettings : public QObject {
     Q_PROPERTY(QString candleWickColor READ candleWickColor NOTIFY candleAppearanceChanged)
     Q_PROPERTY(double candleBodyOpacity READ candleBodyOpacity NOTIFY candleAppearanceChanged)
     Q_PROPERTY(int candleWickWidth READ candleWickWidth NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(double candleBodyFraction READ candleBodyFraction NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(int candleMaxBodyPx READ candleMaxBodyPx NOTIFY candleAppearanceChanged)
 public:
     static QColor chartBackground() { return theme::chartBackground(); }
     static QColor footprintSellAggr() { return theme::negative(); }
@@ -53,6 +55,8 @@ public:
     QString candleWickColor() const { return candleWickColor_; }
     double candleBodyOpacity() const { return candleBodyOpacity_; }
     int candleWickWidth() const { return candleWickWidth_; }
+    double candleBodyFraction() const { return candleBodyFraction_; }
+    int candleMaxBodyPx() const { return candleMaxBodyPx_; }
     int tpoTimeframeMs() const { return tpoTimeframeMs_; }
     int tpoSessionType() const { return tpoSessionType_; }
     int tpoSessions() const;
@@ -100,6 +104,8 @@ private:
     QString candleWickColor_ = "auto";
     double candleBodyOpacity_ = 1;
     int candleWickWidth_ = 1;
+    double candleBodyFraction_ = 0.85;
+    int candleMaxBodyPx_ = 71;
     int tpoTimeframeMs_ = 1800000;
     int tpoSessionType_ = 4;
     tpo::Theme tpoConfigTheme_ = tpo::Theme::Rainbow;

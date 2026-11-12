@@ -129,6 +129,8 @@ Rectangle {
         wickColor: unifiedGridRenderer.candles.candleWickColor
         bodyOpacity: unifiedGridRenderer.candles.candleBodyOpacity
         wickWidth: unifiedGridRenderer.candles.candleWickWidth
+        bodyFraction: unifiedGridRenderer.candles.candleBodyFraction
+        maxBodyPx: unifiedGridRenderer.candles.candleMaxBodyPx
         // Candles go behind the TPO (it is slightly transparent) when no heatmap or footprint would cover them.
         z: unifiedGridRenderer.layers.tpoLayerEnabled && !unifiedGridRenderer.layers.heatmapLayerEnabled
            && !unifiedGridRenderer.layers.footprintLayerEnabled ? 0.5 : 2

@@ -7,6 +7,8 @@ heatmap:
   gamma: 1.05
   contrast: 1.15
   shader_floor: 0.01
+  candle_body_fraction: 0.85 # Body share of a column (0.3..1.0)
+  candle_max_body_px: 71     # Maximum body width in logical pixels (5..120)
 
   # Initial viewport (client only)
   initial_column_px: 8      # Time zoom on connect: screen pixels per heatmap column
