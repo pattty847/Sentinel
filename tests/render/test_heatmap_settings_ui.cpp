@@ -718,7 +718,7 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
             const double gapF = std::clamp(mid.colPxF - 2.0, 0.0, 1.0);
             const double c = mid.colPxF;
             const double glideWidth = std::max(1.0, std::min({c - 2.0 * gapF,
-                candle_pixels::kCandleBodyFraction * c,
+                std::max(candle_pixels::kCandleBodyFraction * c, std::min(c, 2.0)),
                 candle_pixels::kCandleMaxBodyLogicalPx * dpr}));
             EXPECT_NEAR(v[0].x * dpr, mid.xDev(time + tf * 0.5) - glideWidth * 0.5, 1e-4);
             EXPECT_NEAR(v[2].x * dpr, mid.xDev(time + tf * 0.5) + glideWidth * 0.5, 1e-4);
@@ -751,13 +751,17 @@ TEST(CandleStyleTest, BodyWidthIsContinuousDuringTimeGlide) {
             return candle_pixels::body(left / dpr, (left + c) / dpr, 17.2 / dpr, 23.1 / dpr, dpr, false, true);
         };
         const auto atTwo = sample(2.0);
-        EXPECT_NEAR((atTwo.x.hi - atTwo.x.lo) * dpr, 2 * candle_pixels::kCandleBodyFraction, 1e-5);
+        const auto restTwo = candle_pixels::body(left / dpr, (left + 2.0) / dpr,
+                                                 17.2 / dpr, 23.1 / dpr, dpr, true, true);
+        EXPECT_NEAR((atTwo.x.hi - atTwo.x.lo) * dpr,
+                    (restTwo.x.hi - restTwo.x.lo) * dpr, 1e-5)
+            << "C2 has no gap in either the continuous or rest frame";
         for (double columns : {1.0, 2.0, 2.001, 2.7, 3.0, 3.01, 14.7, 15.0, 15.01, 27.7, 28.0, 28.01, 32.37, 60.2}) {
             SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
             const auto b = sample(columns);
             const double gapF = std::clamp(columns - 2.0, 0.0, 1.0);
             const double width = std::max(1.0, std::min({columns - 2.0 * gapF,
-                columns * candle_pixels::kCandleBodyFraction,
+                std::max(columns * candle_pixels::kCandleBodyFraction, std::min(columns, 2.0)),
                 candle_pixels::kCandleMaxBodyLogicalPx * dpr}));
             EXPECT_NEAR(b.x.lo * dpr, left + (columns - width) * 0.5, 1e-5);
             EXPECT_NEAR(b.x.hi * dpr, left + (columns + width) * 0.5, 1e-5);
@@ -766,6 +770,25 @@ TEST(CandleStyleTest, BodyWidthIsContinuousDuringTimeGlide) {
             const auto next = sample(columns + 0.001);
             EXPECT_LE(std::abs(next.x.lo - b.x.lo) * dpr, 0.00101);
             EXPECT_LE(std::abs(next.x.hi - b.x.hi) * dpr, 0.00101);
+        }
+    }
+}
+
+TEST(CandleStyleTest, SmallColumnWidthsMatchWhenTimeAxisLands) {
+    for (double dpr : {1.0, 2.0}) {
+        for (double fraction : {0.85, 0.3}) {
+            for (int columns : {1, 2, 3}) {
+                SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr
+                                                  << " f=" << fraction);
+                const double left = 11.31 / dpr;
+                const double right = (11.31 + columns) / dpr;
+                const auto free = candle_pixels::body(left, right, 10, 20, dpr,
+                                                       false, true, fraction, 71);
+                const auto rest = candle_pixels::body(left, right, 10, 20, dpr,
+                                                       true, true, fraction, 71);
+                EXPECT_NEAR((free.x.hi - free.x.lo) * dpr,
+                            (rest.x.hi - rest.x.lo) * dpr, 1e-5);
+            }
         }
     }
 }

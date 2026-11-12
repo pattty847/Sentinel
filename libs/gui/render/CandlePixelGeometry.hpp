@@ -13,7 +13,8 @@ struct Span { float lo, hi; };
 inline Span footprintSpine(double columnLeft) { return {float(columnLeft + 2), float(columnLeft + 8)}; }
 inline double snappedBodyWidth(double columns, double scale, double fraction, double maxBodyLogicalPx) {
     const double gap = columns >= 3 ? 1.0 : 0.0;
-    return std::max(1.0, std::min({columns - 2.0 * gap, double(std::lround(fraction * columns)),
+    const double fractionWidth = std::max(double(std::lround(fraction * columns)), std::min(columns, 2.0));
+    return std::max(1.0, std::min({columns - 2.0 * gap, fractionWidth,
                                    double(std::lround(maxBodyLogicalPx * scale))}));
 }
 inline int capacityFor(int current, int required) {
@@ -70,7 +71,8 @@ inline Body body(double columnLeft, double columnRight, double openY, double clo
         // Fade the gap between C2 (no gap) and C3 (one pixel per side)
         // while the moving axis retains continuous edges.
         const double gapF = std::clamp(columns - 2.0, 0.0, 1.0);
-        const double width = std::max(1.0, std::min({columns - 2.0 * gapF, fraction * columns,
+        const double fractionWidth = std::max(fraction * columns, std::min(columns, 2.0));
+        const double width = std::max(1.0, std::min({columns - 2.0 * gapF, fractionWidth,
                                                      maxBodyLogicalPx * scale}));
         const double mid = (left + right) * 0.5;
         left = mid - width * 0.5;
