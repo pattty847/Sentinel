@@ -1054,10 +1054,12 @@ TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {
     auto *liveTip = shell->findChild<QObject *>("followLiveToolTip");
     ASSERT_TRUE(renderer && price && live);
     ASSERT_NE(liveTip, nullptr);
-    EXPECT_EQ(shell->property("followLiveShortcutKey").toInt(), Qt::Key_A);
-    EXPECT_EQ(shell->property("followLiveShortcutLabel").toString(), QStringLiteral("A"));
+    EXPECT_EQ(shell->property("followLiveShortcutKey").toInt(), Qt::Key_L);
+    EXPECT_EQ(shell->property("followLiveAliasKey").toInt(), Qt::Key_A);
+    EXPECT_EQ(shell->property("followLiveShortcutLabel").toString(), QStringLiteral("L"));
+    EXPECT_EQ(shell->property("followLiveAliasLabel").toString(), QStringLiteral("A"));
     EXPECT_EQ(liveTip->property("text").toString(),
-              QStringLiteral("A · Follow live time: keep newest data in view"));
+              QStringLiteral("L · Follow live time: keep newest data in view"));
     renderer->view()->setAutoPriceScale(false);
     renderer->view()->enableAutoScroll(false);
     const auto press = [](QObject *target, int key) {
@@ -1073,8 +1075,10 @@ TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {
     press(shell.get(), Qt::Key_P);
     EXPECT_FALSE(renderer->view()->autoPriceScale());
     EXPECT_TRUE(renderer->view()->autoScrollEnabled());
-    press(shell.get(), Qt::Key_A);
+    press(shell.get(), Qt::Key_L);
     EXPECT_FALSE(renderer->view()->autoScrollEnabled());
+    press(shell.get(), Qt::Key_A);
+    EXPECT_TRUE(renderer->view()->autoScrollEnabled());
     for (const char *name : {"priceAxisControl", "timeAxisControl"}) {
         auto *axis = shell->findChild<QQuickItem *>(name);
         ASSERT_TRUE(axis);
