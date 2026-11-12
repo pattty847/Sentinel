@@ -69,6 +69,28 @@ Trade tick(const char* symbol, double price) {
     return {std::chrono::system_clock::now(), symbol, "1", AggressorSide::Buy, price, 1.0};
 }
 
+TEST(PaperTicket, DirectionButtonsShareColoursAndWidths) {
+    PaperTradingDock dock;
+    dock.resize(640, 800);
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* buyMarket = dock.findChild<QPushButton*>("paperBuyMarket");
+    auto* sellMarket = dock.findChild<QPushButton*>("paperSellMarket");
+    auto* buyLimit = dock.findChild<QPushButton*>("paperBuyLimit");
+    auto* sellLimit = dock.findChild<QPushButton*>("paperSellLimit");
+    ASSERT_TRUE(buyMarket && sellMarket && buyLimit && sellLimit);
+    EXPECT_TRUE(buyMarket->styleSheet().contains("#2ebd85"));
+    EXPECT_TRUE(buyLimit->styleSheet().contains("#2ebd85"));
+    EXPECT_TRUE(sellMarket->styleSheet().contains("#f6465d"));
+    EXPECT_TRUE(sellLimit->styleSheet().contains("#f6465d"));
+    EXPECT_TRUE(buyMarket->styleSheet().contains("rgba(46, 189, 133, 64)"));
+    EXPECT_TRUE(buyLimit->styleSheet().contains("background-color: transparent"));
+    EXPECT_EQ(buyMarket->width(), sellMarket->width());
+    EXPECT_EQ(buyMarket->width(), buyLimit->width());
+    EXPECT_EQ(sellMarket->width(), sellLimit->width());
+    EXPECT_EQ(buyMarket->height(), 28);
+}
+
 TEST(PaperTicket, EditedLimitSurvivesTradesFocusQuantityAndButtons) {
     Source source;
     PaperTradingDock dock;

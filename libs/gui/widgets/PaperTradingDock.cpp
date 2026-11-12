@@ -1,5 +1,6 @@
 #include "../datasources/RemoteGridDataSource.hpp"
 #include "PaperTradingDock.hpp"
+#include "themes/ThemePalette.hpp"
 #include "../models/PriceUnits.hpp"
 #include "../render/PnlCurveItem.hpp"
 #include "../datasources/IGridDataSource.hpp"
@@ -261,24 +262,43 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     m_sellMarketBtn = new QPushButton(QStringLiteral("Sell Mkt"), ticketFrame);
     m_buyLimitBtn = new QPushButton(QStringLiteral("Buy Limit"), ticketFrame);
     m_sellLimitBtn = new QPushButton(QStringLiteral("Sell Limit"), ticketFrame);
+    m_buyMarketBtn->setObjectName(QStringLiteral("paperBuyMarket"));
+    m_sellMarketBtn->setObjectName(QStringLiteral("paperSellMarket"));
     m_buyLimitBtn->setObjectName(QStringLiteral("paperBuyLimit"));
     m_sellLimitBtn->setObjectName(QStringLiteral("paperSellLimit"));
     m_flattenBtn = new QPushButton(QStringLiteral("Flatten"), ticketFrame);
     m_cancelAllBtn = new QPushButton(QStringLiteral("Cancel All"), ticketFrame);
 
-    m_buyMarketBtn->setStyleSheet("QPushButton { background: #143f8f; color: white; padding: 4px 10px; }");
-    m_sellMarketBtn->setStyleSheet("QPushButton { background: #7a2a1f; color: white; padding: 4px 10px; }");
-    const QString limitDisabledStyle = QStringLiteral(
-        " QPushButton:disabled { background: #2A2A2A; color: #666; border-color: #333; }");
-    m_buyLimitBtn->setStyleSheet(QStringLiteral(
-        "QPushButton { background: #1a472a; color: #7dff9b; padding: 4px 10px; }") + limitDisabledStyle);
-    m_sellLimitBtn->setStyleSheet(QStringLiteral(
-        "QPushButton { background: #55311a; color: #ffcc80; padding: 4px 10px; }") + limitDisabledStyle);
+    const auto orderStyle = [](const QColor& side, bool market) {
+        const QString color = side.name();
+        const QString fill = market
+            ? QStringLiteral("rgba(%1, %2, %3, 64)").arg(side.red()).arg(side.green()).arg(side.blue())
+            : QStringLiteral("transparent");
+        return QStringLiteral(
+            "QPushButton { background-color: %1; color: %2; border: 1px solid %2; "
+            "border-radius: 3px; padding: 3px 8px; }"
+            "QPushButton:hover { background-color: rgba(%3, %4, %5, 96); }"
+            "QPushButton:pressed { background-color: rgba(%3, %4, %5, 128); }"
+            "QPushButton:disabled { background-color: transparent; color: #6E7580; border-color: #2B3138; }")
+            .arg(fill, color).arg(side.red()).arg(side.green()).arg(side.blue());
+    };
+    m_buyMarketBtn->setStyleSheet(orderStyle(theme::positive(), true));
+    m_buyLimitBtn->setStyleSheet(orderStyle(theme::positive(), false));
+    m_sellMarketBtn->setStyleSheet(orderStyle(theme::negative(), true));
+    m_sellLimitBtn->setStyleSheet(orderStyle(theme::negative(), false));
 
-    ticketGrid->addWidget(m_buyMarketBtn, 2, 0);
-    ticketGrid->addWidget(m_sellMarketBtn, 2, 1);
-    ticketGrid->addWidget(m_buyLimitBtn, 2, 2);
-    ticketGrid->addWidget(m_sellLimitBtn, 2, 3);
+    auto* orderGrid = new QGridLayout;
+    orderGrid->setContentsMargins(0, 0, 0, 0);
+    orderGrid->setSpacing(4);
+    orderGrid->setColumnStretch(0, 1);
+    orderGrid->setColumnStretch(1, 1);
+    for (auto* button : {m_buyMarketBtn, m_sellMarketBtn, m_buyLimitBtn, m_sellLimitBtn})
+        button->setFixedHeight(28);
+    orderGrid->addWidget(m_buyMarketBtn, 0, 0);
+    orderGrid->addWidget(m_sellMarketBtn, 0, 1);
+    orderGrid->addWidget(m_buyLimitBtn, 1, 0);
+    orderGrid->addWidget(m_sellLimitBtn, 1, 1);
+    ticketGrid->addLayout(orderGrid, 2, 0, 1, 4);
     ticketGrid->addWidget(m_flattenBtn, 3, 0, 1, 2);
     ticketGrid->addWidget(m_cancelAllBtn, 3, 2, 1, 2);
 
