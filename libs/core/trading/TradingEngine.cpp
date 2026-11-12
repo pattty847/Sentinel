@@ -60,7 +60,7 @@ void TradingEngine::appendRiskUpdate(TradingResult& out, const std::string& symb
 }
 
 bool TradingEngine::clearAttachedRiskIfPresent(TradingResult& out, const std::string& symbol) {
-    m_rejectedRiskMarkBySymbol.erase(symbol);
+    m_rejectedRiskSymbols.erase(symbol);
     auto it = m_attachedRiskBySymbol.find(symbol);
     if (it == m_attachedRiskBySymbol.end()) {
         return false;
@@ -163,11 +163,6 @@ TradingResult TradingEngine::onTick(const std::string& symbol, double lastTradeP
     if (!std::isfinite(lastTradePrice) || lastTradePrice <= 0.0) {
         return out;
     }
-    if (auto it = m_rejectedRiskMarkBySymbol.find(symbol);
-        it != m_rejectedRiskMarkBySymbol.end() && it->second != lastTradePrice) {
-        m_rejectedRiskMarkBySymbol.erase(it);
-    }
-
     // Mark-to-market position update (no fill)
     {
         auto pos = m_positions.markToMarket(symbol, lastTradePrice);
@@ -388,7 +383,7 @@ TradingResult TradingEngine::handleCancelAll(const TradeCommand& command) {
         appendRiskUpdate(out, symbol, AttachedRiskState{});
     }
     m_attachedRiskBySymbol.clear();
-    m_rejectedRiskMarkBySymbol.clear();
+    m_rejectedRiskSymbols.clear();
     return out;
 }
 
@@ -452,7 +447,7 @@ TradingResult TradingEngine::handleSetAttachedRisk(const TradeCommand& command) 
         previous->second.takeProfitPrice != next.takeProfitPrice ||
         previous->second.hasStopLoss != next.hasStopLoss ||
         previous->second.stopLossPrice != next.stopLossPrice) {
-        m_rejectedRiskMarkBySymbol.erase(command.symbol);
+        m_rejectedRiskSymbols.erase(command.symbol);
     }
     m_attachedRiskBySymbol[command.symbol] = next;
     appendRiskUpdate(out, command.symbol, next);
@@ -479,22 +474,29 @@ TradingResult TradingEngine::handleTriggeredRiskExit(const std::string& symbol,
     if (!tpTriggered && !slTriggered) {
         return out;
     }
-    if (m_rejectedRiskMarkBySymbol.find(symbol) != m_rejectedRiskMarkBySymbol.end()) {
-        return out;
-    }
-
     const OrderSide exitSide = isLong ? OrderSide::Sell : OrderSide::Buy;
-    const double fillPrice = tpTriggered
+    bool exitAtTakeProfit = tpTriggered;
+    double fillPrice = tpTriggered
         ? risk.takeProfitPrice
         : m_execution.fillPrice(lastTradePrice, exitSide);
-    if (!std::isfinite(fillPrice) || fillPrice <= 0.0) {
-        m_rejectedRiskMarkBySymbol.emplace(symbol, lastTradePrice);
-        sLog_Warning("paper risk exit rejected: symbol=" << symbol << " trigger="
-                     << (tpTriggered ? "take_profit" : "stop_loss")
-                     << " mark=" << lastTradePrice << " fill=" << fillPrice
-                     << " reason=invalid_fill_price");
-        return rejected("invalid_fill_price");
+    if ((!std::isfinite(fillPrice) || fillPrice <= 0.0) && slTriggered && tpTriggered) {
+        const double stopFillPrice = m_execution.fillPrice(lastTradePrice, exitSide);
+        if (std::isfinite(stopFillPrice) && stopFillPrice > 0.0) {
+            exitAtTakeProfit = false;
+            fillPrice = stopFillPrice;
+        }
     }
+    if (!std::isfinite(fillPrice) || fillPrice <= 0.0) {
+        if (m_rejectedRiskSymbols.insert(symbol).second) {
+            sLog_Warning("paper risk exit rejected: symbol=" << symbol << " trigger="
+                         << (tpTriggered ? "take_profit" : "stop_loss")
+                         << " mark=" << lastTradePrice << " fill=" << fillPrice
+                         << " reason=invalid_fill_price");
+            return rejected("invalid_fill_price");
+        }
+        return out;
+    }
+    m_rejectedRiskSymbols.erase(symbol);
 
     Order exitOrder;
     exitOrder.id = nextOrderId();
@@ -503,7 +505,7 @@ TradingResult TradingEngine::handleTriggeredRiskExit(const std::string& symbol,
     exitOrder.qty = std::abs(position.netQty);
     exitOrder.algoId.clear();
 
-    if (tpTriggered) {
+    if (exitAtTakeProfit) {
         exitOrder.orderType = OrderType::Limit;
         exitOrder.limitPrice = risk.takeProfitPrice;
     } else {

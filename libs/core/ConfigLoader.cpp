@@ -192,7 +192,17 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
         if (serverRoot["trading"]) {
             auto trading = serverRoot["trading"];
             readScalar(trading, "mode", cfg.trading.mode);
-            readScalar(trading, "slippage_bps", cfg.trading.slippageBps);
+            double slippageBps = cfg.trading.slippageBps;
+            if (readScalar(trading, "slippage_bps", slippageBps)) {
+                if (std::isfinite(slippageBps) && slippageBps >= 0.0 && slippageBps < 10000.0) {
+                    cfg.trading.slippageBps = slippageBps;
+                } else {
+                    cfg.trading.slippageBps = ServerConfig{}.trading.slippageBps;
+                    sLog_Warning("Ignored trading.slippage_bps=" << slippageBps
+                                 << ": expected finite value in [0, 10000); using default="
+                                 << cfg.trading.slippageBps);
+                }
+            }
         }
         if (serverRoot["tls"]) {
             auto tls = serverRoot["tls"];

@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace trading {
@@ -80,7 +81,7 @@ private:
     PositionManager m_positions;
     PaperExecutionAdapter m_execution;
     std::unordered_map<std::string, AttachedRiskState> m_attachedRiskBySymbol;
-    std::unordered_map<std::string, double> m_rejectedRiskMarkBySymbol;
+    std::unordered_set<std::string> m_rejectedRiskSymbols;
 };
 
 TradeCommand parseTradeCommandJson(const std::string& raw);
