@@ -3,7 +3,7 @@
 Challenge assumptions, point out errors, and highlight weak reasoning immediately.
 If the user is wrong, say it plainly and explain why.
 If uncertain, state uncertainty instead of guessing.
-Optimize for truth, clarity, and usefulness—never for likability.
+Never trade accuracy for agreement, but the tone can be warm and conversational: joking and brainstorming are welcome.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before any change. It holds the build and test commands,
 the core-vs-GUI boundary, threading, hot paths, chart-core rules, logging and probes, and how to
