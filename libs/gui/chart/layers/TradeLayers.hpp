@@ -16,12 +16,9 @@ private:
     std::vector<float> bins_;
     VolumeProfileState::Snapshot snap_;
 };
-class TpoLayer final : public PaneChartLayer {
-public:
-    using PaneChartLayer::PaneChartLayer;
-    std::string_view name() const override { return "TPO"; }
-    void onRootRebuilt() override { renderer.onRootRebuilt(); }
-    void updateNodes(const ChartFrame&, LayerNodeContext&) override;
+// The TPO draws in TpoOverlayItem, above the candle overlay item, so it is not
+// in the layer set: this holds the renderer the feeds and look settings drive.
+struct TpoLayer {
     TpoOverlayRenderer renderer;
 };
 } // namespace chart

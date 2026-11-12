@@ -129,9 +129,16 @@ Rectangle {
         wickColor: unifiedGridRenderer.candles.candleWickColor
         bodyOpacity: unifiedGridRenderer.candles.candleBodyOpacity
         wickWidth: unifiedGridRenderer.candles.candleWickWidth
-        // Candles go behind the TPO (it is slightly transparent) when no heatmap or footprint would cover them.
-        z: unifiedGridRenderer.layers.tpoLayerEnabled && !unifiedGridRenderer.layers.heatmapLayerEnabled
-           && !unifiedGridRenderer.layers.footprintLayerEnabled ? 0.5 : 2
+        z: 2
+    }
+
+    // The TPO sits above the candles (they show through its slight transparency)
+    // and below trade bubbles drawn above candles.
+    TpoOverlayItem {
+        objectName: "tpoOverlay"
+        anchors.fill: unifiedGridRenderer
+        chart: unifiedGridRenderer
+        z: 2.3
     }
 
     TradeBubbleOverlayItem {

@@ -249,12 +249,13 @@ settings (keys `theme`, `reach` and `<element>.color|opacity|visible|width`). El
 (fill opacity, default 95%, and the gap between cells, default 1 px from 6 px cells), `letters`
 (on; off draws blocks), `outsideVa` (rows outside the 70% value area keep 55% brightness),
 `valueArea` (an optional band behind the value area), the level lines `poc`, `vah`, `val`, `ibh`,
-`ibl` (IB = the session's first hour), and `tags` (level tags at the plot's right edge for the
-newest session). The POC row and line default to neutral white. Level lines sit under the
+`ibl` (IB = the high and low of the session's first hour on the trade grid's own price levels, so
+zoom never moves it; with brackets longer than an hour, or not dividing it, IBH/IBL are not
+drawn), and `tags` (level tags at the plot's right edge for the newest session on screen). The POC row and line default to neutral white. Level lines sit under the
 cells and reach across the profile (`reach: profile`) or the whole session (`session`).
 Presets: `letters` (default), `blocks` (letters off), `extended` (lines across the session) and
-`indigo` (the indigo theme). With TPO on and no heatmap or footprint, candles draw behind the
-profile. Reset in the TPO tab forgets the saved style. `m1` needs a server
+`indigo` (the indigo theme). The TPO always draws above the candles (heatmap/footprint, then
+candles, then TPO). Reset in the TPO tab forgets the saved style. `m1` needs a server
 that accepts session type 6.
 
 ## Related documentation

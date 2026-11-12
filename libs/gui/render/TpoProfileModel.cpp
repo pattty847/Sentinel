@@ -175,8 +175,8 @@ ValueArea computeValueArea(const std::vector<int>& counts, double fraction) {
 
 int initialBalancePeriods(int64_t periodMs) {
     constexpr int64_t kHourMs = 3'600'000;
-    if (periodMs <= 0) return 1;
-    return static_cast<int>(std::max<int64_t>(1, kHourMs / periodMs));
+    if (periodMs <= 0 || periodMs > kHourMs || kHourMs % periodMs != 0) return 0;
+    return static_cast<int>(kHourMs / periodMs);
 }
 
 void ProfileRows::build(const std::vector<std::vector<int>>& rowsByPeriod,
@@ -213,8 +213,10 @@ void ProfileRows::build(const std::vector<std::vector<int>>& rowsByPeriod,
         for (const int row : rowsByPeriod[static_cast<size_t>(p)]) {
             const int r = static_cast<int>(floorDiv(topAbs - row - 1, m_group) - minG);
             if (p < ibPeriods) {
-                m_ib.low = m_ib.low < 0 ? r : std::min(m_ib.low, r);
-                m_ib.high = std::max(m_ib.high, r);
+                const int64_t level = topAbs - row - 1;
+                m_ib.lowAbs = m_ib.present ? std::min(m_ib.lowAbs, level) : level;
+                m_ib.highAbs = m_ib.present ? std::max(m_ib.highAbs, level) : level;
+                m_ib.present = true;
             }
             uint64_t& bits = m_bits[static_cast<size_t>(r) * m_words + word];
             if (!(bits & mask)) {
@@ -241,36 +243,34 @@ const Element& levelElement(const StyleModel& style, Level level) {
     return style.*kFields[static_cast<int>(level)];
 }
 
-LevelLines levelLines(const ProfileRows& profile, const StyleModel& style, int64_t topAbs, double basePx) {
+LevelLines levelLines(const ProfileRows& profile, const StyleModel& style) {
     LevelLines out;
-    const double cellH = basePx * profile.group();
-    auto rowTop = [&](int row) {
-        return static_cast<double>(topAbs - (profile.minGroup() + row + 1) * profile.group()) * basePx;
-    };
-    auto add = [&](Level level, int row, double offset) {
-        if (row < 0 || !levelElement(style, level).visible) return;
-        out.lines[static_cast<size_t>(out.count++)] = {level, rowTop(row) + offset};
+    const double group = profile.group();
+    auto rowBottom = [&](int row) { return static_cast<double>(profile.minGroup() + row) * group; };
+    auto add = [&](Level level, double ticks) {
+        if (!levelElement(style, level).visible) return;
+        out.lines[static_cast<size_t>(out.count++)] = {level, ticks};
     };
     const ValueArea& va = profile.valueArea();
     const InitialBalance& ib = profile.initialBalance();
     if (va.valid()) {
-        add(Level::Poc, va.poc, cellH * 0.5);
-        add(Level::Vah, va.high, 0.0);
-        add(Level::Val, va.low, cellH);
+        add(Level::Poc, rowBottom(va.poc) + group * 0.5);
+        add(Level::Vah, rowBottom(va.high) + group);
+        add(Level::Val, rowBottom(va.low));
     }
     if (ib.valid()) {
-        add(Level::Ibh, ib.high, 0.0);
-        add(Level::Ibl, ib.low, cellH);
+        add(Level::Ibh, static_cast<double>(ib.highAbs + 1));
+        add(Level::Ibl, static_cast<double>(ib.lowAbs));
     }
     return out;
 }
 
-unsigned placeTags(const LevelLines& lines, double offsetY, double chipHeight, double top, double bottom) {
+unsigned placeTags(const std::array<double, 5>& ys, int count, double chipHeight, double top, double bottom) {
     unsigned kept = 0;
     std::array<double, 5> placed{};
     int placedCount = 0;
-    for (int i = 0; i < lines.count; ++i) {
-        const double y = lines.lines[static_cast<size_t>(i)].y + offsetY;
+    for (int i = 0; i < count; ++i) {
+        const double y = ys[static_cast<size_t>(i)];
         if (!std::isfinite(y) || y - chipHeight * 0.5 < top || y + chipHeight * 0.5 > bottom) continue;
         bool clear = true;
         for (int k = 0; k < placedCount; ++k) clear = clear && std::abs(placed[static_cast<size_t>(k)] - y) >= chipHeight;

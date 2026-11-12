@@ -7,7 +7,9 @@
 
 #include <QByteArray>
 #include <QRectF>
+#include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -68,6 +70,9 @@ public:
     TpoOverlayRenderer();
     ~TpoOverlayRenderer();
 
+    /// GUI thread: called after every enqueue() or setStyle(), so the item that
+    /// draws the TPO can schedule a frame.
+    void setChangeListener(std::function<void()> listener);
     /// Thread-safe enqueue (GUI thread).
     void enqueue(PendingUpload upload);
     /// Thread-safe style change (GUI thread). Applied on the next render.
@@ -85,6 +90,22 @@ public:
                 bool atlasReady,
                 const chart_raster::RasterCamera& camera, double dpr, bool snapX, bool snapY,
                 const QRectF& surfaceBounds);
+
+    // Test access (render thread state, read after render()).
+    struct TagView {
+        int count = 0;
+        std::array<tpo::Level, 5> levels{};
+        std::array<double, 5> centreY{};  // chip centres, item coordinates
+        int64_t sessionStartMs = 0;
+    };
+    const TagView& tagsForTest() const { return m_tagView; }
+    struct SessionNodes {
+        const QSGTransformNode* cells = nullptr;
+        const QSGGeometryNode* cellGeometry = nullptr;
+        const QSGTransformNode* levels = nullptr;
+        const QSGGeometryNode* levelGeometry = nullptr;
+    };
+    SessionNodes sessionNodesForTest(int64_t sessionStartMs) const;
 
 private:
     struct LayoutKey {
@@ -119,7 +140,6 @@ private:
         // profile (Profile reach) or the session start (Session reach).
         QSGTransformNode* levelTransform = nullptr;
         QSGGeometryNode* levels = nullptr;
-        tpo::LevelLines lines;
         ChartTextNode* lightText = nullptr;
         ChartTextNode* darkText = nullptr;
         int cellCapacity = 0;
@@ -143,16 +163,19 @@ private:
     };
 
     struct TagKey {
-        tpo::LevelLines lines;
+        int count = 0;
+        std::array<tpo::Level, 5> levels{};
+        std::array<double, 5> ys{};  // line screen y, item coordinates
+        int64_t sessionStartMs = 0;
         tpo::StyleModel look;
-        double offsetY = 0.0;
         QRectF bounds;
         bool operator==(const TagKey&) const = default;
     };
 
     void ensureProfile(Session& session, int64_t topAbs, int group);
     void rebuildLevels(Session& session, const LayoutKey& key, int64_t topAbs, double basePx);
-    void updateTags(const ChartTextAtlas& atlas, bool textAvailable, double offsetY, const QRectF& bounds);
+    TagKey tagKey(const Session* tagged, const TimeAxisMapping& mapping, bool metrics, const QRectF& bounds) const;
+    void updateTags(const ChartTextAtlas& atlas, const TagKey& key);
     int chooseRowGroup(double basePx, double pxPerMs, int64_t topAbs, const Style& style);
     void applyUploads(std::vector<PendingUpload>& uploads, int maxSessions);
     void clearSessions();
@@ -185,7 +208,9 @@ private:
     ChartTextNode* m_tagDark = nullptr;
     std::vector<ChartGlyphInstance> m_tagLightGlyphs, m_tagDarkGlyphs;
     TagKey m_tagKey;
+    TagView m_tagView;
     bool m_hasTags = false;
+    std::function<void()> m_changed;
     QRectF m_clipRect;
     GroupKey m_groupKey;
     int m_group = 1;

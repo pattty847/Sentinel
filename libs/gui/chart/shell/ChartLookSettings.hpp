@@ -78,6 +78,7 @@ public:
     // Forgets the saved style and returns to the default preset with the configured theme.
     void resetTpoLook();
     void setTpoStyleStore(std::shared_ptr<TpoStyleStore> store);
+    ChartLayers& layers() const { return layers_; }
     void applyClientConfig(const ClientConfig& config, ChartViewController& view, AxisTextService* axes);
     void applyServerConfig(const ServerConfig& config, ChartViewController& view);
 signals:

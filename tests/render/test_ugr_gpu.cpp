@@ -41,6 +41,9 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include "render/TradeBubbleOverlayItem.hpp"
+#include "render/TpoOverlayItem.hpp"
+#include "chart/shell/ChartTpoQml.hpp"
+#include <QSGSimpleRectNode>
 #include <QQuickView>
 #include <QQuickWindow>
 #include <QSGOpacityNode>
@@ -1563,15 +1566,31 @@ TEST_F(UgrGpu, ComesBackAfterTheQRhiIsRecreated) {
     EXPECT_EQ(layer().tileStats().errors.load(), 0u);
 }
 
-// Overlays keep their QSGNode hosting on the gpu root: TPO letters draw (after the
-// gated tile node, so on top of it), and the gate blocks the tile node while the
-// heatmap layer is off.
-TEST_F(UgrGpu, TpoOverlayDrawsOnTopOfTheGpuRoot) {
+// Stands in for the candle overlay item: a solid fill at the candles' z.
+class CandleStandIn : public QQuickItem {
+public:
+    explicit CandleStandIn(QQuickItem* parent) : QQuickItem(parent) { setFlag(ItemHasContents, true); }
+    QSGNode* updatePaintNode(QSGNode* old, UpdatePaintNodeData*) override {
+        auto* node = old ? static_cast<QSGSimpleRectNode*>(old) : new QSGSimpleRectNode;
+        node->setRect(boundingRect());
+        node->setColor(QColor(0, 255, 0));
+        return node;
+    }
+};
+
+// The TPO draws above the candles whatever else is on (heatmap or footprint in
+// the chart item): heatmap/footprint < candles < TPO.
+TEST_F(UgrGpu, TpoDrawsAboveCandlesWithHeatmapOrFootprintOn) {
     gpuOn();
-    ASSERT_TRUE(settle()) << error.toStdString();
-    ugr->layers()->setTpoEnabled(true); // the heatmap layer goes off (existing layer rule)
-    ASSERT_TRUE(frames(5)) << error.toStdString();
-    const QImage plain = image;
+    auto* candles = new CandleStandIn(scene->window()->contentItem());
+    candles->setSize(ugr->size());
+    candles->setZ(2);
+    auto* tpoItem = new TpoOverlayItem;
+    tpoItem->setParentItem(scene->window()->contentItem());
+    tpoItem->setSize(ugr->size());
+    tpoItem->setZ(2.3);
+    tpoItem->setChart(ugr);
+    ASSERT_EQ(tpoItem->rendererForTest(), ugr->tpo()->overlayRenderer());
     TradeOverlayGrid grid;
     grid.startMs = viewLo - 30 * minute;
     grid.endMs = grid.startMs + 24 * kHourMs;
@@ -1580,17 +1599,27 @@ TEST_F(UgrGpu, TpoOverlayDrawsOnTopOfTheGpuRoot) {
     grid.generation = 1;
     QByteArray letters(40, '\0');
     for (int r = 10; r < 30; ++r) letters[r] = 'A';
-    emit ugr->getDataProcessor()->tpoColumnReady(0, 48, 40, letters, grid.startMs, grid.endMs, 30 * minute, grid);
-    ASSERT_TRUE(frames(5)) << error.toStdString();
-    int changed = 0;
-    for (int y = 0; y < 320; y += 2)
-        for (int x = 0; x < 640; x += 2) changed += image.pixel(x, y) != plain.pixel(x, y);
-    EXPECT_GT(changed, 200) << "the TPO profile draws on the gpu root";
-    QSGNode *root = paintRoot(ugr);
-    ASSERT_TRUE(root && root->firstChild());
-    EXPECT_EQ(root->firstChild()->type(), QSGNode::OpacityNodeType) << "the tile node is the first (bottom) child";
-    EXPECT_EQ(static_cast<QSGOpacityNode *>(root->firstChild())->opacity(), 0.0) << "heatmap layer off: gated";
-    EXPECT_GE(root->childCount(), 2) << "overlays follow the tile node";
+    for (const char* other : {"heatmap", "footprint"}) {
+        SCOPED_TRACE(other);
+        ugr->layers()->setLayerEnabled("tpo", false);
+        ugr->layers()->setLayerEnabled(other, true);
+        ASSERT_TRUE(frames(5)) << error.toStdString();
+        int green = 0;
+        for (int y = 0; y < 320; y += 4)
+            for (int x = 0; x < 640; x += 4) green += image.pixel(x, y) == qRgb(0, 255, 0);
+        EXPECT_GT(green, 40 * 160 * 9 / 10) << "the candle stand-in covers the chart item";
+        ugr->layers()->setLayerEnabled("tpo", true);
+        EXPECT_TRUE(ugr->layers()->tpoEnabled() && (ugr->layers()->heatmapEnabled() || ugr->layers()->footprintEnabled()));
+        emit ugr->getDataProcessor()->tpoColumnReady(0, 48, 40, letters, grid.startMs, grid.endMs, 30 * minute, grid);
+        ASSERT_TRUE(frames(5)) << error.toStdString();
+        int covered = 0;
+        for (int y = 0; y < 320; y += 2)
+            for (int x = 0; x < 640; x += 2) covered += image.pixel(x, y) != qRgb(0, 255, 0);
+        EXPECT_GT(covered, 200) << "TPO cells draw over the candles";
+        ugr->layers()->setLayerEnabled(other, false);
+    }
+    delete tpoItem;
+    delete candles;
 }
 
 // Inspect actual root children, including containers, without coupling to registry implementation.
@@ -1608,7 +1637,6 @@ std::string tradeLayerNodeName(QSGNode* node, QSGNode* textRoot) {
             return "footprintCells";
         return hasNode<QSGClipNode>(node) ? "ladder" : "unknown";
     }
-    if (hasNode<QSGClipNode>(node)) return "TPO";
     return hasNode<QSGGeometryNode>(node) ? "VP" : "unknown";
 }
 
@@ -1650,7 +1678,7 @@ TEST_F(UgrGpu, LateEnableKeepsRegistryOrderAndTextLast) {
     std::cout << "late-enable order:";
     for (const auto& name : order) std::cout << " " << name;
     std::cout << std::endl;
-    EXPECT_EQ(order, (std::vector<std::string>{"footprintCells", "VP", "TPO", "ladder", "text"}));
+    EXPECT_EQ(order, (std::vector<std::string>{"footprintCells", "VP", "ladder", "text"}));
 }
 
 // Node construction itself needs a window but no initialized RHI or GPU draw.
@@ -1696,7 +1724,7 @@ TEST(TradeLayerNodes, LateEnableKeepsRegistryOrderAndTextLast) {
     std::cout << "\nnode-only late-enable order:";
     for (const auto& name : order) std::cout << " " << name;
     std::cout << std::endl;
-    EXPECT_EQ(order, (std::vector<std::string>{"heatmap", "footprintCells", "VP", "TPO", "ladder", "text"}));
+    EXPECT_EQ(order, (std::vector<std::string>{"heatmap", "footprintCells", "VP", "ladder", "text"}));
 }
 
 TEST(TradeLayerNodes, FixedHeatmapVpLabelsStructure) {
@@ -1726,7 +1754,7 @@ TEST(TradeLayerNodes, FixedHeatmapVpLabelsStructure) {
         std::cout << "] ";
     }
     std::cout << std::endl;
-    ASSERT_EQ(root.childCount(), 6);
+    ASSERT_EQ(root.childCount(), 5);
     EXPECT_EQ(tradeLayerNodeName(root.childAtIndex(1), root.lastChild()), "footprintCells");
     EXPECT_EQ(root.firstChild()->type(), QSGNode::OpacityNodeType);
     EXPECT_TRUE(hasNode<ChartTextNode>(root.lastChild()));
@@ -5586,6 +5614,7 @@ int main(int argc, char **argv) {
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
     qmlRegisterType<TradeBubbleOverlayItem>("Sentinel.Charts", 1, 0, "TradeBubbleOverlayItem");
     qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");
+    qmlRegisterType<TpoOverlayItem>("Sentinel.Charts", 1, 0, "TpoOverlayItem");
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;
     configureFixture();

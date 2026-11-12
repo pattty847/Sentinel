@@ -85,13 +85,18 @@ struct ValueArea {
 // below, whichever holds more TPOs, until `fraction` of all TPOs is covered.
 ValueArea computeValueArea(const std::vector<int>& counts, double fraction = 0.70);
 
-// Periods in a session's initial balance (its first hour); at least one.
+// Periods that make up a session's initial balance (its first hour), or 0 when
+// the brackets cannot resolve the first hour (longer than an hour, or not
+// dividing it): then IBH/IBL are not drawn.
 int initialBalancePeriods(int64_t periodMs);
 
+// Initial balance on the trade grid's own price levels (absolute low index L,
+// see above), independent of the display row grouping.
 struct InitialBalance {
-    int low = -1;   // lowest display row touched by the initial-balance periods
-    int high = -1;  // highest such row
-    bool valid() const { return low >= 0; }
+    int64_t lowAbs = 0;   // lowest base row touched by the initial-balance periods
+    int64_t highAbs = 0;  // highest such base row
+    bool present = false;
+    bool valid() const { return present; }
 };
 
 // Display rows of one session profile.
@@ -143,18 +148,17 @@ private:
     InitialBalance m_ib;
 };
 
-// Reference levels of one profile, in the profile's layout space (y grows
-// downward from the trade grid top; rowTop(row) = (topAbs - (minGroup + row + 1)
-// * group) * basePx). POC sits on its row centre; VAH/IBH on the top edge of
-// their row, VAL/IBL on the bottom edge. Only visible elements are listed, in
-// tag priority order: POC, VAH, VAL, IBH, IBL.
+// Reference levels of one profile as prices in trade-grid ticks (price / tick).
+// POC sits on its display row centre; VAH on the top edge of its row and VAL on
+// the bottom edge; IBH/IBL on the top and bottom edges of their base rows. Only
+// visible elements are listed, in tag priority order: POC, VAH, VAL, IBH, IBL.
 enum class Level : int { Poc = 0, Vah = 1, Val = 2, Ibh = 3, Ibl = 4 };
 const char* levelName(Level level);
 const Element& levelElement(const StyleModel& style, Level level);
 
 struct LevelLine {
     Level level = Level::Poc;
-    double y = 0.0;
+    double ticks = 0.0;
     bool operator==(const LevelLine&) const = default;
 };
 struct LevelLines {
@@ -162,11 +166,11 @@ struct LevelLines {
     int count = 0;
     bool operator==(const LevelLines&) const = default;
 };
-LevelLines levelLines(const ProfileRows& profile, const StyleModel& style, int64_t topAbs, double basePx);
+LevelLines levelLines(const ProfileRows& profile, const StyleModel& style);
 
-// Tags are chips of chipHeight centred on each line's screen y. A tag that
-// would overlap an earlier (higher priority) tag, or leave [top, bottom], is
-// dropped. Returns a bit per input line (bit i = line i keeps its tag).
-unsigned placeTags(const LevelLines& lines, double offsetY, double chipHeight, double top, double bottom);
+// Tags are chips of chipHeight centred on screen ys[i]. A tag that would overlap
+// an earlier (higher priority) tag, or leave [top, bottom], is dropped. Returns
+// a bit per input (bit i = ys[i] keeps its tag).
+unsigned placeTags(const std::array<double, 5>& ys, int count, double chipHeight, double top, double bottom);
 
 } // namespace tpo

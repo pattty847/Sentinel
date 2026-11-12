@@ -8,6 +8,7 @@
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/CandlePixelGeometry.hpp"
 #include "render/TpoOverlayRenderer.hpp"
+#include "mainwindow/ChartAgentPort.hpp"
 #include "render/VolumeProfileRenderer.hpp"
 #include "render/ChartTextAtlas.hpp"
 #include "lab/LabData.hpp"
@@ -747,11 +748,12 @@ void checkTpoPixelGeometry(bool timeFree, bool priceFree, bool hold = false) {
             QSGNode root;
             const QRectF surface(0, 0, 640, 320);
             renderer.render(&window, &root, true, atlas, false, rest, dpr, true, true, surface);
-            QSGNode* sessions = root.firstChild()->firstChild()->firstChild()->firstChild();
-            auto* levelTransform = static_cast<QSGTransformNode*>(sessions->firstChild());
-            auto* transform = static_cast<QSGTransformNode*>(levelTransform->nextSibling());
-            auto* geometry = static_cast<QSGGeometryNode*>(transform->firstChild())->geometry();
-            auto* levels = static_cast<QSGGeometryNode*>(levelTransform->firstChild())->geometry();
+            const auto nodes = renderer.sessionNodesForTest(start);
+            ASSERT_TRUE(nodes.cells && nodes.cellGeometry && nodes.levels && nodes.levelGeometry);
+            const QSGTransformNode* transform = nodes.cells;
+            const QSGTransformNode* levelTransform = nodes.levels;
+            const QSGGeometry* geometry = nodes.cellGeometry->geometry();
+            const QSGGeometry* levels = nodes.levelGeometry->geometry();
             const void* storage = geometry->vertexData();
             tpo::ProfileRows profile;
             profile.build(rows, 150, 1);
@@ -964,9 +966,9 @@ TEST(TpoPixelGeometry, MinimumCellIsOneDevicePixelAtFractionalDpr) {
         ChartTextAtlas atlas;
         QSGNode root;
         renderer.render(&window, &root, true, atlas, false, camera, dpr, true, true, {0, 0, 640, 320});
-        QSGNode* sessions = root.firstChild()->firstChild()->firstChild()->firstChild();
-        auto* transform = static_cast<QSGTransformNode*>(sessions->firstChild()->nextSibling());
-        const auto* geometry = static_cast<QSGGeometryNode*>(transform->firstChild())->geometry();
+        const auto nodes = renderer.sessionNodesForTest(600'123);
+        ASSERT_TRUE(nodes.cellGeometry);
+        const auto* geometry = nodes.cellGeometry->geometry();
         const auto* v = geometry->vertexDataAsColoredPoint2D();
         int onePixelCells = 0;
         for (int k = 0; k < 2; ++k) {
@@ -976,6 +978,114 @@ TEST(TpoPixelGeometry, MinimumCellIsOneDevicePixelAtFractionalDpr) {
         }
         EXPECT_GE(onePixelCells, 1) << "fixture must exercise a one-device-pixel cell";
     }
+}
+
+// Tags follow the newest session that is on screen, at its level prices under
+// the current camera: panning to an older session moves the tags to it, and a
+// price zoom moves them with the prices (no stale line pixels).
+TEST(TpoTags, FollowTheVisibleSessionAtCurrentPrices) {
+    ChartTextAtlas atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 48;
+    params.charset = QStringLiteral("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+    ASSERT_TRUE(atlas.build(params));
+    TpoOverlayRenderer renderer;
+    TpoOverlayRenderer::Style style;
+    style.rowPx = 4;
+    renderer.setStyle(style);
+    constexpr qint64 hour = 3'600'000, day = 24 * hour, period = 30 * 60'000;
+    constexpr qint64 older = 100 * day, newer = older + day;
+    constexpr double tick = 1.0, top = 200.0;
+    // Older session around 150-160, newer around 120-130: different levels.
+    for (const auto& [start, lo] : {std::pair<qint64, int>{older, 40}, std::pair<qint64, int>{newer, 70}}) {
+        for (int p = 0; p < 6; ++p) {
+            TpoOverlayRenderer::PendingUpload upload;
+            upload.x = p;
+            upload.gridWidth = 48;
+            upload.gridHeight = 100;
+            upload.periodMs = period;
+            upload.grid = {start, start + day, top, tick, 1};
+            upload.letters = QByteArray(100, '\0');
+            for (int row = lo + p; row < lo + 6 + p / 2; ++row) upload.letters[row] = char('A' + p);
+            renderer.enqueue(std::move(upload));
+        }
+    }
+    QQuickWindow window;
+    QSGNode root;
+    const QRectF surface(0, 0, 640, 320);
+    auto cameraFor = [](qint64 from, qint64 to, double lo, double hi) {
+        chart_raster::RasterInputs in;
+        in.timeStart = from;
+        in.timeEnd = to;
+        in.minPrice = lo;
+        in.maxPrice = hi;
+        in.tfMs = 30 * 60'000;
+        in.tick = 1;
+        in.itemWidthLogical = 640;
+        in.itemHeightLogical = 320;
+        in.dpr = 1.0;
+        return chart_raster::computeRaster(in, {});
+    };
+    auto expectTagsAt = [&](const chart_raster::RasterCamera& camera, qint64 session) {
+        renderer.render(&window, &root, true, atlas, true, camera, 1.0, true, true, surface);
+        const auto& tags = renderer.tagsForTest();
+        EXPECT_EQ(tags.sessionStartMs, session);
+        ASSERT_GE(tags.count, 1);
+        ASSERT_EQ(tags.levels[0], tpo::Level::Poc);
+        // Recompute the POC price from the session's own data, independent of the renderer.
+        std::vector<std::vector<int>> rows(6);
+        const int lo = session == older ? 40 : 70;
+        for (int p = 0; p < 6; ++p)
+            for (int row = lo + p; row < lo + 6 + p / 2; ++row) rows[size_t(p)].push_back(row);
+        const auto mapping = chart_raster::toMapping(camera);
+        const int64_t topAbs = std::llround(top / tick);
+        // rowPx 4: the renderer's row group is the smallest 1-2-5 step at least 4 px tall.
+        const int group = tpo::rowGroupFor(camera.pxPerPrice() * tick, 4.0);
+        tpo::ProfileRows profile;
+        profile.build(rows, topAbs, group, 2);
+        const double pocTicks = (profile.minGroup() + profile.valueArea().poc + 0.5) * group;
+        EXPECT_NEAR(tags.centreY[0], mapping.priceToScreenY(pocTicks * tick), 1.0) << "group=" << group;
+    };
+    expectTagsAt(cameraFor(newer + 2 * hour, newer + 20 * hour, 100, 220), newer);
+    expectTagsAt(cameraFor(older + 2 * hour, older + 20 * hour, 100, 220), older);  // pan to the older session
+    expectTagsAt(cameraFor(older + 2 * hour, older + 20 * hour, 130, 180), older);  // price zoom, the newer one off screen
+    renderer.render(&window, &root, true, atlas, true, cameraFor(older - 3 * day, older - 2 * day, 100, 220), 1.0,
+                    true, true, surface);
+    EXPECT_EQ(renderer.tagsForTest().count, 0) << "no session on screen: no tags";
+}
+
+// Settings opened over a restored non-default style shows it, and one edit keeps the rest.
+TEST(TpoSettings, DialogStartsFromTheCurrentStyleAndEditsOneProperty) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    UnifiedGridRenderer ugr;
+    auto restored = tpo::presetStyle(tpo::Preset::Extended, tpo::Theme::Sage);
+    restored.poc.color = {246, 70, 93, 255};
+    restored.cells.width = 0.0;
+    ugr.tpo()->setTpoLook(restored);
+    HeatmapSettingsDialog dialog(&model, &ugr);
+    auto* vah = dialog.findChild<QCheckBox*>("tpoStyle.vah.visible");
+    ASSERT_TRUE(vah);
+    EXPECT_TRUE(vah->isChecked());
+    vah->setChecked(false);
+    auto expected = restored;
+    expected.vah.visible = false;
+    EXPECT_EQ(ugr.tpo()->tpoLook(), expected);
+    auto* reach = dialog.findChild<QComboBox*>("tpoStyle.reach");
+    ASSERT_TRUE(reach);
+    EXPECT_EQ(reach->currentData().toString(), "session");
+}
+
+TEST(TpoAgentPort, LookFieldsGoThroughTheChartPort) {
+    UnifiedGridRenderer ugr;
+    const auto port = ugr.agentPort();
+    EXPECT_TRUE(ChartAgentPort::isTpoLookKey("tpoPreset"));
+    EXPECT_FALSE(ChartAgentPort::isTpoLookKey("tpo"));
+    port.applyTpoLook({{"tpoTheme", "calm"}, {"tpoPreset", "blocks"}, {"tpoLayout", "split"}});
+    EXPECT_EQ(ugr.tpo()->tpoPreset(), "blocks");
+    EXPECT_EQ(ugr.tpo()->tpoTheme(), "calm");
+    EXPECT_EQ(port.tpoLook(), (QJsonObject{{"tpoLayout", "split"}, {"tpoTheme", "calm"}, {"tpoPreset", "blocks"}}));
 }
 
 TEST(CandleStyleTest, DefaultColoursOpacityAndGeometryCapacity) {

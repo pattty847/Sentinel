@@ -298,7 +298,6 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
             const QSignalBlocker a(m_tpoLayoutCombo), b(m_tpoThemeCombo);
             m_tpoLayoutCombo->setCurrentIndex(std::max(0, m_tpoLayoutCombo->findData(m_renderer->tpo()->tpoLayout())));
             m_tpoThemeCombo->setCurrentIndex(std::max(0, m_tpoThemeCombo->findData(m_renderer->tpo()->tpoTheme())));
-    m_tpoStyleEditor->setStyleModel(m_renderer->tpo()->tpoLook());
             m_tpoStyleEditor->setStyleModel(m_renderer->tpo()->tpoLook());
         });
     }
@@ -978,6 +977,7 @@ void HeatmapSettingsDialog::refreshFromRenderer() {
     if (const int i = m_tpoSessionCombo->findData(m_renderer->tpo()->tpoSessionType()); i >= 0) m_tpoSessionCombo->setCurrentIndex(i);
     m_tpoLayoutCombo->setCurrentIndex(std::max(0, m_tpoLayoutCombo->findData(m_renderer->tpo()->tpoLayout())));
     m_tpoThemeCombo->setCurrentIndex(std::max(0, m_tpoThemeCombo->findData(m_renderer->tpo()->tpoTheme())));
+    m_tpoStyleEditor->setStyleModel(m_renderer->tpo()->tpoLook());
     m_loading = was;
 }
 

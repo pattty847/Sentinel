@@ -4,6 +4,8 @@
 #include <memory>
 #include "chart/core/TpoStyle.hpp"
 struct ClientTpoConfig;
+class ChartTextAtlas;
+class TpoOverlayRenderer;
 namespace chart {
 class ChartLookSettings;
 class TpoStyleStore;
@@ -27,6 +29,10 @@ public:
     void setTpoLook(const tpo::StyleModel& look);
     void resetTpoLook();
     void setStyleStore(std::shared_ptr<TpoStyleStore> store);
+    // For TpoOverlayItem, which draws the TPO above the candles.
+    TpoOverlayRenderer* overlayRenderer();
+    const ChartTextAtlas* overlayAtlas() const;
+    bool overlayAtlasReady() const;
     int tpoSessions() const;
     void applyTpoConfig(const ClientTpoConfig& tpo);
 signals:

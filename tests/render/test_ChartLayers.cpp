@@ -46,17 +46,16 @@ TEST(LayerRegistry, DispatchPreservesRegistrationOrder) {
     registry.afterRendering();
     EXPECT_EQ(calls, (Calls{"sync:b", "sync:a", "b", "a", "after:b", "after:a"}));
 }
-TEST(ChartLayerSet, RegistersHeatmapFootprintCellsVpTpoLadderText) {
+TEST(ChartLayerSet, RegistersHeatmapFootprintCellsVpLadderText) {
     chart::ChartLayers layers;
     ASSERT_TRUE(layers.registry.precedes("heatmap", "text"));
-    EXPECT_TRUE(layers.registry.precedes("TPO", "ladder"));
+    EXPECT_FALSE(layers.registry.precedes("TPO", "text")) << "the TPO draws in TpoOverlayItem, above the candles";
     EXPECT_TRUE(layers.registry.precedes("ladder", "text")) << "chart text draws over the ladder";
-    EXPECT_FALSE(layers.registry.precedes("ladder", "TPO"));
     layers.heatmap.initialize();
     QSGNode root;
     layers.registry.onRootRebuilt(&root);
-    EXPECT_EQ(root.childCount(), 6);
-    EXPECT_EQ(root.childAtIndex(4)->type(), QSGNode::OpacityNodeType) << "the ladder's gate";
+    EXPECT_EQ(root.childCount(), 5);
+    EXPECT_EQ(root.childAtIndex(3)->type(), QSGNode::OpacityNodeType) << "the ladder's gate";
     EXPECT_EQ(root.firstChild()->type(), QSGNode::OpacityNodeType);
     EXPECT_EQ(root.firstChild()->firstChild()->type(), QSGNode::RenderNodeType);
 }
@@ -1015,13 +1014,13 @@ TEST(CvdLayer, LazyContainerKeepsDefaultTreeAndInsertsBeforeText) {
     layers.heatmap.initialize();
     QSGNode root;
     layers.registry.onRootRebuilt(&root);
-    ASSERT_EQ(root.childCount(), 6);
+    ASSERT_EQ(root.childCount(), 5);
     auto* textRoot = root.lastChild();
     ChartTextRenderer text; ChartTextAtlas atlas;
     chart::LayerNodeContext context{nullptr, &root, text, atlas, false};
     auto frame = footprintChartFrame();
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    EXPECT_EQ(root.childCount(), 6); EXPECT_EQ(root.lastChild(), textRoot);
+    EXPECT_EQ(root.childCount(), 5); EXPECT_EQ(root.lastChild(), textRoot);
     layers.cvd.presentation().stripPx = 50;
     EXPECT_FALSE(layers.cvd.presentation().drawable(1000));
     chart::CvdFeed::build(layers.cvd.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
@@ -1029,13 +1028,13 @@ TEST(CvdLayer, LazyContainerKeepsDefaultTreeAndInsertsBeforeText) {
     EXPECT_TRUE(layers.cvd.presentation().drawable(1000));
     EXPECT_FALSE(layers.cvd.presentation().drawable(60000));
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    ASSERT_EQ(root.childCount(), 7); EXPECT_EQ(root.lastChild(), textRoot);
-    EXPECT_EQ(root.childAtIndex(5)->type(), QSGNode::OpacityNodeType);
+    ASSERT_EQ(root.childCount(), 6); EXPECT_EQ(root.lastChild(), textRoot);
+    EXPECT_EQ(root.childAtIndex(4)->type(), QSGNode::OpacityNodeType);
     EXPECT_TRUE(layers.cvd.drawing());
     layers.cvd.presentation().stripPx = 0;
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
     EXPECT_FALSE(layers.cvd.drawing());
-    EXPECT_EQ(static_cast<QSGOpacityNode*>(root.childAtIndex(5))->opacity(), 0);
+    EXPECT_EQ(static_cast<QSGOpacityNode*>(root.childAtIndex(4))->opacity(), 0);
 }
 TEST(CvdLayer, LineAreaBoundsAndFreshFramesAllocateNothing) {
     chart::CvdLayer layer;
@@ -1239,15 +1238,15 @@ TEST(FlowFooter, DefaultNodesAreIdenticalAndEnabledNodesAreLazyBeforeText) {
     ChartTextRenderer text; ChartTextAtlas atlas;
     chart::LayerNodeContext context{nullptr, &root, text, atlas, false};
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    EXPECT_EQ(root.childCount(), 6); EXPECT_EQ(layers.flowFooter.createContainer(), nullptr);
+    EXPECT_EQ(root.childCount(), 5); EXPECT_EQ(layers.flowFooter.createContainer(), nullptr);
     layers.cvd.presentation().flowFooter = true;
     chart::CvdFeed::build(layers.cvd.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
     layers.cvd.mailbox().post(); layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    EXPECT_EQ(root.childCount(), 7); EXPECT_EQ(root.lastChild(), textRoot);
+    EXPECT_EQ(root.childCount(), 6); EXPECT_EQ(root.lastChild(), textRoot);
     EXPECT_TRUE(layers.flowFooter.drawing()); EXPECT_FALSE(layers.cvd.drawing());
     layers.cvd.presentation().stripPx = 60;
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    EXPECT_EQ(root.childCount(), 8);
+    EXPECT_EQ(root.childCount(), 7);
     EXPECT_EQ(layers.flowFooter.bounds().bottom(), layers.cvd.strip().top());
     EXPECT_EQ(layers.flowFooter.bounds().top(), 85);
     EXPECT_EQ(layers.cvd.presentation().bottomInset(1000, 200), 115);
@@ -1416,12 +1415,12 @@ TEST(FlowFooter, PanAndMagnitudeChangesKeepTheSameAbsoluteColumnPhase) {
 #endif
 }
 
-TEST(FlowFooter, TpoAndVpSubtreesRespectTheCombinedPaneWithoutAllocating) {
+TEST(FlowFooter, VpSubtreeRespectsTheCombinedPaneWithoutAllocating) {
     chart::CvdPresentation presentation;
-    chart::VolumeProfileLayer vp(&presentation); chart::TpoLayer tpo(&presentation);
+    chart::VolumeProfileLayer vp(&presentation);
     auto frame = footprintChartFrame();
     ChartTextRenderer text; ChartTextAtlas atlas;
-    for (chart::PaneChartLayer* layer : {static_cast<chart::PaneChartLayer*>(&vp), static_cast<chart::PaneChartLayer*>(&tpo)}) {
+    for (chart::PaneChartLayer* layer : {static_cast<chart::PaneChartLayer*>(&vp)}) {
         presentation.stripPx = 0; presentation.flowFooter = false;
         std::unique_ptr<QSGNode> root(layer->createContainer());
         auto* label = new QSGNode; root->appendChildNode(label);

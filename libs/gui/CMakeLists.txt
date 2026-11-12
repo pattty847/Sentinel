@@ -341,6 +341,8 @@ qt6_add_qml_module(sentinel_gui_lib
         render/TradeBubbleOverlayItem.cpp
         render/CandlestickOverlayItem.hpp
         render/CandlestickOverlayItem.cpp
+        render/TpoOverlayItem.hpp
+        render/TpoOverlayItem.cpp
         render/AlgoOrderSpans.hpp
         render/AlgoOrderSpans.cpp
         render/AlgoOverlayRenderer.hpp
