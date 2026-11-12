@@ -747,12 +747,15 @@ void checkTpoPixelGeometry(bool timeFree, bool priceFree, bool hold = false) {
             QSGNode root;
             const QRectF surface(0, 0, 640, 320);
             renderer.render(&window, &root, true, atlas, false, rest, dpr, true, true, surface);
-            auto* transform = static_cast<QSGTransformNode*>(root.firstChild()->firstChild()->firstChild()->firstChild());
+            QSGNode* sessions = root.firstChild()->firstChild()->firstChild()->firstChild();
+            auto* levelTransform = static_cast<QSGTransformNode*>(sessions->firstChild());
+            auto* transform = static_cast<QSGTransformNode*>(levelTransform->nextSibling());
             auto* geometry = static_cast<QSGGeometryNode*>(transform->firstChild())->geometry();
+            auto* levels = static_cast<QSGGeometryNode*>(levelTransform->firstChild())->geometry();
             const void* storage = geometry->vertexData();
             tpo::ProfileRows profile;
             profile.build(rows, 150, 1);
-            const int liveVertices = (profile.totalTpos() + (layout == tpo::Layout::Split ? 1 : 0)) * 6;
+            const int liveVertices = profile.totalTpos() * 6;
             const auto snapshot = [&] {
                 std::vector<QPointF> result;
                 const auto* v = geometry->vertexDataAsColoredPoint2D();
@@ -782,10 +785,16 @@ void checkTpoPixelGeometry(bool timeFree, bool priceFree, bool hold = false) {
                 EXPECT_NEAR(v[index+2].y, edge(bottom, snapY), 1e-5);
             };
             int written = 0;
-            if (layout == tpo::Layout::Split) {
-                const double top = (150 - (profile.minGroup() + profile.valueArea().poc + 1)) * basePx;
-                checkQuad(0, 0, top, 2 * periodPx, top + basePx);
-                written += 6;
+            {
+                // The POC line sits under the cells on the POC row's centre, across the profile.
+                const double centre = (150 - (profile.minGroup() + profile.valueArea().poc + 1)) * basePx + basePx * 0.5;
+                const auto* line = levels->vertexDataAsColoredPoint2D();
+                EXPECT_NEAR(levelTransform->matrix()(1, 3), ty, 1e-5);
+                EXPECT_EQ(line[0].x, 0.0f);
+                EXPECT_GT(line[1].x, 0.0f);
+                EXPECT_LE(line[0].y, centre + 1.0);
+                EXPECT_GE(line[2].y, centre - 1.0);
+                EXPECT_LT(line[2].y - line[0].y, 1.5);
             }
             for (int row = 0; row < profile.rows(); ++row) {
                 const double top = (150 - (profile.minGroup() + row + 1)) * basePx;
@@ -955,7 +964,8 @@ TEST(TpoPixelGeometry, MinimumCellIsOneDevicePixelAtFractionalDpr) {
         ChartTextAtlas atlas;
         QSGNode root;
         renderer.render(&window, &root, true, atlas, false, camera, dpr, true, true, {0, 0, 640, 320});
-        auto* transform = static_cast<QSGTransformNode*>(root.firstChild()->firstChild()->firstChild()->firstChild());
+        QSGNode* sessions = root.firstChild()->firstChild()->firstChild()->firstChild();
+        auto* transform = static_cast<QSGTransformNode*>(sessions->firstChild()->nextSibling());
         const auto* geometry = static_cast<QSGGeometryNode*>(transform->firstChild())->geometry();
         const auto* v = geometry->vertexDataAsColoredPoint2D();
         int onePixelCells = 0;

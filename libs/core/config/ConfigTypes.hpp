@@ -187,11 +187,11 @@ struct ClientGuiConfig {
 /// TPO (market profile) overlay. Parsed values are validated by the GUI.
 struct ClientTpoConfig {
     std::string layout = "collapsed";  // collapsed | split
-    std::string theme = "rainbow";     // rainbow | calm | sage
+    std::string theme = "rainbow";     // rainbow | calm | sage | indigo
     std::string session = "h24";       // ny | london | asia | australia | h24 | w1 | m1
     int periodMinutes = 30;            // letter bracket; must divide a UTC day or the session
     int sessions = 5;                  // retained sessions (current + previous), 1..8
-    int rowPx = 14;                    // rows merge (1-2-5 ticks) until at least this tall
+    int rowPx = 13;                    // rows merge (1-2-5 ticks) until at least this tall
 };
 
 struct ClientServerConfig {

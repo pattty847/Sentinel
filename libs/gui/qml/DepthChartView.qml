@@ -129,7 +129,9 @@ Rectangle {
         wickColor: unifiedGridRenderer.candles.candleWickColor
         bodyOpacity: unifiedGridRenderer.candles.candleBodyOpacity
         wickWidth: unifiedGridRenderer.candles.candleWickWidth
-        z: 2
+        // Candles go behind the TPO (it is slightly transparent) when no heatmap or footprint would cover them.
+        z: unifiedGridRenderer.layers.tpoLayerEnabled && !unifiedGridRenderer.layers.heatmapLayerEnabled
+           && !unifiedGridRenderer.layers.footprintLayerEnabled ? 0.5 : 2
     }
 
     TradeBubbleOverlayItem {

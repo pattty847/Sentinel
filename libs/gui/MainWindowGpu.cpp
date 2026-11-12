@@ -18,6 +18,7 @@
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
 #include "mainwindow/ChartAgentPort.hpp"
+#include "chart/shell/TpoStyleStore.hpp"
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
@@ -1204,6 +1205,7 @@ void MainWindowGPU::connectMarketDataSignals() {
             },
             Qt::QueuedConnection);
 
+    unifiedGridRenderer->tpo()->setStyleStore(std::make_shared<chart::TpoStyleStore>());
     unifiedGridRenderer->applyClientConfig(GuiConfigStore::instance().clientConfig());
     if (GuiConfigStore::instance().hasServerConfig()) {
         unifiedGridRenderer->applyServerConfig(GuiConfigStore::instance().serverConfig());
@@ -1645,6 +1647,7 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
             const bool enabled = it.value().toBool();
             if (it.key() == "tpoLayout") { renderer->tpo()->setTpoLayout(it.value().toString()); continue; }
             if (it.key() == "tpoTheme") { renderer->tpo()->setTpoTheme(it.value().toString()); continue; }
+            if (it.key() == "tpoPreset") { renderer->tpo()->setTpoPreset(it.value().toString()); continue; }
             if (it.key() == "candles") {
                 if (m_modeController) m_modeController->setCandlesEnabled(enabled);
             } else {
@@ -1665,7 +1668,8 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
                                           {"ladder", state.ladderLayer.value_or(false)},
                                           {"wallRadar", state.wallRadarLayer.value_or(false)},
                                           {"tpoLayout", state.tpoLayout.value_or(QString())},
-                                          {"tpoTheme", state.tpoTheme.value_or(QString())}};
+                                          {"tpoTheme", state.tpoTheme.value_or(QString())},
+                                          {"tpoPreset", renderer->tpo()->tpoPreset()}};
         for (auto it = toggles.begin(); it != toggles.end(); ++it) layerState[it.key()] = it.value();
         out.data["layers"] = layerState;
     }

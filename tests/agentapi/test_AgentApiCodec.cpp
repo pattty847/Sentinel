@@ -52,6 +52,8 @@ TEST(AgentApiControls, BodiesAndBounds) {
     EXPECT_EQ(check("/api/v1/layers", R"({"tpo":true,"tpoLayout":"split","tpoTheme":"calm"})").body.layers.size(), 3);
     EXPECT_EQ(check("/api/v1/layers", R"({"tpoLayout":"sideways"})").status, 422);
     EXPECT_EQ(check("/api/v1/layers", R"({"tpoTheme":true})").status, 422);
+    EXPECT_EQ(check("/api/v1/layers", R"({"tpoTheme":"indigo","tpoPreset":"blocks"})").body.layers.size(), 2);
+    EXPECT_EQ(check("/api/v1/layers", R"({"tpoPreset":"custom"})").status, 422);
     EXPECT_EQ(check("/api/v1/layers", R"({"ladder":true})").body.layers.size(), 1);
     EXPECT_EQ(check("/api/v1/layers", R"({"ladder":"on"})").status, 422);
     EXPECT_EQ(check("/api/v1/layers", R"({"wallRadar":true})").body.layers.size(), 1);

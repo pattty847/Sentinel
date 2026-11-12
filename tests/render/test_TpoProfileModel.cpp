@@ -99,20 +99,79 @@ TEST(TpoProfileModel, ProfileRowsHandleMoreThanSixtyFourPeriods) {
     EXPECT_EQ(profile.maxCount(), 3);
 }
 
-TEST(TpoProfileModel, PalettesWalkTheSessionAndDimTails) {
-    const auto first = cellColor(Theme::Rainbow, 0, 48, true, false);
-    const auto last = cellColor(Theme::Rainbow, 47, 48, true, false);
-    EXPECT_GT(first.r, first.b);  // red start
-    EXPECT_GT(last.b, last.g);    // violet end
-    for (Theme theme : {Theme::Rainbow, Theme::Calm, Theme::Sage}) {
-        const auto va = cellColor(theme, 10, 48, true, false);
-        const auto tail = cellColor(theme, 10, 48, false, false);
-        EXPECT_GT(va.r + va.g + va.b, tail.r + tail.g + tail.b) << themeName(theme);
-        EXPECT_TRUE(prefersDarkText(cellColor(theme, 10, 48, true, true))) << themeName(theme);
-        EXPECT_EQ(parseTheme(themeName(theme), Theme::Calm), theme);
-    }
+TEST(TpoProfileModel, LayoutNamesRoundTrip) {
     EXPECT_EQ(parseLayout("split", Layout::Collapsed), Layout::Split);
     EXPECT_EQ(parseLayout("bogus", Layout::Collapsed), Layout::Collapsed);
+}
+
+TEST(TpoProfileModel, InitialBalanceIsTheFirstHourOnDisplayRows) {
+    EXPECT_EQ(initialBalancePeriods(30 * kMin), 2);
+    EXPECT_EQ(initialBalancePeriods(15 * kMin), 4);
+    EXPECT_EQ(initialBalancePeriods(4 * 60 * kMin), 1);  // a bracket longer than an hour: the first one
+    EXPECT_EQ(initialBalancePeriods(0), 1);
+    // topAbs = 100: base row i is L = 99 - i. Periods 0-1 form the IB.
+    std::vector<std::vector<int>> rowsByPeriod(4);
+    rowsByPeriod[0] = {4, 5};   // L = 95, 94
+    rowsByPeriod[1] = {3};      // L = 96
+    rowsByPeriod[2] = {0, 9};   // L = 99, 90: outside the IB
+    rowsByPeriod[3] = {6};
+    ProfileRows profile;
+    profile.build(rowsByPeriod, 100, 1, 2);
+    ASSERT_TRUE(profile.initialBalance().valid());
+    EXPECT_EQ(profile.minGroup(), 90);
+    EXPECT_EQ(profile.initialBalance().low, 94 - 90);
+    EXPECT_EQ(profile.initialBalance().high, 96 - 90);
+    // Merged rows: G = floor(L / 2), the IB spans G 47..48.
+    profile.build(rowsByPeriod, 100, 2, 2);
+    EXPECT_EQ(profile.initialBalance().low, 47 - 45);
+    EXPECT_EQ(profile.initialBalance().high, 48 - 45);
+    profile.build(rowsByPeriod, 100, 1);  // no IB periods
+    EXPECT_FALSE(profile.initialBalance().valid());
+}
+
+TEST(TpoProfileModel, LevelLinesSitOnTheirRowsInPriorityOrder) {
+    // One period per row count: rows L=96..99 with counts 1, 3, 2, 1.
+    std::vector<std::vector<int>> rowsByPeriod(3);
+    rowsByPeriod[0] = {1, 2};      // L = 98, 97 (IB with 1 period)
+    rowsByPeriod[1] = {0, 1, 2, 3};
+    rowsByPeriod[2] = {2};
+    ProfileRows profile;
+    profile.build(rowsByPeriod, 100, 1, 1);
+    const auto& va = profile.valueArea();
+    ASSERT_EQ(va.poc, 97 - 96);
+    StyleModel style = presetStyle(Preset::Letters);
+    const double basePx = 10.0;
+    const auto rowTop = [&](int row) { return (100.0 - (96 + row + 1)) * basePx; };
+    auto lines = levelLines(profile, style, 100, basePx);
+    ASSERT_EQ(lines.count, 5);
+    EXPECT_EQ(lines.lines[0].level, Level::Poc);
+    EXPECT_DOUBLE_EQ(lines.lines[0].y, rowTop(va.poc) + 5.0);
+    EXPECT_EQ(lines.lines[1].level, Level::Vah);
+    EXPECT_DOUBLE_EQ(lines.lines[1].y, rowTop(va.high));
+    EXPECT_EQ(lines.lines[2].level, Level::Val);
+    EXPECT_DOUBLE_EQ(lines.lines[2].y, rowTop(va.low) + 10.0);
+    EXPECT_EQ(lines.lines[3].level, Level::Ibh);
+    EXPECT_DOUBLE_EQ(lines.lines[3].y, rowTop(98 - 96));
+    EXPECT_EQ(lines.lines[4].level, Level::Ibl);
+    EXPECT_DOUBLE_EQ(lines.lines[4].y, rowTop(97 - 96) + 10.0);
+    style.vah.visible = false;
+    style.ibl.visible = false;
+    lines = levelLines(profile, style, 100, basePx);
+    ASSERT_EQ(lines.count, 3);
+    EXPECT_EQ(lines.lines[1].level, Level::Val);
+    EXPECT_EQ(lines.lines[2].level, Level::Ibh);
+}
+
+TEST(TpoProfileModel, TagsDropOverlapsAndLeaveThePlot) {
+    LevelLines lines;
+    lines.count = 4;
+    lines.lines[0] = {Level::Poc, 100.0};
+    lines.lines[1] = {Level::Vah, 110.0};  // overlaps the POC chip (height 18)
+    lines.lines[2] = {Level::Val, 130.0};
+    lines.lines[3] = {Level::Ibh, 5.0};    // chip would leave the plot top
+    EXPECT_EQ(placeTags(lines, 0.0, 18.0, 0.0, 500.0), 0b0101u);
+    EXPECT_EQ(placeTags(lines, 20.0, 18.0, 0.0, 500.0), 0b1101u);
+    EXPECT_EQ(placeTags(lines, 0.0, 18.0, 0.0, 120.0), 0b0001u);
 }
 
 TEST(TpoProfileModel, PeriodResolutionKeepsServerBudgets) {

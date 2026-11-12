@@ -17,22 +17,6 @@ const char* layoutName(Layout layout) {
     return layout == Layout::Split ? "split" : "collapsed";
 }
 
-Theme parseTheme(std::string_view name, Theme fallback) {
-    if (name == "rainbow") return Theme::Rainbow;
-    if (name == "calm") return Theme::Calm;
-    if (name == "sage") return Theme::Sage;
-    return fallback;
-}
-
-const char* themeName(Theme theme) {
-    switch (theme) {
-    case Theme::Rainbow: return "rainbow";
-    case Theme::Calm: return "calm";
-    case Theme::Sage: return "sage";
-    }
-    return "rainbow";
-}
-
 int parseSessionType(std::string_view name, int fallback) {
     using SessionManager::SessionType;
     if (name == "ny") return static_cast<int>(SessionType::NY);
@@ -189,8 +173,14 @@ ValueArea computeValueArea(const std::vector<int>& counts, double fraction) {
     return va;
 }
 
+int initialBalancePeriods(int64_t periodMs) {
+    constexpr int64_t kHourMs = 3'600'000;
+    if (periodMs <= 0) return 1;
+    return static_cast<int>(std::max<int64_t>(1, kHourMs / periodMs));
+}
+
 void ProfileRows::build(const std::vector<std::vector<int>>& rowsByPeriod,
-                        int64_t topAbs, int group) {
+                        int64_t topAbs, int group, int ibPeriods) {
     m_group = std::max(1, group);
     m_periods = static_cast<int>(rowsByPeriod.size());
     m_words = std::max(1, (m_periods + 63) / 64);
@@ -207,6 +197,7 @@ void ProfileRows::build(const std::vector<std::vector<int>>& rowsByPeriod,
     m_maxCount = 0;
     m_total = 0;
     m_va = {};
+    m_ib = {};
     if (minG > maxG) {
         m_rows = 0;
         m_minGroup = 0;
@@ -221,6 +212,10 @@ void ProfileRows::build(const std::vector<std::vector<int>>& rowsByPeriod,
         const size_t word = static_cast<size_t>(p >> 6);
         for (const int row : rowsByPeriod[static_cast<size_t>(p)]) {
             const int r = static_cast<int>(floorDiv(topAbs - row - 1, m_group) - minG);
+            if (p < ibPeriods) {
+                m_ib.low = m_ib.low < 0 ? r : std::min(m_ib.low, r);
+                m_ib.high = std::max(m_ib.high, r);
+            }
             uint64_t& bits = m_bits[static_cast<size_t>(r) * m_words + word];
             if (!(bits & mask)) {
                 bits |= mask;
@@ -235,66 +230,55 @@ void ProfileRows::build(const std::vector<std::vector<int>>& rowsByPeriod,
     m_va = computeValueArea(m_counts);
 }
 
-namespace {
-Rgba hsv(double hDeg, double s, double v, uint8_t a = 255) {
-    const double h = std::fmod(std::fmod(hDeg, 360.0) + 360.0, 360.0) / 60.0;
-    const double c = v * s;
-    const double x = c * (1.0 - std::abs(std::fmod(h, 2.0) - 1.0));
-    double r = 0, g = 0, b = 0;
-    switch (static_cast<int>(h)) {
-    case 0: r = c; g = x; break;
-    case 1: r = x; g = c; break;
-    case 2: g = c; b = x; break;
-    case 3: g = x; b = c; break;
-    case 4: r = x; b = c; break;
-    default: r = c; b = x; break;
-    }
-    const double m = v - c;
-    auto to8 = [](double f) { return static_cast<uint8_t>(std::clamp(std::lround(f * 255.0), 0L, 255L)); };
-    return {to8(r + m), to8(g + m), to8(b + m), a};
+const char* levelName(Level level) {
+    static constexpr const char* kNames[] = {"POC", "VAH", "VAL", "IBH", "IBL"};
+    return kNames[static_cast<int>(level)];
 }
 
-Rgba mix(const Rgba& a, const Rgba& b, double t) {
-    auto lerp = [t](uint8_t x, uint8_t y) {
-        return static_cast<uint8_t>(std::lround(x + (static_cast<double>(y) - x) * t));
+const Element& levelElement(const StyleModel& style, Level level) {
+    static constexpr Element StyleModel::* kFields[] = {
+        &StyleModel::poc, &StyleModel::vah, &StyleModel::val, &StyleModel::ibh, &StyleModel::ibl};
+    return style.*kFields[static_cast<int>(level)];
+}
+
+LevelLines levelLines(const ProfileRows& profile, const StyleModel& style, int64_t topAbs, double basePx) {
+    LevelLines out;
+    const double cellH = basePx * profile.group();
+    auto rowTop = [&](int row) {
+        return static_cast<double>(topAbs - (profile.minGroup() + row + 1) * profile.group()) * basePx;
     };
-    return {lerp(a.r, b.r), lerp(a.g, b.g), lerp(a.b, b.b), lerp(a.a, b.a)};
+    auto add = [&](Level level, int row, double offset) {
+        if (row < 0 || !levelElement(style, level).visible) return;
+        out.lines[static_cast<size_t>(out.count++)] = {level, rowTop(row) + offset};
+    };
+    const ValueArea& va = profile.valueArea();
+    const InitialBalance& ib = profile.initialBalance();
+    if (va.valid()) {
+        add(Level::Poc, va.poc, cellH * 0.5);
+        add(Level::Vah, va.high, 0.0);
+        add(Level::Val, va.low, cellH);
+    }
+    if (ib.valid()) {
+        add(Level::Ibh, ib.high, 0.0);
+        add(Level::Ibl, ib.low, cellH);
+    }
+    return out;
 }
 
-constexpr Rgba kPocCell{226, 229, 234, 255};
-} // namespace
-
-Rgba cellColor(Theme theme, int period, int periods, bool inValueArea, bool poc) {
-    if (poc) return kPocCell;
-    const double t = periods > 1 ? std::clamp(static_cast<double>(period) / (periods - 1), 0.0, 1.0) : 0.0;
-    switch (theme) {
-    case Theme::Rainbow: {
-        // Red -> orange -> yellow -> green -> cyan -> blue -> violet across the session.
-        const double hue = 280.0 * t;
-        return inValueArea ? hsv(hue, 0.86, 0.92) : hsv(hue, 0.62, 0.52);
+unsigned placeTags(const LevelLines& lines, double offsetY, double chipHeight, double top, double bottom) {
+    unsigned kept = 0;
+    std::array<double, 5> placed{};
+    int placedCount = 0;
+    for (int i = 0; i < lines.count; ++i) {
+        const double y = lines.lines[static_cast<size_t>(i)].y + offsetY;
+        if (!std::isfinite(y) || y - chipHeight * 0.5 < top || y + chipHeight * 0.5 > bottom) continue;
+        bool clear = true;
+        for (int k = 0; k < placedCount; ++k) clear = clear && std::abs(placed[static_cast<size_t>(k)] - y) >= chipHeight;
+        if (!clear) continue;
+        placed[static_cast<size_t>(placedCount++)] = y;
+        kept |= 1u << i;
     }
-    case Theme::Calm: {
-        // Single blue hue; periods walk a gentle lightness ramp so letters stay distinct.
-        const Rgba early = inValueArea ? Rgba{70, 112, 182, 255} : Rgba{40, 54, 80, 255};
-        const Rgba late = inValueArea ? Rgba{98, 142, 210, 255} : Rgba{50, 66, 94, 255};
-        return mix(early, late, t);
-    }
-    case Theme::Sage: {
-        const Rgba early = inValueArea ? Rgba{104, 140, 100, 255} : Rgba{62, 80, 62, 255};
-        const Rgba late = inValueArea ? Rgba{128, 160, 116, 255} : Rgba{72, 92, 70, 255};
-        return mix(early, late, t);
-    }
-    }
-    return kPocCell;
-}
-
-Rgba pocBarColor(Theme /*theme*/) {
-    return {226, 229, 234, 70};
-}
-
-bool prefersDarkText(const Rgba& cell) {
-    const double luma = 0.2126 * cell.r + 0.7152 * cell.g + 0.0722 * cell.b;
-    return luma > 150.0;
+    return kept;
 }
 
 } // namespace tpo

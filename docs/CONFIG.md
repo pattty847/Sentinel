@@ -234,14 +234,27 @@ Client-only look and session selection for the TPO layer (`tpo:` in `client_conf
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `layout` | `collapsed` | `collapsed`: each price row's letters pack left-to-right from the session start (one profile per session; it sticks to the plot's left edge while its session is on screen). `split`: every period keeps its own time column, aligned with candles. |
-| `theme` | `rainbow` | `rainbow`: cell colour walks red to violet across the session's periods. `calm`: single blue hue. `sage`: single green hue. In every theme the POC row is light and cells outside the 70% value area are dimmed. |
+| `theme` | `rainbow` | `rainbow`: cell colour walks red to violet across the session's periods. `calm`: single blue hue. `sage`: single green hue. `indigo`: indigo `#2e2a78` to sky `#8fc0ff`. A theme saved from Settings or the Agent API wins over this key. |
 | `session` | `h24` | `ny`, `london`, `asia`, `australia`, `h24`, `w1` (7 days from Monday 00:00 UTC) or `m1` (calendar month, UTC). |
 | `period_minutes` | `30` | Letter bracket. It must divide the session (for `w1`/`m1`, a UTC day) into at most 2048 periods; otherwise the largest valid standard bracket (15, 30, 60, 120, 240, 480, 1440 minutes) below it is used. |
 | `sessions` | `5` | Sessions shown: the current one plus earlier ones (1-8). History is requested newest first in pages of at most 7 days and 512 periods, one page in flight at a time (the next page is sent when the reply arrives; a failed or silent page is skipped after an error or 45 s and cancelled on the server). The page budget covers every configured session, capped at 64 pages. Re-requesting the selection that is already loading is a no-op. |
-| `row_px` | `14` | Price rows (trade grid ticks) merge in 1-2-5 steps until a row is at least this tall. POC and value area are computed on the merged rows. |
+| `row_px` | `13` | Price rows (trade grid ticks) merge in 1-2-5 steps until a row is at least this tall. POC and value area are computed on the merged rows. |
 
 Letters are session-relative: `A`-`Z`, then `a`-`z`, then repeat. They fade out
-when a cell is too small to read; the coloured cells remain. `m1` needs a server
+when a cell is too small to read; the coloured cells remain.
+
+**Style.** The rest of the TPO look is one style model (`libs/gui/chart/core/TpoStyle.hpp`),
+edited in Chart Settings > TPO and saved for every chart under `tpo/style/<key>` in the GUI
+settings (keys `theme`, `reach` and `<element>.color|opacity|visible|width`). Elements: `cells`
+(fill opacity, default 95%, and the gap between cells, default 1 px from 6 px cells), `letters`
+(on; off draws blocks), `outsideVa` (rows outside the 70% value area keep 55% brightness),
+`valueArea` (an optional band behind the value area), the level lines `poc`, `vah`, `val`, `ibh`,
+`ibl` (IB = the session's first hour), and `tags` (level tags at the plot's right edge for the
+newest session). The POC row and line default to neutral white. Level lines sit under the
+cells and reach across the profile (`reach: profile`) or the whole session (`session`).
+Presets: `letters` (default), `blocks` (letters off), `extended` (lines across the session) and
+`indigo` (the indigo theme). With TPO on and no heatmap or footprint, candles draw behind the
+profile. Reset in the TPO tab forgets the saved style. `m1` needs a server
 that accepts session type 6.
 
 ## Related documentation

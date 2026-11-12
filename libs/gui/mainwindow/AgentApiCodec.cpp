@@ -481,13 +481,15 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
                 result.body.layers.insert(key, v);
                 continue;
             }
-            if (key == "tpoLayout" || key == "tpoTheme") {
+            if (key == "tpoLayout" || key == "tpoTheme" || key == "tpoPreset") {
                 static const QStringList kLayouts{"split", "collapsed"};
-                static const QStringList kThemes{"rainbow", "calm", "sage"};
-                const auto& allowed = key == "tpoLayout" ? kLayouts : kThemes;
+                static const QStringList kThemes{"rainbow", "calm", "sage", "indigo"};
+                static const QStringList kPresets{"letters", "blocks", "extended", "indigo"};
+                const auto& allowed = key == "tpoLayout" ? kLayouts : key == "tpoTheme" ? kThemes : kPresets;
                 if (!v.isString() || !allowed.contains(v.toString()))
                     return reject("invalid_layer", key == "tpoLayout" ? "tpoLayout must be split or collapsed"
-                                                                      : "tpoTheme must be rainbow, calm or sage");
+                                                   : key == "tpoTheme" ? "tpoTheme must be rainbow, calm, sage or indigo"
+                                                                       : "tpoPreset must be letters, blocks, extended or indigo");
                 result.body.layers.insert(key, v);
                 continue;
             }

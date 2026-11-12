@@ -4,8 +4,9 @@
  * Pure (Qt-free) market profile math for the TPO overlay:
  *   - session-relative period letters (A..Z, a..z, then repeat),
  *   - display row grouping by zoom (1-2-5 steps of the trade grid tick),
- *   - per display row period sets, TPO counts, POC and the 70% value area,
- *   - the period colour palettes.
+ *   - per display row period sets, TPO counts, POC, the 70% value area and the
+ *     initial balance (the rows the session's first hour touched).
+ * Colours and element looks live in chart/core/TpoStyle.
  *
  * Row conventions: a trade grid base row i (0 = highest price) covers
  * [maxPrice - (i+1)*tick, maxPrice - i*tick). With topAbs = round(maxPrice/tick),
@@ -15,6 +16,9 @@
  */
 #pragma once
 
+#include "chart/core/TpoStyle.hpp"
+
+#include <array>
 #include <bit>
 #include <cstdint>
 #include <string_view>
@@ -23,12 +27,9 @@
 namespace tpo {
 
 enum class Layout : int { Split = 0, Collapsed = 1 };
-enum class Theme : int { Rainbow = 0, Calm = 1, Sage = 2 };
 
 Layout parseLayout(std::string_view name, Layout fallback);
 const char* layoutName(Layout layout);
-Theme parseTheme(std::string_view name, Theme fallback);
-const char* themeName(Theme theme);
 
 // Session names used by config: ny, london, asia, australia, h24, w1, m1.
 // Returns a SessionManager::SessionType value, or fallback for unknown names.
@@ -84,12 +85,22 @@ struct ValueArea {
 // below, whichever holds more TPOs, until `fraction` of all TPOs is covered.
 ValueArea computeValueArea(const std::vector<int>& counts, double fraction = 0.70);
 
+// Periods in a session's initial balance (its first hour); at least one.
+int initialBalancePeriods(int64_t periodMs);
+
+struct InitialBalance {
+    int low = -1;   // lowest display row touched by the initial-balance periods
+    int high = -1;  // highest such row
+    bool valid() const { return low >= 0; }
+};
+
 // Display rows of one session profile.
 class ProfileRows {
 public:
     // rowsByPeriod[p] lists the occupied base rows of period p.
+    // The first ibPeriods periods form the initial balance (0 = none).
     void build(const std::vector<std::vector<int>>& rowsByPeriod,
-               int64_t topAbs, int group);
+               int64_t topAbs, int group, int ibPeriods = 0);
 
     int group() const { return m_group; }
     int rows() const { return m_rows; }
@@ -100,6 +111,7 @@ public:
     int maxCount() const { return m_maxCount; }
     int totalTpos() const { return m_total; }
     const ValueArea& valueArea() const { return m_va; }
+    const InitialBalance& initialBalance() const { return m_ib; }
     bool has(int row, int period) const {
         const uint64_t word = m_bits[static_cast<size_t>(row) * m_words + static_cast<size_t>(period >> 6)];
         return (word >> (period & 63)) & 1u;
@@ -128,17 +140,33 @@ private:
     std::vector<uint64_t> m_bits;
     std::vector<int> m_counts;
     ValueArea m_va;
+    InitialBalance m_ib;
 };
 
-struct Rgba {
-    uint8_t r = 0, g = 0, b = 0, a = 255;
-};
+// Reference levels of one profile, in the profile's layout space (y grows
+// downward from the trade grid top; rowTop(row) = (topAbs - (minGroup + row + 1)
+// * group) * basePx). POC sits on its row centre; VAH/IBH on the top edge of
+// their row, VAL/IBL on the bottom edge. Only visible elements are listed, in
+// tag priority order: POC, VAH, VAL, IBH, IBL.
+enum class Level : int { Poc = 0, Vah = 1, Val = 2, Ibh = 3, Ibl = 4 };
+const char* levelName(Level level);
+const Element& levelElement(const StyleModel& style, Level level);
 
-// Cell colour for one TPO. period/periods place the cell on the session gradient.
-Rgba cellColor(Theme theme, int period, int periods, bool inValueArea, bool poc);
-// Background bar drawn across the profile at the POC row.
-Rgba pocBarColor(Theme theme);
-// True when a letter on this cell should be dark rather than light.
-bool prefersDarkText(const Rgba& cell);
+struct LevelLine {
+    Level level = Level::Poc;
+    double y = 0.0;
+    bool operator==(const LevelLine&) const = default;
+};
+struct LevelLines {
+    std::array<LevelLine, 5> lines{};
+    int count = 0;
+    bool operator==(const LevelLines&) const = default;
+};
+LevelLines levelLines(const ProfileRows& profile, const StyleModel& style, int64_t topAbs, double basePx);
+
+// Tags are chips of chipHeight centred on each line's screen y. A tag that
+// would overlap an earlier (higher priority) tag, or leave [top, bottom], is
+// dropped. Returns a bit per input line (bit i = line i keeps its tag).
+unsigned placeTags(const LevelLines& lines, double offsetY, double chipHeight, double top, double bottom);
 
 } // namespace tpo

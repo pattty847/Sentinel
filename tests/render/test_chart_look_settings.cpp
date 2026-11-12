@@ -3,6 +3,8 @@
 #include "chart/core/ChartViewController.hpp"
 #include "chart/core/PublishedFrame.hpp"
 #include "heatmap/HeatmapChartSettings.hpp"
+#include "chart/shell/TpoStyleStore.hpp"
+#include <QTemporaryDir>
 #include <gtest/gtest.h>
 #include <QSignalSpy>
 #include <string>
@@ -70,6 +72,51 @@ TEST(ChartLookSettings, TpoConfigAndStyleKeepNoticeOrder) {
     EXPECT_EQ(look.tpoTimeframeMs(), 3'600'000);
     EXPECT_EQ(configSignals.count(), 3);
     EXPECT_EQ(styleSignals.count(), 2);
+}
+
+TEST(ChartLookSettings, TpoStyleIsSavedRestoredAndReset) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    QSettings settings(dir.filePath("tpo.ini"), QSettings::IniFormat);
+    auto store = std::make_shared<chart::TpoStyleStore>(settings);
+    ClientTpoConfig config;
+    config.theme = "calm";
+    {
+        chart::ChartLayers layers;
+        chart::ChartLookSettings look(layers);
+        look.setTpoStyleStore(store);
+        look.applyTpoConfig(config);
+        EXPECT_FALSE(store->load().has_value());  // nothing saved until the user changes the style
+        EXPECT_EQ(look.tpoLook(), tpo::presetStyle(tpo::Preset::Letters, tpo::Theme::Calm));
+        EXPECT_EQ(look.tpoPreset(), "letters");
+        QSignalSpy styleSignals(&look.tpo, &chart::ChartTpoQml::tpoStyleChanged);
+        look.setTpoPreset("blocks");
+        look.setTpoPreset("bogus");
+        EXPECT_EQ(styleSignals.count(), 1);
+        EXPECT_EQ(look.tpoPreset(), "blocks");
+        EXPECT_EQ(look.tpoTheme(), "calm");  // a preset keeps the theme
+        auto edited = look.tpoLook();
+        edited.poc.color = {246, 70, 93, 255};
+        look.setTpoLook(edited);
+        EXPECT_EQ(look.tpoPreset(), "custom");
+    }
+    auto saved = tpo::presetStyle(tpo::Preset::Blocks, tpo::Theme::Calm);
+    saved.poc.color = {246, 70, 93, 255};
+    ASSERT_TRUE(store->load().has_value());
+    EXPECT_EQ(*store->load(), saved);
+    settings.sync();
+    QSettings reread(dir.filePath("tpo.ini"), QSettings::IniFormat);
+    EXPECT_EQ(*chart::TpoStyleStore(reread).load(), saved);
+
+    chart::ChartLayers layers;
+    chart::ChartLookSettings look(layers);
+    look.setTpoStyleStore(store);
+    config.theme = "sage";  // a saved theme wins over the configured one
+    look.applyTpoConfig(config);
+    EXPECT_EQ(look.tpoLook(), saved);
+    look.resetTpoLook();
+    EXPECT_FALSE(store->load().has_value());
+    EXPECT_EQ(look.tpoLook(), tpo::presetStyle(tpo::Preset::Letters, tpo::Theme::Sage));
 }
 
 TEST(ChartLookSettings, ToneAndCandleLookKeepClampsAndNotices) {
