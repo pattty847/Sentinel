@@ -306,7 +306,7 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
     if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelMinPx", "labelMaxPx",
-                                "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleWickWidth", "footprintIntensity", "footprintCandle", "footprintNumbers",
+                                "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleBodyFraction", "candleMaxBodyPx", "candleWickWidth", "footprintIntensity", "footprintCandle", "footprintNumbers",
                                 "footprintDustNotional", "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
@@ -466,8 +466,12 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     candleForm->addRow("Down colour", m_candleDownColor);
     candleForm->addRow("Wick colour", wickRow);
     m_candleBodyOpacity = intSpin(candles, "candleBodyOpacity", 0, 100, 5, "%");
+    m_candleBodyFraction = intSpin(candles, "candleBodyFraction", 30, 100, 5, "%");
+    m_candleMaxBodyPx = intSpin(candles, "candleMaxBodyPx", 5, 120, 1, " px");
     m_candleWickWidth = intSpin(candles, "candleWickWidth", 1, 3, 1, " px");
     candleForm->addRow("Body opacity", m_candleBodyOpacity);
+    candleForm->addRow("Body width (column)", m_candleBodyFraction);
+    candleForm->addRow("Maximum body width", m_candleMaxBodyPx);
     candleForm->addRow("Wick width (device pixels)", m_candleWickWidth);
     m_candlePreview = new CandlePreview(m_model, candles);
     candleForm->addRow("Preview", m_candlePreview);
@@ -485,6 +489,8 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_candleWickColor->setToolTip(wickRow->toolTip());
     m_candleWickAuto->setToolTip(wickRow->toolTip());
     describe(candleForm, m_candleBodyOpacity, "Candle body opacity: 0% = transparent, 100% = solid; also applies to the close-price line. Lower it to see the heatmap underneath.");
+    describe(candleForm, m_candleBodyFraction, "Body width as a percentage of its time column (30-100%). Narrow columns keep their existing pixel widths.");
+    describe(candleForm, m_candleMaxBodyPx, "Maximum candle body width in logical pixels (5-120), independent of display scale.");
     describe(candleForm, m_candleWickWidth, "Wick thickness in device pixels (1-3). Raise it when highs and lows are hard to see.");
     connect(m_showLabels, &QCheckBox::toggled, this, [this](bool on) { apply({{"showLabels", on}}); });
     connect(m_labelCurrency, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
@@ -513,6 +519,12 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     connect(m_candleWickAuto, &QPushButton::clicked, this, [this] { apply({{"candleWickColor", "auto"}}); });
     connect(m_candleBodyOpacity, &QSpinBox::valueChanged, this, [this](int value) {
         apply({{"candleBodyOpacity", value / 100.0}});
+    });
+    connect(m_candleBodyFraction, &QSpinBox::valueChanged, this, [this](int value) {
+        apply({{"candleBodyFraction", value / 100.0}});
+    });
+    connect(m_candleMaxBodyPx, &QSpinBox::valueChanged, this, [this](int value) {
+        apply({{"candleMaxBodyPx", value}});
     });
     connect(m_candleWickWidth, &QSpinBox::valueChanged, this, [this](int value) {
         apply({{"candleWickWidth", value}});
@@ -927,6 +939,8 @@ void HeatmapSettingsDialog::refreshFromModel() {
     swatch(m_candleWickColor, s.candleWickColor);
     m_candleWickAuto->setEnabled(s.candleWickColor != "auto");
     set(m_candleBodyOpacity, int(std::lround(s.candleBodyOpacity * 100)));
+    set(m_candleBodyFraction, int(std::lround(s.candleBodyFraction * 100)));
+    set(m_candleMaxBodyPx, s.candleMaxBodyPx);
     set(m_candleWickWidth, s.candleWickWidth);
     m_candlePreview->update();
     {

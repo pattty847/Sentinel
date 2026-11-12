@@ -1261,6 +1261,33 @@ TEST(CandleStyleTest, ChartControlsApplyLiveAndReset) {
     EXPECT_EQ(opacity->value(), 100);
 }
 
+TEST(CandleStyleTest, BodyWidthControlsPersistAndReset) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    auto *fraction = dialog.findChild<QSpinBox *>("candleBodyFraction");
+    auto *maximum = dialog.findChild<QSpinBox *>("candleMaxBodyPx");
+    ASSERT_NE(fraction, nullptr);
+    ASSERT_NE(maximum, nullptr);
+    EXPECT_EQ(fraction->minimum(), 30);
+    EXPECT_EQ(fraction->maximum(), 100);
+    EXPECT_EQ(maximum->minimum(), 5);
+    EXPECT_EQ(maximum->maximum(), 120);
+    EXPECT_EQ(fraction->value(), 85);
+    EXPECT_EQ(maximum->value(), 71);
+    fraction->setValue(60);
+    maximum->setValue(80);
+    EXPECT_DOUBLE_EQ(model.settings().candleBodyFraction, 0.6);
+    EXPECT_EQ(model.settings().candleMaxBodyPx, 80);
+    EXPECT_DOUBLE_EQ(t.reload().candleBodyFraction, 0.6);
+    EXPECT_EQ(t.reload().candleMaxBodyPx, 80);
+    child<QPushButton>(dialog, "resetChart")->click();
+    EXPECT_EQ(fraction->value(), 85);
+    EXPECT_EQ(maximum->value(), 71);
+    EXPECT_DOUBLE_EQ(t.reload().candleBodyFraction, 0.85);
+    EXPECT_EQ(t.reload().candleMaxBodyPx, 71);
+}
+
 TEST(CandleStyleTest, ModelChangesReachTheChartProperties) {
     TempStore t;
     HeatmapSettingsModel model(t.store, "main", t.config);
