@@ -425,7 +425,7 @@ libs/core/marketdata/
 
 ## Transport security (TLS / WSS)
 
-The internal stream server (`SentinelStreamServer`) defaults to `ws://127.0.0.1:8080`. Without TLS, all traffic (market data, server config, and eventually trade commands) is plaintext. TLS upgrades to `wss://` so the stream is encrypted and the client can verify the server.
+The internal stream server (`SentinelStreamServer`) serves only `wss://` (default `wss://127.0.0.1:8080`): every session is TLS, and the server will not start without a loadable certificate and private key (`tls.cert_file` / `tls.key_file`, defaulting to `certs/sentinel-server.crt` and `.key`). The stream is encrypted, and the client can verify the server.
 
 **Encrypted:** `server_config`, `heatmap_slice`, l2 snapshots/updates, `market_trades`, candle and TPO history, `trade_command`, `order_update`, `position_update`, and control messages (e.g. `subscribe`).
 
