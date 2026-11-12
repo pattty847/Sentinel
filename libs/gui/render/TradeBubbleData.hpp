@@ -1,5 +1,6 @@
 #pragma once
 #include "TimeAxisMapping.hpp"
+#include "TradeBubbleStyle.hpp"
 #include "chart/core/BubblePlacement.hpp"
 #include "marketdata/model/TradeData.h"
 #include <array>
@@ -81,37 +82,14 @@ public:
     static constexpr double MaxRadius = chart::bubbles::MaxRadius;
     Layout();
     static double radius(double notional, double reference) { return chart::bubbles::radius(notional, reference); }
-    std::span<const Bubble> build(Samples trades, const TimeAxisMapping& map, const chart::bubbles::Options& options, double previousPrice = 0);
+    std::span<const Bubble> build(Samples trades, const TimeAxisMapping& map, const chart::bubbles::Options& options, double previousPrice = 0, const StyleModel& style = {});
     size_t scannedRows() const { return scannedRows_; }
-    size_t hashProbes() const { return hashProbes_; }
-    size_t coarseCellVisits() const { return coarseCellVisits_; }
-    size_t fineCellCount() const { return fineCellCount_; }
-    double binSizePx() const { return binSize_; } // 0 means individual executions.
-private:
-    struct Point {
-        double x = 0, y = 0, notional = 0;
-        double minY = 0, maxY = 0, opacity = 1;
-        double radiusCap = chart::bubbles::MaxRadius;
-        bool aggregate = false;
-        AggressorSide side = AggressorSide::Unknown;
-        uint32_t cellX = 0, cellY = 0;
-    };
-    static constexpr size_t PointCapacity = chart::bubbles::BubblePlacement::MaxMarks;
-    static constexpr size_t FineSlots = 1u << 18; // <=150k marks, load <0.58
-    chart::bubbles::BubblePlacement policy_;
-public:
-    static constexpr size_t scratchBytes() { return PointCapacity * sizeof(Point) +
-        FineSlots * sizeof(uint32_t) + MaxBubbles * sizeof(Point) +
-        MaxBubbles * sizeof(Bubble) + MaxBubbles * 2 * sizeof(uint16_t) +
+    double binSizePx() const { return 0; } // Spatial merging is disabled.
+    static constexpr size_t scratchBytes() { return MaxBubbles * sizeof(Bubble) +
         chart::bubbles::BubblePlacement::storageBytes(); }
 private:
-    std::unique_ptr<Point[]> points_; // raw projected rows, compacted in place to 6 px cells
-    std::unique_ptr<uint32_t[]> fineSlots_;
-    std::array<uint16_t, MaxBubbles * 2> coarseSlots_{};
-    std::array<Point, MaxBubbles> bins_{};
+    chart::bubbles::BubblePlacement policy_;
     std::array<Bubble, MaxBubbles> bubbles_{};
     size_t count_ = 0, scannedRows_ = 0;
-    double binSize_ = 0;
-    size_t hashProbes_ = 0, coarseCellVisits_ = 0, fineCellCount_ = 0;
 };
 } // namespace trade_bubbles

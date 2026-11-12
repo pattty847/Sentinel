@@ -296,6 +296,15 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(guiNode, "axis_label_px", cfg.gui.axisLabelPx);
     }
 
+    YAML::Node bubbles = (clientNode && clientNode["bubbles"]) ? clientNode["bubbles"] : root["bubbles"];
+    if (bubbles) {
+        readScalar(bubbles, "fill_opacity", cfg.bubbles.fillOpacity);
+        readScalar(bubbles, "max_radius", cfg.bubbles.maxRadius);
+        readScalar(bubbles, "minimum_btc", cfg.bubbles.minimumBtc);
+        readScalar(bubbles, "ring_width", cfg.bubbles.ringWidth);
+        readScalar(bubbles, "ring_visible", cfg.bubbles.ringVisible);
+    }
+
     YAML::Node tpoNode = (clientNode && clientNode["tpo"]) ? clientNode["tpo"] : root["tpo"];
     if (tpoNode) {
         readScalar(tpoNode, "layout", cfg.tpo.layout);

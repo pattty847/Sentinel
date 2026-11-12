@@ -5,14 +5,16 @@
 #include <algorithm>
 
 namespace {
-struct Vertex { float x, y, u, v, r, g, b, a, halfLength; };
+struct Vertex { float x, y, u, v, r, g, b, a, halfLength, ringR, ringG, ringB, ringA, ringWidth; };
 const QSGGeometry::AttributeSet& attributes() {
     static const QSGGeometry::Attribute a[] = {
         QSGGeometry::Attribute::create(0, 2, QSGGeometry::FloatType, true),
         QSGGeometry::Attribute::create(1, 2, QSGGeometry::FloatType),
         QSGGeometry::Attribute::create(2, 4, QSGGeometry::FloatType),
-        QSGGeometry::Attribute::create(3, 1, QSGGeometry::FloatType)};
-    static const QSGGeometry::AttributeSet set{4, sizeof(Vertex), a};
+        QSGGeometry::Attribute::create(3, 1, QSGGeometry::FloatType),
+        QSGGeometry::Attribute::create(4, 4, QSGGeometry::FloatType),
+        QSGGeometry::Attribute::create(5, 1, QSGGeometry::FloatType)};
+    static const QSGGeometry::AttributeSet set{6, sizeof(Vertex), a};
     return set;
 }
 class Shader final : public QSGMaterialShader {
@@ -68,7 +70,8 @@ TradeBubbleNode::~TradeBubbleNode() {
     removeChildNode(&clip_);
 }
 void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMapping& m,
-                          bool enabled, const chart::bubbles::Options& options, QColor buy, QColor sell) {
+                          bool enabled, const chart::bubbles::Options& options, const trade_bubbles::StyleModel& style) {
+    const auto look = trade_bubbles::clamped(style);
     auto clip = m.drawRect;
     if (bottomInset_ > 0) clip.setHeight(std::max(0.0, clip.height() - bottomInset_));
     if (clip_.clipRect() != clip) {
@@ -89,7 +92,7 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
     // inserts rows and evicts its oldest row, never edits existing executions.
     // This also ignores updates outside the viewport and duplicate replay rows.
     if (tape_ == &tape && rebuildCount_ && key == windowKey_ && enabled_ == enabled && options_ == options && mapping_.appendMs == m.appendMs &&
-        buy_ == buy && sell_ == sell && mapping_.valid == m.valid && mapping_.drawRect == m.drawRect &&
+        style_ == look && mapping_.valid == m.valid && mapping_.drawRect == m.drawRect &&
         scaleX(mapping_) == scaleX(m) && scaleY(mapping_) == scaleY(m) &&
         mapping_.priceToScreenY(m.viewMinPrice) == m.priceToScreenY(m.viewMinPrice) &&
         mapping_.viewMinPrice == m.viewMinPrice && mapping_.viewMaxPrice == m.viewMaxPrice) {
@@ -103,9 +106,9 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
     }
     tape_ = &tape;
     windowKey_ = key; enabled_ = enabled; options_ = options;
-    mapping_ = m; buy_ = buy; sell_ = sell;
+    mapping_ = m; style_ = look;
     transform_.setMatrix(QMatrix4x4{});
-    const auto bubbles = enabled ? layout_.build(window.rows, m, options, window.previousPrice) : std::span<const trade_bubbles::Bubble>{};
+    const auto bubbles = enabled ? layout_.build(window.rows, m, options, window.previousPrice, look) : std::span<const trade_bubbles::Bubble>{};
     lastScanRows_ = enabled ? layout_.scannedRows() : 0;
     ++rebuildCount_;
     auto* v = static_cast<Vertex*>(geometry_.vertexData());
@@ -113,8 +116,11 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
     constexpr float corners[6][2] = {{-1,-1},{1,-1},{-1,1},{-1,1},{1,-1},{1,1}};
     for (const auto& b : bubbles) {
         if (!(b.radius > 0)) continue;
-        const auto c = b.side == AggressorSide::Buy ? buy : sell;
-        const float alpha = 0.60f * b.opacity;
+        const auto& element = b.side == AggressorSide::Buy ? look.buy : look.sell;
+        const auto c = element.color;
+        const float alpha = float(element.opacity);
+        const auto ring = look.ring.color;
+        const float ringAlpha = float(look.ring.opacity);
         const double length = double(b.maxY) - b.minY;
         const float radius = float(chart::bubbles::capsuleHalfWidth(b.radius, length));
         if (!(radius > 0)) continue;
@@ -125,7 +131,9 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
             const float x = b.x + uv[0] * radius;
             const float y = float(centreY + uv[1] * (length / 2 + radius));
             v[count++] = {x, y, uv[0], uv[1] * (halfLength + 1),
-                          float(c.redF())*alpha, float(c.greenF())*alpha, float(c.blueF())*alpha, alpha, halfLength};
+                          c.r/255.f*alpha, c.g/255.f*alpha, c.b/255.f*alpha, alpha, halfLength,
+                          ring.r/255.f*ringAlpha, ring.g/255.f*ringAlpha, ring.b/255.f*ringAlpha, ringAlpha,
+                          look.ring.visible ? float(look.ring.width / radius) : 0.f};
         }
     }
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)

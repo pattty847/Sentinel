@@ -1,6 +1,6 @@
 #pragma once
 #include "TradeBubbleData.hpp"
-#include <QColor>
+#include "TradeBubbleStyle.hpp"
 #include <atomic>
 
 namespace trade_bubbles {
@@ -15,6 +15,6 @@ struct RenderFrame {
     std::atomic_bool referencePending = false;
     int referenceRetryMs = 0;
     chart::bubbles::Options options;
-    QColor buy, sell;
+    StyleModel style;
 };
 }
