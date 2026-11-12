@@ -7,6 +7,7 @@
 
 namespace trade_overlay {
 constexpr int64_t kRefreshMs = 1000;
+// Raw snapshot limit for TPO history only. Live aggregates directly from the tape.
 constexpr size_t kMaxTrades = 250000;
 constexpr int kMaxColumns = 512;
 constexpr int kMaxGridWidth = 2048;
@@ -23,9 +24,6 @@ struct Grid {
     bool valid() const;
 };
 enum class Kind { Live, TpoHistory };
-constexpr OverlayTradeBudget overlayBudgetFor(Kind kind) {
-    return kind == Kind::TpoHistory ? OverlayTradeBudget::Newest : OverlayTradeBudget::Reject;
-}
 struct Request {
     std::string symbol;
     Kind kind = Kind::Live;
@@ -62,7 +60,21 @@ int64_t tpoCandleGranularityMs(int64_t periodMs, int64_t sessionStartMs);
 // tape (retainedFromMs == 0) backfills the entire requested historical window.
 CandleFetchResult fetchTpoCandles(const Request& request, int64_t retainedFromMs,
                                 const CandleFetcher& fetch, const StopRequested& stopped = {});
+// One worker-local aggregate, never raw trades. Rebuilt from the retained tape on
+// every publish: late arrivals, session/grid/symbol changes need no cache invalidation.
+struct LiveSnapshot {
+    Request request;
+    Grid grid;
+    std::vector<double> volumeBins;
+    std::vector<std::pair<int64_t, QByteArray>> columns;
+    std::string error;
+};
+// Caller keeps the timestamp-sorted tape stable; aggregation does no I/O or wire encoding.
+LiveSnapshot aggregateLive(const Request& request,
+                           const std::deque<ServerDataModel::RetainedTradeSample>& trades);
+Result buildLive(const LiveSnapshot& snapshot);
 // Pure worker-side builder. Inputs are timestamp-sorted immutable snapshots.
+// Live has no raw-trade count limit.
 Result build(const Request& request, const std::vector<ServerDataModel::RetainedTradeSample>& trades,
              const std::vector<OHLCVBar>& candles = {}, int64_t retainedFromMs = 0);
 // TPO grid for a session type: the base grid for daily sessions; for W1 (x5)

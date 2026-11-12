@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 #include <QCoreApplication>
+#include <QtEndian>
+#include <cstring>
 #include <QDir>
 #include <QTemporaryDir>
 #include "protocol/SentinelStreamClientParseHelpers.hpp"
@@ -28,6 +30,10 @@ struct TradeOverlayWireTest {
 struct TradeOverlayModelTest {
     static void seed(ServerDataModel& model, const std::string& symbol,
                      std::deque<ServerDataModel::RetainedTradeSample> trades) {
+        // Match onTrade's timestamp ordering, preserving arrival order for ties.
+        std::stable_sort(trades.begin(), trades.end(), [](const auto& a, const auto& b) {
+            return a.timestampMs < b.timestampMs;
+        });
         std::lock_guard<std::mutex> lock(model.m_tradeMutex);
         model.m_recentTrades[symbol] = std::move(trades);
     }
@@ -67,10 +73,154 @@ protected:
     }
 };
 }
-TEST(TradeOverlayBudget, OnlyTpoHistoryUsesNewestBudget) {
-    EXPECT_EQ(overlayBudgetFor(Kind::TpoHistory), OverlayTradeBudget::Newest);
-    EXPECT_EQ(overlayBudgetFor(Kind::Live), OverlayTradeBudget::Reject);
+namespace {
+using OverlayTrade = ServerDataModel::RetainedTradeSample;
+std::deque<OverlayTrade> busyTape() {
+    std::deque<OverlayTrade> trades;
+    // A busy full UTC day, with exact binary fractions for the oracle.
+    for (size_t i = 0; i < kMaxTrades + 50001; ++i)
+        trades.push_back({day + static_cast<int64_t>((i * 7919) % 86400000),
+                          100.0 + (i % 24), .125 * (1 + i % 7), AggressorSide::Buy});
+    std::stable_sort(trades.begin(), trades.end(), [](const auto& a, const auto& b) {
+        return a.timestampMs < b.timestampMs;
+    });
+    return trades;
 }
+void expectLiveProfile(const Result& result, const Request& q, const std::deque<OverlayTrade>& trades) {
+    ASSERT_TRUE(result.error.empty()) << result.error;
+    ASSERT_FALSE(result.messages.empty());
+    const auto wire = nlohmann::json::parse(result.messages.back());
+    ASSERT_EQ(wire["type"], "volume_profile_slice");
+    const auto session = SessionManager::sessionContaining(q.nowMs, volumeProfileSession(q.session));
+    EXPECT_EQ(wire["session_start_ms"], session.startMs);
+    std::vector<double> expected(result.grid.rows, 0);
+    for (const auto& t : trades) {
+        if (t.timestampMs < session.startMs || t.timestampMs >= session.endMs || t.timestampMs > q.nowMs ||
+            !std::isfinite(t.price) || !std::isfinite(t.size) || t.size <= 0) continue;
+        const int row = static_cast<int>(std::floor((result.grid.maxPrice - t.price) / result.grid.tick));
+        if (row >= 0 && row < result.grid.rows) expected[row] += t.size;
+    }
+    const auto bytes = QByteArray::fromBase64(QByteArray::fromStdString(wire.at("volume_bins")));
+    ASSERT_EQ(bytes.size(), expected.size() * 4);
+    double total = 0;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        const auto bits = qFromLittleEndian<uint32_t>(reinterpret_cast<const uchar*>(bytes.constData()) + 4 * i);
+        float value; std::memcpy(&value, &bits, sizeof(value));
+        EXPECT_FLOAT_EQ(value, static_cast<float>(expected[i])) << "row=" << i;
+        total += expected[i];
+    }
+    EXPECT_DOUBLE_EQ(wire["total_volume"].get<double>(), total);
+}
+}
+
+TEST_F(TradeOverlayModel, BusyDayLiveProfileIsExactAndSnapshotStorageIsIndependentOfTradeCount) {
+    auto trades = busyTape();
+    auto q = request(); q.nowMs = day + 86400000 - 1; q.previousMs = q.nowMs - q.tpoMs;
+    trades.push_back({day - 1, 111, 999, AggressorSide::Buy});
+    trades.push_back({q.nowMs + 1, 111, 999, AggressorSide::Buy});
+    trades.push_back({q.nowMs, 111, 2, AggressorSide::Buy});
+    trades.push_back({q.nowMs, 111, -1, AggressorSide::Buy});
+    trades.push_back({q.nowMs, std::numeric_limits<double>::quiet_NaN(), 1, AggressorSide::Buy});
+    TradeOverlayModelTest::seed(*model, q.symbol, trades);
+    const auto snapshot = model->collectLiveOverlay(q);
+    ASSERT_TRUE(snapshot.error.empty()) << snapshot.error;
+    EXPECT_EQ(snapshot.volumeBins.size(), q.grid.rows);
+    ASSERT_EQ(snapshot.columns.size(), 2);
+    size_t letterCells = 0;
+    for (const auto& [_, letters] : snapshot.columns) letterCells += letters.size();
+    EXPECT_EQ(letterCells, 2 * q.grid.rows); // No retained raw-trade vector in this snapshot.
+    expectLiveProfile(buildLive(snapshot), q, trades);
+    // The pure builder has the same sorted-input contract as the model tape.
+    std::stable_sort(trades.begin(), trades.end(), [](const auto& a, const auto& b) {
+        return a.timestampMs < b.timestampMs;
+    });
+    expectLiveProfile(build(q, {trades.begin(), trades.end()}), q, trades);
+}
+
+TEST_F(TradeOverlayModel, BusyLiveRebuildsOnRolloverGridSymbolAndLateArrival) {
+    auto trades = busyTape();
+    auto q = request(); q.nowMs = day + 86400000 - 1;
+    TradeOverlayModelTest::seed(*model, q.symbol, trades);
+    expectLiveProfile(buildLive(model->collectLiveOverlay(q)), q, trades);
+    q.grid = {12, 1, 118};
+    expectLiveProfile(buildLive(model->collectLiveOverlay(q)), q, trades);
+    // Old exchange timestamp appended after the publish, including a timestamp tie.
+    trades.push_back({day + 1000, 113, 9, AggressorSide::Sell});
+    trades.push_back({day + 1000, 113, 5, AggressorSide::Buy});
+    TradeOverlayModelTest::seed(*model, q.symbol, trades);
+    expectLiveProfile(buildLive(model->collectLiveOverlay(q)), q, trades);
+    q.nowMs = day + 2 * 86400000 - 1;
+    for (auto t : busyTape()) {
+        t.timestampMs += 86400000;
+        t.size *= 2;
+        trades.push_back(t);
+    }
+    trades.push_back({q.nowMs, 111, 7, AggressorSide::Buy});
+    TradeOverlayModelTest::seed(*model, q.symbol, trades);
+    expectLiveProfile(buildLive(model->collectLiveOverlay(q)), q, trades);
+    q.symbol = "ETH-USD";
+    const std::deque<OverlayTrade> other{{q.nowMs, 115, 3, AggressorSide::Buy}};
+    TradeOverlayModelTest::seed(*model, q.symbol, other);
+    expectLiveProfile(buildLive(model->collectLiveOverlay(q)), q, other);
+    // A restarted/empty tape has no cached volume from either symbol.
+    TradeOverlayModelTest::seed(*model, q.symbol, {});
+    expectLiveProfile(buildLive(model->collectLiveOverlay(q)), q, {});
+}
+
+TEST_F(TradeOverlayModel, LiveTpoRecentBucketsMatchSmallTapeDespiteBusySessionPrefix) {
+    auto q = request(); q.tpoMs = 60000;
+    const auto small = tape();
+    const auto reference = build(q, small);
+    ASSERT_TRUE(reference.error.empty());
+    ASSERT_EQ(reference.messages.size(), 3);
+    // Pin the pre-change letter bytes, including both sides of the minute boundary.
+    EXPECT_EQ(nlohmann::json::parse(reference.messages[0])["letters"], "AABCAAAAAAAAAA==");
+    EXPECT_EQ(nlohmann::json::parse(reference.messages[1])["letters"], "AAAAAEMAAAAAAA==");
+    std::deque<OverlayTrade> trades(small.begin(), small.end());
+    for (size_t i = 0; i <= kMaxTrades; ++i)
+        trades.push_back({day + 1, 119, 1, AggressorSide::Buy});
+    TradeOverlayModelTest::seed(*model, q.symbol, trades);
+    const auto live = buildLive(model->collectLiveOverlay(q));
+    ASSERT_TRUE(live.error.empty()) << live.error;
+    ASSERT_EQ(live.messages.size(), 3);
+    EXPECT_EQ(live.messages[0], reference.messages[0]);
+    EXPECT_EQ(live.messages[1], reference.messages[1]);
+}
+
+TEST_F(TradeOverlayModel, LiveUnanchoredGridUsesNewestTimestampAndArrivalTie) {
+    auto q = request(); q.grid.maxPrice = 0;
+    const std::deque<OverlayTrade> trades{{q.nowMs, 111, 1, AggressorSide::Buy},
+        {day + 1, 900, 1, AggressorSide::Buy}, {q.nowMs, 115, 2, AggressorSide::Buy},
+        {q.nowMs + 1, 500, 1, AggressorSide::Buy}};
+    TradeOverlayModelTest::seed(*model, q.symbol, trades);
+    const auto live = buildLive(model->collectLiveOverlay(q));
+    EXPECT_EQ(live.grid.maxPrice, 124);
+    expectLiveProfile(live, q, trades);
+}
+
+
+TEST_F(TradeOverlayModel, LiveWindowAnchorsOnlyInsideHalfOpenSessionRange) {
+    constexpr int64_t hour = 3600000;
+    auto q = request(); q.session = SessionManager::SessionType::NY;
+    q.nowMs = day + 15 * hour; q.tpoMs = hour; q.grid.maxPrice = 0;
+    const auto window = tradeWindow(q);
+    const std::deque<OverlayTrade> trades{
+        {window.startMs - 1, 900, 100, AggressorSide::Buy},
+        {window.startMs, 111, 3, AggressorSide::Buy},
+        {window.endMs - 1, 115, 5, AggressorSide::Buy},
+        {window.endMs - 1, 117, 7, AggressorSide::Buy},
+        {window.endMs, 800, 100, AggressorSide::Buy}};
+    TradeOverlayModelTest::seed(*model, q.symbol, trades);
+    const auto result = buildLive(model->collectLiveOverlay(q));
+    EXPECT_EQ(result.grid.maxPrice, 126);
+    expectLiveProfile(result, q, trades);
+    // Lower bounds coincide when all retained trades lie outside the window.
+    TradeOverlayModelTest::seed(*model, q.symbol, {trades.front(), trades.back()});
+    const auto empty = model->collectLiveOverlay(q);
+    EXPECT_EQ(empty.error, "overlay grid unavailable or invalid");
+    EXPECT_TRUE(empty.volumeBins.empty());
+}
+
 
 TEST_F(TradeOverlayModel, OrderedMillionTradeTapeNeedsOnlyOneHeapify) {
     using Trade = ServerDataModel::RetainedTradeSample;
@@ -201,7 +351,8 @@ TEST_F(TradeOverlay, InvalidGridAndTradeBudgetNeverYieldPartialMessages) {
     auto r = build(q, tape()); EXPECT_FALSE(r.error.empty()); EXPECT_TRUE(r.messages.empty());
     q = request(); q.grid.rows = kMaxRows + 1;
     EXPECT_FALSE(build(q, tape()).error.empty());
-    q = request(); std::vector<ServerDataModel::RetainedTradeSample> tooMany(kMaxTrades + 1);
+    q = request(); q.kind = Kind::TpoHistory;
+    std::vector<ServerDataModel::RetainedTradeSample> tooMany(kMaxTrades + 1);
     EXPECT_FALSE(build(q, tooMany).error.empty());
     q.tpoMs = 70000; EXPECT_FALSE(build(q, tape()).error.empty());
 }

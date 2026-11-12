@@ -713,7 +713,8 @@ legacy producers can still cause duplicate bubbles on reconnect.
 History sources today:
 - `ServerDataModel::m_recentTrades`: server-global RAM, retention
   `clamp(2 * maxConfiguredTimeframe * max(1024, retentionColumns), 5 min, 24 h)`;
-  `collectOverlayTrades` copies bounded windows for aggregate publishers only.
+  `collectOverlayTrades` copies bounded windows for TPO history only;
+  `collectLiveOverlay` aggregates the retained tape without copying raw trades.
 - `TradeOverlayPublisher`: VP aggregates and TPO letters; TPO's older
   REST-candle range fallback contains no individual executions, sizes or sides.
   `trade_overlay` is also the error context, not a raw-row response family.
@@ -773,16 +774,42 @@ there, never on the network executor or recording live callback. Only immutable
 bounded replies return to the session executor. Closing/unsubscribing discards
 late replies, and selection generations prevent obsolete grids from publishing.
 
-Each job copies at most 250,000 trades inside its requested half-open time window
-and produces at most 8 MiB. Trades outside that window do not consume the budget;
-only matching trades are sorted. Oversized live windows fail explicitly
-instead of producing a partial profile. TPO history keeps the newest 250,000 trades
-by exchange timestamp and extends the existing approximate candle-range fallback
-through the last omitted timestamp (including timestamp ties at candle boundaries).
-The seven-day candle input budget remains in force, and each limited page logs its
-symbol, window and kept trade count. History
-pages contain at most 512 columns. Saturation rejects history requests with a
-`trade_overlay` error; live refreshes coalesce until the next timer turn. A live
+Live jobs stream-aggregate the requested retained-tape window directly into one
+VP array and at most two TPO letter arrays (at most 2,048 rows each). They do not
+materialize, sort, truncate or cap a raw-trade snapshot: a session exceeding
+250,000 trades still contributes every retained, valid, in-grid trade through
+`now_ms` to VP. The timestamp-sorted tape is located with binary searches at the
+requested window boundaries; aggregation then takes O(trades in the session
+window + rows) time per publish, with O(log retained trades) boundary lookup and
+O(rows) additional memory. The scan runs on the history worker under
+`m_tradeMutex`, which is shared by all symbols; JSON/base64 encoding runs after
+releasing the mutex. The already-retained model tape is not duplicated. An
+initially unanchored grid uses the last trade before the window end (last arrival
+wins timestamp ties), without an extra scan.
+
+There is no running VP cache: each publish rebuilds for its symbol, current
+session, tick and price grid. Session rollover excludes the preceding session;
+grid/tick or symbol changes rebuild exactly from that symbol's retained tape.
+Late and out-of-order arrivals, including trades sharing a timestamp, contribute
+on the next refresh if still retained and inside the requested window. Restart
+starts from the new process's retained tape, with no carried-over aggregates;
+this does not recover trades lost before restart or before the retention cutoff.
+Aggregation preserves double-precision volume sums and float32 wire bins.
+
+Every job produces at most 8 MiB. TPO history alone copies at most 250,000 trades
+inside its requested half-open time window. Trades outside that window do not
+consume the budget; only matching trades are sorted. TPO history keeps the newest
+250,000 trades by exchange timestamp and extends the existing approximate
+candle-range fallback through the last omitted timestamp (including timestamp
+ties at candle boundaries). The seven-day candle input budget remains in force,
+and each limited page logs its symbol, window and kept trade count. History pages
+contain at most 512 columns. A failed job or worker-queue refusal, including Live,
+sends an `error` with context `trade_overlay` and the symbol; history errors also
+echo their request ID. Per client and symbol, identical consecutive Live errors
+are sent only once; a changed error sends again, and a successful Live publish
+clears the remembered error. The current GUI client logs uncorrelated Live errors but
+does not display an overlay-specific status or disturb its history pager. Live
+refreshes coalesce until the next timer turn and retry after failures. A live
 refresh sends the forming bucket and, when a boundary was crossed, the preceding
 closed bucket. Long stalls do not enqueue a bucket backlog; older ranges use
 TPO history requests. TPO letters and brackets align to its own session open. TPO history ends at session close,
