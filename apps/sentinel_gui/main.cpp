@@ -23,6 +23,7 @@ This version modularizes startup logic for maintainability and clarity.
 #include "SentinelLogging.hpp"
 #include "SentinelLogSink.hpp"
 #include "themes/ThemeManager.hpp"
+#include "themes/WidgetToolTips.hpp"
 #include "themes/FontManager.hpp"
 #include "ConfigLoader.hpp"
 #include "config/AgentHostMode.hpp"
@@ -151,6 +152,8 @@ int main(int argc, char *argv[])
     }
 
     QApplication app(argc, argv);
+
+    WidgetToolTips::install(&app);
 
     // Register resources embedded in the static GUI library.
     Q_INIT_RESOURCE(sentinel_svg_resources);

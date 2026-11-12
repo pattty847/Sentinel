@@ -116,20 +116,24 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_candleAction = candleAction;
 
     m_heatmapButton = addIconButton(":/svg/grid_view.svg", "Heatmap");
+    m_heatmapButton->setObjectName("chartHeatmapButton");
     m_heatmapButton->setCheckable(true);
     m_heatmapButton->setChecked(true);
     m_heatmapButton->setAutoExclusive(false);
 
     m_footprintButton = addIconButton(":/svg/footprint.svg", "Footprint");
+    m_footprintButton->setObjectName("chartFootprintButton");
     m_footprintButton->setCheckable(true);
     m_footprintButton->setAutoExclusive(false);
 
     m_tpoButton = addIconButton(":/svg/tpo_chart.svg", "TPO");
+    m_tpoButton->setObjectName("chartTpoButton");
     m_tpoButton->setCheckable(true);
     m_tpoButton->setAutoExclusive(false);
 
     // A text mark distinguishes volume profile from the TPO glyph at a glance.
     m_volumeProfileButton = addIconButton(QString(), "Volume profile");
+    m_volumeProfileButton->setObjectName("chartVolumeProfileButton");
     m_volumeProfileButton->setText("VP");
     m_volumeProfileButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_volumeProfileButton->setAccessibleName("Volume profile layer");

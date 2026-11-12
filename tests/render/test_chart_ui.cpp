@@ -25,6 +25,7 @@
 #include "widgets/TopToolbar.hpp"
 #include "widgets/ChartDock.hpp"
 #include "themes/ThemeManager.hpp"
+#include "themes/WidgetToolTips.hpp"
 #include "themes/FontManager.hpp"
 #include "SyntheticHmc2Fixture.hpp"
 #include <QAction>
@@ -242,6 +243,23 @@ void exerciseMenuKeyboard(QMenu *root) {
 
 // ------------------------------------------------------------ toolbar modes
 // The rules live in one place (TopToolbar::controlVisibility).
+TEST(ChartToolbar, CheckedLayerHasVisibleStateAndCombosHaveArrows) {
+    TopToolbar toolbar;
+    toolbar.resize(1600, 40);
+    toolbar.show();
+    QCoreApplication::processEvents();
+    auto* heatmap = toolbar.findChild<QToolButton*>("chartHeatmapButton");
+    ASSERT_NE(heatmap, nullptr);
+    heatmap->setChecked(false);
+    const QImage off = heatmap->grab().toImage();
+    heatmap->setChecked(true);
+    const QImage on = heatmap->grab().toImage();
+    EXPECT_NE(off.pixelColor(2, heatmap->height() / 2),
+              on.pixelColor(2, heatmap->height() / 2));
+    EXPECT_TRUE(qApp->styleSheet().contains("QComboBox::down-arrow"));
+    EXPECT_TRUE(qApp->styleSheet().contains(":/svg/chevron_down.svg"));
+}
+
 TEST(ChartToolbar, ControlVisibilityRulesPerMode) {
     struct Case {
         const char *what;
@@ -1028,7 +1046,11 @@ TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {
     auto *renderer = shell->findChild<UnifiedGridRenderer *>("unifiedGridRenderer");
     auto *price = shell->findChild<QQuickItem *>("autoPriceScaleButton");
     auto *live = shell->findChild<QQuickItem *>("followLiveButton");
+    auto *liveTip = shell->findChild<QObject *>("followLiveToolTip");
     ASSERT_TRUE(renderer && price && live);
+    ASSERT_NE(liveTip, nullptr);
+    EXPECT_EQ(liveTip->property("text").toString(),
+              QStringLiteral("L · Follow live time: keep newest data in view"));
     renderer->view()->setAutoPriceScale(false);
     renderer->view()->enableAutoScroll(false);
     const auto press = [](QObject *target, int key) {
@@ -1051,6 +1073,46 @@ TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {
         ASSERT_TRUE(axis);
         EXPECT_TRUE(axis->activeFocusOnTab());
     }
+}
+
+TEST(ChartTooltips, WidgetTextWrapsBeforeTheWidthLimit) {
+    const QString text = QStringLiteral("A long explanation that would otherwise cover the price axis and the data beneath it, including a second sentence about zooming and resetting the chart.");
+    const QString wrapped = WidgetToolTips::wrappedText(text);
+    EXPECT_TRUE(wrapped.contains("<br/>"));
+    EXPECT_TRUE(wrapped.startsWith("<span"));
+    EXPECT_FALSE(wrapped.contains("<script"));
+}
+
+TEST(ChartTooltips, SharedQmlTooltipStaysBesidePointerAtRightEdge) {
+    QQmlEngine engine;
+    engine.addImportPath("qrc:/qt/qml");
+    QQmlComponent component(&engine);
+    component.setData(R"(
+        import QtQuick 2.15
+        import Sentinel.Charts 1.0
+        Item {
+            id: root
+            width: 640
+            height: 500
+            Item { id: pointer; x: 625; y: 100; property real mouseX: 2; property real mouseY: 20 }
+            ChartToolTip {
+                objectName: "tip"
+                parent: root
+                pointerItem: pointer
+                text: "Price axis · drag or scroll to zoom, then double-click to fit the visible range"
+            }
+        }
+    )", QUrl("test:chart-tooltip"));
+    QTRY_VERIFY_WITH_TIMEOUT(!component.isLoading(), 3000);
+    ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+    std::unique_ptr<QObject> root(component.create());
+    ASSERT_TRUE(root) << component.errorString().toStdString();
+    auto* tip = root->findChild<QObject*>("tip");
+    ASSERT_NE(tip, nullptr);
+    EXPECT_LE(tip->property("width").toReal(), 360.0);
+    EXPECT_LT(tip->property("anchorX").toReal(), 625.0);
+    EXPECT_GE(tip->property("anchorY").toReal(), 120.0);
+    EXPECT_LT(tip->property("anchorY").toReal(), 200.0);
 }
 
 // Lock to mid's corner toggle (M) reflects and drives view.lockToMid, replaces the

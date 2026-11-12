@@ -664,9 +664,12 @@ Rectangle {
             onReleased: unifiedGridRenderer.view.endZoomGesture()
             onCanceled: unifiedGridRenderer.view.endZoomGesture()
         }
-        ToolTip.visible: priceAxisMouse.containsMouse
-        ToolTip.delay: 550
-        ToolTip.text: "Price axis · drag/scroll to zoom; double-click or Home to fit"
+        ChartToolTip {
+            parent: root
+            pointerItem: priceAxisMouse
+            visible: priceAxisMouse.containsMouse
+            text: "Price axis · drag/scroll to zoom; double-click or Home to fit"
+        }
 
         WheelHandler {
             acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
@@ -755,9 +758,12 @@ Rectangle {
             onReleased: unifiedGridRenderer.view.endZoomGesture()
             onCanceled: unifiedGridRenderer.view.endZoomGesture()
         }
-        ToolTip.visible: timeAxisMouse.containsMouse
-        ToolTip.delay: 550
-        ToolTip.text: "Time axis · drag/scroll to zoom; double-click or Home to reset live view"
+        ChartToolTip {
+            parent: root
+            pointerItem: timeAxisMouse
+            visible: timeAxisMouse.containsMouse
+            text: "Time axis · drag/scroll to zoom; double-click or Home to reset live view"
+        }
 
         WheelHandler {
             acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
@@ -828,9 +834,12 @@ Rectangle {
                     unifiedGridRenderer.view.autoPriceScale = !unifiedGridRenderer.view.autoPriceScale
                 }
             }
-            ToolTip.visible: autoPriceScaleMouse.containsMouse
-            ToolTip.delay: 550
-            ToolTip.text: "P · Auto price scale: fit visible candles"
+            ChartToolTip {
+                parent: root
+                pointerItem: autoPriceScaleMouse
+                visible: autoPriceScaleMouse.containsMouse
+                text: "P · Auto price scale: fit visible candles"
+            }
             Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                     unifiedGridRenderer.view.autoPriceScale = !unifiedGridRenderer.view.autoPriceScale
@@ -871,9 +880,13 @@ Rectangle {
                     unifiedGridRenderer.view.enableAutoScroll(!unifiedGridRenderer.view.autoScrollEnabled)
                 }
             }
-            ToolTip.visible: followLiveMouse.containsMouse
-            ToolTip.delay: 550
-            ToolTip.text: "A · Follow live time: keep newest data in view"
+            ChartToolTip {
+                objectName: "followLiveToolTip"
+                parent: root
+                pointerItem: followLiveMouse
+                visible: followLiveMouse.containsMouse
+                text: "L · Follow live time: keep newest data in view"
+            }
             Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                     unifiedGridRenderer.view.enableAutoScroll(!unifiedGridRenderer.view.autoScrollEnabled)
@@ -914,9 +927,12 @@ Rectangle {
                     unifiedGridRenderer.view.lockToMid = !unifiedGridRenderer.view.lockToMid
                 }
             }
-            ToolTip.visible: lockToMidMouse.containsMouse
-            ToolTip.delay: 550
-            ToolTip.text: "M · Lock to mid: keep the book mid centred"
+            ChartToolTip {
+                parent: root
+                pointerItem: lockToMidMouse
+                visible: lockToMidMouse.containsMouse
+                text: "M · Lock to mid: keep the book mid centred"
+            }
             Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                     unifiedGridRenderer.view.lockToMid = !unifiedGridRenderer.view.lockToMid
