@@ -802,15 +802,26 @@ TEST(FootprintEmptyState, CoverageDistinguishesLoadingRefusedAndProvenEmpty) {
     FlowSeriesBuffer::Series series;
     using State = chart::FlowSnapshot::WindowState;
     using Status = SentinelStreamClient::FlowStatus;
-    EXPECT_EQ(chart::FlowFeed::windowState(series, 0, 2000), State::Loading);
+    auto frame = footprintFrame();
+    frame.viewportTimeStart = 0; frame.viewportTimeEnd = 2000;
+    frame.raster.drawnEndMs = 2000.25; // the raster extends into an unrequested bucket
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Loading);
     series.coverage[0] = {0, 1000, Status::Complete};
-    EXPECT_EQ(chart::FlowFeed::windowState(series, 0, 2000), State::Loading);
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Loading);
     series.coverage[1000] = {1000, 2000, Status::Building};
-    EXPECT_EQ(chart::FlowFeed::windowState(series, 0, 2000), State::Loading);
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Loading);
     series.coverage[1000].status = Status::Refused;
-    EXPECT_EQ(chart::FlowFeed::windowState(series, 0, 2000), State::Unavailable);
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Unavailable);
     series.coverage[1000].status = Status::Complete;
-    EXPECT_EQ(chart::FlowFeed::windowState(series, 0, 2000), State::Ready);
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Ready);
+    series.coverage.clear();
+    series.coverage[0] = {0, 3600000, Status::Complete};
+    series.coverage[1000] = {1000, 2000, Status::Partial};
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Loading);
+    series.coverage[1000].status = Status::Building;
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Loading);
+    series.coverage.erase(1000);
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Ready);
 }
 TEST(FootprintEmptyState, MessageRequiresProvenEmptyVisibleWindow) {
     chart::FootprintCellsLayer layer;
@@ -834,6 +845,19 @@ TEST(FootprintEmptyState, MessageRequiresProvenEmptyVisibleWindow) {
     frame.context.raster.drawnStartMs -= 1;
     publish(footprintSeries(), chart::FlowSnapshot::WindowState::Ready);
     EXPECT_TRUE(layer.emptyStateText(frame).isEmpty());
+    auto priceFrame = footprintFrame();
+    priceFrame.raster.drawnMinPrice = 200; priceFrame.raster.drawnMaxPrice = 210;
+    auto chartPriceFrame = frame; chartPriceFrame.context.raster = priceFrame.raster;
+    ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), priceFrame));
+    layer.mailbox().back().windowState = chart::FlowSnapshot::WindowState::Ready;
+    EXPECT_EQ(layer.mailbox().back().visibleBarCount, 1);
+    EXPECT_EQ(layer.mailbox().back().maxRowVolume, 0);
+    layer.mailbox().post(); layer.sync(chartPriceFrame);
+    EXPECT_TRUE(layer.emptyStateText(chartPriceFrame).isEmpty());
+    auto timeFrame = footprintFrame();
+    timeFrame.viewportTimeStart = 1000; timeFrame.viewportTimeEnd = 2000;
+    ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), timeFrame));
+    EXPECT_EQ(layer.mailbox().back().visibleBarCount, 0) << "drawn overscan is outside the visible window";
     frame.context.overlays.footprint = false;
     EXPECT_TRUE(layer.emptyStateText(frame).isEmpty());
 }
@@ -852,6 +876,9 @@ TEST(VolumeProfileEmptyState, LoadingEmptyAndVisibleDataHaveDistinctResults) {
     VolumeProfileState::Snapshot snap;
     snap.sessionStartMs = 500; snap.sessionEndMs = 1500;
     snap.minPrice = 95; snap.tickSize = 1; snap.gridHeight = 10;
+    layer.renderer.enqueue({}, snap);
+    layer.updateNodes(frame, context);
+    EXPECT_EQ(layer.emptyStateText(frame), "Volume profile: no trade data for this window");
     layer.renderer.enqueue(std::vector<float>(10, 0), snap);
     layer.updateNodes(frame, context);
     EXPECT_EQ(layer.emptyStateText(frame), "Volume profile: no trade data for this window");
@@ -863,11 +890,22 @@ TEST(VolumeProfileEmptyState, LoadingEmptyAndVisibleDataHaveDistinctResults) {
     EXPECT_NE(bars->indexDataAsUShort()[0], bars->indexDataAsUShort()[1]);
     frame.context.raster.drawnStartMs = 3000; frame.context.raster.drawnEndMs = 5000;
     layer.updateNodes(frame, context);
-    EXPECT_EQ(layer.emptyStateText(frame), "Volume profile: no trade data for this window");
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty()) << "the current-session bars still draw on a past window";
+    EXPECT_NE(bars->indexDataAsUShort()[0], bars->indexDataAsUShort()[1]);
+    frame.context.mapping.viewMinPrice = 200; frame.context.mapping.viewMaxPrice = 210;
+    layer.updateNodes(frame, context);
+    EXPECT_EQ(layer.emptyStateText(frame), "Volume profile: current session only");
+    layer.renderer.enqueue(std::vector<float>(10, 0), snap);
+    layer.updateNodes(frame, context);
+    EXPECT_EQ(layer.emptyStateText(frame), "Volume profile: current session only");
+    layer.renderer.enqueue(std::vector<float>(10, 1), snap);
+    frame.context.raster.drawnStartMs = 0; frame.context.raster.drawnEndMs = 2000;
+    layer.updateNodes(frame, context);
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty()) << "profile volume exists outside this price range";
     frame.context.overlays.volumeProfile = false;
     EXPECT_TRUE(layer.emptyStateText(frame).isEmpty());
 }
-TEST(ChartEmptyStateText, LayersUseOneCentredMsdfRunAtBothScaleFactors) {
+TEST(ChartEmptyStateText, EmptyLabelsUseMsdfAndAvoidVisibleCandles) {
     QTemporaryDir cache;
     QString error;
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
@@ -906,6 +944,18 @@ TEST(ChartEmptyStateText, LayersUseOneCentredMsdfRunAtBothScaleFactors) {
         EXPECT_NEAR((left + right) * 0.5, frame.context.surfaceBounds.center().x(), 2.0);
         EXPECT_NEAR((top + bottom) * 0.5, frame.context.surfaceBounds.center().y(), 2.0);
     }
+    chart::CandleBar candle;
+    candle.timeStartMs = 0; candle.timeEndMs = 2000;
+    candle.high = 95; candle.low = 92;
+    frame.context.surfaceDpr = 1; frame.context.raster.dpr = 1;
+    frame.context.raster.colPxF = 400;
+    layers.text.setCandleEnvelope({candle}, 2000);
+    layers.text.sync(frame);
+    layers.text.updateNodes(frame, context);
+    ASSERT_FALSE(layers.text.emptyGlyphs().empty());
+    double labelBottom = -1e9;
+    for (const auto& glyph : layers.text.emptyGlyphs()) labelBottom = std::max(labelBottom, glyph.rect.bottom());
+    EXPECT_LT(labelBottom, 177.0) << "the centre text box crosses this candle's wick";
     layers.footprintCells.mailbox().back().windowState = chart::FlowSnapshot::WindowState::Loading;
     layers.footprintCells.mailbox().post();
     layers.footprintCells.sync(frame);

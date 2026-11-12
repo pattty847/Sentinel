@@ -294,7 +294,7 @@ void UnifiedGridRenderer::setActiveSymbol(const QString& symbol) {
               << " symbol=" << normalized);
   m_view->zoomGlide().land();
   m_view->priceCarry().capture();
-  m_view->session().setSymbol(normalized);
+  m_view->session().setSymbol(normalized); m_layers.text.refreshCandles();
   m_layers.ladderFeed.beginGeneration(); // no rows of the previous symbol survive the switch
   // The controller serial switches the heatmap (the node holds the old picture
   // until the new spans are ready); clearData() resets the trade overlays. The
@@ -350,7 +350,7 @@ void UnifiedGridRenderer::setCandleBuffer(QObject* buffer) {
   auto* candles = qobject_cast<CandleSeriesBuffer*>(buffer);
   if (m_candleSource.buffer() == candles) return;
   if (m_connections.candleDirty) disconnect(m_connections.candleDirty);
-  m_candleSource.setBuffer(candles);
+  m_candleSource.setBuffer(candles); m_layers.text.refreshCandles();
   m_view->priceFitter().setCandleSource(candles ? &m_candleSource : nullptr);
   if (candles) {
     // Auto price scale: a candle update or history page in view refits price (a few
@@ -358,7 +358,7 @@ void UnifiedGridRenderer::setCandleBuffer(QObject* buffer) {
     m_connections.candleDirty = connect(candles, &CandleSeriesBuffer::candlesDirty, this,
                                 [this](const QString& symbol, int64_t timeframeMs, qint64 dirtyStart,
                                        qint64 dirtyEnd) {
-                                  m_view->priceFitter().candlesDirty(symbol, timeframeMs, dirtyStart, dirtyEnd);
+                                  m_view->priceFitter().candlesDirty(symbol, timeframeMs, dirtyStart, dirtyEnd); m_layers.text.candlesDirty(symbol, timeframeMs, dirtyStart, dirtyEnd);
                                 });
   }
   refitAutoPrice();

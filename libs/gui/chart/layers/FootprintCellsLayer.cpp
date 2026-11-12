@@ -66,7 +66,7 @@ QString FootprintCellsLayer::emptyStateText(const ChartFrame& frame) const {
         return {};
     if (data.windowFromMs != cam.drawnStartMs || data.windowToMs != cam.drawnEndMs ||
         data.windowLow != cam.drawnMinPrice || data.windowHigh != cam.drawnMaxPrice ||
-        data.maxRowVolume > 0) return {};
+        data.visibleBarCount > 0) return {};
     if (data.windowState == FlowSnapshot::WindowState::Unavailable)
         return QStringLiteral("Footprint: trade data unavailable for this window");
     if (data.windowState == FlowSnapshot::WindowState::Ready)

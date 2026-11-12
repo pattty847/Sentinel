@@ -19,6 +19,15 @@ bool grid(double native, double drawn) {
 }
 using FlatRows = std::array<FlowCell, FlowSnapshot::kMaxCells>;
 enum class Added { Yes, Invalid, Oversized, Full };
+struct VisibleTime { double start, end; };
+VisibleTime visibleTime(const MappingFrameContext& frame) {
+    if (frame.viewportValid && frame.viewportTimeEnd > frame.viewportTimeStart)
+        return {double(frame.viewportTimeStart), double(frame.viewportTimeEnd)};
+    return {frame.raster.drawnStartMs, frame.raster.drawnEndMs};
+}
+bool barTouches(const sentinel::flow::FlowBar& bar, VisibleTime visible) {
+    return double(bar.startMs) < visible.end && double(bar.startMs) + bar.timeframeMs > visible.start;
+}
 int prepareRows(FlatRows& rows, const sentinel::flow::FlowBar& bar, double tick) {
     if (bar.baseScale <= 0 || !grid(bar.nativeTick, tick)) return -1;
     if (bar.rows.size() > rows.size()) return -2;
@@ -58,7 +67,7 @@ bool inPrice(const FlowCell& row, double tick, double low, double high) {
     return (double(row.row) + row.span) * tick > low && double(row.row) * tick < high;
 }
 Added addBar(FlowSnapshot& out, const sentinel::flow::FlowBar& bar, FlatRows& rows,
-             const chart_raster::RasterCamera& cam, int64_t band) {
+             const chart_raster::RasterCamera& cam, int64_t band, VisibleTime visible) {
     int count = prepareRows(rows, bar, out.tick);
     if (count == -2) return Added::Oversized;
     if (count >= 0) bandRows(rows, count, band);
@@ -74,7 +83,8 @@ Added addBar(FlowSnapshot& out, const sentinel::flow::FlowBar& bar, FlatRows& ro
     if (out.barCount == FlowSnapshot::kMaxBars || out.cellCount + column.cellCount > FlowSnapshot::kMaxCells)
         return Added::Full;
     out.bars[size_t(out.barCount++)] = column;
-    const bool visibleBar = double(bar.startMs) < cam.drawnEndMs && double(bar.startMs) + bar.timeframeMs > cam.drawnStartMs;
+    const bool visibleBar = barTouches(bar, visible);
+    if (visibleBar) ++out.visibleBarCount;
     for (int i = 0; i < count; ++i) {
         const auto& cell = rows[size_t(i)];
         if (!inPrice(cell, out.tick, out.low, out.high)) continue;
@@ -108,8 +118,8 @@ Budget budget(const chart_raster::RasterCamera& cam, int64_t timeframeMs, double
     return plan;
 }
 Added visit(FlowSnapshot& out, const sentinel::flow::FlowBar& bar, FlatRows& rows,
-            const chart_raster::RasterCamera& cam, int64_t band) {
-    const auto result = bar.timeframeMs == out.timeframeMs ? addBar(out, bar, rows, cam, band) : Added::Invalid;
+            const chart_raster::RasterCamera& cam, int64_t band, VisibleTime visible) {
+    const auto result = bar.timeframeMs == out.timeframeMs ? addBar(out, bar, rows, cam, band, visible) : Added::Invalid;
     if (result == Added::Invalid) ++out.skippedBars;
     if (result == Added::Oversized || result == Added::Full) ++out.truncatedBars;
     return result;
@@ -118,12 +128,12 @@ int64_t barKey(double ms) { return int64_t(std::clamp(ms, -9e15, 9e15)); }
 // Visible bars newest first, so a full snapshot trims the far past and never the live
 // edge; then overscan outward from the nearer view edge. No candidate allocation.
 void collect(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, FlatRows& rows,
-             const chart_raster::RasterCamera& cam, int64_t band) {
+             const chart_raster::RasterCamera& cam, int64_t band, VisibleTime visible) {
     const double tf = double(out.timeframeMs);
     const auto lo = series.bars.upper_bound(barKey(std::floor(cam.drawnStartMs - tf)));
     const auto hi = series.bars.lower_bound(barKey(std::ceil(cam.drawnEndMs)));
     for (auto it = hi; it != lo;)
-        if (visit(out, (--it)->second.bar, rows, cam, band) == Added::Full) return;
+        if (visit(out, (--it)->second.bar, rows, cam, band, visible) == Added::Full) return;
     auto left = lo, right = hi;
     for (;;) {
         const bool leftOk = left != series.bars.begin() && double(std::prev(left)->first) + tf > out.fromMs;
@@ -132,7 +142,7 @@ void collect(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, FlatRows
         const bool takeLeft = leftOk && (!rightOk ||
             cam.drawnStartMs - tf - double(std::prev(left)->first) <= double(right->first) - cam.drawnEndMs);
         const auto& bar = takeLeft ? (--left)->second.bar : (right++)->second.bar;
-        if (visit(out, bar, rows, cam, band) == Added::Full) return;
+        if (visit(out, bar, rows, cam, band, visible) == Added::Full) return;
     }
 }
 } // namespace
@@ -216,7 +226,7 @@ void FlowFeed::post() {
 void FlowFeed::withdraw() {
     auto& out = mailbox_.back();
     out.valid = false; out.windowState = FlowSnapshot::WindowState::Loading;
-    out.barCount = 0; out.cellCount = 0; out.serial = ++serial_;
+    out.barCount = 0; out.cellCount = 0; out.visibleBarCount = 0; out.serial = ++serial_;
     post();
 }
 void FlowFeed::receive(SentinelStreamClient::FlowBatchPtr batch) {
@@ -258,7 +268,7 @@ bool FlowFeed::bin(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, co
                    FootprintStage stage, int64_t previousBand) {
     const auto& cam = frame.raster;
     out.valid = false; out.windowState = FlowSnapshot::WindowState::Loading;
-    out.barCount = 0; out.cellCount = 0; out.maxRowVolume = 0;
+    out.barCount = 0; out.cellCount = 0; out.visibleBarCount = 0; out.maxRowVolume = 0;
     out.skippedBars = 0; out.truncatedBars = 0; out.bandRows = 1;
     out.tick = cam.tick; out.timeframeMs = frame.activeTimeframeMs;
     out.windowFromMs = cam.drawnStartMs; out.windowToMs = cam.drawnEndMs;
@@ -271,29 +281,35 @@ bool FlowFeed::bin(FlowSnapshot& out, const FlowSeriesBuffer::Series& series, co
     out.low = cam.drawnMinPrice - plan.padPrice; out.high = cam.drawnMaxPrice + plan.padPrice;
     // Reused on the GUI thread; fixed storage also bounds malformed/oversized bars.
     thread_local FlatRows rows;
-    collect(out, series, rows, cam, plan.band);
+    collect(out, series, rows, cam, plan.band, visibleTime(frame));
     std::sort(out.bars.begin(), out.bars.begin() + out.barCount,
               [](const auto& a, const auto& b) { return a.startMs < b.startMs; });
     out.valid = true;
     return true;
 }
 FlowSnapshot::WindowState FlowFeed::windowState(const FlowSeriesBuffer::Series& series,
-                                                 double fromMs, double toMs) {
+                                                 const MappingFrameContext& frame) {
     using Status = SentinelStreamClient::FlowStatus;
-    if (!std::isfinite(fromMs) || !std::isfinite(toMs) || toMs <= fromMs)
+    const auto [fromMs, toMs] = visibleTime(frame);
+    const double tf = double(frame.activeTimeframeMs);
+    if (!std::isfinite(fromMs) || !std::isfinite(toMs) || !(tf >= 1000) || toMs <= fromMs)
         return FlowSnapshot::WindowState::Loading;
-    double cursor = fromMs;
-    while (cursor < toMs) {
-        const auto next = series.coverage.upper_bound(int64_t(std::floor(cursor)));
-        if (next == series.coverage.begin()) return FlowSnapshot::WindowState::Loading;
-        const auto& range = std::prev(next)->second;
-        if (double(range.fromMs) > cursor || double(range.toMs) <= cursor)
-            return FlowSnapshot::WindowState::Loading;
-        if (range.status == Status::Refused) return FlowSnapshot::WindowState::Unavailable;
-        if (range.status == Status::Building || range.status == Status::Partial)
-            return FlowSnapshot::WindowState::Loading;
-        cursor = double(range.toMs);
+    const double start = std::floor(fromMs / tf) * tf;
+    const double end = std::ceil(toMs / tf) * tf;
+    double coveredThrough = start;
+    bool incomplete = false, refused = false;
+    for (const auto& [key, range] : series.coverage) {
+        if (double(key) >= end) break;
+        if (double(range.toMs) <= start) continue;
+        if (range.status == Status::Refused) refused = true;
+        else if (range.status == Status::Building || range.status == Status::Partial) incomplete = true;
+        else if (double(range.fromMs) <= coveredThrough)
+            coveredThrough = std::max(coveredThrough, double(range.toMs));
     }
+    if (refused) return FlowSnapshot::WindowState::Unavailable;
+    // A missing flow file currently stays Building/Partial: the server has no
+    // distinct "not recorded" result, so do not claim that window is empty.
+    if (incomplete || coveredThrough < end) return FlowSnapshot::WindowState::Loading;
     return FlowSnapshot::WindowState::Ready;
 }
 void FlowFeed::report(const FlowSnapshot& out) {
@@ -312,14 +328,14 @@ void FlowFeed::publishRows() {
     const auto frame = ports_.frame ? ports_.frame() : MappingFrameContext{};
     if (!visible(frame)) return;
     auto& out = mailbox_.back();
-    out.valid = false; out.barCount = 0; out.cellCount = 0;
+    out.valid = false; out.barCount = 0; out.cellCount = 0; out.visibleBarCount = 0;
     out.skippedBars = 0; out.truncatedBars = 0; out.serial = ++serial_;
     const auto* series = buffer_.series(symbol_, frame.activeTimeframeMs);
     // Numbers off caps the stage at Cells, as the layer does, so bands stay at the Cells height.
     const auto stage = !numbers_ && lod_ == FootprintStage::Numbers ? FootprintStage::Cells : lod_;
     if (series && bin(out, *series, frame, stage, band_)) {
         band_ = out.bandRows;
-        out.windowState = windowState(*series, frame.raster.drawnStartMs, frame.raster.drawnEndMs);
+        out.windowState = windowState(*series, frame);
     }
     report(out);
     post();

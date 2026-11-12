@@ -22,6 +22,7 @@ private:
     };
     VisibleKey visibleKey_;
     bool visibleKeyValid_ = false;
+    bool anyData_ = false;
     bool visibleData_ = false;
     std::vector<float> bins_;
     VolumeProfileState::Snapshot snap_;
