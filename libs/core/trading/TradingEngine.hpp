@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace trading {
@@ -18,7 +19,7 @@ struct TradingResult {
     std::vector<PositionUpdate> positionUpdates;
     std::vector<PnlSnapshot> pnlSnapshots;
     std::vector<RiskOrderUpdate> riskOrderUpdates;
-    std::string rejectReason; // non-empty when a command was refused; a stable snake_case token
+    std::string rejectReason; // non-empty when a command or triggered exit was refused; a stable snake_case token
 };
 
 class TradingEngine {
@@ -80,6 +81,7 @@ private:
     PositionManager m_positions;
     PaperExecutionAdapter m_execution;
     std::unordered_map<std::string, AttachedRiskState> m_attachedRiskBySymbol;
+    std::unordered_set<std::string> m_rejectedRiskSymbols;
 };
 
 TradeCommand parseTradeCommandJson(const std::string& raw);
