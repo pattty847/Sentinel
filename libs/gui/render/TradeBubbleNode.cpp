@@ -118,9 +118,9 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
         if (!(b.radius > 0)) continue;
         const auto& element = b.side == AggressorSide::Buy ? look.buy : look.sell;
         const auto c = element.color;
-        const float alpha = float(element.opacity);
+        const float alpha = float(element.opacity) * b.opacity;
         const auto ring = look.ring.color;
-        const float ringAlpha = float(look.ring.opacity);
+        const float ringAlpha = float(look.ring.opacity) * b.opacity;
         const double length = double(b.maxY) - b.minY;
         const float radius = float(chart::bubbles::capsuleHalfWidth(b.radius, length));
         if (!(radius > 0)) continue;

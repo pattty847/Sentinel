@@ -47,7 +47,7 @@ TradeBubbleStyleEditor::TradeBubbleStyleEditor(QWidget* parent) : QWidget(parent
         if (loading_) return;
         style_.minimumBaseSize = v;
         setStyleModel(style_);
-        emit styleEdited(style_);
+        emit styleEdited(style_, true);
     });
     setStyleModel(style_);
 }
@@ -91,7 +91,7 @@ void TradeBubbleStyleEditor::buildRow(int i, QGridLayout* grid) {
         if (!picked.isValid()) return;
         element.color = {uint8_t(picked.red()), uint8_t(picked.green()), uint8_t(picked.blue()), 255};
         setStyleModel(style_);
-        emit styleEdited(style_);
+        emit styleEdited(style_, false);
     });
 }
 void TradeBubbleStyleEditor::setStyleModel(const trade_bubbles::StyleModel& style) {
@@ -127,5 +127,5 @@ void TradeBubbleStyleEditor::readControls() {
         e.width = rows_[i].width->value() / 10.0;
     }
     setStyleModel(style_);
-    emit styleEdited(style_);
+    emit styleEdited(style_, false);
 }

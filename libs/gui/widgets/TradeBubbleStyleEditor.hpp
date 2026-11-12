@@ -17,7 +17,7 @@ public:
     void setStyleModel(const trade_bubbles::StyleModel& style);
     trade_bubbles::StyleModel styleModel() const { return style_; }
 signals:
-    void styleEdited(const trade_bubbles::StyleModel& style);
+    void styleEdited(const trade_bubbles::StyleModel& style, bool minimumEdited);
 private:
     struct Row {
         QCheckBox* visible;

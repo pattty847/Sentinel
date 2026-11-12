@@ -286,13 +286,15 @@ Settings → Chart → Trade bubbles uses the same element model as TPO: buy fil
 sell fill and ring each have colour, opacity, visibility and radius/width.
 Buy/sell defaults use the app's positive/negative tokens (`#2EBD85` / `#F6465D`),
 and the ring uses the chart-background token (`#0F1114`) at full opacity.
-The fill stays at its selected opacity even when consecutive executions have the same price.
+Passive marks (including the first without a predecessor) use 35% of each element's
+opacity: 14% fill at the default 40%. A sweep with a price change uses full opacity.
 Sliders edit opacity, radius and ring width; the minimum has a product-scaled slider
 and exact base-unit input. Logical sizes scale once with the window's DPR.
 
 Element edits are shared by charts and saved under `tradeBubbles/style/<element>.<property>`
 in the same `Sentinel/SentinelTerminal` QSettings store as TPO. Base-size minimums
-are saved separately under `tradeBubbles/minimum/<product>`; editing ETH-USD never
+are saved only when the minimum control changes, separately under `tradeBubbles/minimum/<product>`;
+appearance edits leave automatic minimums automatic. Editing ETH-USD never
 changes BTC-USD's minimum. User edits override YAML. Reset Chart restores the configured
 element defaults and removes only the current product's minimum override.
 
@@ -301,14 +303,19 @@ BTC-USD defaults to 0.38 BTC regardless of price. Other USD products use
 price is available, the reference is $100,000, matching the existing heatmap auto-sensitivity
 convention (thus a $38,000 notional minimum at the shipped default). Until a product
 price is available, its automatic base filter is zero. Unsaved automatic minimums
-refresh on that product's incoming trades; saved minimums stay fixed. This uses
-prices already received by the chart feeds and makes no network request.
+are rounded to two significant figures and refresh on incoming trades only when the
+rounded candidate differs from the active minimum by more than 5%; saved minimums
+stay fixed. This uses prices already received by the chart feeds and makes no network request.
 
-The base-size filter runs before the existing sweep/slot policy; the separate quote
-minimum is an additional filter. Bubbles default above candles (`tradesAboveCandles=true`,
-z=2.5; false uses z=1.5). Nearby bubbles are never spatially merged. If more than
-4,096 qualifying marks are visible, the newest 4,096 are retained in the fixed mesh
-budget. Existing exchange-time/slot placement and sweep semantics are unchanged.
+The base-size filter applies to each completed mark's summed base size after sweep/slot
+placement; all fills contribute to a Slot aggregate and its VWAP. The separate quote
+minimum is an additional filter applied after sweep merging. Bubbles default above
+candles (`tradesAboveCandles=true`, z=2.5; false uses z=1.5). Nearby bubbles stay
+separate up to the 4,096-mark geometry budget. Above that budget,
+the density fallback merges each side into 6 px spatial bins, then the smallest fitting
+6 px multiple if needed. It preserves all qualifying notional with weighted centres,
+the largest capsule span and strongest opacity in each bin; no older marks are
+dropped. Existing exchange-time/slot placement and sweep semantics are unchanged.
 
 ## Chart timeframes and retained trades
 

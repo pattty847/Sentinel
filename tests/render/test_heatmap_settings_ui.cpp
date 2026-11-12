@@ -2283,6 +2283,25 @@ TEST(TradeBubbleControls, StyleSlidersPersistPerProductAndReset) {
     EXPECT_DOUBLE_EQ(store->load("ETH-USD").minimumBaseSize,3);
 }
 
+TEST(TradeBubbleControls, AppearanceSlidersLeaveAutomaticMinimumUnpinned) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    model.selectSymbol("BTC-USD");
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    auto store = std::make_shared<chart::TradeBubbleStyleStore>(t.settings);
+    dialog.setBubbleStyleStore(store);
+    child<QSlider>(dialog,"bubbleStyle.buy.opacity")->setValue(60);
+    EXPECT_FALSE(store->hasMinimum("BTC-USD"));
+    child<QSlider>(dialog,"bubbleStyle.minimumBaseSize")->setValue(500);
+    EXPECT_TRUE(store->hasMinimum("BTC-USD"));
+    EXPECT_DOUBLE_EQ(store->load("BTC-USD").minimumBaseSize,.5);
+    child<QSlider>(dialog,"bubbleStyle.sell.width")->setValue(240);
+    EXPECT_DOUBLE_EQ(store->load("BTC-USD").minimumBaseSize,.5);
+    child<QPushButton>(dialog,"resetChart")->click();
+    child<QSlider>(dialog,"bubbleStyle.ring.opacity")->setValue(70);
+    EXPECT_FALSE(store->hasMinimum("BTC-USD"));
+}
+
 // ----------------------------------------------------------- telemetry dock
 TEST(HeatmapTelemetryDockTest, PollsAt4HzOnlyWhileVisible) {
     HeatmapTelemetryDock dock;

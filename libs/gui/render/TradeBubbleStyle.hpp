@@ -25,6 +25,15 @@ inline StyleModel clamped(StyleModel s) {
     s.minimumBaseSize = std::max(0.0, finite(s.minimumBaseSize, defaults.minimumBaseSize));
     return s;
 }
+// Two significant figures with a dead band, so small price changes cannot
+// invalidate a cached mesh or toggle marks near the automatic threshold.
+inline double stabilizedMinimum(double candidate, double active) {
+    if (!(candidate > 0) || !std::isfinite(candidate)) return 0;
+    const double step = std::pow(10.0, std::floor(std::log10(candidate)) - 1);
+    const double rounded = step > 0 ? std::round(candidate / step) * step : candidate;
+    if (active > 0 && std::abs(rounded - active) <= .05 * active) return active;
+    return rounded;
+}
 inline double defaultMinimum(std::string_view product, double price, double btcPrice, double btcSize = .38) {
     if (product == "BTC-USD") return btcSize;
     // Same $100k BTC reference convention as heatmap auto sensitivity until a

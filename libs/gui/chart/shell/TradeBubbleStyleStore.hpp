@@ -18,7 +18,8 @@ public:
     TradeBubbleStyleStore() = default;
     explicit TradeBubbleStyleStore(QSettings& settings) : settings_(&settings) {}
     trade_bubbles::StyleModel load(const std::string& product) const;
-    void save(const std::string& product, const trade_bubbles::StyleModel& style);
+    // Appearance edits leave the per-product automatic minimum unpinned.
+    void save(const std::string& product, const trade_bubbles::StyleModel& style, bool minimumEdited = false);
     void clear(const std::string& product);
     bool hasMinimum(const std::string& product) const;
     static trade_bubbles::StyleModel defaults(const std::string& product);

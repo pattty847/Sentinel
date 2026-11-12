@@ -19,6 +19,7 @@ void TradeBubbleFeed::selectProduct(const std::string& product) {
 }
 void TradeBubbleFeed::notePrice(double price, int64_t timeMs) {
     TradeBubbleStyleStore::notePrice(product_, price, timeMs);
+    // The store holds a rounded, hysteretic default shared by this product's charts and editor.
     if (!customMinimum_) frame_->style.minimumBaseSize = TradeBubbleStyleStore::minimum(product_);
 }
 

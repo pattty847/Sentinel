@@ -91,18 +91,17 @@ TEST(TradeBubbles, PlacementUsesExchangeTimeAndPriceWithoutRingOffset) {
     EXPECT_FLOAT_EQ(p[0].x,106);
     EXPECT_FLOAT_EQ(p[0].y,100);
 }
-TEST(TradeBubbles, NearbyExecutionsStaySeparateAtAndBeyondCapacity) {
+TEST(TradeBubbles, NearbyExecutionsStaySeparateWithinCapacity) {
     auto tape = std::make_unique<Tape>();
-    for (int i = 0; i < 5000; ++i)
+    for (int i = 0; i < 60; ++i)
         ASSERT_TRUE(tape->append({1000+i/10,150,1,AggressorSide::Buy}));
     Layout layout;
     const auto m = mapping();
     const auto b = layout.build(tape->samples(),m,{});
-    ASSERT_EQ(b.size(),Layout::MaxBubbles);
+    ASSERT_EQ(b.size(),60);
     EXPECT_EQ(layout.binSizePx(),0);
     for (const auto& bubble : b) {
         EXPECT_EQ(bubble.notional,150);
-        EXPECT_GE(bubble.x,float(m.timeToScreenX(1090))); // newest marks survive overload
     }
 }
 TEST(TradeBubbles, SlotAggregateAndNotablesUseAggregateReferenceAndRadiusCap) {
@@ -143,10 +142,10 @@ TEST(TradeBubbles, SpatialOverflowRemainsBoundedAndReusesScratch) {
     auto b = layout.build(tape->samples(),m,{chart::bubbles::Mode::Individual,{0,195},1});
     EXPECT_LE(b.size(),Layout::MaxBubbles);
     EXPECT_GT(b.size(),1000);
-    EXPECT_EQ(layout.binSizePx(),0);
+    EXPECT_GE(layout.binSizePx(),6);
     EXPECT_EQ(layout.scannedRows(),100000);
 }
-TEST(TradeBubbles, PredecessorChangesPreserveUniformStyleOpacity) {
+TEST(TradeBubbles, PredecessorChangesInvalidatePassiveOpacity) {
     auto tape = std::make_unique<Tape>();
     tape->append({999,150,1,AggressorSide::Buy});
     tape->append({1500,150,1,AggressorSide::Buy});
@@ -154,7 +153,7 @@ TEST(TradeBubbles, PredecessorChangesPreserveUniformStyleOpacity) {
     chart::bubbles::Options options{chart::bubbles::Mode::Individual,{0,150},1};
     node.sync(*tape,mapping(),true,options);
     const auto* vertices = static_cast<const float*>(node.geometry()->vertexData());
-    EXPECT_NEAR(vertices[7],.4f,1e-6);
+    EXPECT_NEAR(vertices[7],.14f,1e-6);
     const auto builds = node.rebuildCount();
     tape->append({999,149,1,AggressorSide::Sell});
     node.sync(*tape,mapping(),true,options);
@@ -200,7 +199,7 @@ TEST(TradeBubbles, PartialSlotsUseWholeBarAndTimeframeChangesInvalidateGeometry)
     node.sync(*tape,m,true,options);
     EXPECT_EQ(node.rebuildCount(), builds + 1);
 }
-TEST(TradeBubbles, CapsulesKeepMinimumWidthAndUniformStyleOpacity) {
+TEST(TradeBubbles, CapsulesKeepMinimumWidthAndPassiveOpacity) {
     auto tape = std::make_unique<Tape>();
     tape->append({1500,150,1,AggressorSide::Buy,"1"});
     tape->append({1500,181.25,1,AggressorSide::Buy,"2"});
@@ -214,7 +213,7 @@ TEST(TradeBubbles, CapsulesKeepMinimumWidthAndUniformStyleOpacity) {
     EXPECT_GE(radius,1.5);
     EXPECT_GT(pi*radius*radius+2*100*radius,pi*4);
     EXPECT_FLOAT_EQ(v[7],.4f);
-    EXPECT_NEAR(v[6*14+7],.4f,1e-6);
+    EXPECT_NEAR(v[6*14+7],.14f,1e-6);
 }
 TEST(TradeBubbles, LargerCirclesDrawFirstAcrossSidesAndNeighbouringCells) {
     Layout layout;
@@ -227,16 +226,17 @@ TEST(TradeBubbles, LargerCirclesDrawFirstAcrossSidesAndNeighbouringCells) {
     EXPECT_GT(b[0].radius,b[1].radius);
     EXPECT_GT(b[1].radius,b[2].radius);
     auto tape=std::make_unique<Tape>();
-    for (int i=0;i<5000;++i) tape->append(rows[i%3]);
-    b=layout.build(tape->samples(),mapping(),options);
-    ASSERT_EQ(b.size(),Layout::MaxBubbles);
+    for (int i=0;i<5000;++i) { auto row=rows[i%3]; row.size/=1000; tape->append(row); }
+    StyleModel look; look.minimumBaseSize = 0;
+    b=layout.build(tape->samples(),mapping(),options,0,look);
+    ASSERT_EQ(b.size(),2);
     EXPECT_EQ(b[0].side,AggressorSide::Sell);
     EXPECT_GT(b.front().radius,b.back().radius);
     TradeBubbleNode node;
-    node.sync(*tape,mapping(),true,options);
+    node.sync(*tape,mapping(),true,options,look);
     const auto* v=static_cast<const float*>(node.geometry()->vertexData());
-    EXPECT_FLOAT_EQ(v[4],246.f/255*.4f);
-    EXPECT_FLOAT_EQ(v[6],93.f/255*.4f);
+    EXPECT_FLOAT_EQ(v[4],246.f/255*.14f);
+    EXPECT_FLOAT_EQ(v[6],93.f/255*.14f);
 }
 TEST(TradeBubbles, OrderedRingBinarySearchBoundsScanAndPanReusesGeometry) {
     auto tape=std::make_unique<Tape>();
@@ -334,18 +334,18 @@ TEST(TradeBubbles, TapeAndQsgCapacityNeverGrowAcrossFramesAndToggleClearsGeometr
         m.drawRect.setWidth(600+i);
         node.sync(*tape,m,true,{chart::bubbles::Mode::Individual,{0,150},1});
         ASSERT_EQ(node.geometry()->vertexData(),vertices);
-        ASSERT_EQ(node.usedVertexCount(),int(Layout::MaxBubbles * 6));
+        ASSERT_EQ(node.usedVertexCount(),6);
         expectDrawCount(node);
     }
-    // Each retained execution keeps its own radius (no merged notional).
+    // Overload falls back to one capped spatial bin without growing geometry.
     auto* v=static_cast<const float*>(node.geometry()->vertexData());
-    EXPECT_NEAR(v[0],m.timeToScreenX(1500)-9,1e-4);
-    EXPECT_NEAR(v[1],m.priceToScreenY(150)-9,1e-4);
+    EXPECT_NEAR(v[0],m.timeToScreenX(1500)-18,1e-4);
+    EXPECT_NEAR(v[1],m.priceToScreenY(150)-18,1e-4);
     node.sync(*tape,m,false,{chart::bubbles::Mode::Individual,{0,150},1});
     EXPECT_EQ(node.usedVertexCount(),0);
     expectDrawCount(node);
     node.sync(*tape,m,true,{chart::bubbles::Mode::Individual,{0,150},1});
-    EXPECT_EQ(node.usedVertexCount(),int(Layout::MaxBubbles * 6));
+    EXPECT_EQ(node.usedVertexCount(),6);
     tape->clear();
     node.sync(*tape,m,true,{chart::bubbles::Mode::Individual,{0,150},1});
     EXPECT_EQ(node.usedVertexCount(),0);
@@ -479,7 +479,7 @@ TEST(TradeBubbleStyle, RoundTripClampsAndResetRestoresDefaults) {
     {
         QSettings ini(path, QSettings::IniFormat);
         chart::TradeBubbleStyleStore store(ini);
-        store.save("BTC-USD", s);
+        store.save("BTC-USD", s, true);
         ini.sync();
     }
     QSettings ini(path, QSettings::IniFormat);
@@ -488,7 +488,7 @@ TEST(TradeBubbleStyle, RoundTripClampsAndResetRestoresDefaults) {
     s.buy.opacity = -2; s.sell.opacity = 3; s.ring.opacity = -1;
     s.buy.width = 1; s.sell.width = 500; s.ring.width = 4;
     s.minimumBaseSize = -1;
-    store.save("BTC-USD", s);
+    store.save("BTC-USD", s, true);
     const auto clipped = store.load("BTC-USD");
     EXPECT_EQ(clipped.buy.opacity, 0); EXPECT_EQ(clipped.sell.opacity, 1);
     EXPECT_EQ(clipped.ring.opacity, 0);
@@ -515,7 +515,7 @@ TEST(TradeBubbleStyle, ProductMinimumIsIndependentAndUsesObservedPrices) {
     EXPECT_DOUBLE_EQ(store.load("BTC-USD").minimumBaseSize, .38);
     EXPECT_DOUBLE_EQ(store.load("ETH-USD").minimumBaseSize, 7.6);
     auto s = store.load("ETH-USD"); s.minimumBaseSize = 2;
-    store.save("ETH-USD", s);
+    store.save("ETH-USD", s, true);
     EXPECT_DOUBLE_EQ(store.load("BTC-USD").minimumBaseSize, .38);
     EXPECT_DOUBLE_EQ(store.load("ETH-USD").minimumBaseSize, 2);
     store.clear("ETH-USD");
@@ -525,8 +525,9 @@ TEST(TradeBubbleStyle, ProductMinimumIsIndependentAndUsesObservedPrices) {
 }
 TEST(TradeBubbleStyle, MeshUsesDirectionFillAndLogicalRingForBothSides) {
     auto tape = std::make_unique<Tape>();
+    tape->append({999,149,1,AggressorSide::Buy});
     tape->append({1200,150,1,AggressorSide::Buy});
-    tape->append({1300,150,1,AggressorSide::Sell});
+    tape->append({1300,151,1,AggressorSide::Sell});
     TradeBubbleNode node;
     node.sync(*tape,mapping(),true,{});
     ASSERT_EQ(node.usedVertexCount(),12);
@@ -569,7 +570,7 @@ TEST(TradeBubbleStyle, HugeTradeCapsAtLogicalRadiusAcrossDprAndEdits) {
         EXPECT_NEAR((v[14]-v[0])/2,48,1e-5);
     }
 }
-TEST(TradeBubbleStyle, BaseSizeFilterIsInclusiveBeforePlacement) {
+TEST(TradeBubbleStyle, BaseSizeFilterIsInclusiveAfterPlacement) {
     auto tape = std::make_unique<Tape>();
     tape->append({1200,150,.37,AggressorSide::Buy});
     tape->append({1300,150,.38,AggressorSide::Buy});
@@ -601,7 +602,7 @@ TEST(TradeBubbleStyle, YamlDefaultsReachStoreAndReset) {
     EXPECT_DOUBLE_EQ(defaults.minimumBaseSize,.5);
     EXPECT_DOUBLE_EQ(defaults.ring.width,.7);
     EXPECT_FALSE(defaults.ring.visible);
-    store.save("BTC-USD", StyleModel{});
+    store.save("BTC-USD", StyleModel{}, true);
     EXPECT_DOUBLE_EQ(store.load("BTC-USD").buy.opacity,.4);
     store.clear("BTC-USD");
     EXPECT_EQ(store.load("BTC-USD"),defaults);
@@ -631,7 +632,7 @@ TEST(TradeBubbleStyle, FeedLoadsPersistedStyleAndUpdatesPlainFrameOnEdit) {
     EXPECT_EQ(node.usedVertexCount(),6);
     auto edited = frame->style;
     edited.minimumBaseSize = .39;
-    store->save("BTC-USD",edited);
+    store->save("BTC-USD",edited, true);
     // No ingestion or UGR publication is needed for style changes to reach the sibling.
     EXPECT_EQ(frame->style,edited);
     node.sync(*frame->tape,frame->mapping,frame->enabled,frame->options,frame->style);
@@ -641,4 +642,112 @@ TEST(TradeBubbleStyle, FeedLoadsPersistedStyleAndUpdatesPlainFrameOnEdit) {
     EXPECT_EQ(reopened.tradeBubbleRenderFrame()->style,edited);
     store->clear("BTC-USD");
     EXPECT_EQ(frame->style,StyleModel{});
+}
+
+TEST(TradeBubbleStyleReview, SubMinimumFillsFormOneQualifyingSweep) {
+    Layout layout;
+    const Sample rows[] = {{1500,150,.20,AggressorSide::Buy,"1"},
+                           {1500,160,.20,AggressorSide::Buy,"2"}};
+    const auto b = layout.build({rows,{}},mapping(),{});
+    ASSERT_EQ(b.size(),1);
+    EXPECT_NEAR(b[0].notional,62,1e-10);
+    EXPECT_NEAR(b[0].y,mapping().priceToScreenY(155),1e-5);
+    const Sample small[] = {{1500,150,.19,AggressorSide::Buy,"1"},
+                            {1500,160,.18,AggressorSide::Buy,"2"}};
+    EXPECT_TRUE(layout.build({small,{}},mapping(),{}).empty());
+}
+TEST(TradeBubbleStyleReview, BaseMinimumAppliesToWholeSweepWithoutSplittingIt) {
+    Layout layout;
+    const Sample rows[] = {{1500,150,.5,AggressorSide::Buy,"1"},
+                           {1500,160,.2,AggressorSide::Buy,"2"},
+                           {1500,170,.5,AggressorSide::Buy,"3"}};
+    auto b = layout.build({rows,{}},mapping(),{});
+    ASSERT_EQ(b.size(),1);
+    EXPECT_NEAR(b[0].notional,192,1e-10);
+    StyleModel s; s.minimumBaseSize = 1.21;
+    EXPECT_TRUE(layout.build({rows,{}},mapping(),{},0,s).empty());
+}
+TEST(TradeBubbleStyleReview, SlotVwapIncludesEveryFillBeforeBaseFiltering) {
+    Layout layout;
+    const Sample rows[] = {{1200,150,.5,AggressorSide::Buy,"1"},
+                           {1300,180,.2,AggressorSide::Buy,"3"}};
+    auto m = mapping(); m.appendMs = 1000; m.srcRect.setWidth(1);
+    const auto b = layout.build({rows,{}},m,{chart::bubbles::Mode::Slot});
+    ASSERT_FALSE(b.empty());
+    const auto aggregate = std::find_if(b.begin(),b.end(),[](const Bubble& x) { return std::abs(x.notional-111)<1e-10; });
+    ASSERT_NE(aggregate,b.end());
+    EXPECT_NEAR(aggregate->y,m.priceToScreenY(111/.7),1e-5);
+}
+TEST(TradeBubbleStyleReview, OverloadFallbackPreservesAllQualifyingNotional) {
+    auto tape = std::make_unique<Tape>();
+    double total = 0;
+    for (int i=0; i<12000; ++i) {
+        const double price = 101 + (i%97), size = 1 + (i%3);
+        ASSERT_TRUE(tape->append({1000+i/20,price,size,i%2 ? AggressorSide::Buy : AggressorSide::Sell}));
+        total += price*size;
+    }
+    Layout layout;
+    auto m = mapping(1847,901);
+    const auto b = layout.build(tape->samples(),m,{});
+    ASSERT_LE(b.size(),Layout::MaxBubbles);
+    double drawn = 0;
+    for (const auto& bubble : b) drawn += bubble.notional;
+    EXPECT_NEAR(drawn,total,1e-6);
+    EXPECT_GE(layout.binSizePx(),6);
+}
+TEST(TradeBubbleStyleReview, SamePriceMarksUsePassiveOpacityFactor) {
+    auto tape = std::make_unique<Tape>();
+    tape->append({1200,150,1,AggressorSide::Buy});
+    tape->append({1300,150,1,AggressorSide::Buy});
+    TradeBubbleNode node;
+    StyleModel s; s.buy.opacity = .8;
+    node.sync(*tape,mapping(),true,{},s);
+    ASSERT_EQ(node.usedVertexCount(),12);
+    const auto* vertices = static_cast<const float*>(node.geometry()->vertexData());
+    EXPECT_NEAR(vertices[7],.8*.35,1e-7);
+    EXPECT_NEAR(vertices[6*14+7],.8*.35,1e-7);
+    EXPECT_NEAR(vertices[12],.35,1e-7);
+}
+TEST(TradeBubbleStyleReview, AutomaticMinimumIsRoundedStableAndKeepsOffscreenAppendCached) {
+    QTemporaryDir dir;
+    QSettings ini(dir.filePath("style.ini"),QSettings::IniFormat);
+    auto store = std::make_shared<chart::TradeBubbleStyleStore>(ini);
+    chart::TradeBubbleStyleStore::notePrice("BTC-USD",80000);
+    chart::TradeBubbleFeed feed(store);
+    heatmap::HeatmapChartSettings settings; settings.showTrades = true;
+    settings.sensitivitySymbol = "STABILITY-USD";
+    feed.setSettings(settings,[] {});
+    Trade trade{std::chrono::system_clock::time_point(std::chrono::milliseconds(1500)),
+                "STABILITY-USD","1",AggressorSide::Buy,150,1000};
+    feed.append(trade); feed.publish(mapping());
+    const auto frame = feed.tradeBubbleRenderFrame();
+    EXPECT_DOUBLE_EQ(frame->style.minimumBaseSize,200); // 202.666... -> two significant figures
+    TradeBubbleNode node;
+    node.sync(*frame->tape,frame->mapping,true,frame->options,frame->style);
+    const auto builds = node.rebuildCount();
+    for (int i=0; i<4; ++i) {
+        trade.timestamp += std::chrono::milliseconds(2000);
+        trade.trade_id = std::to_string(i+2); trade.price = 150.5+i;
+        feed.append(trade); feed.publish(mapping());
+        EXPECT_DOUBLE_EQ(frame->style.minimumBaseSize,200);
+        node.sync(*frame->tape,frame->mapping,true,frame->options,frame->style);
+        EXPECT_EQ(node.rebuildCount(),builds);
+    }
+    trade.timestamp += std::chrono::milliseconds(2000);
+    trade.trade_id = "large"; trade.price = 180;
+    feed.append(trade);
+    EXPECT_DOUBLE_EQ(frame->style.minimumBaseSize,170);
+}
+TEST(TradeBubbleStyleReview, AppearanceEditDoesNotPinAutomaticMinimum) {
+    QTemporaryDir dir;
+    QSettings ini(dir.filePath("style.ini"),QSettings::IniFormat);
+    chart::TradeBubbleStyleStore store(ini);
+    chart::TradeBubbleStyleStore::notePrice("BTC-USD",80000);
+    chart::TradeBubbleStyleStore::notePrice("UNPINNED-USD",4000);
+    auto style = store.load("UNPINNED-USD");
+    style.buy.opacity = .6;
+    store.save("UNPINNED-USD",style);
+    EXPECT_FALSE(store.hasMinimum("UNPINNED-USD"));
+    chart::TradeBubbleStyleStore::notePrice("UNPINNED-USD",5000);
+    EXPECT_LT(store.load("UNPINNED-USD").minimumBaseSize,style.minimumBaseSize);
 }

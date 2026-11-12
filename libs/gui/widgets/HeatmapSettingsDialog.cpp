@@ -416,7 +416,9 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     bubbleLayout->addWidget(m_bubbleStyleEditor);
     form->addRow(bubbleGroup);
     connect(m_bubbleStyleEditor, &TradeBubbleStyleEditor::styleEdited, this,
-            [this](const trade_bubbles::StyleModel& style) { m_bubbleStyleStore->save(bubbleProduct(), style); });
+            [this](const trade_bubbles::StyleModel& style, bool minimumEdited) {
+                m_bubbleStyleStore->save(bubbleProduct(), style, minimumEdited);
+            });
     m_tradesAboveCandles = new QCheckBox("Trades above candles", page);
     m_tradesAboveCandles->setObjectName("tradesAboveCandles");
     m_tradesAboveCandles->setToolTip("Keep translucent executions visible over opaque candle bodies.");

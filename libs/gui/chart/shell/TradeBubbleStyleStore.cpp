@@ -6,7 +6,7 @@
 namespace chart {
 namespace {
 constexpr auto kGroup = "tradeBubbles/style";
-struct Quote { double price = 0; int64_t timeMs = 0; };
+struct Quote { double price = 0; int64_t timeMs = 0; double minimum = 0; };
 std::map<std::string, Quote> prices;
 QString minimumKey(const std::string& product) {
     return "tradeBubbles/minimum/" + QString::fromStdString(product);
@@ -25,12 +25,17 @@ void TradeBubbleStyleStore::notePrice(const std::string& product, double price, 
     if (product.empty() || !std::isfinite(price) || price <= 0) return;
     auto& quote = prices[product];
     if (timeMs > 0 && timeMs < quote.timeMs) return;
-    quote = {price, timeMs};
+    quote.price = price;
+    quote.timeMs = timeMs;
 }
 double TradeBubbleStyleStore::minimum(const std::string& product) {
     const auto price = prices.find(product), btc = prices.find("BTC-USD");
-    return trade_bubbles::defaultMinimum(product, price == prices.end() ? 0 : price->second.price,
+    const double candidate = trade_bubbles::defaultMinimum(product, price == prices.end() ? 0 : price->second.price,
         btc == prices.end() ? 0 : btc->second.price, GuiConfigStore::instance().clientConfig().bubbles.minimumBtc);
+    if (product == "BTC-USD" || price == prices.end()) return candidate;
+    auto& active = price->second.minimum;
+    active = trade_bubbles::stabilizedMinimum(candidate, active);
+    return active;
 }
 trade_bubbles::StyleModel TradeBubbleStyleStore::defaults(const std::string& product) {
     trade_bubbles::StyleModel s;
@@ -61,7 +66,7 @@ trade_bubbles::StyleModel TradeBubbleStyleStore::load(const std::string& product
     return trade_bubbles::clamped(s);
 }
 bool TradeBubbleStyleStore::hasMinimum(const std::string& product) const { return settings_->contains(minimumKey(product)); }
-void TradeBubbleStyleStore::save(const std::string& product, const trade_bubbles::StyleModel& style) {
+void TradeBubbleStyleStore::save(const std::string& product, const trade_bubbles::StyleModel& style, bool minimumEdited) {
     const auto s = trade_bubbles::clamped(style);
     settings_->beginGroup(kGroup);
     settings_->remove("");
@@ -74,7 +79,7 @@ void TradeBubbleStyleStore::save(const std::string& product, const trade_bubbles
         settings_->setValue(prefix + "width", e.width);
     }
     settings_->endGroup();
-    settings_->setValue(minimumKey(product), s.minimumBaseSize);
+    if (minimumEdited) settings_->setValue(minimumKey(product), s.minimumBaseSize);
     emit TradeBubbleStyleChanges::instance().changed();
 }
 void TradeBubbleStyleStore::clear(const std::string& product) {
