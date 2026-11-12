@@ -15,7 +15,6 @@ This version modularizes startup logic for maintainability and clarity.
 #include "models/PriceAxisModel.hpp"
 #include "render/CandlestickBatched.hpp"
 #include "render/CandlestickOverlayItem.hpp"
-#include "render/TpoOverlayItem.hpp"
 #include "render/AlgoOverlayRenderer.hpp"
 #include "render/PaperTradeOverlayModel.hpp"
 #include "render/PaperTradeOverlayRenderer.hpp"
@@ -95,7 +94,6 @@ void registerMetaTypesAndQml() {
     qmlRegisterModule("Sentinel.Charts", 1, 0);
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
     qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");
-    qmlRegisterType<TpoOverlayItem>("Sentinel.Charts", 1, 0, "TpoOverlayItem");
 }
 
 // --- Main application entrypoint ---

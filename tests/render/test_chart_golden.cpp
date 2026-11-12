@@ -20,7 +20,6 @@
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/DataProcessor.hpp"
 #include "render/TradeBubbleOverlayItem.hpp"
-#include "render/TpoOverlayItem.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "servermodel/Hmc2Store.hpp"
 #include <QByteArray>
@@ -141,7 +140,6 @@ struct Harness {
     UnifiedGridRenderer* ugr = nullptr;
     CandlestickOverlayItem* candles = nullptr;
     TradeBubbleOverlayItem* bubbles = nullptr;
-    TpoOverlayItem* tpo = nullptr;
     CandleSeriesBuffer buffer;
     QString error;
     QImage image;
@@ -173,11 +171,6 @@ struct Harness {
         candles->setSymbol("BTC-USD");
         candles->setTimeframeMs(60000);
         candles->setZ(2);
-        tpo = new TpoOverlayItem; // the chart's TPO draws above the candles, as DepthChartView.qml stacks it
-        tpo->setParentItem(scene.window()->contentItem());
-        tpo->setSize(ugr->size());
-        tpo->setZ(2.3);
-        tpo->setChart(ugr);
     }
     void addBubbles() {
         bubbles = new TradeBubbleOverlayItem; // parented after construction, as QML does: the item connects on windowChanged

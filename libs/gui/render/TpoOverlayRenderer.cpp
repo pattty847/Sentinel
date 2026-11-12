@@ -107,26 +107,16 @@ TpoOverlayRenderer::~TpoOverlayRenderer() = default;
 //  GUI thread
 // ─────────────────────────────────────────────────────────────────────────────
 
-void TpoOverlayRenderer::setChangeListener(std::function<void()> listener) {
-    m_changed = std::move(listener);
-}
-
 void TpoOverlayRenderer::enqueue(PendingUpload upload) {
-    {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        m_pendingUploads.push_back(std::move(upload));
-    }
-    if (m_changed) m_changed();
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    m_pendingUploads.push_back(std::move(upload));
 }
 
 void TpoOverlayRenderer::setStyle(const Style& style) {
-    {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        m_pendingStyle = style;
-        m_pendingStyle.rowPx = std::clamp(style.rowPx, 4.0, 64.0);
-        m_pendingStyle.maxSessions = std::clamp(style.maxSessions, 1, 8);
-    }
-    if (m_changed) m_changed();
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    m_pendingStyle = style;
+    m_pendingStyle.rowPx = std::clamp(style.rowPx, 4.0, 64.0);
+    m_pendingStyle.maxSessions = std::clamp(style.maxSessions, 1, 8);
 }
 
 TpoOverlayRenderer::Style TpoOverlayRenderer::style() const {

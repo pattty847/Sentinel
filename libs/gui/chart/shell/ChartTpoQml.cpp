@@ -1,6 +1,5 @@
 #include "ChartTpoQml.hpp"
 #include "ChartLookSettings.hpp"
-#include "chart/layers/ChartLayers.hpp"
 namespace chart {
 ChartTpoQml::ChartTpoQml(ChartLookSettings& look) : QObject(&look), look_(look) {}
 void ChartTpoQml::applyTpoConfig(const ClientTpoConfig& config) { look_.applyTpoConfig(config); }
@@ -27,9 +26,6 @@ QString ChartTpoQml::tpoPreset() const { return look_.tpoPreset(); }
 tpo::StyleModel ChartTpoQml::tpoLook() const { return look_.tpoLook(); }
 void ChartTpoQml::setTpoLook(const tpo::StyleModel& look) { look_.setTpoLook(look); }
 void ChartTpoQml::resetTpoLook() { look_.resetTpoLook(); }
-TpoOverlayRenderer* ChartTpoQml::overlayRenderer() { return &look_.layers().tpo.renderer; }
-const ChartTextAtlas* ChartTpoQml::overlayAtlas() const { return &look_.layers().text.atlas; }
-bool ChartTpoQml::overlayAtlasReady() const { return look_.layers().text.atlasBuilt; }
 void ChartTpoQml::setStyleStore(std::shared_ptr<TpoStyleStore> store) { look_.setTpoStyleStore(std::move(store)); }
 
 } // namespace chart

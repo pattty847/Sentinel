@@ -9,7 +9,6 @@
 #include <QRectF>
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -70,9 +69,6 @@ public:
     TpoOverlayRenderer();
     ~TpoOverlayRenderer();
 
-    /// GUI thread: called after every enqueue() or setStyle(), so the item that
-    /// draws the TPO can schedule a frame.
-    void setChangeListener(std::function<void()> listener);
     /// Thread-safe enqueue (GUI thread).
     void enqueue(PendingUpload upload);
     /// Thread-safe style change (GUI thread). Applied on the next render.
@@ -210,7 +206,6 @@ private:
     TagKey m_tagKey;
     TagView m_tagView;
     bool m_hasTags = false;
-    std::function<void()> m_changed;
     QRectF m_clipRect;
     GroupKey m_groupKey;
     int m_group = 1;

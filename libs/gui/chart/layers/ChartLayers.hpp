@@ -14,7 +14,7 @@ struct ChartLayers {
     FootprintCellsLayer footprintCells;
     CvdLayer cvd;
     VolumeProfileLayer vp{&cvd.presentation()};
-    TpoLayer tpo;
+    TpoLayer tpo{&cvd.presentation()};
     FlowFooterLayer flowFooter{cvd};
     LadderLayer ladder{&cvd.presentation()};
     ChartTextLayer text{heatmap, ladder, footprintCells, cvd, flowFooter};

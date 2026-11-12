@@ -254,8 +254,8 @@ zoom never moves it; with brackets longer than an hour, or not dividing it, IBH/
 drawn), and `tags` (level tags at the plot's right edge for the newest session on screen). The POC row and line default to neutral white. Level lines sit under the
 cells and reach across the profile (`reach: profile`) or the whole session (`session`).
 Presets: `letters` (default), `blocks` (letters off), `extended` (lines across the session) and
-`indigo` (the indigo theme). The TPO always draws above the candles (heatmap/footprint, then
-candles, then TPO). Reset in the TPO tab forgets the saved style. `m1` needs a server
+`indigo` (the indigo theme). With TPO on and no heatmap or footprint, candles draw behind the
+profile; with footprint on they stay on top. Reset in the TPO tab forgets the saved style. `m1` needs a server
 that accepts session type 6.
 
 ## Related documentation

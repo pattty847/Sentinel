@@ -23,7 +23,6 @@
 #include "models/PriceAxisModel.hpp"
 #include "render/CandlestickBatched.hpp"
 #include "render/CandlestickOverlayItem.hpp"
-#include "render/TpoOverlayItem.hpp"
 #include "render/AlgoOverlayRenderer.hpp"
 #include "render/PaperTradeOverlayModel.hpp"
 #include "render/PaperTradeOverlayRenderer.hpp"
@@ -1107,7 +1106,6 @@ int main(int argc, char** argv) {
     qmlRegisterModule("Sentinel.Charts", 1, 0);
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
     qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");
-    qmlRegisterType<TpoOverlayItem>("Sentinel.Charts", 1, 0, "TpoOverlayItem");
     QTemporaryDir settingsDir;
     isolatedSettingsPath = settingsDir.path();
     QSettings::setDefaultFormat(QSettings::IniFormat);
