@@ -91,7 +91,7 @@ QString DarkTheme::stylesheet() const {
             color: #E8E8E8;
             border: 1px solid #444;
             border-radius: 3px;
-            padding: 4px 8px;
+            padding: 4px 24px 4px 8px;
         }
         
         QComboBox:hover {
@@ -104,7 +104,14 @@ QString DarkTheme::stylesheet() const {
         
         QComboBox::drop-down {
             border: none;
-            background-color: #404040;
+            background-color: transparent;
+            width: 16px;
+        }
+
+        QComboBox::down-arrow {
+            image: url(:/svg/chevron_down.svg);
+            width: 8px;
+            height: 8px;
         }
         
         QComboBox QAbstractItemView {
@@ -195,6 +202,16 @@ QString DarkTheme::stylesheet() const {
 
         QToolButton:pressed {
             background-color: #202328;
+        }
+
+        QToolBar QToolButton:checked {
+            background-color: #2A4A6A;
+            border: 1px solid #3A6A9A;
+        }
+
+        QToolBar QToolButton:checked:hover {
+            background-color: #355A80;
+            border-color: #5E86B0;
         }
 
         /* Order book toggles: the on state is visible (selection colours) */
@@ -374,10 +391,11 @@ QString DarkTheme::stylesheet() const {
         
         /* Tooltips */
         QToolTip {
-            background-color: #2A2A2A;
-            color: #E8E8E8;
-            border: 1px solid #555;
-            padding: 4px;
+            background-color: #20252B;
+            color: #B6C2CF;
+            border: 1px solid #2B3138;
+            padding: 4px 6px;
+            font-size: 11px;
         }
     )";
 }

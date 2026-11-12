@@ -1,4 +1,5 @@
 #include "widgets/PaperTradingDock.hpp"
+#include "themes/ThemePalette.hpp"
 #include "render/PaperTradeOverlayModel.hpp"
 #include "../core/trading/LiveTradingSession.hpp"
 #include "datasources/IGridDataSource.hpp"
@@ -25,6 +26,7 @@
 #include <QTemporaryDir>
 #include <QPlainTextEdit>
 #include <QToolButton>
+#include <algorithm>
 #include <cmath>
 #include <gtest/gtest.h>
 
@@ -67,6 +69,58 @@ void setOnAlgoStop(PaperTradingDock& dock, const char* value) {
 
 Trade tick(const char* symbol, double price) {
     return {std::chrono::system_clock::now(), symbol, "1", AggressorSide::Buy, price, 1.0};
+}
+
+TEST(PaperTicket, DirectionButtonsShareColoursAndWidths) {
+    PaperTradingDock dock;
+    dock.resize(640, 800);
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* buyMarket = dock.findChild<QPushButton*>("paperBuyMarket");
+    auto* sellMarket = dock.findChild<QPushButton*>("paperSellMarket");
+    auto* buyLimit = dock.findChild<QPushButton*>("paperBuyLimit");
+    auto* sellLimit = dock.findChild<QPushButton*>("paperSellLimit");
+    ASSERT_TRUE(buyMarket && sellMarket && buyLimit && sellLimit);
+    EXPECT_TRUE(buyMarket->styleSheet().contains("#2ebd85"));
+    EXPECT_TRUE(buyLimit->styleSheet().contains("#2ebd85"));
+    EXPECT_TRUE(sellMarket->styleSheet().contains("#f6465d"));
+    EXPECT_TRUE(sellMarket->styleSheet().contains("#ff8c82"));
+    EXPECT_TRUE(sellLimit->styleSheet().contains("#f6465d"));
+    EXPECT_TRUE(buyMarket->styleSheet().contains("rgba(46, 189, 133, 64)"));
+    EXPECT_TRUE(sellMarket->styleSheet().contains("rgba(246, 70, 93, 64)"));
+    EXPECT_TRUE(buyLimit->styleSheet().contains("background-color: transparent"));
+    EXPECT_TRUE(buyLimit->styleSheet().contains("rgba(46, 189, 133, 24)"));
+    EXPECT_TRUE(sellLimit->styleSheet().contains("rgba(246, 70, 93, 24)"));
+    EXPECT_TRUE(buyMarket->styleSheet().contains("border-color: " + theme::positive().lighter(130).name()));
+    EXPECT_TRUE(sellMarket->styleSheet().contains("border-color: " + theme::negative().lighter(130).name()));
+    EXPECT_FALSE(buyMarket->styleSheet().contains("border-width: 2px"));
+    EXPECT_EQ(buyMarket->width(), sellMarket->width());
+    EXPECT_EQ(buyMarket->width(), buyLimit->width());
+    EXPECT_EQ(sellMarket->width(), sellLimit->width());
+    EXPECT_EQ(buyMarket->height(), 28);
+
+    const auto luminance = [](const QColor& color) {
+        const auto channel = [](int value) {
+            const double c = value / 255.0;
+            return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * channel(color.red()) + 0.7152 * channel(color.green()) +
+               0.0722 * channel(color.blue());
+    };
+    const auto marketFill = [](const QColor& side) {
+        const QColor base("#161820");
+        const double alpha = 64.0 / 255.0;
+        return QColor::fromRgbF(side.redF() * alpha + base.redF() * (1.0 - alpha),
+                                side.greenF() * alpha + base.greenF() * (1.0 - alpha),
+                                side.blueF() * alpha + base.blueF() * (1.0 - alpha));
+    };
+    const auto contrast = [&](const QColor& ink, const QColor& background) {
+        const double a = luminance(ink);
+        const double b = luminance(background);
+        return (std::max(a, b) + 0.05) / (std::min(a, b) + 0.05);
+    };
+    EXPECT_GE(contrast(theme::positive(), marketFill(theme::positive())), 4.5);
+    EXPECT_GE(contrast(QColor("#FF8C82"), marketFill(theme::negative())), 4.5);
 }
 
 TEST(PaperTicket, EditedLimitSurvivesTradesFocusQuantityAndButtons) {

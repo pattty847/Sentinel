@@ -41,6 +41,7 @@ Rectangle {
     property var    secSignalMarkers: []
     property int    hoveredSignalIndex: -1
     property var    hoveredSignal: ({})
+    property Item   hoveredSignalPointer: null
 
     // Mirrors CandlestickBatched.kVolFraction — do not bind to candleChart here: id resolves after
     // children complete; early binding yielded undefined→double warnings in packaged runs.
@@ -75,6 +76,7 @@ Rectangle {
         root.secSignalMarkers    = []
         root.hoveredSignalIndex  = -1
         root.hoveredSignal       = ({})
+        root.hoveredSignalPointer = null
         candleChart.setSecSignalOverrides([])
     }
 
@@ -243,24 +245,6 @@ Rectangle {
     function zeroValueNoteText(marker) {
         if (!hasZeroValueNote(marker)) return ""
         return "$0 on some neutral/derivative rows means the filing did not report a clean cash value for that leg."
-    }
-
-    // ── Signal tooltip placement ───────────────────────────────────────────────
-
-    function signalTooltipX() {
-        if (!root.hoveredSignal || root.hoveredSignal.candleIndex === undefined) return 10
-        const markerX   = candleCenterX(root.hoveredSignal.candleIndex)
-        // markerX is in candleChart coords; adjust to chartArea coords
-        const chartMarkerX = markerX + candleChart.x
-        const cardWidth = signalTooltipCard.width
-        const margin    = 12
-        const preferRight = chartMarkerX < (chartArea.width * 0.55)
-        const desiredX = preferRight ? (chartMarkerX + margin) : (chartMarkerX - cardWidth - margin)
-        return Math.max(10, Math.min(chartArea.width - cardWidth - 10, desiredX))
-    }
-
-    function signalTooltipY() {
-        return Math.max(10, Math.min(chartArea.height - signalTooltipCard.height - 10, 38))
     }
 
     // ── Nice-number helper (mirrors PriceAxisModel::calculateNicePriceStep) ──
@@ -551,16 +535,19 @@ Rectangle {
                             onEntered: {
                                 root.hoveredSignalIndex = index
                                 root.hoveredSignal      = modelData
+                                root.hoveredSignalPointer = hoveredArea
                             }
                             onExited: {
                                 if (root.hoveredSignalIndex === index) {
                                     root.hoveredSignalIndex = -1
                                     root.hoveredSignal      = ({})
+                                    root.hoveredSignalPointer = null
                                 }
                             }
                             onClicked: {
                                 root.hoveredSignalIndex = index
                                 root.hoveredSignal      = modelData
+                                root.hoveredSignalPointer = hoveredArea
                             }
                         }
                     }
@@ -679,24 +666,15 @@ Rectangle {
             }
 
             // ── Signal detail tooltip card ─────────────────────────────────────
-            Rectangle {
+            ChartToolTip {
                 id:      signalTooltipCard
+                parent:  root
+                pointerItem: root.hoveredSignalPointer
                 visible: root.hoveredSignalIndex >= 0
-                x:       root.signalTooltipX()
-                y:       root.signalTooltipY()
-                width:   320
-                height:  signalInfoCol.implicitHeight + 14
-                color:   theme.panelAlt
-                radius:  5
-                border.color: theme.border
-                border.width: 1
+                width:   Math.min(320, root.width - 20)
 
-                Column {
+                contentItem: Column {
                     id:               signalInfoCol
-                    anchors.left:     parent.left
-                    anchors.right:    parent.right
-                    anchors.margins:  9
-                    anchors.verticalCenter: parent.verticalCenter
                     spacing:          4
 
                     Text {
@@ -778,9 +756,13 @@ Rectangle {
                     color: theme.textDim
                     font.pixelSize: 10 * root.fontScale
                     elide: Text.ElideRight
-                    ToolTip.visible: sourceHover.containsMouse
-                    ToolTip.text: text
                     MouseArea { id: sourceHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
+                    ChartToolTip {
+                        parent: root
+                        pointerItem: sourceHover
+                        visible: sourceHover.containsMouse
+                        text: "yfinance · daily adjusted · As of: " + root.asOf + " · Retrieved: " + root.retrievedAt
+                    }
                 }
                 Text {
                     font.family: root.uiFont.family
@@ -789,9 +771,13 @@ Rectangle {
                     color: theme.textDim
                     font.pixelSize: 10 * root.fontScale
                     elide: Text.ElideRight
-                    ToolTip.visible: secHover.containsMouse
-                    ToolTip.text: text
                     MouseArea { id: secHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
+                    ChartToolTip {
+                        parent: root
+                        pointerItem: secHover
+                        visible: secHover.containsMouse
+                        text: root.secSignalsLoading ? "SEC EDGAR · Loading insiders…" : root.secStatus
+                    }
                 }
             }
         }
