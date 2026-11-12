@@ -13,6 +13,8 @@ Rectangle {
     property bool gridModeEnabled: true
     property bool candlesEnabled: chartModeController ? chartModeController.candlesEnabled : true
     property bool showCandles: candlesEnabled
+    readonly property int followLiveShortcutKey: Qt.Key_A
+    readonly property string followLiveShortcutLabel: String.fromCharCode(followLiveShortcutKey)
 
     property int currentActiveTimeframe: 100
     // The price axis column (axis and corner): the renderer's measured label width, but
@@ -861,7 +863,7 @@ Rectangle {
             Accessible.checkable: true
             Accessible.checked: unifiedGridRenderer.view.autoScrollEnabled
             Accessible.name: "Follow live time"
-            Accessible.description: "Keep the newest time at the right edge. Press A to toggle. Independent of auto price scale."
+            Accessible.description: "Keep the newest time at the right edge. Press " + root.followLiveShortcutLabel + " to toggle. Independent of auto price scale."
             Accessible.onPressAction: unifiedGridRenderer.view.enableAutoScroll(!unifiedGridRenderer.view.autoScrollEnabled)
             Text {
                 anchors.centerIn: parent
@@ -885,7 +887,7 @@ Rectangle {
                 parent: root
                 pointerItem: followLiveMouse
                 visible: followLiveMouse.containsMouse
-                text: "L · Follow live time: keep newest data in view"
+                text: root.followLiveShortcutLabel + " · Follow live time: keep newest data in view"
             }
             Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
@@ -1107,7 +1109,7 @@ Rectangle {
     Keys.onPressed: function(event) {
         switch(event.key) {
             case Qt.Key_R: unifiedGridRenderer.view.resetZoom(); event.accepted = true; break;
-            case Qt.Key_A: unifiedGridRenderer.view.enableAutoScroll(!unifiedGridRenderer.view.autoScrollEnabled); event.accepted = true; break;
+            case root.followLiveShortcutKey: unifiedGridRenderer.view.enableAutoScroll(!unifiedGridRenderer.view.autoScrollEnabled); event.accepted = true; break;
             case Qt.Key_P: unifiedGridRenderer.view.autoPriceScale = !unifiedGridRenderer.view.autoPriceScale; event.accepted = true; break;
             case Qt.Key_M: unifiedGridRenderer.view.lockToMid = !unifiedGridRenderer.view.lockToMid; event.accepted = true; break;
             case Qt.Key_Plus:

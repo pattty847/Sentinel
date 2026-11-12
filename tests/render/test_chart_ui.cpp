@@ -43,6 +43,9 @@
 #include <QPainter>
 #include <QElapsedTimer>
 #include <QMenu>
+#include <QHelpEvent>
+#include <QTextDocument>
+#include <QToolTip>
 #include <QQuickWindow>
 #include <QQmlComponent>
 #include <QQmlContext>
@@ -256,6 +259,7 @@ TEST(ChartToolbar, CheckedLayerHasVisibleStateAndCombosHaveArrows) {
     const QImage on = heatmap->grab().toImage();
     EXPECT_NE(off.pixelColor(2, heatmap->height() / 2),
               on.pixelColor(2, heatmap->height() / 2));
+    EXPECT_TRUE(qApp->styleSheet().contains("QToolBar QToolButton:checked:hover"));
     EXPECT_TRUE(qApp->styleSheet().contains("QComboBox::down-arrow"));
     EXPECT_TRUE(qApp->styleSheet().contains(":/svg/chevron_down.svg"));
 }
@@ -1003,7 +1007,8 @@ private:
     static void capture(QtMsgType type, const QMessageLogContext& context, const QString& message) {
         const QByteArray category(context.category);
         if (type == QtWarningMsg && (category == "qt.core.qobject.connect" ||
-            category.startsWith("qt.qml") || message.contains("ReferenceError") || message.contains("TypeError")))
+            category.startsWith("qt.qml") || message.contains("ReferenceError") ||
+            message.contains("TypeError") || message.contains("Binding loop")))
             warnings_->append(message);
     }
 };
@@ -1049,8 +1054,10 @@ TEST(ChartShell, AxisControlsHaveKeyboardActionsAndIndependentFollowStates) {
     auto *liveTip = shell->findChild<QObject *>("followLiveToolTip");
     ASSERT_TRUE(renderer && price && live);
     ASSERT_NE(liveTip, nullptr);
+    EXPECT_EQ(shell->property("followLiveShortcutKey").toInt(), Qt::Key_A);
+    EXPECT_EQ(shell->property("followLiveShortcutLabel").toString(), QStringLiteral("A"));
     EXPECT_EQ(liveTip->property("text").toString(),
-              QStringLiteral("L · Follow live time: keep newest data in view"));
+              QStringLiteral("A · Follow live time: keep newest data in view"));
     renderer->view()->setAutoPriceScale(false);
     renderer->view()->enableAutoScroll(false);
     const auto press = [](QObject *target, int key) {
@@ -1081,10 +1088,38 @@ TEST(ChartTooltips, WidgetTextWrapsBeforeTheWidthLimit) {
     EXPECT_TRUE(wrapped.contains("<br/>"));
     EXPECT_TRUE(wrapped.startsWith("<span"));
     EXPECT_FALSE(wrapped.contains("<script"));
+    QTextDocument document;
+    document.setDefaultFont(QToolTip::font());
+    document.setDocumentMargin(0);
+    document.setHtml(wrapped);
+    EXPECT_LE(document.idealWidth() + 14, 360);
+}
+
+TEST(ChartTooltips, PlainMenuActionDoesNotAcquireTooltip) {
+    auto* filter = WidgetToolTips::install(qApp);
+    QToolTip::hideText();
+    QCoreApplication::processEvents();
+    QMenu menu;
+    QAction* action = menu.addAction("&Open chart");
+    menu.show();
+    QCoreApplication::processEvents();
+    const QPoint point = menu.actionGeometry(action).center();
+    QHelpEvent help(QEvent::ToolTip, point, menu.mapToGlobal(point));
+    QCoreApplication::sendEvent(&menu, &help);
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(QToolTip::isVisible());
+    menu.hide();
+    qApp->removeEventFilter(filter);
+    delete filter;
 }
 
 TEST(ChartTooltips, SharedQmlTooltipStaysBesidePointerAtRightEdge) {
     QQmlEngine engine;
+    QStringList warnings;
+    QObject::connect(&engine, &QQmlEngine::warnings, &engine, [&](const QList<QQmlError>& errors) {
+        for (const auto& error : errors) warnings.append(error.toString());
+    });
+    QmlRuntimeWarnings runtimeWarnings(warnings);
     engine.addImportPath("qrc:/qt/qml");
     QQmlComponent component(&engine);
     component.setData(R"(
@@ -1094,7 +1129,7 @@ TEST(ChartTooltips, SharedQmlTooltipStaysBesidePointerAtRightEdge) {
             id: root
             width: 640
             height: 500
-            Item { id: pointer; x: 625; y: 100; property real mouseX: 2; property real mouseY: 20 }
+            Item { id: pointer; objectName: "pointer"; x: 625; y: 100; property real mouseX: 2; property real mouseY: 20 }
             ChartToolTip {
                 objectName: "tip"
                 parent: root
@@ -1108,11 +1143,28 @@ TEST(ChartTooltips, SharedQmlTooltipStaysBesidePointerAtRightEdge) {
     std::unique_ptr<QObject> root(component.create());
     ASSERT_TRUE(root) << component.errorString().toStdString();
     auto* tip = root->findChild<QObject*>("tip");
+    auto* pointer = root->findChild<QQuickItem*>("pointer");
     ASSERT_NE(tip, nullptr);
+    ASSERT_NE(pointer, nullptr);
+    tip->setProperty("text", QStringLiteral("Price axis · drag or scroll to zoom, then double-click to fit the visible range. ").repeated(8));
+    QCoreApplication::processEvents();
+    EXPECT_GT(tip->property("width").toReal(), 300.0);
     EXPECT_LE(tip->property("width").toReal(), 360.0);
+    EXPECT_GT(tip->property("anchorX").toReal(), 200.0);
     EXPECT_LT(tip->property("anchorX").toReal(), 625.0);
     EXPECT_GE(tip->property("anchorY").toReal(), 120.0);
     EXPECT_LT(tip->property("anchorY").toReal(), 200.0);
+    pointer->setX(1);
+    pointer->setY(1);
+    pointer->setProperty("mouseX", 0);
+    pointer->setProperty("mouseY", 0);
+    QCoreApplication::processEvents();
+    EXPECT_NEAR(tip->property("anchorX").toReal(), 13.0, 1.0);
+    EXPECT_NEAR(tip->property("anchorY").toReal(), 17.0, 1.0);
+    pointer->setY(490);
+    QCoreApplication::processEvents();
+    EXPECT_LT(tip->property("anchorY").toReal(), 490.0);
+    EXPECT_FALSE(warnings.join('\n').contains("Binding loop")) << warnings.join('\n').toStdString();
 }
 
 // Lock to mid's corner toggle (M) reflects and drives view.lockToMid, replaces the

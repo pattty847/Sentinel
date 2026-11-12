@@ -15,15 +15,15 @@
 
 WidgetToolTips::WidgetToolTips(QApplication* app) : QObject(app) {}
 
-void WidgetToolTips::install(QApplication* app) {
-    app->installEventFilter(new WidgetToolTips(app));
+WidgetToolTips* WidgetToolTips::install(QApplication* app) {
+    auto* filter = new WidgetToolTips(app);
+    app->installEventFilter(filter);
+    return filter;
 }
 
 QString WidgetToolTips::wrappedText(const QString& text) {
     constexpr int contentWidth = 344;
-    QFont font = QApplication::font("QToolTip");
-    font.setPixelSize(11);
-    const QFontMetrics metrics(font);
+    const QFontMetrics metrics(QToolTip::font());
     QStringList lines;
     for (const QString& paragraph : text.split('\n')) {
         QString line;
@@ -59,15 +59,25 @@ bool WidgetToolTips::eventFilter(QObject* watched, QEvent* event) {
     if (!widget) return false;
     auto* help = static_cast<QHelpEvent*>(event);
     QString tip = widget->toolTip();
+    QRect tipRect;
     if (auto* view = qobject_cast<QAbstractItemView*>(widget->parentWidget())) {
         if (view->viewport() == widget) {
             const QModelIndex index = view->indexAt(help->pos());
             const QString itemTip = index.data(Qt::ToolTipRole).toString();
-            if (!itemTip.isEmpty()) tip = itemTip;
+            if (!itemTip.isEmpty()) {
+                tip = itemTip;
+                tipRect = view->visualRect(index);
+            }
         }
     }
     if (auto* menu = qobject_cast<QMenu*>(widget)) {
-        if (QAction* action = menu->actionAt(help->pos())) tip = action->toolTip();
+        if (!menu->toolTipsVisible()) return false;
+        QAction* action = menu->actionAt(help->pos());
+        if (!action) return false;
+        const QString label = QString(action->text()).remove('&');
+        const QString actionTip = action->toolTip();
+        if (actionTip.isEmpty() || actionTip == label) return false;
+        tip = actionTip;
     }
     if (auto* tabs = qobject_cast<QTabBar*>(widget)) {
         const int index = tabs->tabAt(help->pos());
@@ -79,6 +89,6 @@ bool WidgetToolTips::eventFilter(QObject* watched, QEvent* event) {
                                                           Qt::ToolTipRole).toString();
     }
     if (tip.isEmpty()) return false;
-    QToolTip::showText(help->globalPos() + QPoint(12, 16), wrappedText(tip), widget);
+    QToolTip::showText(help->globalPos(), wrappedText(tip), widget, tipRect);
     return true;
 }

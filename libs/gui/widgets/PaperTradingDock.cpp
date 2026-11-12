@@ -269,23 +269,27 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     m_flattenBtn = new QPushButton(QStringLiteral("Flatten"), ticketFrame);
     m_cancelAllBtn = new QPushButton(QStringLiteral("Cancel All"), ticketFrame);
 
-    const auto orderStyle = [](const QColor& side, bool market) {
+    const auto orderStyle = [](const QColor& side, const QColor& ink, bool market) {
         const QString color = side.name();
+        const auto fillAt = [&side](int alpha) {
+            return QStringLiteral("rgba(%1, %2, %3, %4)")
+                .arg(side.red()).arg(side.green()).arg(side.blue()).arg(alpha);
+        };
         const QString fill = market
-            ? QStringLiteral("rgba(%1, %2, %3, 64)").arg(side.red()).arg(side.green()).arg(side.blue())
+            ? fillAt(64)
             : QStringLiteral("transparent");
         return QStringLiteral(
-            "QPushButton { background-color: %1; color: %2; border: 1px solid %2; "
+            "QPushButton { background-color: %1; color: %2; border: 1px solid %3; "
             "border-radius: 3px; padding: 3px 8px; }"
-            "QPushButton:hover { background-color: rgba(%3, %4, %5, 96); }"
-            "QPushButton:pressed { background-color: rgba(%3, %4, %5, 128); }"
+            "QPushButton:hover { background-color: %4; border-width: 2px; }"
+            "QPushButton:pressed { background-color: %5; color: #E6EDF3; }"
             "QPushButton:disabled { background-color: transparent; color: #6E7580; border-color: #2B3138; }")
-            .arg(fill, color).arg(side.red()).arg(side.green()).arg(side.blue());
+            .arg(fill, ink.name(), color, fillAt(market ? 64 : 24), fillAt(market ? 96 : 48));
     };
-    m_buyMarketBtn->setStyleSheet(orderStyle(theme::positive(), true));
-    m_buyLimitBtn->setStyleSheet(orderStyle(theme::positive(), false));
-    m_sellMarketBtn->setStyleSheet(orderStyle(theme::negative(), true));
-    m_sellLimitBtn->setStyleSheet(orderStyle(theme::negative(), false));
+    m_buyMarketBtn->setStyleSheet(orderStyle(theme::positive(), theme::positive(), true));
+    m_buyLimitBtn->setStyleSheet(orderStyle(theme::positive(), theme::positive(), false));
+    m_sellMarketBtn->setStyleSheet(orderStyle(theme::negative(), QColor("#FF8C82"), true));
+    m_sellLimitBtn->setStyleSheet(orderStyle(theme::negative(), theme::negative(), false));
 
     auto* orderGrid = new QGridLayout;
     orderGrid->setContentsMargins(0, 0, 0, 0);

@@ -209,6 +209,11 @@ QString DarkTheme::stylesheet() const {
             border: 1px solid #3A6A9A;
         }
 
+        QToolBar QToolButton:checked:hover {
+            background-color: #355A80;
+            border-color: #5E86B0;
+        }
+
         /* Order book toggles: the on state is visible (selection colours) */
         QToolButton#domPulse:checked, QToolButton#domLean:checked, QToolButton#domCumulative:checked {
             background-color: #2A4A6A;

@@ -7,7 +7,7 @@ class QApplication;
 
 class WidgetToolTips final : public QObject {
 public:
-    static void install(QApplication* app);
+    static WidgetToolTips* install(QApplication* app);
     static QString wrappedText(const QString& text);
 
 private:
