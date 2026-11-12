@@ -4,6 +4,8 @@
 #include "themes/ThemePalette.hpp"
 #include <QObject>
 #include "ChartTpoQml.hpp"
+#include "chart/core/TpoStyle.hpp"
+#include <memory>
 #include <QString>
 #include <functional>
 
@@ -13,6 +15,7 @@ struct ChartLayers;
 class ChartViewController;
 }
 class AxisTextService;
+namespace chart { class TpoStyleStore; }
 
 namespace chart {
 class ChartLookSettings : public QObject {
@@ -55,6 +58,8 @@ public:
     int tpoSessions() const;
     QString tpoLayout() const;
     QString tpoTheme() const;
+    QString tpoPreset() const;
+    tpo::StyleModel tpoLook() const;
 
     void setInitialTone(const ClientConfig& config);
     void syncGpuTone();
@@ -68,6 +73,11 @@ public:
     void setTpoSessionType(int sessionType);
     void setTpoLayout(const QString& layout);
     void setTpoTheme(const QString& theme);
+    void setTpoPreset(const QString& preset);
+    void setTpoLook(const tpo::StyleModel& look);
+    // Forgets the saved style and returns to the default preset with the configured theme.
+    void resetTpoLook();
+    void setTpoStyleStore(std::shared_ptr<TpoStyleStore> store);
     void applyClientConfig(const ClientConfig& config, ChartViewController& view, AxisTextService* axes);
     void applyServerConfig(const ServerConfig& config, ChartViewController& view);
 signals:
@@ -79,6 +89,7 @@ signals:
     void tradeBubbleSettingsChanged();
 private:
     void changed(Notice notice);
+    bool applyTpoLook(const tpo::StyleModel& look);
     void update() { if (requestUpdate) requestUpdate(); }
     ChartLayers& layers_;
     double gamma_ = 1.05;
@@ -91,5 +102,7 @@ private:
     int candleWickWidth_ = 1;
     int tpoTimeframeMs_ = 1800000;
     int tpoSessionType_ = 4;
+    tpo::Theme tpoConfigTheme_ = tpo::Theme::Rainbow;
+    std::shared_ptr<TpoStyleStore> tpoStore_;
 };
 } // namespace chart

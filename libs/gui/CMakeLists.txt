@@ -85,6 +85,8 @@ set(GRID_CORE_SOURCES
     chart/shell/ChartDebugQml.cpp
     chart/shell/ChartTpoQml.hpp
     chart/shell/ChartTpoQml.cpp
+    chart/shell/TpoStyleStore.hpp
+    chart/shell/TpoStyleStore.cpp
     chart/shell/LayerVisibility.hpp
     chart/shell/ChartLookSettings.hpp
     chart/shell/ChartLookSettings.cpp
@@ -173,6 +175,7 @@ set(WIDGET_SOURCES
     "widgets/ServiceLocator.cpp"
     "widgets/StatusBar.cpp"
     "widgets/HeatmapSettingsDialog.cpp"
+    "widgets/TpoStyleEditor.cpp"
     "widgets/HeatmapTelemetryDock.cpp"
     "widgets/TopToolbar.cpp"
     "widgets/LiquidityRangeSlider.cpp"
@@ -238,6 +241,8 @@ add_library(sentinel_chart_core STATIC
     chart/core/ChartViewController.cpp
     chart/core/ViewCommands.hpp
     chart/core/ViewCommands.cpp
+    chart/core/TpoStyle.hpp
+    chart/core/TpoStyle.cpp
 )
 target_include_directories(sentinel_chart_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(sentinel_chart_core PUBLIC sentinel_core Qt6::Core)

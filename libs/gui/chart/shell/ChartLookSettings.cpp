@@ -1,6 +1,7 @@
 #include "chart/shell/ChartLookSettings.hpp"
 #include "chart/layers/ChartLayers.hpp"
 #include "chart/core/ChartViewController.hpp"
+#include "chart/shell/TpoStyleStore.hpp"
 #include "render/AxisTextService.hpp"
 #include "render/heatmap/HeatmapSettingsStore.hpp"
 #include "servermodel/SessionManager.hpp"
@@ -73,7 +74,10 @@ void ChartLookSettings::setCandleAppearance(const heatmap::HeatmapChartSettings&
 void ChartLookSettings::applyTpoConfig(const ClientTpoConfig& config) {
     TpoOverlayRenderer::Style style = layers_.tpo.renderer.style();
     style.layout = tpo::parseLayout(config.layout, tpo::Layout::Collapsed);
-    style.theme = tpo::parseTheme(config.theme, tpo::Theme::Rainbow);
+    tpoConfigTheme_ = tpo::parseTheme(config.theme, tpo::Theme::Rainbow);
+    const auto saved = tpoStore_ ? tpoStore_->load() : std::nullopt;
+    if (saved) style.look = *saved;
+    else style.look.theme = tpoConfigTheme_;
     style.rowPx = config.rowPx;
     style.maxSessions = config.sessions;
     layers_.tpo.renderer.setStyle(style);
@@ -86,7 +90,8 @@ void ChartLookSettings::applyTpoConfig(const ClientTpoConfig& config) {
         changed(Notice::TpoConfig);
     }
     sLog_Render("TPO config: layout=" << tpo::layoutName(style.layout)
-                << " theme=" << tpo::themeName(style.theme)
+                << " theme=" << tpo::themeName(style.look.theme)
+                << " preset=" << tpoPreset() << " saved=" << saved.has_value()
                 << " session=" << tpo::sessionTypeName(sessionType)
                 << " periodMs=" << period << " sessions=" << layers_.tpo.renderer.style().maxSessions
                 << " rowPx=" << layers_.tpo.renderer.style().rowPx);
@@ -122,14 +127,46 @@ void ChartLookSettings::setTpoLayout(const QString& layout) {
 }
 
 void ChartLookSettings::setTpoTheme(const QString& theme) {
+    auto look = tpoLook();
+    look.theme = tpo::parseTheme(theme.toStdString(), look.theme);
+    setTpoLook(look);
+}
+
+void ChartLookSettings::setTpoPreset(const QString& preset) {
+    tpo::Preset parsed = tpo::Preset::Letters;
+    if (!tpo::parsePreset(preset.toStdString(), parsed)) return;
+    setTpoLook(tpo::presetStyle(parsed, tpoLook().theme));
+}
+
+void ChartLookSettings::setTpoLook(const tpo::StyleModel& look) {
+    if (!applyTpoLook(look)) return;
+    if (tpoStore_) tpoStore_->save(look);
+}
+
+void ChartLookSettings::resetTpoLook() {
+    if (tpoStore_) tpoStore_->clear();
+    applyTpoLook(tpo::presetStyle(tpo::Preset::Letters, tpoConfigTheme_));
+}
+
+bool ChartLookSettings::applyTpoLook(const tpo::StyleModel& look) {
     auto style = layers_.tpo.renderer.style();
-    const auto next = tpo::parseTheme(theme.toStdString(), style.theme);
-    if (next == style.theme) return;
-    style.theme = next;
+    if (style.look == look) return false;
+    style.look = look;
     layers_.tpo.renderer.setStyle(style);
-    sLog_Render("TPO theme=" << tpo::themeName(next));
+    sLog_Render("TPO style: preset=" << tpoPreset() << " theme=" << tpo::themeName(look.theme)
+                << " letters=" << look.letters.visible << " reach=" << tpo::reachName(look.reach));
     update();
     changed(Notice::TpoStyle);
+    return true;
+}
+
+void ChartLookSettings::setTpoStyleStore(std::shared_ptr<TpoStyleStore> store) { tpoStore_ = std::move(store); }
+
+tpo::StyleModel ChartLookSettings::tpoLook() const { return layers_.tpo.renderer.style().look; }
+
+QString ChartLookSettings::tpoPreset() const {
+    tpo::Preset preset = tpo::Preset::Letters;
+    return tpo::matchPreset(tpoLook(), preset) ? QString::fromLatin1(tpo::presetName(preset)) : QStringLiteral("custom");
 }
 
 QString ChartLookSettings::tpoLayout() const {
@@ -137,7 +174,7 @@ QString ChartLookSettings::tpoLayout() const {
 }
 
 QString ChartLookSettings::tpoTheme() const {
-    return QString::fromLatin1(tpo::themeName(layers_.tpo.renderer.style().theme));
+    return QString::fromLatin1(tpo::themeName(tpoLook().theme));
 }
 
 int ChartLookSettings::tpoSessions() const { return layers_.tpo.renderer.style().maxSessions; }

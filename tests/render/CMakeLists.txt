@@ -47,6 +47,12 @@ target_link_libraries(test_ChartCamera PRIVATE GTest::gtest_main sentinel_chart_
 add_test(NAME ChartCameraTests COMMAND test_ChartCamera)
 set_tests_properties(ChartCameraTests PROPERTIES LABELS "render;fast")
 
+add_executable(test_TpoStyle test_TpoStyle.cpp)
+target_include_directories(test_TpoStyle PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_TpoStyle PRIVATE GTest::gtest_main sentinel_chart_core)
+add_test(NAME TpoStyleTests COMMAND test_TpoStyle)
+set_tests_properties(TpoStyleTests PROPERTIES LABELS "render;fast")
+
 add_executable(test_ChartViewController test_chart_view_controller.cpp)
 target_include_directories(test_ChartViewController PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_ChartViewController PRIVATE GTest::gtest_main sentinel_chart_core Qt6::Core)

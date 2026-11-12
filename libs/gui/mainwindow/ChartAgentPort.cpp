@@ -1,4 +1,5 @@
 #include "ChartAgentPort.hpp"
+#include "chart/shell/ChartTpoQml.hpp"
 #include "chart/core/ChartViewController.hpp"
 #include "chart/core/PublishedFrame.hpp"
 #include "chart/core/FrameAck.hpp"
@@ -99,6 +100,20 @@ void ChartAgentPort::applyFootprintSettings(const QJsonObject& patch) const {
     if (patch.contains("footprintCandle")) layers_->setFootprintCandle(patch["footprintCandle"].toString());
     if (patch.contains("footprintDustNotional")) layers_->setFootprintDustNotional(patch["footprintDustNotional"].toDouble());
     if (patch.contains("footprintNumbers")) layers_->setFootprintNumbers(patch["footprintNumbers"].toBool());
+}
+
+bool ChartAgentPort::isTpoLookKey(const QString& key) {
+    return key == "tpoLayout" || key == "tpoTheme" || key == "tpoPreset";
+}
+void ChartAgentPort::applyTpoLook(const QJsonObject& patch) const {
+    if (!tpo_) return;
+    if (patch.contains("tpoLayout")) tpo_->setTpoLayout(patch["tpoLayout"].toString());
+    if (patch.contains("tpoTheme")) tpo_->setTpoTheme(patch["tpoTheme"].toString());
+    if (patch.contains("tpoPreset")) tpo_->setTpoPreset(patch["tpoPreset"].toString());
+}
+QJsonObject ChartAgentPort::tpoLook() const {
+    if (!tpo_) return {};
+    return {{"tpoLayout", tpo_->tpoLayout()}, {"tpoTheme", tpo_->tpoTheme()}, {"tpoPreset", tpo_->tpoPreset()}};
 }
 
 QJsonObject ChartAgentPort::footprintPatch(const QJsonObject& patch) {

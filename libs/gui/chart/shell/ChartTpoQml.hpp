@@ -1,9 +1,12 @@
 #pragma once
 #include <QObject>
 #include <QString>
+#include <memory>
+#include "chart/core/TpoStyle.hpp"
 struct ClientTpoConfig;
 namespace chart {
 class ChartLookSettings;
+class TpoStyleStore;
 class ChartTpoQml : public QObject {
     Q_OBJECT
     Q_PROPERTY(int tpoTimeframeMs READ tpoTimeframeMs WRITE setTpoTimeframeMs NOTIFY tpoConfigChanged)
@@ -18,6 +21,12 @@ public:
     Q_INVOKABLE void setTpoTheme(const QString& theme);
     QString tpoLayout() const;
     QString tpoTheme() const;
+    Q_INVOKABLE void setTpoPreset(const QString& preset);
+    QString tpoPreset() const;
+    tpo::StyleModel tpoLook() const;
+    void setTpoLook(const tpo::StyleModel& look);
+    void resetTpoLook();
+    void setStyleStore(std::shared_ptr<TpoStyleStore> store);
     int tpoSessions() const;
     void applyTpoConfig(const ClientTpoConfig& tpo);
 signals:

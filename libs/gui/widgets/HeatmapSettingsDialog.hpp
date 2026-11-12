@@ -154,4 +154,5 @@ private:
     QComboBox *m_tpoSessionCombo = nullptr;
     QComboBox *m_tpoLayoutCombo = nullptr;
     QComboBox *m_tpoThemeCombo = nullptr;
+    class TpoStyleEditor *m_tpoStyleEditor = nullptr;
 };

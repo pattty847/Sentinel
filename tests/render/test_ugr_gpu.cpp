@@ -5478,6 +5478,29 @@ TEST(UgrInput, MacMouseAndPreciseScrollReachBothAxisWheelHandlers) {
     chart->setHeatmapService(nullptr);
 }
 
+// Accepted stacking (owner, 2026-11-12): with TPO the only primary layer, the
+// candles drop below the chart item, so the slightly transparent TPO covers
+// them; with heatmap or footprint on as well, candles stay above the chart.
+TEST(UgrInput, CandlesGoBehindTheTpoOnlyWhenNothingElseCoversThem) {
+    QQuickView view;
+    view.rootContext()->setContextProperty("uiTheme", nullptr);
+    view.rootContext()->setContextProperty("dataSource", nullptr);
+    view.rootContext()->setContextProperty("chartModeController", nullptr);
+    view.setSource(QUrl::fromLocalFile(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml")));
+    ASSERT_EQ(view.status(), QQuickView::Ready) << view.errors().value(0).toString().toStdString();
+    auto *candles = view.rootObject()->findChild<CandlestickOverlayItem *>();
+    auto *chart = view.rootObject()->findChild<UnifiedGridRenderer *>("unifiedGridRenderer");
+    ASSERT_TRUE(candles && chart);
+    EXPECT_GT(candles->z(), chart->z()) << "default (heatmap): candles above the chart";
+    chart->layers()->setTpoEnabled(true);  // exclusive: heatmap and footprint go off
+    EXPECT_LT(candles->z(), chart->z()) << "TPO only: candles behind the TPO";
+    chart->layers()->setLayerEnabled("footprint", true);
+    EXPECT_GT(candles->z(), chart->z()) << "TPO + footprint: candles stay on top (accepted for now)";
+    chart->layers()->setLayerEnabled("footprint", false);
+    chart->layers()->setLayerEnabled("heatmap", true);
+    EXPECT_GT(candles->z(), chart->z()) << "TPO + heatmap: candles stay on top";
+}
+
 // DepthChartView's root `symbol` property shadowed the
 // context property QmlSceneController set, so the candle overlay and the paper-trade
 // model stayed on BTC-USD after a symbol switch.

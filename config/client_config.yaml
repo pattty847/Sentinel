@@ -18,11 +18,11 @@ heatmap:
 
 tpo:
   layout: collapsed   # collapsed (letters packed per session) | split (letters in their time column)
-  theme: rainbow      # rainbow (period gradient) | calm (blue) | sage (green)
+  theme: rainbow      # rainbow (period gradient) | calm (blue) | sage (green) | indigo (indigo -> sky)
   session: h24        # ny | london | asia | australia | h24 | w1 | m1 (calendar month, UTC)
   period_minutes: 30  # letter bracket; must divide the session (w1/m1: a UTC day)
   sessions: 5         # current session plus previous ones (1-8)
-  row_px: 14          # price rows merge (1-2-5 ticks) until at least this tall
+  row_px: 13          # price rows merge (1-2-5 ticks) until at least this tall
 
 gui:
   api_port: 17100

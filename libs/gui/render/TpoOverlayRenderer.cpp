@@ -37,8 +37,6 @@ constexpr double kCollapsedAspect = 0.85;
 constexpr double kMaxCollapsedCellW = 16.0;
 // Display rows are never shorter than this.
 constexpr double kMinRowPx = 3.0;
-// Letters stay a small monospace, however tall the rows get.
-constexpr double kMaxFontPx = 13.0;
 // Collapsed profiles use at most this share of their session's width.
 constexpr double kCollapsedSessionFill = 0.96;
 // Letter font size relative to the cell; the glyph advance must fit the width.
@@ -48,8 +46,34 @@ constexpr double kAdvanceFill = 0.78;  // the glyph advance may use this share o
 constexpr double kTextHiddenPx = 7.0;
 constexpr double kTextFullPx = 10.0;
 
-const QColor kLightText(240, 243, 247);
 const QColor kDarkText(18, 22, 28);
+// Tag chips: horizontal padding and the gap to the plot's right edge (px).
+constexpr double kTagPadPx = 4.0;
+constexpr double kTagMarginPx = 4.0;
+constexpr int kTagVertices = 5 * 6;
+
+QColor qcolor(const tpo::Rgba& c, double alpha) {
+    return QColor(c.r, c.g, c.b, static_cast<int>(std::lround(std::clamp(alpha, 0.0, 1.0) * 255.0)));
+}
+
+QSGGeometryNode* colorNode() {
+    auto* node = new QSGGeometryNode();
+    auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 0);
+    geometry->setDrawingMode(QSGGeometry::DrawTriangles);
+    geometry->setVertexDataPattern(QSGGeometry::DynamicPattern);
+    node->setGeometry(geometry);
+    node->setFlag(QSGNode::OwnsGeometry, true);
+    node->setMaterial(new QSGVertexColorMaterial());
+    node->setFlag(QSGNode::OwnsMaterial, true);
+    return node;
+}
+
+void setTransform(QSGTransformNode* node, double tx, double ty) {
+    QMatrix4x4 matrix;
+    matrix.translate(static_cast<float>(tx), static_cast<float>(ty));
+    node->setMatrix(matrix);
+    node->markDirty(QSGNode::DirtyMatrix);
+}
 
 int64_t quantize(double value) {
     return std::llround(value * 256.0);
@@ -109,9 +133,16 @@ void TpoOverlayRenderer::onRootRebuilt() {
     m_root = nullptr;
     m_opacity = nullptr;
     m_clip = nullptr;
+    m_sessionsRoot = nullptr;
+    m_tagChips = nullptr;
+    m_tagLight = nullptr;
+    m_tagDark = nullptr;
+    m_hasTags = false;
     m_clipRect = QRectF();
     for (auto& [start, session] : m_sessions) {
         session.transform = nullptr;
+        session.levelTransform = nullptr;
+        session.levels = nullptr;
         session.cells = nullptr;
         session.lightText = nullptr;
         session.darkText = nullptr;
@@ -121,13 +152,16 @@ void TpoOverlayRenderer::onRootRebuilt() {
 }
 
 void TpoOverlayRenderer::dropSessionNodes(Session& session) {
-    if (session.transform) {
-        if (QSGNode* parent = session.transform->parent()) {
-            parent->removeChildNode(session.transform);
+    for (QSGTransformNode* node : {session.transform, session.levelTransform}) {
+        if (!node) continue;
+        if (QSGNode* parent = node->parent()) {
+            parent->removeChildNode(node);
         }
-        delete session.transform;  // deletes cells and text nodes (owned by parent)
+        delete node;  // deletes its geometry and text children (owned by parent)
     }
     session.transform = nullptr;
+    session.levelTransform = nullptr;
+    session.levels = nullptr;
     session.cells = nullptr;
     session.lightText = nullptr;
     session.darkText = nullptr;
@@ -230,6 +264,16 @@ void TpoOverlayRenderer::ensureRoot(QSGNode* parentNode) {
     m_clip->setFlag(QSGNode::OwnsGeometry, true);
     m_root->appendChildNode(m_opacity);
     m_opacity->appendChildNode(m_clip);
+    m_sessionsRoot = new QSGNode();
+    m_clip->appendChildNode(m_sessionsRoot);
+    m_tagChips = colorNode();
+    m_tagChips->geometry()->allocate(kTagVertices);
+    m_tagLight = new ChartTextNode();
+    m_tagDark = new ChartTextNode();
+    m_clip->appendChildNode(m_tagChips);
+    m_clip->appendChildNode(m_tagLight);
+    m_clip->appendChildNode(m_tagDark);
+    m_hasTags = false;
     parentNode->appendChildNode(m_root);
     m_clipRect = QRectF();
 }
@@ -238,25 +282,23 @@ void TpoOverlayRenderer::ensureSessionNodes(Session& session) {
     if (session.transform) {
         return;
     }
+    session.levelTransform = new QSGTransformNode();
+    session.levels = colorNode();
+    session.levelTransform->appendChildNode(session.levels);
+    m_sessionsRoot->appendChildNode(session.levelTransform);
     session.transform = new QSGTransformNode();
-    session.cells = new QSGGeometryNode();
-    auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 0);
-    geometry->setDrawingMode(QSGGeometry::DrawTriangles);
-    geometry->setVertexDataPattern(QSGGeometry::DynamicPattern);
-    session.cells->setGeometry(geometry);
-    session.cells->setFlag(QSGNode::OwnsGeometry, true);
-    session.cells->setMaterial(new QSGVertexColorMaterial());
-    session.cells->setFlag(QSGNode::OwnsMaterial, true);
+    session.cells = colorNode();
     session.lightText = new ChartTextNode();
     session.darkText = new ChartTextNode();
     session.transform->appendChildNode(session.cells);
     session.transform->appendChildNode(session.lightText);
     session.transform->appendChildNode(session.darkText);
-    m_clip->appendChildNode(session.transform);
+    m_sessionsRoot->appendChildNode(session.transform);
     session.cellCapacity = 0;
     session.hasBuilt = false;
     session.lastTx = std::numeric_limits<double>::quiet_NaN();
     session.lastTy = std::numeric_limits<double>::quiet_NaN();
+    session.lastLevelTx = std::numeric_limits<double>::quiet_NaN();
 }
 
 void TpoOverlayRenderer::appendGlyph(std::vector<ChartGlyphInstance>& out,
@@ -286,11 +328,13 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
                                         int64_t topAbs, float textFontPx) {
     const tpo::ProfileRows& profile = session.profile;
     const tpo::ValueArea& va = profile.valueArea();
+    const tpo::StyleModel& look = key.look;
     const bool split = key.layout == tpo::Layout::Split;
     const double cellW = key.cellW;
     const double cellH = key.cellH;
-    const float gapX = cellW >= 6.0 ? 1.0f : 0.0f;
-    const float gapY = cellH >= 6.0 ? 1.0f : 0.0f;
+    const float gap = static_cast<float>(look.cells.width);
+    const float gapX = cellW >= 6.0 ? gap : 0.0f;
+    const float gapY = cellH >= 6.0 ? gap : 0.0f;
     const auto edge = [&key](double logical, bool snap) {
         return snap ? std::round(logical * key.dpr) / key.dpr : logical;
     };
@@ -302,8 +346,7 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
         if (!session.rowsByPeriod[static_cast<size_t>(p)].empty()) { lastPeriod = p; break; }
     }
 
-    const bool pocBar = split && va.valid() && lastPeriod >= 0;
-    const int quads = profile.totalTpos() + (pocBar ? 1 : 0);
+    const int quads = look.cells.visible ? profile.totalTpos() : 0;
     QSGGeometry* geometry = session.cells->geometry();
     const int needed = quads * 6;
     if (needed > session.cellCapacity) {
@@ -322,14 +365,6 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
         return static_cast<double>(topAbs - (g + 1) * group) * basePx;
     };
 
-    if (pocBar) {
-        const double top = rowTop(va.poc);
-        writeQuad(v + written, 0.0f, static_cast<float>(edge(top, key.snapY)),
-                  static_cast<float>(edge((lastPeriod + 1) * periodPx, key.snapX)),
-                  static_cast<float>(edge(top + cellH, key.snapY)), tpo::pocBarColor(style.theme));
-        written += 6;
-    }
-
     double widest = 0.0;
     for (int row = 0; row < profile.rows(); ++row) {
         if (profile.count(row) == 0) {
@@ -346,14 +381,14 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
             const double left = split ? period * periodPx : k * cellW;
             const float x0 = static_cast<float>(edge(left, key.snapX));
             const float x1 = static_cast<float>(edge(left + cellW - gapX, key.snapX));
-            const tpo::Rgba color = tpo::cellColor(style.theme, period, session.periods, inVa, poc);
-            if (written + 6 <= session.cellCapacity) {
+            const tpo::Rgba color = tpo::cellColor(look, period, session.periods, inVa, poc);
+            if (look.cells.visible && written + 6 <= session.cellCapacity) {
                 writeQuad(v + written, x0, y0, std::max(x0 + minCell, x1), std::max(y0 + minCell, y1), color);
                 written += 6;
             }
             if (key.text) {
-                auto& out = tpo::prefersDarkText(color) ? session.darkGlyphs : session.lightGlyphs;
-                appendGlyph(out, atlas, tpo::letterForPeriod(period),
+                const bool dark = look.cells.visible && tpo::prefersDarkText(color);
+                appendGlyph(dark ? session.darkGlyphs : session.lightGlyphs, atlas, tpo::letterForPeriod(period),
                             static_cast<float>(left + cellW * 0.5), cy, fontScale);
             }
             ++k;
@@ -366,26 +401,141 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
     }
     session.cells->markDirty(QSGNode::DirtyGeometry);
     session.profileWidthPx = split ? (lastPeriod + 1) * periodPx : widest;
+    rebuildLevels(session, key, topAbs, basePx);
 
     session.lightText->updateGeometry(session.lightGlyphs);
     session.darkText->updateGeometry(session.darkGlyphs);
 
     const double fade = std::clamp((textFontPx - kTextHiddenPx) / (kTextFullPx - kTextHiddenPx), 0.0, 1.0);
-    session.textAlpha = key.text ? static_cast<float>(fade) : 0.0f;
-    QColor light = kLightText;
-    light.setAlphaF(session.textAlpha);
+    session.textAlpha = key.text ? static_cast<float>(fade * look.letters.opacity) : 0.0f;
+    session.lightText->setColor(qcolor(look.letters.color, session.textAlpha));
     QColor dark = kDarkText;
     dark.setAlphaF(session.textAlpha);
-    session.lightText->setColor(light);
     session.darkText->setColor(dark);
 
     sLog_Probe("tpo.build", "session=" << session.startMs << " periods=" << session.periods
-               << " layout=" << tpo::layoutName(key.layout) << " theme=" << tpo::themeName(key.theme)
+               << " layout=" << tpo::layoutName(key.layout) << " theme=" << tpo::themeName(look.theme)
                << " group=" << group << " rows=" << profile.rows() << " tpos=" << profile.totalTpos()
                << " maxCount=" << profile.maxCount() << " poc=" << va.poc
                << " va=[" << va.low << ".." << va.high << "]"
+               << " ib=[" << profile.initialBalance().lowAbs << ".." << profile.initialBalance().highAbs << "]"
                << " cell=" << cellW << "x" << cellH << " font=" << textFontPx
                << " glyphs=" << (session.lightGlyphs.size() + session.darkGlyphs.size()));
+}
+
+void TpoOverlayRenderer::rebuildLevels(Session& session, const LayoutKey& key, int64_t topAbs, double basePx) {
+    const tpo::StyleModel& look = key.look;
+    const tpo::ProfileRows& profile = session.profile;
+    const tpo::ValueArea& va = profile.valueArea();
+    const tpo::LevelLines lines = tpo::levelLines(profile, look);
+    const double reach = look.reach == tpo::LineReach::Session ? key.sessionPx : session.profileWidthPx;
+    const auto snap = [&key](double logical) { return std::round(logical * key.dpr) / key.dpr; };
+    const float x1 = static_cast<float>(key.snapX ? snap(reach) : reach);
+    const double minPx = 1.0 / key.dpr;
+
+    QSGGeometry* geometry = session.levels->geometry();
+    if (geometry->vertexCount() != 6 * 6) geometry->allocate(6 * 6);
+    auto* v = geometry->vertexDataAsColoredPoint2D();
+    std::memset(static_cast<void*>(v), 0, sizeof(QSGGeometry::ColoredPoint2D) * 36);
+    int written = 0;
+    const double cellH = basePx * profile.group();
+    if (look.valueArea.visible && va.valid() && reach > 0.0) {
+        const double top = static_cast<double>(topAbs - (profile.minGroup() + va.high + 1) * profile.group()) * basePx;
+        const double bottom = top + (va.high - va.low + 1) * cellH;
+        writeQuad(v + written, 0.0f, static_cast<float>(snap(top)), x1, static_cast<float>(snap(bottom)),
+                  tpo::elementColor(look.valueArea));
+        written += 6;
+    }
+    for (int i = 0; i < lines.count && reach > 0.0; ++i) {
+        const auto& line = lines.lines[static_cast<size_t>(i)];
+        const tpo::Element& element = tpo::levelElement(look, line.level);
+        const double width = std::max(element.width, minPx);
+        const double y = (static_cast<double>(topAbs) - line.ticks) * basePx;
+        const double y0 = key.snapY ? snap(y - width * 0.5) : y - width * 0.5;
+        writeQuad(v + written, 0.0f, static_cast<float>(y0), x1, static_cast<float>(y0 + width),
+                  tpo::elementColor(element));
+        written += 6;
+    }
+    session.levels->markDirty(QSGNode::DirtyGeometry);
+}
+
+TpoOverlayRenderer::TagKey TpoOverlayRenderer::tagKey(const Session* tagged, const TimeAxisMapping& mapping,
+                                                     bool metrics, const QRectF& bounds) const {
+    TagKey key;
+    key.look = m_style.look;
+    key.bounds = bounds;
+    if (!tagged || !metrics || !m_style.look.tags.visible) return key;
+    const tpo::LevelLines lines = tpo::levelLines(tagged->profile, m_style.look);
+    key.sessionStartMs = tagged->startMs;
+    key.count = lines.count;
+    for (int i = 0; i < lines.count; ++i) {
+        const auto& line = lines.lines[static_cast<size_t>(i)];
+        key.levels[static_cast<size_t>(i)] = line.level;
+        key.ys[static_cast<size_t>(i)] = bounds.top() + mapping.priceToScreenY(line.ticks * m_grid.tick);
+    }
+    return key;
+}
+
+void TpoOverlayRenderer::updateTags(const ChartTextAtlas& atlas, const TagKey& key) {
+    if (m_hasTags && key == m_tagKey) return;
+    m_tagKey = key;
+    m_hasTags = true;
+
+    const tpo::StyleModel& look = key.look;
+    const QRectF& bounds = key.bounds;
+    const double fontPx = std::max(1.0, look.tags.width);
+    const float scale = static_cast<float>(fontPx / std::max(1, atlas.fontPx()));
+    const double advance = atlas.glyph(QChar('A')).advance * scale;
+    const double chipH = std::round(fontPx * 1.35);
+    const double chipW = std::round(3 * advance + 2 * kTagPadPx);
+    const double left = std::round(bounds.right() - kTagMarginPx - chipW);
+    const unsigned kept = tpo::placeTags(key.ys, key.count, chipH, bounds.top(), bounds.bottom());
+
+    auto* v = m_tagChips->geometry()->vertexDataAsColoredPoint2D();
+    std::memset(static_cast<void*>(v), 0, sizeof(QSGGeometry::ColoredPoint2D) * kTagVertices);
+    m_tagLightGlyphs.clear();
+    m_tagDarkGlyphs.clear();
+    m_tagView = {};
+    m_tagView.sessionStartMs = key.sessionStartMs;
+    int written = 0;
+    for (int i = 0; i < key.count; ++i) {
+        if (!(kept & (1u << i))) continue;
+        const tpo::Level level = key.levels[static_cast<size_t>(i)];
+        const double top = std::round(key.ys[static_cast<size_t>(i)] - chipH * 0.5);
+        tpo::Element chipStyle = tpo::levelElement(look, level);
+        chipStyle.opacity = look.tags.opacity;
+        const tpo::Rgba chip = tpo::elementColor(chipStyle);
+        writeQuad(v + written, static_cast<float>(left), static_cast<float>(top),
+                  static_cast<float>(left + chipW), static_cast<float>(top + chipH), chip);
+        written += 6;
+        auto& out = tpo::prefersDarkText(chip) ? m_tagDarkGlyphs : m_tagLightGlyphs;
+        const char* name = tpo::levelName(level);
+        for (int c = 0; c < 3; ++c) {
+            appendGlyph(out, atlas, name[c], static_cast<float>(left + kTagPadPx + (c + 0.5) * advance),
+                        static_cast<float>(top + chipH * 0.5), scale);
+        }
+        m_tagView.levels[static_cast<size_t>(m_tagView.count)] = level;
+        m_tagView.centreY[static_cast<size_t>(m_tagView.count++)] = top + chipH * 0.5;
+    }
+    m_tagChips->markDirty(QSGNode::DirtyGeometry);
+    m_tagLight->updateGeometry(m_tagLightGlyphs);
+    m_tagDark->updateGeometry(m_tagDarkGlyphs);
+    m_tagLight->setColor(qcolor(look.tags.color, 1.0));
+    m_tagDark->setColor(kDarkText);
+}
+
+TpoOverlayRenderer::SessionNodes TpoOverlayRenderer::sessionNodesForTest(int64_t sessionStartMs) const {
+    const auto it = m_sessions.find(sessionStartMs);
+    if (it == m_sessions.end()) return {};
+    const Session& s = it->second;
+    return {s.transform, s.cells, s.levelTransform, s.levels};
+}
+
+void TpoOverlayRenderer::ensureProfile(Session& session, int64_t topAbs, int group) {
+    if (session.profileVersion == session.dataVersion && session.profileGroup == group) return;
+    session.profile.build(session.rowsByPeriod, topAbs, group, tpo::initialBalancePeriods(session.periodMs));
+    session.profileVersion = session.dataVersion;
+    session.profileGroup = group;
 }
 
 int TpoOverlayRenderer::chooseRowGroup(double basePx, double pxPerMs, int64_t topAbs,
@@ -407,11 +557,7 @@ int TpoOverlayRenderer::chooseRowGroup(double basePx, double pxPerMs, int64_t to
                 widthCap = std::min(widthCap, static_cast<double>(session.periodMs) * pxPerMs);
                 continue;
             }
-            if (session.profileVersion != session.dataVersion || session.profileGroup != group) {
-                session.profile.build(session.rowsByPeriod, topAbs, group);
-                session.profileVersion = session.dataVersion;
-                session.profileGroup = group;
-            }
+            ensureProfile(session, topAbs, group);
             const double sessionPx = static_cast<double>(session.endMs - session.startMs) * pxPerMs;
             widthCap = std::min(widthCap, sessionPx * kCollapsedSessionFill /
                                               std::max(1, session.profile.maxCount()));
@@ -492,6 +638,12 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         m_root->texture = texture;
     }
     const bool textAvailable = atlasReady && m_root->texture != nullptr;
+    if (textAvailable) {
+        for (ChartTextNode* node : {m_tagLight, m_tagDark}) {
+            node->setSharedAtlasTexture(m_root->texture);
+            node->setPxRange(atlas.pxRange());
+        }
+    }
 
     const double pxPerMs = camera.pxPerMs() / scale;
     const double pxPerPrice = camera.pxPerPrice() / scale;
@@ -520,16 +672,13 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         if (session.periods <= 0) {
             continue;
         }
-        if (session.profileVersion != session.dataVersion || session.profileGroup != group) {
-            session.profile.build(session.rowsByPeriod, topAbs, group);
-            session.profileVersion = session.dataVersion;
-            session.profileGroup = group;
-        }
+        ensureProfile(session, topAbs, group);
         const double sessionPx = static_cast<double>(session.endMs - session.startMs) * pxPerMs;
         collapsedCellW = std::min(collapsedCellW,
                                   sessionPx * kCollapsedSessionFill / std::max(1, session.profile.maxCount()));
     }
 
+    const Session* tagged = nullptr;
     for (auto& [start, session] : m_sessions) {
         ensureSessionNodes(session);
         if (session.periods <= 0) {
@@ -544,10 +693,12 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         const double startX = surfaceBounds.left() + mapping.timeToScreenX(static_cast<double>(session.startMs));
         const double endX = surfaceBounds.left() + mapping.timeToScreenX(static_cast<double>(session.endMs));
         const bool onScreen = endX > surfaceBounds.left() && startX < surfaceBounds.right();
+        if (onScreen) tagged = &session;
 
         const double periodPx = static_cast<double>(session.periodMs) * pxPerMs;
         const double cellW = std::max(style.layout == tpo::Layout::Collapsed ? collapsedCellW : periodPx, 1.0);
-        const double fontPx = std::min({kMaxFontPx, cellH * kFontPerCellH, cellW * kAdvanceFill / advanceRatio});
+        const double fontPx = std::min({style.look.letters.width, cellH * kFontPerCellH, cellW * kAdvanceFill / advanceRatio});
+        const double sessionPx = static_cast<double>(session.endMs - session.startMs) * pxPerMs;
 
         LayoutKey key;
         key.dataVersion = session.profileVersion;
@@ -560,8 +711,9 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         key.snapX = snapX;
         key.snapY = snapY;
         key.layout = style.layout;
-        key.theme = style.theme;
-        key.text = textAvailable && fontPx >= kTextHiddenPx;
+        key.look = style.look;
+        key.sessionPx = style.look.reach == tpo::LineReach::Session ? sessionPx : 0.0;
+        key.text = textAvailable && style.look.letters.visible && fontPx >= kTextHiddenPx;
         if (onScreen && (!session.hasBuilt || !(key == session.built))) {
             rebuildSession(session, key, style, atlas, basePx, periodPx, topAbs,
                            static_cast<float>(fontPx));
@@ -576,15 +728,18 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         }
         const double tx = edge(anchorX, snapX);
         const double ty = edge(anchorY, snapY);
+        const double levelTx = style.look.reach == tpo::LineReach::Session ? edge(startX, snapX) : tx;
         if (tx != session.lastTx || ty != session.lastTy) {
-            QMatrix4x4 matrix;
-            matrix.translate(static_cast<float>(tx), static_cast<float>(ty));
-            session.transform->setMatrix(matrix);
-            session.transform->markDirty(QSGNode::DirtyMatrix);
+            setTransform(session.transform, tx, ty);
             session.lastTx = tx;
-            session.lastTy = ty;
         }
+        if (levelTx != session.lastLevelTx || ty != session.lastTy) {
+            setTransform(session.levelTransform, levelTx, ty);
+            session.lastLevelTx = levelTx;
+        }
+        session.lastTy = ty;
     }
+    updateTags(atlas, tagKey(tagged, mapping, atlasReady && atlas.isBuilt() && atlas.fontPx() > 0, surfaceBounds));
 
     sLog_Probe("tpo.frame", "sessions=" << m_sessions.size() << " layout=" << tpo::layoutName(style.layout)
                << " basePx=" << basePx << " group=" << group << " cellH=" << cellH

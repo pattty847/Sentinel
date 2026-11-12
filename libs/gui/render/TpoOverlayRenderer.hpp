@@ -7,6 +7,7 @@
 
 #include <QByteArray>
 #include <QRectF>
+#include <array>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -34,8 +35,10 @@ class TpoRootNode;
  *              (classic market profile). The profile sticks to the left edge of
  *              the plot while its session is still on screen.
  *
- * The POC row is painted light (a light bar across the session in split mode)
- * and cells outside the 70% value area are dimmed.
+ * Every look comes from tpo::StyleModel (chart/core/TpoStyle.hpp): cell fill,
+ * letters, the value-area rule, and the POC/VAH/VAL/IBH/IBL lines. Level lines
+ * sit under the cells and reach across the profile or the whole session; the
+ * newest session's levels also get tags at the plot's right edge.
  *
  * Geometry lives in per-session layout space relative to the session anchor
  * (session start, top of the trade grid). Panning only moves the session's
@@ -58,8 +61,8 @@ public:
 
     struct Style {
         tpo::Layout layout = tpo::Layout::Collapsed;
-        tpo::Theme theme = tpo::Theme::Rainbow;
-        double rowPx = 14.0;    // minimum display row height before rows merge
+        tpo::StyleModel look = tpo::presetStyle(tpo::Preset::Letters);
+        double rowPx = 13.0;    // minimum display row height before rows merge
         int maxSessions = 5;
     };
 
@@ -84,6 +87,22 @@ public:
                 const chart_raster::RasterCamera& camera, double dpr, bool snapX, bool snapY,
                 const QRectF& surfaceBounds);
 
+    // Test access (render thread state, read after render()).
+    struct TagView {
+        int count = 0;
+        std::array<tpo::Level, 5> levels{};
+        std::array<double, 5> centreY{};  // chip centres, item coordinates
+        int64_t sessionStartMs = 0;
+    };
+    const TagView& tagsForTest() const { return m_tagView; }
+    struct SessionNodes {
+        const QSGTransformNode* cells = nullptr;
+        const QSGGeometryNode* cellGeometry = nullptr;
+        const QSGTransformNode* levels = nullptr;
+        const QSGGeometryNode* levelGeometry = nullptr;
+    };
+    SessionNodes sessionNodesForTest(int64_t sessionStartMs) const;
+
 private:
     struct LayoutKey {
         uint64_t dataVersion = 0;
@@ -93,7 +112,8 @@ private:
         double dpr = 1.0;
         bool snapX = true, snapY = true;
         tpo::Layout layout = tpo::Layout::Collapsed;
-        tpo::Theme theme = tpo::Theme::Rainbow;
+        tpo::StyleModel look;
+        double sessionPx = 0.0;  // session width; only when level lines reach the session
         bool text = false;
         bool operator==(const LayoutKey&) const = default;
     };
@@ -112,13 +132,17 @@ private:
 
         QSGTransformNode* transform = nullptr;
         QSGGeometryNode* cells = nullptr;
+        // Level lines and the value-area band, under the cells. Anchored at the
+        // profile (Profile reach) or the session start (Session reach).
+        QSGTransformNode* levelTransform = nullptr;
+        QSGGeometryNode* levels = nullptr;
         ChartTextNode* lightText = nullptr;
         ChartTextNode* darkText = nullptr;
         int cellCapacity = 0;
         LayoutKey built;
         bool hasBuilt = false;
         double profileWidthPx = 0.0;
-        double lastTx = 0.0, lastTy = 0.0;
+        double lastTx = 0.0, lastTy = 0.0, lastLevelTx = 0.0;
         float textAlpha = 0.0f;
         std::vector<ChartGlyphInstance> lightGlyphs;
         std::vector<ChartGlyphInstance> darkGlyphs;
@@ -134,6 +158,20 @@ private:
         bool operator==(const GroupKey&) const = default;
     };
 
+    struct TagKey {
+        int count = 0;
+        std::array<tpo::Level, 5> levels{};
+        std::array<double, 5> ys{};  // line screen y, item coordinates
+        int64_t sessionStartMs = 0;
+        tpo::StyleModel look;
+        QRectF bounds;
+        bool operator==(const TagKey&) const = default;
+    };
+
+    void ensureProfile(Session& session, int64_t topAbs, int group);
+    void rebuildLevels(Session& session, const LayoutKey& key, int64_t topAbs, double basePx);
+    TagKey tagKey(const Session* tagged, const TimeAxisMapping& mapping, bool metrics, const QRectF& bounds) const;
+    void updateTags(const ChartTextAtlas& atlas, const TagKey& key);
     int chooseRowGroup(double basePx, double pxPerMs, int64_t topAbs, const Style& style);
     void applyUploads(std::vector<PendingUpload>& uploads, int maxSessions);
     void clearSessions();
@@ -160,6 +198,14 @@ private:
     TpoRootNode* m_root = nullptr;
     QSGOpacityNode* m_opacity = nullptr;
     QSGClipNode* m_clip = nullptr;
+    QSGNode* m_sessionsRoot = nullptr;
+    QSGGeometryNode* m_tagChips = nullptr;
+    ChartTextNode* m_tagLight = nullptr;
+    ChartTextNode* m_tagDark = nullptr;
+    std::vector<ChartGlyphInstance> m_tagLightGlyphs, m_tagDarkGlyphs;
+    TagKey m_tagKey;
+    TagView m_tagView;
+    bool m_hasTags = false;
     QRectF m_clipRect;
     GroupKey m_groupKey;
     int m_group = 1;

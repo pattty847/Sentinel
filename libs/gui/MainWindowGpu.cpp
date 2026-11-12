@@ -18,6 +18,7 @@
 #include "ChartModeController.h"
 #include "MainWindowGpu.h"
 #include "mainwindow/ChartAgentPort.hpp"
+#include "chart/shell/TpoStyleStore.hpp"
 #include "UnifiedGridRenderer.h"
 #include "render/DataProcessor.hpp"
 #include "SentinelLogging.hpp"
@@ -1204,6 +1205,7 @@ void MainWindowGPU::connectMarketDataSignals() {
             },
             Qt::QueuedConnection);
 
+    unifiedGridRenderer->tpo()->setStyleStore(std::make_shared<chart::TpoStyleStore>());
     unifiedGridRenderer->applyClientConfig(GuiConfigStore::instance().clientConfig());
     if (GuiConfigStore::instance().hasServerConfig()) {
         unifiedGridRenderer->applyServerConfig(GuiConfigStore::instance().serverConfig());
@@ -1641,10 +1643,10 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
             if (!error.isEmpty()) { out.status = 422; out.code = "invalid_settings"; out.message = error; return out; }
         }
         auto* toolbar = m_heatmapDock ? m_heatmapDock->toolbar() : nullptr;
+        chartAgentPort().applyTpoLook(body.layers);
         for (auto it = body.layers.begin(); it != body.layers.end(); ++it) {
             const bool enabled = it.value().toBool();
-            if (it.key() == "tpoLayout") { renderer->tpo()->setTpoLayout(it.value().toString()); continue; }
-            if (it.key() == "tpoTheme") { renderer->tpo()->setTpoTheme(it.value().toString()); continue; }
+            if (ChartAgentPort::isTpoLookKey(it.key())) continue;
             if (it.key() == "candles") {
                 if (m_modeController) m_modeController->setCandlesEnabled(enabled);
             } else {
@@ -1663,10 +1665,10 @@ AgentApi::ControlApply MainWindowGPU::agentApiApplyControl(const QString& kind, 
                                           {"tpo", state.tpoLayer.value_or(false)},
                                           {"volumeProfile", state.volumeProfileLayer.value_or(false)},
                                           {"ladder", state.ladderLayer.value_or(false)},
-                                          {"wallRadar", state.wallRadarLayer.value_or(false)},
-                                          {"tpoLayout", state.tpoLayout.value_or(QString())},
-                                          {"tpoTheme", state.tpoTheme.value_or(QString())}};
+                                          {"wallRadar", state.wallRadarLayer.value_or(false)}};
         for (auto it = toggles.begin(); it != toggles.end(); ++it) layerState[it.key()] = it.value();
+        const auto look = chartAgentPort().tpoLook();
+        for (auto it = look.begin(); it != look.end(); ++it) layerState[it.key()] = it.value();
         out.data["layers"] = layerState;
     }
     if (!out.viewportVersion) out.viewportVersion = chartAgentPort().snapshot(agentApiMetadata()).viewportVersion.value_or(0);

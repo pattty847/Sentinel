@@ -3,6 +3,7 @@
 #include "../render/heatmap/HeatmapSettingsModel.hpp"
 #include "SentinelLogging.hpp"
 #include "TopToolbar.hpp"
+#include "TpoStyleEditor.hpp"
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -297,6 +298,7 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
             const QSignalBlocker a(m_tpoLayoutCombo), b(m_tpoThemeCombo);
             m_tpoLayoutCombo->setCurrentIndex(std::max(0, m_tpoLayoutCombo->findData(m_renderer->tpo()->tpoLayout())));
             m_tpoThemeCombo->setCurrentIndex(std::max(0, m_tpoThemeCombo->findData(m_renderer->tpo()->tpoTheme())));
+            m_tpoStyleEditor->setStyleModel(m_renderer->tpo()->tpoLook());
         });
     }
     refreshFromRenderer();
@@ -371,7 +373,10 @@ QPushButton *HeatmapSettingsDialog::resetButton(const QString &tab, QWidget *par
             m_renderer->candles()->setHeatmapContrast(d.contrast);
             m_renderer->candles()->setHeatmapShaderFloor(d.shaderFloor);
         }
-        if (tab == "TPO" && m_renderer) m_renderer->tpo()->applyTpoConfig(m_tpoDefaults);
+        if (tab == "TPO" && m_renderer) {
+            m_renderer->tpo()->applyTpoConfig(m_tpoDefaults);
+            m_renderer->tpo()->resetTpoLook();
+        }
         refreshFromRenderer();
         if (!error.isEmpty() || !budgetError.isEmpty()) showStatus(error.isEmpty() ? budgetError : error, true);
         else showStatus(tab + " reset to defaults", false);
@@ -733,7 +738,7 @@ QWidget *HeatmapSettingsDialog::buildDebugTab() {
 QWidget *HeatmapSettingsDialog::buildTpoTab() {
     auto *page = new QWidget(this);
     auto *form = new QFormLayout(page);
-    form->addRow(note("Changes in this tab apply to this session.", page));
+    form->addRow(note("Bracket, session and layout apply to this session.", page));
     m_tpoTimeframeCombo = new QComboBox(page);
     m_tpoTimeframeCombo->addItem("15m", 900000);
     m_tpoTimeframeCombo->addItem("30m", 1800000);
@@ -756,12 +761,17 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
     m_tpoThemeCombo->addItem("Rainbow", "rainbow");
     m_tpoThemeCombo->addItem("Calm", "calm");
     m_tpoThemeCombo->addItem("Sage", "sage");
+    m_tpoThemeCombo->addItem("Indigo -> Sky", "indigo");
     form->addRow("TPO Theme", m_tpoThemeCombo);
+    m_tpoStyleEditor = new TpoStyleEditor(page);
+    m_tpoStyleEditor->setObjectName("tpoStyleEditor");
+    form->addRow(m_tpoStyleEditor);
+    form->addRow(note("Theme and style are saved for every chart.", page));
     form->addRow(resetButton("TPO", page));
     describe(form, m_tpoTimeframeCombo, "Time covered by each TPO letter (15 minutes to 1 day). Use shorter brackets for more detail. A bracket that does not divide the session evenly, or gives too many columns, is changed to the nearest one that does. This session only.");
     describe(form, m_tpoSessionCombo, "Group TPO letters into a regional session, UTC day, week or month. Change it to compare profiles over that trading window; this session only.");
     describe(form, m_tpoLayoutCombo, "Collapsed packs each price row into a profile; Split keeps brackets in separate time columns. Use Split to follow the session's sequence, this session only.");
-    describe(form, m_tpoThemeCombo, "Choose the TPO cell colours, including value-area and point-of-control highlights. Change it for clearer period or profile contrast; this session only.");
+    describe(form, m_tpoThemeCombo, "Choose the TPO cell colours across the session. The value area, POC and level lines are set below.");
     connect(m_tpoTimeframeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
         if (m_renderer && idx >= 0 && !m_loading) m_renderer->tpo()->setTpoTimeframeMs(m_tpoTimeframeCombo->itemData(idx).toInt());
     });
@@ -773,6 +783,12 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
     });
     connect(m_tpoThemeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int idx) {
         if (m_renderer && idx >= 0 && !m_loading) m_renderer->tpo()->setTpoTheme(m_tpoThemeCombo->itemData(idx).toString());
+    });
+    connect(m_tpoStyleEditor, &TpoStyleEditor::styleEdited, this, [this](const tpo::StyleModel &style) {
+        if (m_renderer && !m_loading) m_renderer->tpo()->setTpoLook(style);
+    });
+    connect(m_tpoStyleEditor, &TpoStyleEditor::presetChosen, this, [this](const QString &preset) {
+        if (m_renderer && !m_loading) m_renderer->tpo()->setTpoPreset(preset);
     });
     return page;
 }
@@ -961,6 +977,7 @@ void HeatmapSettingsDialog::refreshFromRenderer() {
     if (const int i = m_tpoSessionCombo->findData(m_renderer->tpo()->tpoSessionType()); i >= 0) m_tpoSessionCombo->setCurrentIndex(i);
     m_tpoLayoutCombo->setCurrentIndex(std::max(0, m_tpoLayoutCombo->findData(m_renderer->tpo()->tpoLayout())));
     m_tpoThemeCombo->setCurrentIndex(std::max(0, m_tpoThemeCombo->findData(m_renderer->tpo()->tpoTheme())));
+    m_tpoStyleEditor->setStyleModel(m_renderer->tpo()->tpoLook());
     m_loading = was;
 }
 
