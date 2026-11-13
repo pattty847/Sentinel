@@ -143,6 +143,8 @@ TradingResult TradingEngine::onExternalFill(const std::string& orderId,
     order.status = (order.filledQty >= order.qty) ? OrderStatus::Filled : OrderStatus::Partial;
     m_orders.upsert(order);
 
+    const auto priorPosition = m_positions.get(order.symbol);
+    const double priorQty = priorPosition.has_value() ? priorPosition->netQty : 0.0;
     Position position = m_positions.applyFill(order.symbol, order.side, deltaFillQty, fillPrice, fillPrice);
 
     int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -155,6 +157,9 @@ TradingResult TradingEngine::onExternalFill(const std::string& orderId,
     out.positionUpdates.push_back(PositionUpdate{position.symbol, position.netQty, position.avgPrice,
                                                   position.unrealizedPnl, position.realizedPnl});
     out.pnlSnapshots.push_back(buildSnapshot(order.symbol, fillPrice, now, order.algoId));
+    if (shouldClearAttachedRiskAfterFill(priorQty, position.netQty)) {
+        clearAttachedRiskIfPresent(out, order.symbol);
+    }
     return out;
 }
 
@@ -246,7 +251,7 @@ TradingResult TradingEngine::fillOrder(Order& order, double fillPx, double markP
     out.positionUpdates.push_back(PositionUpdate{position.symbol, position.netQty, position.avgPrice,
                                                   position.unrealizedPnl, position.realizedPnl});
     out.pnlSnapshots.push_back(buildSnapshot(order.symbol, markPrice, timestampMs, order.algoId));
-    if (order.algoId.empty() && shouldClearAttachedRiskAfterFill(priorQty, position.netQty)) {
+    if (shouldClearAttachedRiskAfterFill(priorQty, position.netQty)) {
         clearAttachedRiskIfPresent(out, order.symbol);
     }
     return out;
@@ -338,7 +343,7 @@ TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
     out.orderUpdates.insert(out.orderUpdates.end(), fillResult.orderUpdates.begin(), fillResult.orderUpdates.end());
     out.positionUpdates.insert(out.positionUpdates.end(), fillResult.positionUpdates.begin(), fillResult.positionUpdates.end());
     out.pnlSnapshots.insert(out.pnlSnapshots.end(), fillResult.pnlSnapshots.begin(), fillResult.pnlSnapshots.end());
-    // A closing fill clears the attached TP/SL; clients must hear it.
+    // A closing or flipping fill clears the attached TP/SL; clients must hear it.
     out.riskOrderUpdates.insert(out.riskOrderUpdates.end(), fillResult.riskOrderUpdates.begin(),
                                 fillResult.riskOrderUpdates.end());
     return out;
