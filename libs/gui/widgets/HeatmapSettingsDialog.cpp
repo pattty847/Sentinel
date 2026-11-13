@@ -310,7 +310,7 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
     if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelMinPx", "labelMaxPx",
                                 "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleBodyFraction", "candleMaxBodyPx", "candleWickWidth", "footprintIntensity", "footprintCandle", "footprintNumbers",
-                                "footprintDustNotional", "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle"};
+                                "footprintDustNotional", "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "cvdFillAnchor"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
         return {"palettePreset", "bidGradient", "askGradient", "opacity",
@@ -853,11 +853,13 @@ void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
     connect(height, &QSpinBox::valueChanged, this, [this](int value) { apply({{"cvdStripPx", value}}); });
     combo(rows, cvd, "cvdReset", "Reset", {"utcDay", "visible", "tpoSession"}, "Anchor cumulative delta at UTC midnight, the visible window, or the TPO session open.");
     combo(rows, cvd, "cvdStyle", "Style", {"line", "area"}, "Draw cumulative volume delta as a line or a filled area around zero.");
+    combo(rows, cvd, "cvdFillAnchor", "Area fill anchor", {"auto", "zero", "edge", "none"},
+          "Auto fills to zero when visible, or to the nearest strip edge. None draws the line only.");
     form->addRow(cvd);
 }
 void HeatmapSettingsDialog::refreshFlowControls() {
     const auto values = heatmap::settingsJson(m_model->settings());
-    for (const auto* key : {"footprintIntensity", "footprintCandle", "cvdReset", "cvdStyle"}) {
+    for (const auto* key : {"footprintIntensity", "footprintCandle", "cvdReset", "cvdStyle", "cvdFillAnchor"}) {
         auto* control = findChild<QComboBox*>(key); const QSignalBlocker block(control);
         control->setCurrentIndex(control->findData(values[key].toString()));
     }

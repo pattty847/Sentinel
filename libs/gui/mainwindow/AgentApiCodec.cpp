@@ -462,7 +462,7 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
                 else result.body.priceMax = v.toDouble();
             } else return reject("invalid_field", "Unknown viewport field");
         } else if (kind == "layers") {
-            if (key == "flowFooter" || key == "cvdStripPx" || key == "cvdReset" || key == "cvdStyle") {
+            if (key == "flowFooter" || key == "cvdStripPx" || key == "cvdReset" || key == "cvdStyle" || key == "cvdFillAnchor") {
                 heatmap::HeatmapChartSettings settings;
                 const auto error = heatmap::applySettingsPatch(settings, {{key, v}});
                 if (!error.isEmpty()) return reject("invalid_layer", error.toUtf8().constData());
@@ -596,6 +596,7 @@ QJsonObject stateJson(const StateSnapshot& s) {
             {"flowFooter", s.footprintSettings.value("flowFooter")},
             {"cvdStripPx", s.footprintSettings.value("cvdStripPx")},
             {"cvdReset", s.footprintSettings.value("cvdReset")}, {"cvdStyle", s.footprintSettings.value("cvdStyle")},
+            {"cvdFillAnchor", s.footprintSettings.value("cvdFillAnchor")},
             {"footprintIntensity", s.footprintSettings.value("footprintIntensity")},
             {"footprintCandle", s.footprintSettings.value("footprintCandle")},
             {"footprintDustNotional", s.footprintSettings.value("footprintDustNotional")},

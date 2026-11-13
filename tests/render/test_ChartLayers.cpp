@@ -1329,6 +1329,67 @@ TEST(CvdLayer, LineAreaBoundsAndFreshFramesAllocateNothing) {
         EXPECT_GE(vertices[i].y, 99); EXPECT_LE(vertices[i].y, 100);
     }
 }
+using CvdVertex = QSGGeometry::ColoredPoint2D;
+std::vector<CvdVertex> cvdAreaVertices(const std::array<double, 3>& values, chart::CvdFillAnchor anchor,
+                                       bool area = true) {
+    chart::CvdLayer layer;
+    layer.presentation().stripPx = 60;
+    layer.presentation().area = area;
+    layer.presentation().fillAnchor = anchor;
+    auto frame = footprintChartFrame();
+    frame.context.surfaceBounds = {0, 0, 300, 100};
+    frame.context.itemBounds = frame.context.surfaceBounds;
+    frame.context.raster.widthDev = 300;
+    frame.context.raster.drawnEndMs = 3000;
+    auto& snapshot = layer.mailbox().back();
+    snapshot.series.clear(); snapshot.timeframeMs = 1000; snapshot.reset = chart::CvdReset::Visible;
+    for (int i = 0; i < 3; ++i) snapshot.series.points[size_t(i)] = {i * 1000, 0, values[size_t(i)], 0};
+    snapshot.series.count = 3;
+    layer.mailbox().post(); layer.sync(frame);
+    std::unique_ptr<QSGNode> root(layer.createContainer());
+    ChartTextRenderer text; ChartTextAtlas atlas;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
+    layer.updateNodes(frame, context);
+    const auto* vertices = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
+    return {vertices, vertices + layer.vertexCount()};
+}
+TEST(CvdLayer, AutoAnchorsNegativeAreaAtTopEdgeAndPositiveAtBottomEdge) {
+    const auto negative = cvdAreaVertices({-1130, -1060, -1100}, chart::CvdFillAnchor::Auto);
+    const auto positive = cvdAreaVertices({1130, 1060, 1100}, chart::CvdFillAnchor::Auto);
+    const auto forcedEdge = cvdAreaVertices({-1130, -1060, -1100}, chart::CvdFillAnchor::Edge);
+    // The panel and divider consume 12 vertices; an off-screen zero emits no zero line.
+    ASSERT_GE(negative.size(), 30u); ASSERT_GE(positive.size(), 30u);
+    EXPECT_FLOAT_EQ(negative[13].y, 40);
+    EXPECT_GT(negative[12].y, 40); EXPECT_LT(negative[12].y, 100);
+    EXPECT_FLOAT_EQ(positive[13].y, 100);
+    EXPECT_FLOAT_EQ(forcedEdge[13].y, 40);
+    EXPECT_GT(positive[12].y, 40); EXPECT_LT(positive[12].y, 100);
+    for (size_t i = 12; i < negative.size(); ++i) {
+        EXPECT_GE(negative[i].y, 40); EXPECT_LE(negative[i].y, 100);
+        EXPECT_GE(positive[i].y, 40); EXPECT_LE(positive[i].y, 100);
+    }
+}
+TEST(CvdLayer, CrossingZeroKeepsZeroFillAndNoneUsesLineGeometry) {
+    const std::array<double, 3> values{-10, 5, -3};
+    const auto automatic = cvdAreaVertices(values, chart::CvdFillAnchor::Auto);
+    const auto legacy = cvdAreaVertices(values, chart::CvdFillAnchor::Zero);
+    ASSERT_EQ(automatic.size(), legacy.size());
+    for (size_t i = 0; i < automatic.size(); ++i) {
+        EXPECT_FLOAT_EQ(automatic[i].x, legacy[i].x);
+        EXPECT_FLOAT_EQ(automatic[i].y, legacy[i].y);
+        EXPECT_EQ(automatic[i].a, legacy[i].a);
+    }
+    const auto forcedZero = cvdAreaVertices({-1130, -1060, -1100}, chart::CvdFillAnchor::Zero);
+    EXPECT_NE(forcedZero[13].y, 40);
+    const auto none = cvdAreaVertices(values, chart::CvdFillAnchor::None);
+    const auto line = cvdAreaVertices(values, chart::CvdFillAnchor::Auto, false);
+    ASSERT_EQ(none.size(), line.size());
+    for (size_t i = 0; i < none.size(); ++i) {
+        EXPECT_FLOAT_EQ(none[i].x, line[i].x);
+        EXPECT_FLOAT_EQ(none[i].y, line[i].y);
+        EXPECT_EQ(none[i].a, line[i].a);
+    }
+}
 TEST(CvdFeed, SumsAllLoadedBarsAndRespectsTpoOpenAndBaseScale) {
     auto source = footprintSeries();
     auto frame = footprintFrame();

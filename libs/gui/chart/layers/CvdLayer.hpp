@@ -36,6 +36,7 @@ private:
         double left = 0, column = 0, tf = 0, dpr = 0, start = 0, end = 0;
         QRectF strip, gutter;
         bool area = false;
+        CvdFillAnchor fillAnchor = CvdFillAnchor::Auto;
         bool operator==(const Key&) const = default;
     };
     void geometry(const ChartFrame&);

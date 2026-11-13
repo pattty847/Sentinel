@@ -2908,21 +2908,28 @@ TEST(CvdKnobs, QmlAndAgentPortPersistAndProcessOnlyChangesStayLocal) {
     HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
     auto* layers = renderer.layers();
     EXPECT_EQ(layers->cvdStripPx(), 0); EXPECT_EQ(layers->cvdReset(), "visible"); EXPECT_EQ(layers->cvdStyle(), "line");
+    EXPECT_EQ(layers->cvdFillAnchor(), "auto");
     ASSERT_TRUE(QQmlProperty::write(layers, "cvdStripPx", 96));
     ASSERT_TRUE(QQmlProperty::write(layers, "cvdReset", "visible"));
     ASSERT_TRUE(QQmlProperty::write(layers, "cvdStyle", "area"));
+    ASSERT_TRUE(QQmlProperty::write(layers, "cvdFillAnchor", "edge"));
+    ASSERT_TRUE(QQmlProperty::write(layers, "cvdFillAnchor", "invalid"));
+    EXPECT_EQ(layers->cvdFillAnchor(), "edge");
     controls.syncNow();
     auto saved = store.reload();
     EXPECT_EQ(saved.cvdStripPx, 96); EXPECT_EQ(saved.cvdReset, "visible"); EXPECT_EQ(saved.cvdStyle, "area");
-    const QJsonObject patch{{"cvdStripPx", 128}, {"cvdReset", "tpoSession"}, {"cvdStyle", "line"}};
+    EXPECT_EQ(saved.cvdFillAnchor, "edge");
+    const QJsonObject patch{{"cvdStripPx", 128}, {"cvdReset", "tpoSession"}, {"cvdStyle", "line"}, {"cvdFillAnchor", "none"}};
     ASSERT_TRUE(model.apply(ChartAgentPort::footprintPatch(patch), false).isEmpty()); controls.syncNow();
     for (auto it = patch.begin(); it != patch.end(); ++it) EXPECT_EQ(renderer.agentPort().footprintSettings()[it.key()], it.value());
     saved = store.reload();
     EXPECT_EQ(saved.cvdStripPx, 96); EXPECT_EQ(saved.cvdReset, "visible"); EXPECT_EQ(saved.cvdStyle, "area");
+    EXPECT_EQ(saved.cvdFillAnchor, "edge");
     HeatmapSettingsModel restarted(store.store, "main", store.config);
     UnifiedGridRenderer second;
     HeatmapChartControls restored(&restarted); restored.setRenderer(&second);
     EXPECT_EQ(second.layers()->cvdStripPx(), 96); EXPECT_EQ(second.layers()->cvdReset(), "visible"); EXPECT_EQ(second.layers()->cvdStyle(), "area");
+    EXPECT_EQ(second.layers()->cvdFillAnchor(), "edge");
     ASSERT_TRUE(QQmlProperty::write(layers, "cvdStripPx", 128));
     EXPECT_EQ(store.reload().cvdStripPx, 128);
 }
@@ -2958,15 +2965,15 @@ TEST(CvdFeed, RemoteHistoryAndFormingReplacementWorkWithoutFootprintAtAnyZoom) {
     ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_EQ(current->series.count, 0);
 }
 
-TEST(CvdKnobs, BothApiRoutesPersistAllThreeFields) {
+TEST(CvdKnobs, BothApiRoutesPersistAllStyleFields) {
     TempStore store;
     HeatmapSettingsModel model(store.store, "main", store.config);
     UnifiedGridRenderer renderer;
     HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
     for (const char* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
-        for (const char* body : {R"({"flowFooter":true,"cvdStripPx":96,"cvdReset":"visible","cvdStyle":"area"})",
-                                R"({"flowFooter":false,"cvdStripPx":0,"cvdReset":"utcDay","cvdStyle":"line"})",
-                                R"({"cvdStripPx":64,"cvdReset":"tpoSession","cvdStyle":"line"})"}) {
+        for (const char* body : {R"({"flowFooter":true,"cvdStripPx":96,"cvdReset":"visible","cvdStyle":"area","cvdFillAnchor":"edge"})",
+                                R"({"flowFooter":false,"cvdStripPx":0,"cvdReset":"utcDay","cvdStyle":"line","cvdFillAnchor":"none"})",
+                                R"({"cvdStripPx":64,"cvdReset":"tpoSession","cvdStyle":"area","cvdFillAnchor":"auto"})"}) {
             const auto validated = AgentApi::validateControl({"POST", path, {}, body}, std::nullopt);
             ASSERT_EQ(validated.status, 200);
             const auto patch = validated.body.layers.isEmpty() ? validated.body.heatmapSettings

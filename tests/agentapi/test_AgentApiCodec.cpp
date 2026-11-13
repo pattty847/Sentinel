@@ -594,13 +594,14 @@ TEST(AgentApiControls, FootprintSourceIsAnUnknownFieldOnBothRoutes) {
 
 TEST(AgentApiControls, CvdKnobsValidateBothRoutesAtomically) {
     for (const auto* path : {"/api/v1/layers", "/api/v1/heatmap/settings"}) {
-        for (const auto* body : {R"({"cvdStripPx":0,"cvdReset":"utcDay","cvdStyle":"line"})",
-                                R"({"cvdStripPx":128,"cvdReset":"visible","cvdStyle":"area"})",
-                                R"({"cvdReset":"tpoSession"})", R"({"flowFooter":true})", R"({"flowFooter":false})"})
+        for (const auto* body : {R"({"cvdStripPx":0,"cvdReset":"utcDay","cvdStyle":"line","cvdFillAnchor":"auto"})",
+                                R"({"cvdStripPx":128,"cvdReset":"visible","cvdStyle":"area","cvdFillAnchor":"edge"})",
+                                R"({"cvdReset":"tpoSession","cvdFillAnchor":"none"})", R"({"flowFooter":true})", R"({"flowFooter":false})"})
             EXPECT_EQ(validateControl({"POST", path, {}, body}, std::nullopt).status, 200);
         for (const auto* body : {R"({"cvdStripPx":1.5})", R"({"cvdStripPx":true})",
                                 R"({"cvdReset":"none"})", R"({"cvdReset":"day"})", R"({"cvdReset":1})",
-                                R"({"flowFooter":1})", R"({"flowFooter":"true"})", R"({"cvdStyle":"bars"})", R"({"cvdStyle":false})"})
+                                R"({"flowFooter":1})", R"({"flowFooter":"true"})", R"({"cvdStyle":"bars"})", R"({"cvdStyle":false})",
+                                R"({"cvdFillAnchor":"outside"})", R"({"cvdFillAnchor":false})"})
             EXPECT_EQ(validateControl({"POST", path, {}, body}, std::nullopt).status, 422);
     }
 }

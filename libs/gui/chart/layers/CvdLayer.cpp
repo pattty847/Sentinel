@@ -9,11 +9,24 @@
 #include <QSGVertexColorMaterial>
 #include <cstdio>
 #include <cstring>
-#include <utility>
 namespace chart {
 namespace {
 using Vertex = QSGGeometry::ColoredPoint2D;
 constexpr int kVertices = CvdSeries::kCapacity * 18 + 18;
+struct Ink { bool area; bool edge; double stroke; };
+bool edgeFill(const CvdGutterValues& values, CvdFillAnchor anchor) {
+    return anchor == CvdFillAnchor::Edge ||
+        (anchor == CvdFillAnchor::Auto && values.valid && (values.min > 0 || values.max < 0));
+}
+CvdScale plotScale(CvdScale zeroScale, const CvdGutterValues& values, bool area, bool edge) {
+    if (!area || !edge || !values.valid) return zeroScale;
+    CvdScale scale{values.min, values.max};
+    if (scale.min == scale.max) {
+        const double halfSpan = std::max(std::abs(scale.min) * 0.01, 1e-9);
+        scale.min -= halfSpan; scale.max += halfSpan;
+    }
+    return scale;
+}
 void triangle(Vertex*& out, QPointF a, QPointF b, QPointF c, QColor color) {
     const auto alpha = color.alpha();
     for (const auto p : {a, b, c}) {
@@ -25,30 +38,30 @@ void quad(Vertex*& out, const QRectF& rect, QColor color) {
     triangle(out, rect.topLeft(), rect.bottomLeft(), rect.topRight(), color);
     triangle(out, rect.topRight(), rect.bottomLeft(), rect.bottomRight(), color);
 }
-QColor signColor(double value) { return value >= 0 ? theme::positive() : theme::negative(); }
-void segment(Vertex*& out, QPointF a, QPointF b, double zero, bool area, double stroke) {
-    const auto color = signColor(zero - (a.y() + b.y()) * 0.5);
-    if (area) {
+void segment(Vertex*& out, QPointF a, QPointF b, double zero, const QRectF& strip, Ink ink) {
+    const bool positive = zero >= (a.y() + b.y()) * 0.5;
+    const auto color = positive ? theme::positive() : theme::negative();
+    if (ink.area) {
         auto fill = color; fill.setAlpha(110);
-        triangle(out, a, {a.x(), zero}, b, fill);
-        triangle(out, b, {a.x(), zero}, {b.x(), zero}, fill);
+        const double anchor = ink.edge ? (positive ? strip.bottom() : strip.top()) : zero;
+        triangle(out, a, {a.x(), anchor}, b, fill);
+        triangle(out, b, {a.x(), anchor}, {b.x(), anchor}, fill);
     } else {
         // A logical-pixel ribbon stays deterministic on every QSG backend.
-        triangle(out, a, a + QPointF(0, stroke), b, color);
-        triangle(out, b, a + QPointF(0, stroke), b + QPointF(0, stroke), color);
+        triangle(out, a, a + QPointF(0, ink.stroke), b, color);
+        triangle(out, b, a + QPointF(0, ink.stroke), b + QPointF(0, ink.stroke), color);
     }
 }
-void signedSegment(Vertex*& out, QPointF a, QPointF b, double zero, const QRectF& strip, std::pair<bool, double> ink) {
-    const auto [area, stroke] = ink;
+void signedSegment(Vertex*& out, QPointF a, QPointF b, double zero, const QRectF& strip, Ink ink) {
     if (b.x() <= strip.left() || a.x() >= strip.right() || b.x() <= a.x()) return;
     const double slope = (b.y() - a.y()) / (b.x() - a.x());
     if (a.x() < strip.left()) a = {strip.left(), a.y() + (strip.left() - a.x()) * slope};
     if (b.x() > strip.right()) b = {strip.right(), b.y() + (strip.right() - b.x()) * slope};
     if ((a.y() < zero && b.y() > zero) || (a.y() > zero && b.y() < zero)) {
         const QPointF cross(a.x() + (b.x() - a.x()) * (zero - a.y()) / (b.y() - a.y()), zero);
-        segment(out, a, cross, zero, area, std::min(stroke, strip.height()));
-        segment(out, cross, b, zero, area, std::min(stroke, strip.height()));
-    } else segment(out, a, b, zero, area, std::min(stroke, strip.height()));
+        segment(out, a, cross, zero, strip, ink);
+        segment(out, cross, b, zero, strip, ink);
+    } else segment(out, a, b, zero, strip, ink);
 }
 }
 CvdLayer::CvdLayer() : current_(std::make_unique<CvdSnapshot>()) { glyphs_.reserve(128); }
@@ -85,14 +98,19 @@ void CvdLayer::geometry(const ChartFrame& frame) {
     auto panel = strip_; panel.setRight(gutter_.right());
     quad(out, panel, background);
     quad(out, {panel.left(), panel.top(), panel.width(), std::min(capturedStyle_.dividerPx, panel.height())}, theme::line());
-    scale_ = current_->series.scale(frame.context.raster.drawnStartMs, frame.context.raster.drawnEndMs, current_->timeframeMs);
     values_ = CvdGutterValues::visible(current_->series, frame.context.raster.drawnStartMs,
                                       frame.context.raster.drawnEndMs, current_->timeframeMs);
+    const bool edge = edgeFill(values_, captured_.fillAnchor);
+    const bool area = captured_.area && captured_.fillAnchor != CvdFillAnchor::None;
+    scale_ = plotScale(current_->series.scale(frame.context.raster.drawnStartMs, frame.context.raster.drawnEndMs,
+                                               current_->timeframeMs), values_, area, edge);
     const CvdStripLayout layout{strip_.height(), capturedStyle_};
     const double stroke = layout.stroke();
+    const Ink ink{area, edge, stroke};
     const auto y = [&](double value) { return strip_.top() + layout.lineY(scale_.fraction(value)); };
     const double zero = y(0);
-    quad(out, QRectF(strip_.left(), zero, strip_.width(), stroke), theme::line());
+    if (scale_.min <= 0 && scale_.max >= 0)
+        quad(out, QRectF(strip_.left(), zero, strip_.width(), stroke), theme::line());
     const auto& cam = frame.context.raster;
     const auto x = [&](double time) { return frame.context.surfaceBounds.left() + cam.xDev(time) / cam.dpr; };
     const auto& series = current_->series;
@@ -103,8 +121,8 @@ void CvdLayer::geometry(const ChartFrame& frame) {
             p.timeMs - series.points[size_t(i - 1)].timeMs == current_->timeframeMs;
         if (connected) {
             const auto& previous = series.points[size_t(i - 1)];
-            signedSegment(out, {x(double(previous.timeMs) + current_->timeframeMs * 0.5), y(previous.value)}, b, zero, strip_, {captured_.area, stroke});
-        } else signedSegment(out, {x(double(p.timeMs)), b.y()}, b, zero, strip_, {captured_.area, stroke});
+            signedSegment(out, {x(double(previous.timeMs) + current_->timeframeMs * 0.5), y(previous.value)}, b, zero, strip_, ink);
+        } else signedSegment(out, {x(double(p.timeMs)), b.y()}, b, zero, strip_, ink);
     }
     const int used = int(out - begin);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
@@ -125,7 +143,7 @@ void CvdLayer::updateNodes(const ChartFrame& frame, LayerNodeContext&) {
     gate_->setOpacity(drawing_ && !strip_.isEmpty() ? 1 : 0);
     if (!drawing_ || strip_.isEmpty()) return;
     const auto& cam = frame.context.raster;
-    const Key key{cam.leftF, cam.colPxF, cam.tfMs, cam.dpr, cam.drawnStartMs, cam.drawnEndMs, strip_, gutter_, captured_.area};
+    const Key key{cam.leftF, cam.colPxF, cam.tfMs, cam.dpr, cam.drawnStartMs, cam.drawnEndMs, strip_, gutter_, captured_.area, captured_.fillAnchor};
     if (!dirty_ && key == key_) return;
     key_ = key; dirty_ = false;
     geometry(frame);

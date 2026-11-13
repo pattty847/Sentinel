@@ -87,6 +87,10 @@ void CvdFeed::bind(ChartViewController& view, const PublishedFrame& published,
         presentation_.flowFooter = visibility.flowFooter();
         presentation_.reset = visibility.cvdResetRule();
         presentation_.area = visibility.cvdStyle() == "area";
+        const auto anchor = visibility.cvdFillAnchor();
+        presentation_.fillAnchor = anchor == "zero" ? CvdFillAnchor::Zero :
+            anchor == "edge" ? CvdFillAnchor::Edge :
+            anchor == "none" ? CvdFillAnchor::None : CvdFillAnchor::Auto;
         onFrameChanged();
     };
     connect(&visibility, &LayerVisibility::layerVisibilityChanged, this, apply);

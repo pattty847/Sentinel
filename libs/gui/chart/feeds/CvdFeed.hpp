@@ -11,11 +11,13 @@ class ChartViewController;
 class PublishedFrame;
 class LayerVisibility;
 class ChartTpoQml;
+enum class CvdFillAnchor { Auto, Zero, Edge, None };
 struct CvdPresentation {
     int stripPx = 0;
     bool flowFooter = false;
     CvdReset reset = CvdReset::Visible;
     bool area = false;
+    CvdFillAnchor fillAnchor = CvdFillAnchor::Auto;
     // GUI mailbox publication, read only during render sync (GUI is blocked).
     int64_t dataTimeframeMs = 0;
     CvdReset dataReset = CvdReset::Visible;
