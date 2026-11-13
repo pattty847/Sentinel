@@ -11,6 +11,7 @@ class ChartViewController;
 class PublishedFrame;
 class LayerVisibility;
 class ChartTpoQml;
+// Edge uses the plot band only for one-sign visible data; crossing zero fills to zero.
 enum class CvdFillAnchor { Auto, Zero, Edge, None };
 struct CvdPresentation {
     int stripPx = 0;

@@ -13,10 +13,12 @@ namespace chart {
 namespace {
 using Vertex = QSGGeometry::ColoredPoint2D;
 constexpr int kVertices = CvdSeries::kCapacity * 18 + 18;
-struct Ink { bool area; bool edge; double stroke; };
-bool edgeFill(const CvdGutterValues& values, CvdFillAnchor anchor) {
-    return anchor == CvdFillAnchor::Edge ||
-        (anchor == CvdFillAnchor::Auto && values.valid && (values.min > 0 || values.max < 0));
+struct Ink { bool area; int edgeSign; double stroke; double top; double bottom; };
+int edgeSign(const CvdGutterValues& values, CvdFillAnchor anchor) {
+    if (!values.valid || (anchor != CvdFillAnchor::Auto && anchor != CvdFillAnchor::Edge)) return 0;
+    if (values.max < 0) return -1;
+    if (values.min > 0) return 1;
+    return 0;
 }
 CvdScale plotScale(CvdScale zeroScale, const CvdGutterValues& values, bool area, bool edge) {
     if (!area || !edge || !values.valid) return zeroScale;
@@ -38,12 +40,12 @@ void quad(Vertex*& out, const QRectF& rect, QColor color) {
     triangle(out, rect.topLeft(), rect.bottomLeft(), rect.topRight(), color);
     triangle(out, rect.topRight(), rect.bottomLeft(), rect.bottomRight(), color);
 }
-void segment(Vertex*& out, QPointF a, QPointF b, double zero, const QRectF& strip, Ink ink) {
-    const bool positive = zero >= (a.y() + b.y()) * 0.5;
+void segment(Vertex*& out, QPointF a, QPointF b, double zero, Ink ink) {
+    const bool positive = ink.edgeSign ? ink.edgeSign > 0 : zero >= (a.y() + b.y()) * 0.5;
     const auto color = positive ? theme::positive() : theme::negative();
     if (ink.area) {
         auto fill = color; fill.setAlpha(110);
-        const double anchor = ink.edge ? (positive ? strip.bottom() : strip.top()) : zero;
+        const double anchor = ink.edgeSign ? (positive ? ink.bottom : ink.top) : zero;
         triangle(out, a, {a.x(), anchor}, b, fill);
         triangle(out, b, {a.x(), anchor}, {b.x(), anchor}, fill);
     } else {
@@ -59,9 +61,9 @@ void signedSegment(Vertex*& out, QPointF a, QPointF b, double zero, const QRectF
     if (b.x() > strip.right()) b = {strip.right(), b.y() + (strip.right() - b.x()) * slope};
     if ((a.y() < zero && b.y() > zero) || (a.y() > zero && b.y() < zero)) {
         const QPointF cross(a.x() + (b.x() - a.x()) * (zero - a.y()) / (b.y() - a.y()), zero);
-        segment(out, a, cross, zero, strip, ink);
-        segment(out, cross, b, zero, strip, ink);
-    } else segment(out, a, b, zero, strip, ink);
+        segment(out, a, cross, zero, ink);
+        segment(out, cross, b, zero, ink);
+    } else segment(out, a, b, zero, ink);
 }
 }
 CvdLayer::CvdLayer() : current_(std::make_unique<CvdSnapshot>()) { glyphs_.reserve(128); }
@@ -100,13 +102,14 @@ void CvdLayer::geometry(const ChartFrame& frame) {
     quad(out, {panel.left(), panel.top(), panel.width(), std::min(capturedStyle_.dividerPx, panel.height())}, theme::line());
     values_ = CvdGutterValues::visible(current_->series, frame.context.raster.drawnStartMs,
                                       frame.context.raster.drawnEndMs, current_->timeframeMs);
-    const bool edge = edgeFill(values_, captured_.fillAnchor);
+    const int sign = edgeSign(values_, captured_.fillAnchor);
     const bool area = captured_.area && captured_.fillAnchor != CvdFillAnchor::None;
     scale_ = plotScale(current_->series.scale(frame.context.raster.drawnStartMs, frame.context.raster.drawnEndMs,
-                                               current_->timeframeMs), values_, area, edge);
+                                               current_->timeframeMs), values_, area, sign != 0);
     const CvdStripLayout layout{strip_.height(), capturedStyle_};
     const double stroke = layout.stroke();
-    const Ink ink{area, edge, stroke};
+    const Ink ink{area, area ? sign : 0, stroke,
+                  strip_.top() + layout.lineY(1), strip_.top() + layout.lineY(0)};
     const auto y = [&](double value) { return strip_.top() + layout.lineY(scale_.fraction(value)); };
     const double zero = y(0);
     if (scale_.min <= 0 && scale_.max >= 0)

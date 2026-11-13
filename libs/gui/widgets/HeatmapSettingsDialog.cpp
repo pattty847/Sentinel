@@ -854,7 +854,7 @@ void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
     combo(rows, cvd, "cvdReset", "Reset", {"utcDay", "visible", "tpoSession"}, "Anchor cumulative delta at UTC midnight, the visible window, or the TPO session open.");
     combo(rows, cvd, "cvdStyle", "Style", {"line", "area"}, "Draw cumulative volume delta as a line or a filled area around zero.");
     combo(rows, cvd, "cvdFillAnchor", "Area fill anchor", {"auto", "zero", "edge", "none"},
-          "Auto fills to zero when visible, or to the nearest strip edge. None draws the line only.");
+          "Auto fills to zero when crossed, or to the near plot edge for one-sign data. Edge also fills to zero when crossed. None draws the line only.");
     form->addRow(cvd);
 }
 void HeatmapSettingsDialog::refreshFlowControls() {

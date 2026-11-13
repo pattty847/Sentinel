@@ -167,9 +167,10 @@ Both routes report the current knobs; `GET /api/v1/state` includes them under `l
 Layer-route and QML writes persist, including writes of the current value. The heatmap
 settings route supports `persist:false` for lab comparisons without changing saved settings.
 CVD works with footprint on or off and has no footprint zoom gate. With area style,
-`auto` fills to zero when visible and to the nearest strip edge when visible samples
-stay on one side of zero. `zero` forces zero fill, `edge` forces edge fill, and
-`none` draws the line only.
+`auto` fills to zero when visible and to the near plot-band edge when visible
+samples stay on one side of zero. `edge` also uses that plot-band edge for
+one-sign data, and fills to zero when data crosses zero. `zero` forces zero
+fill; `none` draws the line only.
 Sub-second charts use the loaded 1 s flow series.
 The default `visible` mode anchors at zero on the first bar whose start time is at
 or after the drawn window's left edge (`drawnStartMs`), then accumulates subsequent
