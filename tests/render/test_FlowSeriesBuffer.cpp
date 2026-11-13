@@ -5,6 +5,7 @@
 #include "chart/feeds/FlowFeed.hpp"
 #include "flow/FlowBarBuilder.hpp"
 #include "flow/FlowCodec.hpp"
+#include "protocol/SentinelStreamClientParseHelpers.hpp"
 #include <future>
 #include "chart/core/CvdHistory.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
@@ -759,4 +760,51 @@ TEST(FlowSeriesBufferCapacity, TouchedBucketsMatchWhatBackfillRetains) {
         EXPECT_EQ(retained, std::min(touched, cap)) << w.start << ' ' << w.end;
         EXPECT_EQ(touched > cap, retained < touched) << "warn exactly when buckets are dropped";
     }
+}
+
+TEST(FlowSeriesBuffer, UnrecordedCoversEmptyWindowWithoutRetryWhileOldBuildingStillRetries) {
+    for (const auto status : {Status::Unrecorded, Status::Building}) {
+        FlowBackfillState state;
+        FlowSeriesBuffer buffer;
+        state.select("BTC-USD", 60'000); state.setWindow(0, 120'000);
+        const auto request = state.next(0);
+        ASSERT_TRUE(request);
+        const auto wireStatus = status == Status::Unrecorded ? "unrecorded" : "building";
+        const nlohmann::json header = {{"type", "flow_history_chunk"}, {"schema_version", 1},
+            {"req", request->id}, {"symbol", "BTC-USD"}, {"timeframe_ms", 60'000},
+            {"oldest_ms", 0}, {"sealed_through_ms", 0}, {"status", wireStatus},
+            {"ranges", {{{"from_ms", 0}, {"to_ms", 60'000}, {"status", wireStatus}},
+                        {{"from_ms", 60'000}, {"to_ms", 120'000}, {"status", wireStatus}}}},
+            {"bars", nlohmann::json::array()}};
+        const auto json = header.dump();
+        sentinel::flow::Bytes frame{'F', 'H', 'E', '1'};
+        for (unsigned i = 0; i < 4; ++i) frame.push_back(uint8_t(json.size() >> (8 * i)));
+        frame.insert(frame.end(), json.begin(), json.end());
+        const auto page = protocol::clientparse::parseFlowHistory(frame);
+        ASSERT_TRUE(state.accept(page, 10));
+        EXPECT_TRUE(buffer.apply(page, 10).empty());
+        const auto* series = buffer.series(60'000);
+        ASSERT_NE(series, nullptr);
+        EXPECT_TRUE(series->bars.empty());
+        ASSERT_EQ(series->coverage.size(), 2u);
+        EXPECT_EQ(series->coverage.at(0).status, status);
+        EXPECT_FALSE(state.next(1000));
+        const auto retry = state.next(FlowSeriesBuffer::kRefetchIntervalMs + 10);
+        EXPECT_EQ(retry.has_value(), status == Status::Building);
+    }
+}
+
+TEST(FlowSeriesBuffer, UnrecordedWithdrawsOldGenerationAndAllowsNewRecordingRevisionOne) {
+    FlowSeriesBuffer buffer;
+    buffer.apply(batch(bar(9, true, Source::Store)), 0);
+    auto absent = batch(bar(), true);
+    absent.bars.clear(); absent.status = Status::Unrecorded;
+    absent.ranges = {{60'000, 120'000, Status::Unrecorded}};
+    buffer.apply(absent, 1);
+    ASSERT_TRUE(buffer.series(60'000)->bars.empty());
+    auto discovered = batch(bar(1, true, Source::Store), true);
+    discovered.ranges = {{60'000, 120'000, Status::Complete}};
+    buffer.apply(discovered, 2);
+    EXPECT_EQ(buffer.series(60'000)->bars.at(60'000).revision, 1u);
+    EXPECT_EQ(buffer.series(60'000)->coverage.at(60'000).status, Status::Complete);
 }

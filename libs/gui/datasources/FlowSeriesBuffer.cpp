@@ -39,7 +39,15 @@ std::vector<int64_t> FlowSeriesBuffer::apply(const Batch& batch, int64_t nowMs) 
                 } else ++it;
             }
         }
-        for (const auto& range : batch.ranges) s.coverage[range.fromMs] = range;
+        for (const auto& range : batch.ranges) {
+            s.coverage[range.fromMs] = range;
+            if (range.status != Status::Unrecorded) continue;
+            // A terminal empty answer withdraws cached values, including a prior
+            // source generation. A later discovered recording can start at revision 1.
+            s.bars.erase(s.bars.lower_bound(range.fromMs), s.bars.lower_bound(range.toMs));
+            s.losses.erase(s.losses.lower_bound(range.fromMs), s.losses.lower_bound(range.toMs));
+            s.lossRefetchAt.erase(s.lossRefetchAt.lower_bound(range.fromMs), s.lossRefetchAt.lower_bound(range.toMs));
+        }
     }
     for (const auto& in : batch.bars) {
         const auto start = in.bar.startMs;

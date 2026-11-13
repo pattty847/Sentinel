@@ -322,17 +322,30 @@ Range statuses are:
 - `partial`: only part of the requested coverage is available (for example a
   restart inside a minute, a short journal or rejected trades). Returned bars
   have `complete: false`.
-- `building`: some required store hours or live coverage are not built or are
-  stale/corrupt. Available constituents may be returned with `complete: false`;
-  no empty complete bars are manufactured. Clients show the range as not built.
+- `building`: required coverage is pending: today's growing day, a closed day
+  with a journal awaiting a flow build/rebuild, or source inventory not yet known.
+  Stale/corrupt store files remain pending repair, never evidence of absence.
+  Available constituents may be returned with `complete: false`; no empty
+  complete bars are manufactured. Clients retry these ranges.
+- `unrecorded`: a closed UTC day has neither a flow source for the requested
+  hours nor a journal source for that day. This includes days before the first
+  journal. It is a terminal empty answer, with no bars and zero grid/revision
+  metadata, independent of `sealed_through_ms`; it does not advance that mark.
+  It means no recording is available, whereas `complete` with no bars means
+  observed coverage with no trades. Today and future days never use this status.
+  A next-day journal segment inside the request's one-minute receive tail keeps
+  the boundary `partial` because it may contain late exchange-time trades; this
+  is incomplete source coverage, not a promise that a minute build will fill it.
 - `refused`: invalid request or cap violation. The binary reply includes `error`
   naming the reason and no bars; its range has `from_ms`, `to_ms` and `status`.
 
 A range can report complete coverage while a crossing bar is still marked
 `complete: false` because it is provisional. The page status is `building` if
-any range is building, otherwise `partial` if any range is partial, otherwise
-`complete`. `oldest_ms` is the oldest requested bucket, including empty or
-building ranges, so paging can always make progress.
+any range is building, otherwise `partial` if any range is partial or recorded
+and unrecorded ranges are mixed, otherwise `unrecorded` if every range is
+unrecorded, otherwise `complete`. A coarse bucket mixing recorded and unrecorded
+constituents is also `partial`. `oldest_ms` is the oldest requested bucket,
+including empty or building ranges, so paging can always make progress.
 Fetch the next older page with `end_time_ms = oldest_ms - timeframe_ms`, stopping
 at zero. Pages select the newest interval first; bars within each page are
 chronological. Clients should retry building ranges separately after catch-up.
@@ -342,9 +355,26 @@ plus a queued read-only copy of the model's retained minute series for the
 forming hour and times newer than the built-through watermark. Live minutes
 and closed-hour composites remain available until the store builds them, up to
 six extra closed hours; further lag is logged and appears as `building`.
-Minute and coarse requests never replay or scan journals. Coarse bars use
-`flow::composeFlowBars`, the same composition and
-scales as live. Missing sealed hours remain building until the background store
+Minute and coarse requests never replay or scan journals. The builder publishes
+source-day availability from its validated journal-header catalog, including an
+empty inventory even when the recorder watermark is zero. Until that inventory
+is known, minute requests remain `building`; additions/removals are discovered
+on the normal builder rescan (60 seconds by default). A day must have been
+closed when that inventory began; crossing midnight requires a new inventory,
+and inventory failure withdraws absence proof. RAWL2 rotates on receive
+hour changes, so segment headers identify source days without reading trade
+payloads. A discovered journal withdraws an earlier absence answer on subsequent
+requests; building its FLD1 follows the normal revision rules. Absence is not
+persisted as an FLD1 generation. One-second requests consult the same catalog
+and replay an available journal inline even if its minute flow file is not built;
+without a journal, a surviving minute flow file cannot prove second coverage
+and the second reply remains `partial`.
+
+Clients retain `unrecorded` as covered empty history, withdraw cached bars and
+loss markers in that range, and do not schedule a building retry for it. An
+explicit later request may replace that coverage when sources have changed. Clients receiving only the older statuses keep their
+existing behavior; omission of a required `status` field is still malformed.
+Coarse bars use `flow::composeFlowBars`, the same composition and scales as live. Missing sealed hours remain building until the background store
 builder catches up. After a restart, missing unsealed minutes remain building;
 live coverage starts with the first observed trade and cannot prove an earlier
 prefix. Empty observed minutes are covered without fabricating trades.

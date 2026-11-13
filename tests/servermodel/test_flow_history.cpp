@@ -126,6 +126,7 @@ protected:
         recording::FlowStore::Options options;
         options.root = root; options.journalRoot = journal; options.hmc2Root = hmc;
         options.symbols = {"BTC-USD"};
+        options.nowMs = [] { return Epoch + 2 * Hour; };
         options.hourThrough = [this](const std::string&) { return through; };
         options.afterRecordForTest = [this](std::stop_token stop) {
             const auto count = replayRecords.fetch_add(1) + 1;
@@ -531,13 +532,13 @@ TEST_F(FlowHistory, DayCompositeAcrossStoreAndLiveMatchesLivePublication) {
     EXPECT_EQ(flow::encodeFlowBar(reply.bars[0]), flow::Bytes(raw.begin(), raw.end()));
     sub->active.store(false);
 }
-TEST_F(FlowHistory, WindowBeforeFirstJournalIsPartialWithoutInventedBars) {
+TEST_F(FlowHistory, WindowBeforeFirstJournalDayIsUnrecordedWithoutInventedBars) {
     Journal writer(journal);
     writer.snapshot(0); writer.heartbeat(Minute); writer.close();
-    const auto reply = store->buildWindow("BTC-USD", Epoch - 2 * Minute, Epoch - Minute);
+    const auto reply = store->buildWindow("BTC-USD", Epoch - 3 * Minute, Epoch - 2 * Minute);
     EXPECT_TRUE(reply.bars.empty());
     ASSERT_EQ(reply.ranges.size(), 1u);
-    EXPECT_EQ(reply.ranges.front().status, "partial");
+    EXPECT_EQ(reply.ranges.front().status, "unrecorded");
 }
 TEST_F(FlowHistory, ShortJournalIsPartialAndNeverPresentedAsComplete) {
     Journal writer(journal);
@@ -742,3 +743,56 @@ TEST_F(FlowHistory, ServerStopCancelsLargeSyntheticReplayWithinTwoSeconds) {
     std::cout << "flow replay stop latency us=" << elapsed << '\n';
 }
 } // namespace
+
+TEST_F(FlowHistory, AbsentDaysReachWireEvenWithZeroStoreWatermark) {
+    through = 0;
+    ASSERT_EQ(store->runPass().failed, 0u);
+    connect();
+    for (const auto tf : {1000LL, 60'000LL, 86'400'000LL}) {
+        const auto reply = request(tf, Epoch - 48 * Hour, 2);
+        EXPECT_EQ(reply.header["status"], "unrecorded");
+        EXPECT_EQ(reply.header["sealed_through_ms"], 0);
+        EXPECT_TRUE(reply.bars.empty());
+        ASSERT_EQ(reply.header["ranges"].size(), 2u);
+        for (const auto& range : reply.header["ranges"]) EXPECT_EQ(range["status"], "unrecorded");
+    }
+}
+TEST_F(FlowHistory, BeforeJournalDayIsTerminalWhileRecordedAndAbsentPagesArePartial) {
+    seed();
+    connect();
+    for (const auto tf : {1000LL, 60'000LL}) {
+        const auto reply = request(tf, Epoch - Hour, 2);
+        EXPECT_EQ(reply.header["status"], "unrecorded");
+        EXPECT_TRUE(reply.bars.empty());
+    }
+    const auto mixed = request(Hour, Epoch, 3);
+    EXPECT_EQ(mixed.header["status"], "partial");
+    EXPECT_EQ(mixed.header["ranges"][0]["status"], "unrecorded");
+    EXPECT_EQ(mixed.header["ranges"][1]["status"], "partial"); // midnight receive tail remains unknown
+}
+TEST(FlowHistoryMerge, UnrecordedMixedWithRecordedConstituentIsPartial) {
+    flow_history::Request q;
+    q.symbol = "BTC-USD"; q.tf = 300'000; q.from = 0; q.to = q.tf;
+    ServerDataModel::FlowHistorySnapshot snapshot;
+    snapshot.data.ranges = {{0, 60'000, "unrecorded", {}}, {60'000, q.to, "complete", {}}};
+    auto page = flow_history::buildPage(q, snapshot, 0);
+    EXPECT_EQ(page.metadata["status"], "partial");
+    EXPECT_EQ(page.metadata["ranges"][0]["status"], "partial");
+    EXPECT_TRUE(page.bars.empty());
+}
+
+TEST_F(FlowHistory, ClosedAbsentPrefixInsideRamRetentionDoesNotHideLiveCoverage) {
+    through = 0;
+    store->runPass();
+    fixture->model->onFlowGrid("BTC-USD", Epoch - 24 * Hour,
+                              sentinel::roller::deriveGrid(metadata, 100000), metadata);
+    live(-2 * Hour, "previous-day-live");
+    tick(-2 * Hour + Minute);
+    connect();
+    const auto result = request(Minute, Epoch - 2 * Hour, 2);
+    ASSERT_EQ(result.header["ranges"].size(), 2u);
+    EXPECT_EQ(result.header["ranges"][0]["status"], "unrecorded");
+    EXPECT_EQ(result.header["ranges"][1]["status"], "complete");
+    EXPECT_EQ(result.header["status"], "partial");
+    ASSERT_EQ(result.bars.size(), 1u);
+}

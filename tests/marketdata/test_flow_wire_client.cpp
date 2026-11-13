@@ -230,3 +230,19 @@ TEST_F(FlowWireClientTest, DroppedLiveFrameReportsBucketOnlyOncePerThrottleInter
     ASSERT_EQ(dropped.size(), 1u);
     EXPECT_EQ(dropped.front(), 60'000);
 }
+
+TEST(FlowWireClient, UnrecordedIsAnExplicitTerminalStatusAndOldStatusesStayUnchanged) {
+    auto h = header();
+    h["bars"] = Json::array();
+    for (const auto status : {"unrecorded", "building", "partial", "complete"}) {
+        h["status"] = status;
+        for (auto& range : h["ranges"]) range["status"] = status;
+        const auto out = protocol::clientparse::parseFlowHistory(envelope(h, {}));
+        const auto expected = std::string(status) == "unrecorded" ? Client::FlowStatus::Unrecorded :
+            std::string(status) == "building" ? Client::FlowStatus::Building :
+            std::string(status) == "partial" ? Client::FlowStatus::Partial : Client::FlowStatus::Complete;
+        EXPECT_EQ(out.status, expected);
+        EXPECT_EQ(out.ranges.front().status, expected);
+        EXPECT_TRUE(out.bars.empty());
+    }
+}

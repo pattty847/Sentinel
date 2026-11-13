@@ -738,11 +738,61 @@ FlowStore::PassResult FlowStore::runPass(std::stop_token stop) {
     result.stopped = result.stopped || stop.stop_requested();
     return result;
 }
+std::shared_ptr<roller::JournalReader> FlowStore::catalogFor(const std::string &symbol, std::stop_token stop) {
+    checkStop(stop);
+    std::lock_guard lock(catalogMutex_);
+    auto &cached = catalogs_[symbol];
+    if (cached) return cached;
+    const auto knownBefore = dayFloor(options_.nowMs());
+    std::map<int64_t, int64_t> days;
+    try {
+        auto catalog = std::make_shared<roller::JournalReader>(options_.journalRoot, symbol);
+        for (const auto &file : catalog->files()) {
+            const auto opened = file.header.at("opened_system_ns").get<int64_t>() / 1'000'000;
+            auto [it, added] = days.try_emplace(dayFloor(opened), opened);
+            if (!added) it->second = std::min(it->second, opened);
+        }
+        if (options_.afterCatalogConstructForTest) options_.afterCatalogConstructForTest();
+        cached = std::move(catalog);
+    } catch (const roller::NoJournalFiles &) {
+        std::lock_guard indexLock(indexMutex_);
+        sourceDays_[symbol] = {};
+        sourceKnownBeforeDay_[symbol] = knownBefore;
+        throw;
+    }
+    std::lock_guard indexLock(indexMutex_);
+    sourceDays_[symbol] = std::move(days);
+    sourceKnownBeforeDay_[symbol] = knownBefore;
+    return cached;
+}
+FlowStore::SourceState FlowStore::sourceState(const std::string &symbol, int64_t from, int64_t to) const {
+    const auto day = dayFloor(from);
+    // Never make a terminal claim for today's growing journal (or the future).
+    if (day >= dayFloor(options_.nowMs())) return SourceState::Unknown;
+    std::lock_guard lock(indexMutex_);
+    const auto known = sourceDays_.find(symbol);
+    if (known == sourceDays_.end() || day >= sourceKnownBeforeDay_.at(symbol)) return SourceState::Unknown;
+    if (known->second.contains(day)) return SourceState::Present;
+    // Trades use exchange time. The next day's first segment can hold late
+    // trades for a window ending near midnight, within the replay's receive tail.
+    const auto next = known->second.find(day + Day);
+    return next == known->second.end() || next->second > to + TradeTail ?
+        SourceState::Absent : SourceState::ReceiveTailOnly;
+}
 void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, PassResult &result) {
     const auto through = options_.hourThrough(symbol) / Hour * Hour;
-    if (through <= 0)
-        return;
-    const auto currentFiles = inventory(symbol, stop);
+    const auto knownBefore = dayFloor(options_.nowMs());
+    std::map<fs::path, FileIdentity> currentFiles;
+    try { currentFiles = inventory(symbol, stop); }
+    catch (...) {
+        // A failed inventory cannot renew a negative source claim.
+        std::lock_guard catalogLock(catalogMutex_);
+        catalogs_.erase(symbol);
+        std::lock_guard indexLock(indexMutex_);
+        sourceDays_.erase(symbol);
+        sourceKnownBeforeDay_.erase(symbol);
+        throw;
+    }
     std::vector<fs::path> changed;
     std::set<fs::path> added;
     bool structuralChanged = false;
@@ -765,21 +815,19 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
     if (structuralChanged) {
         std::lock_guard catalogLock(catalogMutex_);
         catalogs_.erase(symbol);
+        std::lock_guard indexLock(indexMutex_);
+        sourceDays_.erase(symbol);
+        sourceKnownBeforeDay_.erase(symbol);
     }
     std::shared_ptr<roller::JournalReader> catalog;
-    auto getCatalog = [&]() -> roller::JournalReader & {
-        if (!catalog) {
-            checkStop(stop);
-            std::lock_guard catalogLock(catalogMutex_);
-            auto &cached = catalogs_[symbol];
-            if (!cached) {
-                cached = std::make_shared<roller::JournalReader>(options_.journalRoot, symbol);
-                if (options_.afterCatalogConstructForTest) options_.afterCatalogConstructForTest();
-            }
-            catalog = cached;
-        }
-        return *catalog;
-    };
+    try { catalog = catalogFor(symbol, stop); }
+    catch (const roller::NoJournalFiles &) { return; }
+    {
+        std::lock_guard lock(indexMutex_);
+        sourceKnownBeforeDay_[symbol] = knownBefore;
+    }
+    if (through <= 0) return;
+    auto getCatalog = [&]() -> roller::JournalReader & { return *catalog; };
     if (!firstHour_.contains(symbol) || structuralChanged) {
         auto &files = getCatalog().files();
         int64_t first = through;
@@ -819,13 +867,20 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
         checkStop(stop);
         const auto path = filePath(symbol, day);
         auto index = indexFor(symbol, day);
+        // Do not synthesize empty complete days by replaying an older snapshot
+        // across a date for which no source exists.
+        const auto source = sourceState(symbol, day, day + Day);
+        if (!index.file.present && !index.state.present &&
+            (source == SourceState::Absent || source == SourceState::ReceiveTailOnly))
+            continue;
         if (stamp(path) != index.file || stamp(path.string() + ".state") != index.state) {
             index = loadIndex(symbol, day);
             publishIndex(symbol, day, index);
         }
         uint32_t wanted = 0;
         for (int h = 0; h < 24; ++h)
-            if (day + h * Hour >= first && day + (h + 1) * Hour <= through)
+            if (day + h * Hour >= first && day + (h + 1) * Hour <= through &&
+                sourceState(symbol, day + h * Hour, day + (h + 1) * Hour) != SourceState::Absent)
                 wanted |= 1u << h;
         const auto noteRunFailure = [&](int64_t from, int64_t to, const char *reason) {
             for (auto hour = from; hour < to; hour += Hour)
@@ -1030,17 +1085,7 @@ FlowStore::Reply FlowStore::buildWindow(const std::string &symbol, int64_t from,
         throw std::invalid_argument("1s journal replay cap is 3600000 ms (1 h)");
     Reply reply;
     try {
-        std::shared_ptr<roller::JournalReader> catalog;
-        {
-            std::lock_guard lock(catalogMutex_);
-            auto &cached = catalogs_[symbol];
-            if (!cached) {
-                checkStop(stop);
-                cached = std::make_shared<roller::JournalReader>(options_.journalRoot, symbol);
-                if (options_.afterCatalogConstructForTest) options_.afterCatalogConstructForTest();
-            }
-            catalog = cached;
-        }
+        const auto catalog = catalogFor(symbol, stop);
         std::map<int64_t, fs::path> grids;
         bool cataloguedGrids = false;
         {
@@ -1057,6 +1102,12 @@ FlowStore::Reply FlowStore::buildWindow(const std::string &symbol, int64_t from,
         }
         for (auto first = from; first < to;) {
             const auto day = dayFloor(first), end = std::min(to, day + Day);
+            const auto index = indexFor(symbol, day);
+            if (!index.file.present && !index.state.present && sourceState(symbol, first, end) == SourceState::Absent) {
+                reply.ranges.push_back({first, end, "unrecorded", {}});
+                first = end;
+                continue;
+            }
             const auto firstJournalMs = catalog->files().front().header.at("opened_system_ns").get<int64_t>() / 1'000'000;
             if (firstJournalMs >= end) {
                 reply.ranges.push_back({first, end, "partial", {}});
@@ -1087,7 +1138,13 @@ FlowStore::Reply FlowStore::buildWindow(const std::string &symbol, int64_t from,
             first = end;
         }
     } catch (const roller::NoJournalFiles &) {
-        reply.ranges = {{from, to, "partial", {}}};
+        for (auto first = from; first < to;) {
+            const auto end = std::min(to, dayFloor(first) + Day);
+            const auto index = indexFor(symbol, dayFloor(first));
+            const bool absent = !index.file.present && !index.state.present && sourceState(symbol, first, end) == SourceState::Absent;
+            reply.ranges.push_back({first, end, absent ? "unrecorded" : "partial", {}});
+            first = end;
+        }
     }
     return reply;
 }
@@ -1105,17 +1162,7 @@ FlowStore::TradeWindow FlowStore::readTrades(const std::string &symbol, int64_t 
     result.coveredFromMs = from;
     result.coveredToMs = from;
     try {
-        std::shared_ptr<roller::JournalReader> catalog;
-        {
-            std::lock_guard lock(catalogMutex_);
-            auto& cached = catalogs_[symbol];
-            if (!cached) {
-                checkStop(stop);
-                cached = std::make_shared<roller::JournalReader>(options_.journalRoot, symbol);
-                if (options_.afterCatalogConstructForTest) options_.afterCatalogConstructForTest();
-            }
-            catalog = cached;
-        }
+        const auto catalog = catalogFor(symbol, stop);
         const auto firstJournalMs = catalog->files().front().header.at("opened_system_ns").get<int64_t>() / 1'000'000;
         result.coveredFromMs = std::max(from, firstJournalMs);
         if (result.coveredFromMs >= to) { result.partial = true; return result; }
@@ -1194,6 +1241,14 @@ FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int6
                                   stamp(path.string() + ".state") == index.state;
             uint32_t required = 0;
             for (auto hour = std::max(day, from / Hour * Hour); hour < std::min(day + Day, to); hour += Hour) {
+                const bool noStoredHour = (!index.file.present && !index.state.present) ||
+                    (readable && !(index.hours & (1u << ((hour - day) / Hour))));
+                const auto source = sourceState(symbol, std::max(hour, from), std::min(hour + Hour, to));
+                if (noStoredHour && (source == SourceState::Absent || source == SourceState::ReceiveTailOnly)) {
+                    reply.ranges.push_back({std::max(hour, from), std::min(hour + Hour, to),
+                        source == SourceState::Absent ? "unrecorded" : "partial", {}});
+                    continue;
+                }
                 const bool ready = readable && hour + Hour <= through &&
                     (index.hours & (1u << ((hour - day) / Hour)));
                 reply.ranges.push_back({std::max(hour, from), std::min(hour + Hour, to),
@@ -1205,7 +1260,7 @@ FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int6
             }
             sealedRequested |= required != 0;
             if (!readable) {
-                reply.building = true;
+                reply.building |= required != 0;
                 missingSealed |= required != 0;
                 continue;
             }
