@@ -176,6 +176,14 @@ struct Harness {
         candles->setSymbol("BTC-USD");
         candles->setTimeframeMs(60000);
         candles->setZ(chart::depth(chart::ChartDepth::Candles));
+        auto* volume = new VolumeBarOverlayItem(ugr);
+        volume->setSize(ugr->size());
+        volume->setMappingProvider(ugr);
+        volume->setCandleBuffer(&buffer);
+        volume->setSymbol("BTC-USD");
+        volume->setTimeframeMs(60000);
+        QObject::connect(candles, &QQuickItem::visibleChanged, volume,
+                         [volume, this] { volume->setVisible(candles->isVisible()); });
     }
     void addBubbles() {
         bubbles = new TradeBubbleOverlayItem; // parented after construction, as QML does: the item connects on windowChanged

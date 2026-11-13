@@ -280,6 +280,9 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(heatmapNode, "sensitivity_max", cfg.heatmap.sensitivityMax);
         readScalar(heatmapNode, "candle_body_fraction", cfg.heatmap.candleBodyFraction);
         readScalar(heatmapNode, "candle_max_body_px", cfg.heatmap.candleMaxBodyPx);
+        readScalar(heatmapNode, "show_volume_bars", cfg.heatmap.showVolumeBars);
+        readScalar(heatmapNode, "volume_band_percent", cfg.heatmap.volumeBandPercent);
+        readScalar(heatmapNode, "volume_opacity", cfg.heatmap.volumeOpacity);
     }
 
     YAML::Node guiNode;

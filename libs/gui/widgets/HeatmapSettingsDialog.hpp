@@ -128,6 +128,8 @@ private:
     QSpinBox *m_candleMaxBodyPx = nullptr;
     QSpinBox *m_candleWickWidth = nullptr;
     QWidget *m_candlePreview = nullptr;
+    QCheckBox *m_showVolumeBars = nullptr;
+    QSpinBox *m_volumeBandPercent = nullptr, *m_volumeOpacity = nullptr;
     // Tick
     QComboBox *m_tickMode = nullptr;
     QComboBox *m_manualTick = nullptr;

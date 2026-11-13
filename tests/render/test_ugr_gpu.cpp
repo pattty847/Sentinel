@@ -995,6 +995,7 @@ public:
 };
 class CandleTickGeometryItem : public CandlestickOverlayItem {
 public:
+    explicit CandleTickGeometryItem(bool volumeOnly = false) : CandlestickOverlayItem(nullptr, volumeOnly) {}
     using CandlestickOverlayItem::updatePaintNode;
 };
 TEST(UgrCandleCpu, FootprintSpineSquareBodiesAndUncoveredFullBodiesMatchSlotGeometry) {
@@ -5462,7 +5463,7 @@ TEST(UgrInput, MacMouseAndPreciseScrollReachBothAxisWheelHandlers) {
 }
 
 // Use the same QML and independent layer toggle API as the running chart. No GPU is needed.
-TEST(UgrInput, EveryLayerMixHasFieldsCandlesProfilesBubblesThenText) {
+TEST(UgrInput, EveryLayerMixHasFieldsVolumeCandlesProfilesBubblesThenText) {
     QQuickView view;
     view.rootContext()->setContextProperty("uiTheme", nullptr);
     view.rootContext()->setContextProperty("dataSource", nullptr);
@@ -5470,12 +5471,13 @@ TEST(UgrInput, EveryLayerMixHasFieldsCandlesProfilesBubblesThenText) {
     view.setSource(QUrl::fromLocalFile(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml")));
     ASSERT_EQ(view.status(), QQuickView::Ready) << view.errors().value(0).toString().toStdString();
     auto* candles = view.rootObject()->findChild<CandlestickOverlayItem*>();
+    auto* volume = view.rootObject()->findChild<VolumeBarOverlayItem*>();
     auto* bubbles = view.rootObject()->findChild<TradeBubbleOverlayItem*>();
     auto* chart = view.rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
     auto* profiles = view.rootObject()->findChild<QQuickItem*>("chartProfiles");
     auto* text = view.rootObject()->findChild<QQuickItem*>("chartForeground");
-    ASSERT_TRUE(candles && bubbles && chart && profiles && text);
-    for (auto* item : {static_cast<QQuickItem*>(candles), static_cast<QQuickItem*>(bubbles), profiles, text})
+    ASSERT_TRUE(volume && candles && bubbles && chart && profiles && text);
+    for (auto* item : {static_cast<QQuickItem*>(volume), static_cast<QQuickItem*>(candles), static_cast<QQuickItem*>(bubbles), profiles, text})
         EXPECT_EQ(item->parentItem(), chart);
     const auto candleDepth = candles->z();
     const std::array<const char*, 4> names{"heatmap", "footprint", "tpo", "volumeProfile"};
@@ -5491,6 +5493,10 @@ TEST(UgrInput, EveryLayerMixHasFieldsCandlesProfilesBubblesThenText) {
             settings.tradesAboveCandles = above;
             chart->setHeatmapChartSettings(settings);
             EXPECT_EQ(candles->z(), candleDepth);
+            EXPECT_EQ(volume->z(), chart::depth(chart::ChartDepth::Volume));
+            EXPECT_GT(volume->z(), chart::depth(chart::ChartDepth::Fields));
+            EXPECT_LT(volume->z(), candles->z());
+            EXPECT_LT(volume->z(), bubbles->z());
             EXPECT_GT(candles->z(), chart::depth(chart::ChartDepth::Fields)); // the parent's field nodes draw first
             EXPECT_LT(candles->z(), profiles->z());
             EXPECT_LT(profiles->z(), text->z());
@@ -5643,6 +5649,7 @@ int main(int argc, char **argv) {
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
     qmlRegisterType<TradeBubbleOverlayItem>("Sentinel.Charts", 1, 0, "TradeBubbleOverlayItem");
     qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");
+    qmlRegisterType<VolumeBarOverlayItem>("Sentinel.Charts", 1, 0, "VolumeBarOverlayItem");
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;
     configureFixture();
@@ -5731,11 +5738,11 @@ public:
 }
 
 TEST(UgrCandleCpu, PaneLifecycleSurvivesAttachedItemWindowAndRendererTeardown) {
-    for (int repeat = 0; repeat < 4; ++repeat) for (int order = 0; order < 3; ++order) {
+    for (bool volumeOnly : {false, true}) for (int repeat = 0; repeat < 4; ++repeat) for (int order = 0; order < 3; ++order) {
         SCOPED_TRACE(::testing::Message() << "repeat=" << repeat << " order=" << order);
         auto window = std::make_unique<QQuickWindow>();
         auto provider = std::make_unique<PaneLifecycleProvider>();
-        auto candles = std::make_unique<CandleTickGeometryItem>();
+        auto candles = std::make_unique<CandleTickGeometryItem>(volumeOnly);
         auto bubbles = std::make_unique<BubbleLifecycleItem>();
         CandleSeriesBuffer buffer;
         buffer.applyHistory("BTC-USD", 1000, {{1000, 2000, 96, 103, 95, 97, 1}});
@@ -5750,7 +5757,7 @@ TEST(UgrCandleCpu, PaneLifecycleSurvivesAttachedItemWindowAndRendererTeardown) {
         for (bool enabled : {true, false, true}) {
             provider->pane.flowFooter = enabled; provider->pane.stripPx = enabled ? 60 : 0;
             window->afterSynchronizing();
-            EXPECT_EQ(candleRoot->childCount(), enabled ? 1 : 2);
+            EXPECT_EQ(candleRoot->childCount(), enabled ? 1 : volumeOnly ? 3 : 2);
         }
         if (order == 0) {
             candles.reset(); candleRoot.reset(); // attached item dies before its window/root
@@ -5800,4 +5807,162 @@ TEST(TradeLayerNodes, PaneContainersTransferAndDestroyChildrenExactlyOnce) {
         scene.reset();
         EXPECT_EQ(destroyed, 3);
     }
+}
+
+namespace {
+class VolumeGeometryItem : public VolumeBarOverlayItem {
+public:
+    using VolumeBarOverlayItem::updatePaintNode;
+};
+class VolumeFrameProvider : public CandleTickFrameProvider {
+public:
+    chart::CvdPresentation pane;
+    const chart::CvdPresentation* cvdPresentation() const override { return &pane; }
+};
+struct VolumeCpuScene {
+    VolumeFrameProvider provider;
+    CandleSeriesBuffer buffer;
+    QQuickWindow window;
+    VolumeGeometryItem volume;
+    std::unique_ptr<QSGNode> root;
+    VolumeCpuScene(int tf, double dpr, int column) {
+        auto& f = provider.frame;
+        f.activeTimeframeMs = tf; f.viewportValid = true;
+        f.viewportTimeStart = tf; f.viewportTimeEnd = 4 * tf;
+        f.currentBoundaryStartMs = 4 * tf; f.surfaceDpr = dpr;
+        const double width = column * 3 / dpr;
+        f.surfaceBounds = {0, 0, width, 200};
+        f.raster = chart_raster::computeRaster({tf, 4 * tf, 95, 105, {}, double(tf), 1, width, 200, dpr}, {});
+        f.mapping = chart_raster::toMapping(f.raster);
+        buffer.applyHistory("BTC-USD", tf, {{0, tf, 99, 103, 98, 102, 10000},
+            {tf, 2 * tf, 99, 103, 98, 102, 2}, {2 * tf, 3 * tf, 102, 103, 98, 99, 4},
+            {3 * tf, 4 * tf, 99, 103, 98, 102, 1}, {4 * tf, 5 * tf, 99, 103, 98, 102, 20000}});
+        volume.setParentItem(window.contentItem());
+        volume.setSize({width, 200}); volume.setSymbol("BTC-USD"); volume.setTimeframeMs(tf);
+        volume.setCandleBuffer(&buffer); volume.setMappingProvider(&provider);
+        update();
+    }
+    ~VolumeCpuScene() { root.reset(); volume.setParentItem(nullptr); }
+    void update() { root.reset(volume.updatePaintNode(root.release(), nullptr)); }
+    QSGGeometry* geometry() {
+        auto* content = root.get();
+        if (content->firstChild()->type() == QSGNode::ClipNodeType) content = content->firstChild();
+        return static_cast<QSGGeometryNode*>(content->lastChild())->geometry();
+    }
+};
+}
+TEST(UgrCandleCpu, VolumeBarsMatchC1BodiesAndScaleOnlyVisibleVolumeAtEveryTimeframe) {
+    for (int tf : {100, 1000, 60000}) for (double dpr : {1., 2.}) for (int column : {1, 2, 3, 7, 14, 100, 200}) {
+        if (column > chart_raster::maxColumnPixels(tf)) continue; // camera guarantees at least 1 ms/device px
+        SCOPED_TRACE(::testing::Message() << "tf=" << tf << " dpr=" << dpr << " column=" << column);
+        VolumeCpuScene scene(tf, dpr, column);
+        ASSERT_EQ(scene.geometry()->vertexCount(), 18);
+        for (const auto [fraction, cap] : {std::pair{0.85, 71}, std::pair{0.6, 80}}) {
+            scene.volume.setBodyFraction(fraction); scene.volume.setMaxBodyPx(cap); scene.update();
+            const auto* vertices = scene.geometry()->vertexDataAsColoredPoint2D();
+            const auto& f = scene.provider.frame;
+            for (int i = 0; i < 3; ++i) {
+                const auto body = candle_pixels::body(f.mapping.timeToScreenX((i + 1) * tf),
+                    f.mapping.timeToScreenX((i + 2) * tf), 0, 0, dpr,
+                    candle_pixels::axisSnap(f.raster).x, true, fraction, cap);
+                EXPECT_FLOAT_EQ(vertices[i * 6].x, body.x.lo);
+                EXPECT_FLOAT_EQ(vertices[i * 6 + 2].x, body.x.hi);
+                EXPECT_FLOAT_EQ(vertices[i * 6 + 1].y, 200);
+                const double ratio = i == 0 ? 0.5 : i == 1 ? 1 : 0.25;
+                EXPECT_FLOAT_EQ(vertices[i * 6].y, 200 - 44 * ratio);
+            }
+        }
+    }
+}
+TEST(UgrCandleCpu, VolumeBarsUsePremultipliedDirectionColoursAndIndependentOpacity) {
+    VolumeCpuScene scene(1000, 2, 50);
+    scene.volume.setUpColor(QColor("#80C040")); scene.volume.setDownColor(QColor("#E04080"));
+    scene.volume.setVolumeOpacity(0.45); scene.volume.setBodyOpacity(0.1); scene.update();
+    const auto* v = scene.geometry()->vertexDataAsColoredPoint2D();
+    for (int i = 0; i < 3; ++i) {
+        const QColor c = i == 1 ? QColor("#E04080") : QColor("#80C040");
+        EXPECT_EQ(v[i * 6].a, 115);
+        EXPECT_EQ(v[i * 6].r, c.red() * 115 / 255);
+        EXPECT_EQ(v[i * 6].g, c.green() * 115 / 255);
+        EXPECT_EQ(v[i * 6].b, c.blue() * 115 / 255);
+    }
+}
+TEST(UgrCandleCpu, VolumeBarsFollowPaneInsetAfterSyncWithoutCandleUpdates) {
+    VolumeCpuScene scene(100, 2, 50);
+    auto& pane = scene.provider.pane;
+    pane.hasData = true; pane.dataTimeframeMs = 1000;
+    auto* geometry = scene.geometry();
+    auto* storage = geometry->vertexData();
+    for (bool footer : {false, true}) for (int strip : {0, 60, 400}) {
+        pane.flowFooter = footer; pane.stripPx = strip;
+        scene.window.afterSynchronizing();
+        EXPECT_EQ(scene.geometry(), geometry);
+        EXPECT_EQ(geometry->vertexData(), storage);
+        const double bottom = 200 - pane.bottomInset(100, 200);
+        if (bottom <= 0) { EXPECT_EQ(geometry->vertexCount(), 0); continue; }
+        ASSERT_EQ(geometry->vertexCount(), 18);
+        const auto* v = geometry->vertexDataAsColoredPoint2D();
+        EXPECT_FLOAT_EQ(v[7].y, bottom);
+        EXPECT_FLOAT_EQ(v[6].y, bottom * 0.78);
+    }
+    pane.hasData = false; scene.window.afterSynchronizing();
+    EXPECT_FLOAT_EQ(geometry->vertexDataAsColoredPoint2D()[7].y, 200);
+}
+TEST(UgrCandleCpu, VolumeBarsRetainGeometryAndAllocateNothingAfterWarmup) {
+    VolumeCpuScene scene(1000, 1, 50);
+    auto* geometry = scene.geometry();
+    auto* storage = geometry->vertexData();
+    // Warm both the item dirty path and the inset-only callback.
+    scene.volume.setVolumeBandPercent(23); scene.update();
+    scene.provider.pane.hasData = true; scene.provider.pane.dataTimeframeMs = 1000;
+    scene.provider.pane.stripPx = 60; scene.window.afterSynchronizing();
+    gAllocations = 0; gCountAllocations = true;
+    for (int i = 0; i < 100; ++i) {
+        scene.update();
+        scene.volume.setVolumeBandPercent(i % 2 ? 22 : 23); scene.update();
+        scene.provider.pane.stripPx = i % 2 ? 60 : 0; scene.window.afterSynchronizing();
+    }
+    gCountAllocations = false;
+    EXPECT_EQ(gAllocations, 0u);
+    EXPECT_EQ(geometry->vertexData(), storage);
+    std::printf("volume steady-state allocations: %zu over 100 unchanged, dirty and inset frames\n", gAllocations);
+}
+TEST(UgrCandleCpu, VolumeBarsClearOnInvalidSelectionAndIgnoreNonpositiveVolume) {
+    VolumeCpuScene scene(1000, 1, 50);
+    scene.buffer.resetSeriesForSelection("BTC-USD", 1000);
+    scene.buffer.applyHistory("BTC-USD", 1000, {{1000, 2000, 99, 103, 98, 102, 0},
+        {2000, 3000, 102, 103, 98, 99, -4}, {3000, 4000, 99, 103, 98, 102, 1}});
+    scene.update();
+    ASSERT_EQ(scene.geometry()->vertexCount(), 6);
+    EXPECT_FLOAT_EQ(scene.geometry()->vertexDataAsColoredPoint2D()[0].y, 156);
+    scene.volume.setSymbol("ETH-USD"); scene.update();
+    EXPECT_EQ(scene.geometry()->vertexCount(), 0);
+    scene.volume.setSymbol("BTC-USD"); scene.update();
+    ASSERT_EQ(scene.geometry()->vertexCount(), 6);
+    scene.volume.setMappingProvider(nullptr); scene.update();
+    EXPECT_EQ(scene.geometry()->vertexCount(), 0);
+}
+
+TEST(UgrCandleCpu, VolumeBarsKeepMovingC1EdgesContinuousAndUseTheNewVisibleMaximum) {
+    VolumeCpuScene scene(1000, 2, 31);
+    auto& f = scene.provider.frame;
+    f.raster.free = true;
+    f.raster.leftF += 0.25;
+    f.raster.colPxF += 0.3;
+    f.mapping = chart_raster::toMapping(f.raster);
+    scene.update();
+    auto* v = scene.geometry()->vertexDataAsColoredPoint2D();
+    for (int i = 0; i < 3; ++i) {
+        const auto x = candle_pixels::body(f.mapping.timeToScreenX((i + 1) * 1000),
+            f.mapping.timeToScreenX((i + 2) * 1000), 0, 0, 2, false).x;
+        EXPECT_FLOAT_EQ(v[i * 6].x, x.lo); EXPECT_FLOAT_EQ(v[i * 6 + 2].x, x.hi);
+    }
+    // The previous largest candle is now outside the visible window.
+    f.viewportTimeStart = 3000; f.viewportTimeEnd = 4000;
+    f.raster = chart_raster::computeRaster({3000, 4000, 95, 105, {}, 1000, 1, 46.5, 200, 2}, {});
+    f.mapping = chart_raster::toMapping(f.raster);
+    scene.update();
+    ASSERT_EQ(scene.geometry()->vertexCount(), 6);
+    v = scene.geometry()->vertexDataAsColoredPoint2D();
+    EXPECT_FLOAT_EQ(v[0].y, 156); EXPECT_FLOAT_EQ(v[1].y, 200);
 }

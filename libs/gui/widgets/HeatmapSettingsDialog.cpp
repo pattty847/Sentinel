@@ -309,7 +309,7 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
     if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelMinPx", "labelMaxPx",
-                                "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleBodyFraction", "candleMaxBodyPx", "candleWickWidth", "footprintIntensity", "footprintCandle", "footprintNumbers",
+                                "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleBodyFraction", "candleMaxBodyPx", "candleWickWidth", "showVolumeBars", "volumeBandPercent", "volumeOpacity", "footprintIntensity", "footprintCandle", "footprintNumbers",
                                 "footprintDustNotional", "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "cvdFillAnchor"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
@@ -486,6 +486,19 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     candleForm->addRow("Body width (column)", m_candleBodyFraction);
     candleForm->addRow("Maximum body width", m_candleMaxBodyPx);
     candleForm->addRow("Wick width (device pixels)", m_candleWickWidth);
+    m_showVolumeBars = new QCheckBox("Show volume bars", candles);
+    m_showVolumeBars->setObjectName("showVolumeBars");
+    m_volumeBandPercent = intSpin(candles, "volumeBandPercent", 10, 40, 1, "%");
+    m_volumeOpacity = intSpin(candles, "volumeOpacity", 10, 100, 5, "%");
+    candleForm->addRow("Volume", m_showVolumeBars);
+    candleForm->addRow("Volume band height", m_volumeBandPercent);
+    candleForm->addRow("Volume opacity", m_volumeOpacity);
+    describe(candleForm, m_showVolumeBars, "Show candle volume at the bottom of the price pane. Hidden when candles are hidden.");
+    describe(candleForm, m_volumeBandPercent, "Share of the price pane for volume (10-40%). The largest visible volume fills the band.");
+    describe(candleForm, m_volumeOpacity, "Volume bar opacity (10-100%). Lower values keep price easier to read.");
+    connect(m_showVolumeBars, &QCheckBox::toggled, this, [this](bool on) { apply({{"showVolumeBars", on}}); });
+    connect(m_volumeBandPercent, &QSpinBox::valueChanged, this, [this](int v) { apply({{"volumeBandPercent", v}}); });
+    connect(m_volumeOpacity, &QSpinBox::valueChanged, this, [this](int v) { apply({{"volumeOpacity", v / 100.0}}); });
     m_candlePreview = new CandlePreview(m_model, candles);
     candleForm->addRow("Preview", m_candlePreview);
     form->addRow(candles);
@@ -958,6 +971,11 @@ void HeatmapSettingsDialog::refreshFromModel() {
     set(m_candleBodyFraction, int(std::lround(s.candleBodyFraction * 100)));
     set(m_candleMaxBodyPx, s.candleMaxBodyPx);
     set(m_candleWickWidth, s.candleWickWidth);
+    { const QSignalBlocker block(m_showVolumeBars); m_showVolumeBars->setChecked(s.showVolumeBars); }
+    set(m_volumeBandPercent, int(std::lround(s.volumeBandPercent)));
+    set(m_volumeOpacity, int(std::lround(s.volumeOpacity * 100)));
+    m_volumeBandPercent->setEnabled(s.showVolumeBars);
+    m_volumeOpacity->setEnabled(s.showVolumeBars);
     m_candlePreview->update();
     {
         const QSignalBlocker block(m_palette);

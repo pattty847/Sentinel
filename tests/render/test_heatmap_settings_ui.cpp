@@ -2679,3 +2679,58 @@ int main(int argc, char **argv) {
     lab::LabData::configure(fixtureDir->path().toStdString(), epoch + 4 * kHourMs);
     return RUN_ALL_TESTS();
 }
+
+TEST(CandleStyleTest, VolumeControlsRoundTripClampResetAndDriveRealQmlVisibility) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    UnifiedGridRenderer renderer;
+    HeatmapChartControls controls(&model); controls.setRenderer(&renderer);
+    HeatmapSettingsDialog dialog(&model, &renderer);
+    auto* show = child<QCheckBox>(dialog, "showVolumeBars");
+    auto* band = child<QSpinBox>(dialog, "volumeBandPercent");
+    auto* opacity = child<QSpinBox>(dialog, "volumeOpacity");
+    ASSERT_TRUE(show && band && opacity);
+    EXPECT_TRUE(show->isChecked()); EXPECT_EQ(band->value(), 22); EXPECT_EQ(opacity->value(), 45);
+    EXPECT_EQ(band->minimum(), 10); EXPECT_EQ(band->maximum(), 40);
+    EXPECT_EQ(opacity->minimum(), 10); EXPECT_EQ(opacity->maximum(), 100);
+    QFile source(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml"));
+    ASSERT_TRUE(source.open(QIODevice::ReadOnly));
+    const auto qml = source.readAll();
+    const auto start = qml.indexOf("    VolumeBarOverlayItem {");
+    ASSERT_GE(start, 0);
+    const auto end = qml.indexOf("\n    }", start);
+    ASSERT_GT(end, start);
+    qmlRegisterType<VolumeBarOverlayItem>("Sentinel.Charts", 1, 0, "VolumeBarOverlayItem");
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty("unifiedGridRenderer", &renderer);
+    engine.rootContext()->setContextProperty("dataSource", nullptr);
+    QQmlComponent component(&engine);
+    component.setData("import QtQuick\nimport Sentinel.Charts 1.0\nItem { id: root; property bool showCandles: true; property string symbol: 'BTC-USD'\n"
+                      + qml.mid(start, end - start + 6) + "\n}", QUrl());
+    std::unique_ptr<QObject> root(component.create());
+    ASSERT_NE(root, nullptr) << component.errorString().toStdString();
+    auto* volume = root->findChild<VolumeBarOverlayItem*>("volumeBarOverlay");
+    ASSERT_NE(volume, nullptr);
+    EXPECT_TRUE(volume->isVisible());
+    band->setValue(31); opacity->setValue(70);
+    EXPECT_DOUBLE_EQ(t.reload().volumeBandPercent, 31);
+    EXPECT_DOUBLE_EQ(t.reload().volumeOpacity, 0.7);
+    EXPECT_DOUBLE_EQ(volume->volumeBandPercent(), 31);
+    EXPECT_DOUBLE_EQ(volume->volumeOpacity(), 0.7);
+    show->setChecked(false);
+    EXPECT_FALSE(t.reload().showVolumeBars); EXPECT_FALSE(volume->isVisible());
+    EXPECT_FALSE(band->isEnabled()); EXPECT_FALSE(opacity->isEnabled());
+    show->setChecked(true);
+    root->setProperty("showCandles", false); EXPECT_FALSE(volume->isVisible());
+    root->setProperty("showCandles", true); EXPECT_TRUE(volume->isVisible());
+    ASSERT_TRUE(model.apply({{"volumeBandPercent", 999}, {"volumeOpacity", -1}}).isEmpty());
+    EXPECT_DOUBLE_EQ(t.reload().volumeBandPercent, 40); EXPECT_DOUBLE_EQ(t.reload().volumeOpacity, 0.1);
+    ASSERT_TRUE(model.apply({{"volumeBandPercent", -1}, {"volumeOpacity", 999}}).isEmpty());
+    EXPECT_DOUBLE_EQ(t.reload().volumeBandPercent, 10); EXPECT_DOUBLE_EQ(t.reload().volumeOpacity, 1);
+    EXPECT_FALSE(model.apply({{"showVolumeBars", "yes"}}).isEmpty());
+    EXPECT_FALSE(model.apply({{"volumeOpacity", "opaque"}}).isEmpty());
+    EXPECT_EQ(t.reload("other").volumeBandPercent, 22);
+    child<QPushButton>(dialog, "resetChart")->click();
+    EXPECT_TRUE(t.reload().showVolumeBars); EXPECT_EQ(band->value(), 22); EXPECT_EQ(opacity->value(), 45);
+    EXPECT_DOUBLE_EQ(volume->volumeBandPercent(), 22); EXPECT_DOUBLE_EQ(volume->volumeOpacity(), 0.45);
+}

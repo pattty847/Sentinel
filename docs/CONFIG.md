@@ -135,6 +135,9 @@ heatmap:
   initial_price_pct: 5        # price zoom on connect: % of a 2048-row $1 band; 0 = full
   sensitivity_min: 0.05       # colour range in base units (log scale): <= min dark
   sensitivity_max: 50         # >= max brightest
+  show_volume_bars: true
+  volume_band_percent: 22    # 10..40% of the price pane
+  volume_opacity: 0.45       # 0.1..1.0
   candle_body_fraction: 0.85  # share of a candle column, 0.3..1.0
   candle_max_body_px: 71      # maximum body width in logical px, 5..120
 
@@ -193,6 +196,9 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | (settings only) `candleWickWidth` | 1 | Integer 1..3 device pixels, independent of zoom and display scale. |
 | `candle_body_fraction` / `candleBodyFraction` | 0.85 | YAML default / per-chart setting. Body share of a column, clamped to 0.3..1.0. |
 | `candle_max_body_px` / `candleMaxBodyPx` | 71 | YAML default / per-chart setting. Body width cap in logical pixels, clamped to 5..120. At default settings, snapped columns of 1..14 device px retain their previous rest widths; custom settings also apply there. |
+| `show_volume_bars` / `showVolumeBars` | true | Volume bars inside the price pane, hidden when candles are hidden. |
+| `volume_band_percent` / `volumeBandPercent` | 22 | Band height as a percentage of the price pane, clamped to 10..40. |
+| `volume_opacity` / `volumeOpacity` | 0.45 | Direction-colour opacity, clamped to 0.1..1.0. |
 
 | (settings only) `footprintIntensity` | `bar` | `bar` normalises each side volume to the bar maximum single-side cell volume; `window` uses the visible-window maximum. Also writable through the layer API. |
 | (settings only) `footprintCandle` | spine | `spine`: left 6 px body pill and 1.5 px wick on cells-covered bars; `full`: chosen candle appearance. |
@@ -202,6 +208,8 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | (settings only) `ladderWidthPx` | 120 | Integer 60..240 logical px; the strip width while the ladder is on (chart menu "Ladder width"). |
 | (settings only) `showWallRadar` | false | Boolean; wall marks on the ladder (chart menu "Wall radar"; turning it on there also turns the ladder on). |
 | (settings only) `wallMultiple` | 4 | Number 1.5..20; a ladder bin is a wall at this multiple of its side's median nonempty display bin among the 32 nearest its touch (chart menu "Wall threshold": 2, 3, 4, 6, 8). |
+
+Volume bars share the candle body’s C1 x/width rule and direction colours, with premultiplied alpha. Their own scale uses the largest positive finite volume in the visible window; zero/invalid volumes draw no height. The band ends at the price-pane bottom above any active CVD strip or flow footer. Fields draw below volume; candles draw above it. Volume also remains available in hollow and line styles and at 100 ms/1 s. The Candles section edits all three settings per chart, and Chart reset restores their YAML defaults. No volume-axis label is drawn.
 
 Snapped candle bodies use whole device-pixel edges; a moving time axis keeps continuous edges. A minimum 1–2 device-pixel centre span keeps moving and rest widths equal at columns 1–3 px, including with a custom body fraction. Hollow outlines are capped at 3 logical px, while wick width stays at the separate 1..3 device-pixel setting. Footprint spines keep their fixed 6 logical px body.
 

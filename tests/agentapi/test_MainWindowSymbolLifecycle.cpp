@@ -1106,6 +1106,7 @@ int main(int argc, char** argv) {
     qmlRegisterModule("Sentinel.Charts", 1, 0);
     qmlRegisterType<CandlestickBatched>("Sentinel.Charts", 1, 0, "CandlestickBatched");
     qmlRegisterType<CandlestickOverlayItem>("Sentinel.Charts", 1, 0, "CandlestickOverlayItem");
+    qmlRegisterType<VolumeBarOverlayItem>("Sentinel.Charts", 1, 0, "VolumeBarOverlayItem");
     QTemporaryDir settingsDir;
     isolatedSettingsPath = settingsDir.path();
     QSettings::setDefaultFormat(QSettings::IniFormat);

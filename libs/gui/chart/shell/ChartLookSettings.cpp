@@ -63,7 +63,9 @@ void ChartLookSettings::setCandleAppearance(const heatmap::HeatmapChartSettings&
     const QString wick = QString::fromStdString(settings.candleWickColor);
     if (candleUpColor_ == up && candleDownColor_ == down && candleWickColor_ == wick &&
         candleBodyOpacity_ == settings.candleBodyOpacity && candleWickWidth_ == settings.candleWickWidth &&
-        candleBodyFraction_ == settings.candleBodyFraction && candleMaxBodyPx_ == settings.candleMaxBodyPx) return;
+        candleBodyFraction_ == settings.candleBodyFraction && candleMaxBodyPx_ == settings.candleMaxBodyPx &&
+        showVolumeBars_ == settings.showVolumeBars && volumeBandPercent_ == settings.volumeBandPercent &&
+        volumeOpacity_ == settings.volumeOpacity) return;
     candleUpColor_ = up;
     candleDownColor_ = down;
     candleWickColor_ = wick;
@@ -71,6 +73,9 @@ void ChartLookSettings::setCandleAppearance(const heatmap::HeatmapChartSettings&
     candleWickWidth_ = settings.candleWickWidth;
     candleBodyFraction_ = settings.candleBodyFraction;
     candleMaxBodyPx_ = settings.candleMaxBodyPx;
+    showVolumeBars_ = settings.showVolumeBars;
+    volumeBandPercent_ = settings.volumeBandPercent;
+    volumeOpacity_ = settings.volumeOpacity;
     changed(Notice::CandleAppearance);
 }
 
