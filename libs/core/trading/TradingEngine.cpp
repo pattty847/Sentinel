@@ -143,6 +143,8 @@ TradingResult TradingEngine::onExternalFill(const std::string& orderId,
     order.status = (order.filledQty >= order.qty) ? OrderStatus::Filled : OrderStatus::Partial;
     m_orders.upsert(order);
 
+    const auto priorPosition = m_positions.get(order.symbol);
+    const double priorQty = priorPosition.has_value() ? priorPosition->netQty : 0.0;
     Position position = m_positions.applyFill(order.symbol, order.side, deltaFillQty, fillPrice, fillPrice);
 
     int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -155,6 +157,9 @@ TradingResult TradingEngine::onExternalFill(const std::string& orderId,
     out.positionUpdates.push_back(PositionUpdate{position.symbol, position.netQty, position.avgPrice,
                                                   position.unrealizedPnl, position.realizedPnl});
     out.pnlSnapshots.push_back(buildSnapshot(order.symbol, fillPrice, now, order.algoId));
+    if (shouldClearAttachedRiskAfterFill(priorQty, position.netQty)) {
+        clearAttachedRiskIfPresent(out, order.symbol);
+    }
     return out;
 }
 
@@ -246,7 +251,7 @@ TradingResult TradingEngine::fillOrder(Order& order, double fillPx, double markP
     out.positionUpdates.push_back(PositionUpdate{position.symbol, position.netQty, position.avgPrice,
                                                   position.unrealizedPnl, position.realizedPnl});
     out.pnlSnapshots.push_back(buildSnapshot(order.symbol, markPrice, timestampMs, order.algoId));
-    if (order.algoId.empty() && shouldClearAttachedRiskAfterFill(priorQty, position.netQty)) {
+    if (shouldClearAttachedRiskAfterFill(priorQty, position.netQty)) {
         clearAttachedRiskIfPresent(out, order.symbol);
     }
     return out;
@@ -265,8 +270,10 @@ PnlSnapshot TradingEngine::buildSnapshot(const std::string& symbol, double markP
 }
 
 TradingResult TradingEngine::onCommand(const TradeCommand& command) {
+    const bool isAttachedRisk = command.action == TradeAction::SetAttachedRisk;
     if (!std::isfinite(command.qty) || !std::isfinite(command.price) ||
-        !std::isfinite(command.takeProfitPrice) || !std::isfinite(command.stopLossPrice)) {
+        ((!isAttachedRisk || !command.hasTakeProfit) && !std::isfinite(command.takeProfitPrice)) ||
+        ((!isAttachedRisk || !command.hasStopLoss) && !std::isfinite(command.stopLossPrice))) {
         return rejected("non_finite_field");
     }
     switch (command.action) {
@@ -338,7 +345,7 @@ TradingResult TradingEngine::handlePlaceOrder(const TradeCommand& command) {
     out.orderUpdates.insert(out.orderUpdates.end(), fillResult.orderUpdates.begin(), fillResult.orderUpdates.end());
     out.positionUpdates.insert(out.positionUpdates.end(), fillResult.positionUpdates.begin(), fillResult.positionUpdates.end());
     out.pnlSnapshots.insert(out.pnlSnapshots.end(), fillResult.pnlSnapshots.begin(), fillResult.pnlSnapshots.end());
-    // A closing fill clears the attached TP/SL; clients must hear it.
+    // A closing or flipping fill clears the attached TP/SL; clients must hear it.
     out.riskOrderUpdates.insert(out.riskOrderUpdates.end(), fillResult.riskOrderUpdates.begin(),
                                 fillResult.riskOrderUpdates.end());
     return out;
@@ -403,6 +410,12 @@ TradingResult TradingEngine::handleFlatten(const TradeCommand& command) {
 
 TradingResult TradingEngine::handleSetAttachedRisk(const TradeCommand& command) {
     TradingResult out;
+    if (command.hasTakeProfit && (!std::isfinite(command.takeProfitPrice) || command.takeProfitPrice <= 0.0)) {
+        return rejected("invalid_take_profit_price");
+    }
+    if (command.hasStopLoss && (!std::isfinite(command.stopLossPrice) || command.stopLossPrice <= 0.0)) {
+        return rejected("invalid_stop_loss_price");
+    }
     if (!command.algoId.empty()) {
         return rejected("algo_attached_risk_unsupported");
     }
@@ -475,17 +488,9 @@ TradingResult TradingEngine::handleTriggeredRiskExit(const std::string& symbol,
         return out;
     }
     const OrderSide exitSide = isLong ? OrderSide::Sell : OrderSide::Buy;
-    bool exitAtTakeProfit = tpTriggered;
-    double fillPrice = tpTriggered
+    const double fillPrice = tpTriggered
         ? risk.takeProfitPrice
         : m_execution.fillPrice(lastTradePrice, exitSide);
-    if ((!std::isfinite(fillPrice) || fillPrice <= 0.0) && slTriggered && tpTriggered) {
-        const double stopFillPrice = m_execution.fillPrice(lastTradePrice, exitSide);
-        if (std::isfinite(stopFillPrice) && stopFillPrice > 0.0) {
-            exitAtTakeProfit = false;
-            fillPrice = stopFillPrice;
-        }
-    }
     if (!std::isfinite(fillPrice) || fillPrice <= 0.0) {
         if (m_rejectedRiskSymbols.insert(symbol).second) {
             sLog_Warning("paper risk exit rejected: symbol=" << symbol << " trigger="
@@ -505,7 +510,7 @@ TradingResult TradingEngine::handleTriggeredRiskExit(const std::string& symbol,
     exitOrder.qty = std::abs(position.netQty);
     exitOrder.algoId.clear();
 
-    if (exitAtTakeProfit) {
+    if (tpTriggered) {
         exitOrder.orderType = OrderType::Limit;
         exitOrder.limitPrice = risk.takeProfitPrice;
     } else {
