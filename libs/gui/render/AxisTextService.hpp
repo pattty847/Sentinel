@@ -46,6 +46,11 @@ public:
                         qreal canvasHeight,
                         qreal priceGutter = 0.0); // price labels start this far right of the canvas
 
+    // Render-thread pane state; CvdLayer updates it before axis text is submitted.
+    void setPricePaneTop(double top) { m_pricePaneTop = top; }
+    double pricePaneTop() const { return m_pricePaneTop; }
+    int renderPriceAxisWidth() const;
+
     QObject* priceAxisSource() const { return m_priceAxisSource; }
     QObject* timeAxisSource() const { return m_timeAxisSource; }
     double effectiveAxisLabelPx() const { return m_effectiveAxisLabelPx; }
@@ -69,6 +74,7 @@ private:
     void refreshAxisTickSnapshot(AxisModel* model,
                                  std::vector<AxisTickSnapshot>& storage);
 
+    double m_pricePaneTop = -1;
     const ChartTextAtlas& m_atlas;
 
     AxisModel* m_priceAxisSource = nullptr;

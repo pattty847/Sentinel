@@ -23,6 +23,7 @@ struct ChartLayers {
     FlowFeed flowFeed{footprintCells.mailbox()};
     CvdFeed cvdFeed{cvd.mailbox(), cvd.presentation()};
     void bindFlowFeeds(ChartViewController& view, const PublishedFrame& frames, LayerVisibility& visibility, ChartTpoQml& tpoSettings) {
+        cvd.bindAxes(text.axes.get());
         flowFeed.bind(view, frames, visibility, footprintCells.presentation());
         cvdFeed.bind(view, frames, visibility, tpoSettings);
     }

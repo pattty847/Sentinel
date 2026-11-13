@@ -99,3 +99,50 @@ TEST(CvdSeries, EveryVisibleResetPeriodTracksItsOwnLoadedStart) {
     series.push(9 * 3600000, 4, 0, true, 0); // complete coverage proves earlier empty bars
     EXPECT_EQ(series.incompleteStart(), -1);
 }
+
+#include "chart/layers/CvdLayerLayout.hpp"
+TEST(CvdGutter, VisibleExtremaAndLastExcludeOffscreenHistoryAndIncludePartialBars) {
+    CvdSeries series;
+    for (const auto [time, value] : {std::pair{0, 9000.0}, {1000, 1200.0}, {2000, -5.0}, {3000, 7.5}, {4000, -9000.0}})
+        series.push(time, value, time, true);
+    const auto values = CvdGutterValues::visible(series, 1500, 4000, 1000);
+    ASSERT_TRUE(values.valid);
+    EXPECT_EQ(values.max, 1200); EXPECT_EQ(values.min, -5); EXPECT_EQ(values.last, 7.5);
+    char text[24];
+    CvdGutterValues::format(values.max, text); EXPECT_STREQ(text, "1.2k");
+    CvdGutterValues::format(values.min, text); EXPECT_STREQ(text, "-5.00");
+    CvdGutterValues::format(values.last, text); EXPECT_STREQ(text, "7.50");
+    EXPECT_FALSE(CvdGutterValues::visible(series, 5000, 6000, 1000).valid);
+}
+TEST(CvdGutter, FlatPositiveNegativeAndZeroSamplesAreNotPaddedScaleEndpoints) {
+    for (double value : {8.0, -8.0, 0.0}) {
+        CvdSeries series; series.push(1000, value, 0, true);
+        const auto values = CvdGutterValues::visible(series, 1000, 2000, 1000);
+        ASSERT_TRUE(values.valid);
+        EXPECT_EQ(values.min, value); EXPECT_EQ(values.max, value); EXPECT_EQ(values.last, value);
+    }
+    char text[24];
+    CvdGutterValues::format(0, text); EXPECT_STREQ(text, "0");
+    CvdGutterValues::format(-.001, text); EXPECT_STREQ(text, "-<.01");
+}
+
+TEST(CvdStripLayout, ValuesTakePriorityAtEveryRowThreshold) {
+    for (const auto [height, rows] : {std::pair{20., 0}, {21., 1}, {39., 1},
+                                    {40., 2}, {58., 2}, {59., 3}, {77., 3}, {78., 3}}) {
+        const CvdStripLayout layout{height, {}};
+        EXPECT_EQ(layout.valueRows(), rows) << height;
+        EXPECT_EQ(layout.titleFits(), height >= 78) << height;
+    }
+}
+TEST(CvdStripLayout, LastUsesCurveMappingAndClampsClearOfOtherRows) {
+    const CvdStripLayout titled{100, {}};
+    EXPECT_DOUBLE_EQ(titled.lineY(.6), 52.4);
+    EXPECT_DOUBLE_EQ(titled.lastTop(.6) + 8.5, titled.lineY(.6));
+    EXPECT_DOUBLE_EQ(titled.lastTop(1), 21); // max row plus its gap
+    EXPECT_DOUBLE_EQ(titled.lastTop(0), 62); // stop above min row and its gap
+    const CvdStripLayout single{39, {}};
+    EXPECT_FALSE(single.titleFits());
+    EXPECT_DOUBLE_EQ(single.lastTop(.5) + 8.5, single.lineY(.5));
+    EXPECT_DOUBLE_EQ(single.lastTop(1), 2);
+    EXPECT_DOUBLE_EQ(single.lastTop(0), 20);
+}
