@@ -1,5 +1,6 @@
 #include "TradeBubbleOverlayItem.hpp"
 #include "TradeBubbleNode.hpp"
+#include "chart/layers/ChartStack.hpp"
 #include "chart/shell/TradeBubbleStyleStore.hpp"
 #include "chart/feeds/TradeBubbleFeed.hpp"
 #include <QQuickWindow>
@@ -38,6 +39,7 @@ void trade_bubbles::RenderLink::sync() {
 }
 TradeBubbleOverlayItem::TradeBubbleOverlayItem(QQuickItem* parent) : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
+    setZ(chart::depth(chart::ChartDepth::BubblesAbove));
     connect(&chart::TradeBubbleStyleChanges::instance(), &chart::TradeBubbleStyleChanges::changed,
             this, [this] { update(); });
     connect(this, &QQuickItem::windowChanged, this, [this] { connectWindow(); });
@@ -91,4 +93,14 @@ QSGNode* TradeBubbleOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     auto* root = static_cast<OverlayRoot*>(oldNode);
     if (root && !root->uses(m_link)) { delete root; root = nullptr; }
     return root ? root : new OverlayRoot(m_link);
+}
+
+bool TradeBubbleOverlayItem::tradesAboveCandles() const {
+    return z() == chart::depth(chart::ChartDepth::BubblesAbove);
+}
+void TradeBubbleOverlayItem::setTradesAboveCandles(bool above) {
+    const auto target = above ? chart::ChartDepth::BubblesAbove : chart::ChartDepth::BubblesBelow;
+    if (z() == chart::depth(target)) return;
+    setZ(chart::depth(target));
+    emit tradesAboveCandlesChanged();
 }

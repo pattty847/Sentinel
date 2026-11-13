@@ -9,7 +9,7 @@
 
 // Prepare and publish the frame on the render thread with the GUI blocked,
 // before any item syncs (beforeSynchronizing): every
-// sibling overlay that reads currentFrameContext() in its own updatePaintNode (candles,
+// overlay item that reads currentFrameContext() in its own updatePaintNode (candles,
 // algo, paper trading) maps through the camera the heatmap draws in this frame, in
 // whatever order Qt syncs the items. Qt notifications stay outside the producer.
 void UnifiedGridRenderer::prepareSyncFrame() {
@@ -40,11 +40,7 @@ void UnifiedGridRenderer::prepareSyncFrame() {
 }
 
 QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext& frame, bool profile) {
-    auto* root = oldNode;
-    if (!root) {
-        root = new QSGNode();
-        m_layers.registry.onRootRebuilt(root);
-    }
+    auto* root = m_layers.registry.createRoot(oldNode);
     const auto& sync = m_frames.producer.frame();
     m_layers.registry.sync(sync);
     m_bubbles.publish(frame.mapping);

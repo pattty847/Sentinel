@@ -46,19 +46,27 @@ TEST(LayerRegistry, DispatchPreservesRegistrationOrder) {
     registry.afterRendering();
     EXPECT_EQ(calls, (Calls{"sync:b", "sync:a", "b", "a", "after:b", "after:a"}));
 }
+struct RegistryScene {
+    std::unique_ptr<QSGNode> fields, profiles, foreground;
+    explicit RegistryScene(chart::LayerRegistry& registry)
+        : fields(registry.createRoot(nullptr)),
+          profiles(registry.createOutputRoot(chart::LayerPlane::Profiles)),
+          foreground(registry.createOutputRoot(chart::LayerPlane::Foreground)) {}
+};
 TEST(ChartLayerSet, RegistersHeatmapFootprintCellsVpTpoLadderText) {
     chart::ChartLayers layers;
     ASSERT_TRUE(layers.registry.precedes("heatmap", "text"));
     EXPECT_TRUE(layers.registry.precedes("TPO", "ladder"));
-    EXPECT_TRUE(layers.registry.precedes("ladder", "text")) << "chart text draws over the ladder";
+    EXPECT_TRUE(layers.registry.precedes("ladder", "text"));
     EXPECT_FALSE(layers.registry.precedes("ladder", "TPO"));
     layers.heatmap.initialize();
-    QSGNode root;
-    layers.registry.onRootRebuilt(&root);
-    EXPECT_EQ(root.childCount(), 6);
-    EXPECT_EQ(root.childAtIndex(4)->type(), QSGNode::OpacityNodeType) << "the ladder's gate";
-    EXPECT_EQ(root.firstChild()->type(), QSGNode::OpacityNodeType);
-    EXPECT_EQ(root.firstChild()->firstChild()->type(), QSGNode::RenderNodeType);
+    RegistryScene scene(layers.registry);
+    EXPECT_EQ(scene.fields->childCount(), 2);
+    EXPECT_EQ(scene.profiles->firstChild()->childCount(), 2);
+    EXPECT_EQ(scene.foreground->firstChild()->childCount(), 2);
+    EXPECT_EQ(scene.foreground->firstChild()->firstChild()->type(), QSGNode::OpacityNodeType);
+    EXPECT_EQ(scene.fields->firstChild()->type(), QSGNode::OpacityNodeType);
+    EXPECT_EQ(scene.fields->firstChild()->firstChild()->type(), QSGNode::RenderNodeType);
 }
 struct Processor {
     Calls& calls;
@@ -200,6 +208,50 @@ void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+
+TEST(LayerRegistry, OutputRootsCanSyncAndDieInEitherOrderWithoutSteadyAllocations) {
+    for (bool surfaceFirst : {false, true}) {
+        for (bool ownerDiesFirst : {false, true}) {
+            SCOPED_TRACE(surfaceFirst);
+            SCOPED_TRACE(ownerDiesFirst);
+            Calls calls;
+            Layer fields("fields", calls), profiles("profiles", calls), text("text", calls);
+            chart::LayerRegistry registry;
+            registry.add(fields);
+            registry.add(profiles, FrameProfiler::StageCount, chart::LayerPlane::Profiles);
+            registry.add(text, FrameProfiler::StageCount, chart::LayerPlane::Foreground);
+            std::unique_ptr<QSGNode> owner, surface;
+            if (surfaceFirst) surface.reset(registry.createOutputRoot(chart::LayerPlane::Profiles));
+            owner.reset(registry.createRoot(nullptr));
+            if (!surfaceFirst) surface.reset(registry.createOutputRoot(chart::LayerPlane::Profiles));
+            ASSERT_EQ(surface->childCount(), 1);
+            auto* content = surface->firstChild();
+            ASSERT_EQ(content->childCount(), 1);
+            EXPECT_NE(content->parent(), owner.get());
+            auto* ownerPtr = owner.get(); auto* surfacePtr = surface.get();
+            footprintAllocations = 0; footprintCounting = true;
+            for (int frame = 0; frame < 10; ++frame) {
+                registry.createRoot(ownerPtr);
+                registry.createOutputRoot(chart::LayerPlane::Profiles, surfacePtr);
+            }
+            footprintCounting = false;
+            EXPECT_EQ(footprintAllocations.load(), 0u);
+            EXPECT_EQ(surface->firstChild(), content);
+            if (ownerDiesFirst) {
+                owner.reset();
+                EXPECT_EQ(surface->childCount(), 0);
+                owner.reset(registry.createRoot(nullptr));
+                ASSERT_EQ(surface->childCount(), 1);
+                EXPECT_EQ(surface->firstChild()->childCount(), 1);
+            } else {
+                surface.reset();
+                EXPECT_EQ(content->parent(), owner.get());
+                surface.reset(registry.createOutputRoot(chart::LayerPlane::Profiles));
+                EXPECT_EQ(surface->firstChild(), content);
+            }
+        }
+    }
+}
 
 namespace {
 MappingFrameContext footprintFrame() {
@@ -788,8 +840,8 @@ TEST(FootprintBands, StripBuyDominantBandIsGreen) {
 TEST(FootprintCells, RegistrySlotAndNoData) {
     chart::ChartLayers layers;
     layers.heatmap.initialize();
-    QSGNode root;
-    layers.registry.onRootRebuilt(&root);
+    RegistryScene scene(layers.registry);
+    auto& root = *scene.fields;
     EXPECT_EQ(root.childAtIndex(1)->type(), QSGNode::OpacityNodeType);
     EXPECT_EQ(root.childAtIndex(1)->firstChild()->type(), QSGNode::GeometryNodeType);
     auto frame = footprintChartFrame();
@@ -1207,15 +1259,15 @@ TEST(FootprintCells, FlatBinningReusesStorageAndWindowMaximumExcludesOverscan) {
 TEST(CvdLayer, LazyContainerKeepsDefaultTreeAndInsertsBeforeText) {
     chart::ChartLayers layers;
     layers.heatmap.initialize();
-    QSGNode root;
-    layers.registry.onRootRebuilt(&root);
-    ASSERT_EQ(root.childCount(), 6);
+    RegistryScene scene(layers.registry);
+    auto& root = *scene.foreground->firstChild();
+    ASSERT_EQ(root.childCount(), 2);
     auto* textRoot = root.lastChild();
     ChartTextRenderer text; ChartTextAtlas atlas;
     chart::LayerNodeContext context{nullptr, &root, text, atlas, false};
     auto frame = footprintChartFrame();
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    EXPECT_EQ(root.childCount(), 6); EXPECT_EQ(root.lastChild(), textRoot);
+    EXPECT_EQ(root.childCount(), 2); EXPECT_EQ(root.lastChild(), textRoot);
     layers.cvd.presentation().stripPx = 50;
     EXPECT_FALSE(layers.cvd.presentation().drawable(1000));
     chart::CvdFeed::build(layers.cvd.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
@@ -1223,13 +1275,13 @@ TEST(CvdLayer, LazyContainerKeepsDefaultTreeAndInsertsBeforeText) {
     EXPECT_TRUE(layers.cvd.presentation().drawable(1000));
     EXPECT_FALSE(layers.cvd.presentation().drawable(60000));
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    ASSERT_EQ(root.childCount(), 7); EXPECT_EQ(root.lastChild(), textRoot);
-    EXPECT_EQ(root.childAtIndex(5)->type(), QSGNode::OpacityNodeType);
+    ASSERT_EQ(root.childCount(), 3); EXPECT_EQ(root.lastChild(), textRoot);
+    EXPECT_EQ(root.childAtIndex(1)->type(), QSGNode::OpacityNodeType);
     EXPECT_TRUE(layers.cvd.drawing());
     layers.cvd.presentation().stripPx = 0;
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
     EXPECT_FALSE(layers.cvd.drawing());
-    EXPECT_EQ(static_cast<QSGOpacityNode*>(root.childAtIndex(5))->opacity(), 0);
+    EXPECT_EQ(static_cast<QSGOpacityNode*>(root.childAtIndex(1))->opacity(), 0);
 }
 TEST(CvdLayer, LineAreaBoundsAndFreshFramesAllocateNothing) {
     chart::CvdLayer layer;
@@ -1451,29 +1503,29 @@ TEST(FlowFooter, TotalsAndCumulativeShareEveryResetAndIgnoreMissingBars) {
 TEST(FlowFooter, DefaultNodesAreIdenticalAndEnabledNodesAreLazyBeforeText) {
     chart::ChartLayers layers;
     layers.heatmap.initialize();
-    QSGNode root;
-    layers.registry.onRootRebuilt(&root);
+    RegistryScene scene(layers.registry);
+    auto& root = *scene.foreground->firstChild();
     auto* textRoot = root.lastChild();
     auto frame = footprintChartFrame(); frame.context.surfaceBounds.setHeight(200);
     ChartTextRenderer text; ChartTextAtlas atlas;
     chart::LayerNodeContext context{nullptr, &root, text, atlas, false};
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    EXPECT_EQ(root.childCount(), 6); EXPECT_EQ(layers.flowFooter.createContainer(), nullptr);
+    EXPECT_EQ(root.childCount(), 2); EXPECT_EQ(layers.flowFooter.createContainer(), nullptr);
     layers.cvd.presentation().flowFooter = true;
     chart::CvdFeed::build(layers.cvd.mailbox().back(), footprintSeries(), footprintFrame(), chart::CvdReset::Visible, 4);
     layers.cvd.mailbox().post(); layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    EXPECT_EQ(root.childCount(), 7); EXPECT_EQ(root.lastChild(), textRoot);
+    EXPECT_EQ(root.childCount(), 3); EXPECT_EQ(root.lastChild(), textRoot);
     EXPECT_TRUE(layers.flowFooter.drawing()); EXPECT_FALSE(layers.cvd.drawing());
     layers.cvd.presentation().stripPx = 60;
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
-    EXPECT_EQ(root.childCount(), 8);
+    EXPECT_EQ(root.childCount(), 4);
     EXPECT_EQ(layers.flowFooter.bounds().bottom(), layers.cvd.strip().top());
     EXPECT_EQ(layers.flowFooter.bounds().top(), 85);
     EXPECT_EQ(layers.cvd.presentation().bottomInset(1000, 200), 115);
     layers.cvd.presentation().flowFooter = false;
     layers.registry.sync(frame); layers.registry.updateNodes(frame, context);
     EXPECT_FALSE(layers.flowFooter.drawing());
-    EXPECT_EQ(static_cast<QSGOpacityNode*>(root.childAtIndex(6))->opacity(), 0);
+    EXPECT_EQ(static_cast<QSGOpacityNode*>(root.childAtIndex(2))->opacity(), 0);
 }
 
 TEST(FlowFooter, FreshDataPanAndLabelsAllocateNothingAfterWarmup) {

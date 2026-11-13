@@ -41,6 +41,7 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include "render/TradeBubbleOverlayItem.hpp"
+#include <QFile>
 #include <QQuickView>
 #include <QQuickWindow>
 #include <QSGOpacityNode>
@@ -1613,6 +1614,16 @@ std::string tradeLayerNodeName(QSGNode* node, QSGNode* textRoot) {
     return hasNode<QSGGeometryNode>(node) ? "VP" : "unknown";
 }
 
+std::vector<std::string> tradeLayerOrder(QSGNode* fields, QSGNode* profiles, QSGNode* foreground) {
+    std::vector<std::string> order;
+    for (auto* plane : {fields, profiles, foreground}) {
+        for (auto* node = plane->firstChild(); node; node = node->nextSibling())
+            order.push_back(node == fields->firstChild() ? "heatmap" : tradeLayerNodeName(node, foreground->lastChild()));
+    }
+    return order;
+}
+const std::vector<std::string> expectedTradeLayers{"heatmap", "footprintCells", "VP", "TPO", "ladder", "text"};
+
 TEST_F(UgrGpu, LateEnableKeepsRegistryOrderAndTextLast) {
     gpuOn();
     auto* axis = new PriceAxisModel(ugr);
@@ -1620,20 +1631,14 @@ TEST_F(UgrGpu, LateEnableKeepsRegistryOrderAndTextLast) {
     ASSERT_TRUE(ugr->setProperty("priceAxisSource", QVariant::fromValue<QObject*>(axis)));
     ASSERT_TRUE(settle()) << error.toStdString();
     auto* root = paintRoot(ugr);
-    ASSERT_NE(root, nullptr);
-    auto* text = root->lastChild();
-    ASSERT_NE(text, root->firstChild());
-    ASSERT_TRUE(hasNode<ChartTextNode>(text)) << "chart text must exist before enabling overlays";
-    const auto dump = [&] {
-        for (auto* node = root->firstChild(); node; node = node->nextSibling()) {
-            std::cout << typeid(*node).name() << "(" << int(node->type()) << ") [";
-            for (auto* child = node->firstChild(); child; child = child->nextSibling())
-                std::cout << typeid(*child).name() << ",";
-            std::cout << "] ";
-        }
-        std::cout << std::endl;
-    };
-    std::cout << "late-enable initial: "; dump();
+    auto* profileItem = ugr->findChild<QQuickItem*>("chartProfiles");
+    auto* textItem = ugr->findChild<QQuickItem*>("chartForeground");
+    ASSERT_TRUE(profileItem && textItem);
+    ASSERT_TRUE(paintRoot(profileItem) && paintRoot(textItem));
+    auto* profiles = paintRoot(profileItem)->firstChild();
+    auto* foreground = paintRoot(textItem)->firstChild();
+    ASSERT_TRUE(root && profiles && foreground);
+    ASSERT_TRUE(hasNode<ChartTextNode>(foreground->lastChild()));
     ugr->layers()->setVolumeProfileEnabled(true);
     VolumeProfileState::Snapshot vp;
     vp.minPrice = 99'900; vp.maxPrice = 100'300; vp.tickSize = 10; vp.gridHeight = 40;
@@ -1641,26 +1646,17 @@ TEST_F(UgrGpu, LateEnableKeepsRegistryOrderAndTextLast) {
     ASSERT_TRUE(frames(5)) << error.toStdString();
     ugr->layers()->setFootprintEnabled(true);
     ASSERT_TRUE(frames(5)) << error.toStdString();
-    std::cout << "late-enable final: "; dump();
-    std::vector<std::string> order;
-    for (auto* node = root->firstChild()->nextSibling(); node; node = node->nextSibling()) {
-        const auto name = tradeLayerNodeName(node, text);
-        // VP has three siblings before containers are introduced.
-        if (order.empty() || order.back() != name) order.push_back(name);
-    }
-    std::cout << "late-enable order:";
-    for (const auto& name : order) std::cout << " " << name;
-    std::cout << std::endl;
-    EXPECT_EQ(order, (std::vector<std::string>{"footprintCells", "VP", "TPO", "ladder", "text"}));
+    EXPECT_EQ(tradeLayerOrder(root, profiles, foreground), expectedTradeLayers);
 }
 
-// Node construction itself needs a window but no initialized RHI or GPU draw.
+// Node construction needs a window but no initialized RHI or GPU draw.
 TEST(TradeLayerNodes, LateEnableKeepsRegistryOrderAndTextLast) {
     QQuickWindow window;
-    QSGNode root;
     chart::ChartLayers layers;
     layers.heatmap.initialize();
-    layers.registry.onRootRebuilt(&root);
+    std::unique_ptr<QSGNode> root(layers.registry.createRoot(nullptr));
+    std::unique_ptr<QSGNode> profiles(layers.registry.createOutputRoot(chart::LayerPlane::Profiles));
+    std::unique_ptr<QSGNode> foreground(layers.registry.createOutputRoot(chart::LayerPlane::Foreground));
     auto& atlas = layers.text.atlas;
     auto& text = layers.text.renderer;
     chart::ChartFrame snapshotFrame;
@@ -1668,44 +1664,35 @@ TEST(TradeLayerNodes, LateEnableKeepsRegistryOrderAndTextLast) {
     context.surfaceBounds = QRectF(0, 0, 640, 320);
     context.mapping.viewStartMs = 0; context.mapping.viewEndMs = 60000;
     context.mapping.viewMinPrice = 100; context.mapping.viewMaxPrice = 200;
-    VolumeProfileState::Snapshot snapshot;
     const auto frame = [&](bool enableVp, bool enableFootprint) {
         context.overlays.volumeProfile = enableVp;
         context.overlays.footprint = enableFootprint;
         layers.registry.sync(snapshotFrame);
-        layers.registry.updateNodes(snapshotFrame, {&window, &root, text, atlas, false});
+        layers.registry.updateNodes(snapshotFrame, {&window, root.get(), text, atlas, false});
     };
     frame(false, false);
-    auto* textRoot = root.lastChild();
-    ASSERT_NE(textRoot, nullptr);
-    // A chart glyph node is already in the text subtree before either late enable.
+    auto* textRoot = foreground->firstChild()->lastChild();
     textRoot->appendChildNode(new ChartTextNode());
+    VolumeProfileState::Snapshot snapshot;
     snapshot.minPrice = 100; snapshot.maxPrice = 200; snapshot.tickSize = 10; snapshot.gridHeight = 10;
     layers.vp.renderer.enqueue(std::vector<float>(10, 1.0f), snapshot);
-    frame(true, false);
-    frame(false, true);
-    std::vector<std::string> order;
-    std::cout << "node-only late-enable types: ";
-    for (auto* node = root.firstChild(); node; node = node->nextSibling()) {
-        std::cout << typeid(*node).name() << "(" << int(node->type()) << ") [";
-        for (auto* child = node->firstChild(); child; child = child->nextSibling())
-            std::cout << typeid(*child).name() << ",";
-        std::cout << "] ";
-        const auto name = node == root.firstChild() ? "heatmap" : tradeLayerNodeName(node, textRoot);
-        if (order.empty() || order.back() != name) order.push_back(name);
+    for (bool heatmap : {false, true}) for (bool footprint : {false, true}) for (bool tpo : {false, true}) {
+        context.overlays.heatmap = heatmap;
+        context.overlays.tpo = tpo;
+        frame(true, footprint);
+        EXPECT_EQ(tradeLayerOrder(root.get(), profiles->firstChild(), foreground->firstChild()), expectedTradeLayers);
+        EXPECT_EQ(profiles->firstChild()->childCount(), 2) << "VP and TPO stay in the profile plane in every mix";
+        EXPECT_TRUE(hasNode<ChartTextNode>(textRoot));
     }
-    std::cout << "\nnode-only late-enable order:";
-    for (const auto& name : order) std::cout << " " << name;
-    std::cout << std::endl;
-    EXPECT_EQ(order, (std::vector<std::string>{"heatmap", "footprintCells", "VP", "TPO", "ladder", "text"}));
 }
 
 TEST(TradeLayerNodes, FixedHeatmapVpLabelsStructure) {
     QQuickWindow window;
-    QSGNode root;
     chart::ChartLayers layers;
     layers.heatmap.initialize();
-    layers.registry.onRootRebuilt(&root);
+    std::unique_ptr<QSGNode> root(layers.registry.createRoot(nullptr));
+    std::unique_ptr<QSGNode> profiles(layers.registry.createOutputRoot(chart::LayerPlane::Profiles));
+    std::unique_ptr<QSGNode> foreground(layers.registry.createOutputRoot(chart::LayerPlane::Foreground));
     auto& atlas = layers.text.atlas;
     auto& text = layers.text.renderer;
     chart::ChartFrame frame;
@@ -1717,20 +1704,13 @@ TEST(TradeLayerNodes, FixedHeatmapVpLabelsStructure) {
     snapshot.minPrice = 100; snapshot.maxPrice = 200; snapshot.tickSize = 10; snapshot.gridHeight = 10;
     layers.vp.renderer.enqueue(std::vector<float>(10, 1.0f), snapshot);
     layers.registry.sync(frame);
-    layers.registry.updateNodes(frame, {&window, &root, text, atlas, false});
-    root.lastChild()->appendChildNode(new ChartTextNode()); // fixed label node, no Metal texture needed
-    std::cout << "fixed heatmap/VP/labels root: ";
-    for (auto* node = root.firstChild(); node; node = node->nextSibling()) {
-        std::cout << typeid(*node).name() << "(" << int(node->type()) << ") [";
-        for (auto* child = node->firstChild(); child; child = child->nextSibling())
-            std::cout << typeid(*child).name() << ",";
-        std::cout << "] ";
-    }
-    std::cout << std::endl;
-    ASSERT_EQ(root.childCount(), 6);
-    EXPECT_EQ(tradeLayerNodeName(root.childAtIndex(1), root.lastChild()), "footprintCells");
-    EXPECT_EQ(root.firstChild()->type(), QSGNode::OpacityNodeType);
-    EXPECT_TRUE(hasNode<ChartTextNode>(root.lastChild()));
+    layers.registry.updateNodes(frame, {&window, root.get(), text, atlas, false});
+    auto* textRoot = foreground->firstChild()->lastChild();
+    textRoot->appendChildNode(new ChartTextNode()); // no Metal texture needed
+    ASSERT_EQ(root->childCount(), 2);
+    EXPECT_EQ(tradeLayerNodeName(root->childAtIndex(1), textRoot), "footprintCells");
+    EXPECT_EQ(root->firstChild()->type(), QSGNode::OpacityNodeType);
+    EXPECT_TRUE(hasNode<ChartTextNode>(textRoot));
 }
 
 // The chart has one GPU root path from its first frame: a plain node whose first
@@ -5479,27 +5459,78 @@ TEST(UgrInput, MacMouseAndPreciseScrollReachBothAxisWheelHandlers) {
     chart->setHeatmapService(nullptr);
 }
 
-// Accepted stacking (owner, 2026-11-12): with TPO the only primary layer, the
-// candles drop below the chart item, so the slightly transparent TPO covers
-// them; with heatmap or footprint on as well, candles stay above the chart.
-TEST(UgrInput, CandlesGoBehindTheTpoOnlyWhenNothingElseCoversThem) {
+// Use the same QML and independent layer toggle API as the running chart. No GPU is needed.
+TEST(UgrInput, EveryLayerMixHasFieldsCandlesProfilesBubblesThenText) {
     QQuickView view;
     view.rootContext()->setContextProperty("uiTheme", nullptr);
     view.rootContext()->setContextProperty("dataSource", nullptr);
     view.rootContext()->setContextProperty("chartModeController", nullptr);
     view.setSource(QUrl::fromLocalFile(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml")));
     ASSERT_EQ(view.status(), QQuickView::Ready) << view.errors().value(0).toString().toStdString();
-    auto *candles = view.rootObject()->findChild<CandlestickOverlayItem *>();
-    auto *chart = view.rootObject()->findChild<UnifiedGridRenderer *>("unifiedGridRenderer");
-    ASSERT_TRUE(candles && chart);
-    EXPECT_GT(candles->z(), chart->z()) << "default (heatmap): candles above the chart";
-    chart->layers()->setTpoEnabled(true);  // exclusive: heatmap and footprint go off
-    EXPECT_LT(candles->z(), chart->z()) << "TPO only: candles behind the TPO";
-    chart->layers()->setLayerEnabled("footprint", true);
-    EXPECT_GT(candles->z(), chart->z()) << "TPO + footprint: candles stay on top (accepted for now)";
-    chart->layers()->setLayerEnabled("footprint", false);
-    chart->layers()->setLayerEnabled("heatmap", true);
-    EXPECT_GT(candles->z(), chart->z()) << "TPO + heatmap: candles stay on top";
+    auto* candles = view.rootObject()->findChild<CandlestickOverlayItem*>();
+    auto* bubbles = view.rootObject()->findChild<TradeBubbleOverlayItem*>();
+    auto* chart = view.rootObject()->findChild<UnifiedGridRenderer*>("unifiedGridRenderer");
+    auto* profiles = view.rootObject()->findChild<QQuickItem*>("chartProfiles");
+    auto* text = view.rootObject()->findChild<QQuickItem*>("chartForeground");
+    ASSERT_TRUE(candles && bubbles && chart && profiles && text);
+    for (auto* item : {static_cast<QQuickItem*>(candles), static_cast<QQuickItem*>(bubbles), profiles, text})
+        EXPECT_EQ(item->parentItem(), chart);
+    const auto candleDepth = candles->z();
+    const std::array<const char*, 4> names{"heatmap", "footprint", "tpo", "volumeProfile"};
+    for (int mix = 0; mix < 16; ++mix) {
+        SCOPED_TRACE(mix);
+        for (int i = 0; i < names.size(); ++i) chart->layers()->setLayerEnabled(names[i], bool(mix & (1 << i)));
+        EXPECT_EQ(chart->layers()->heatmapEnabled(), bool(mix & 1));
+        EXPECT_EQ(chart->layers()->footprintEnabled(), bool(mix & 2));
+        EXPECT_EQ(chart->layers()->tpoEnabled(), bool(mix & 4));
+        EXPECT_EQ(chart->layers()->volumeProfileEnabled(), bool(mix & 8));
+        for (bool above : {true, false}) {
+            heatmap::HeatmapChartSettings settings;
+            settings.tradesAboveCandles = above;
+            chart->setHeatmapChartSettings(settings);
+            EXPECT_EQ(candles->z(), candleDepth);
+            EXPECT_GT(candles->z(), 0); // the parent's field nodes draw first
+            EXPECT_LT(candles->z(), profiles->z());
+            EXPECT_LT(profiles->z(), text->z());
+            EXPECT_LT(bubbles->z(), text->z());
+            if (above) EXPECT_GT(bubbles->z(), profiles->z());
+            else {
+                EXPECT_GT(bubbles->z(), 0);
+                EXPECT_LT(bubbles->z(), candles->z());
+            }
+        }
+    }
+}
+TEST(UgrInput, QmlStackingNeverDependsOnLayerEnableFlags) {
+    QFile qml(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml"));
+    ASSERT_TRUE(qml.open(QIODevice::ReadOnly));
+    const auto lines = QString::fromUtf8(qml.readAll()).split('\n');
+    for (const auto& line : lines) {
+        if (!line.trimmed().startsWith("z:")) continue;
+        EXPECT_FALSE(line.contains("LayerEnabled") || line.contains("layers.")) << line.toStdString();
+    }
+}
+
+TEST(UgrInput, LayerOutputLinksAreIsolatedAcrossWindows) {
+    for (bool sourceFirst : {true, false}) {
+        QQuickWindow first, second;
+        QQuickItem host;
+        host.setParentItem(first.contentItem());
+        chart::LayerRegistry registry;
+        registry.bindOutputs(host);
+        std::unique_ptr<QSGNode> oldOwner(registry.createRoot(nullptr));
+        std::unique_ptr<QSGNode> oldSurface(registry.createOutputRoot(chart::LayerPlane::Profiles));
+        auto* oldContent = oldSurface->firstChild();
+        host.setParentItem(second.contentItem());
+        std::unique_ptr<QSGNode> owner(registry.createRoot(nullptr));
+        std::unique_ptr<QSGNode> surface(registry.createOutputRoot(chart::LayerPlane::Profiles));
+        auto* content = surface->firstChild();
+        ASSERT_NE(content, oldContent);
+        if (sourceFirst) { oldOwner.reset(); oldSurface.reset(); }
+        else { oldSurface.reset(); oldOwner.reset(); }
+        EXPECT_EQ(surface->firstChild(), content);
+        EXPECT_EQ(content->parent(), surface.get());
+    }
 }
 
 // DepthChartView's root `symbol` property shadowed the

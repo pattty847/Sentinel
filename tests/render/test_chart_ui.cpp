@@ -2708,8 +2708,9 @@ TEST(FootprintSource, EnabledFootprintDrawsCellGeometryAsTheOnlyFootprintNode) {
     f.mapping = chart_raster::toMapping(f.raster);
     ChartTextRenderer text;
     ChartTextAtlas atlas;
-    QSGNode root;
-    layers.registry.onRootRebuilt(&root);
+    std::unique_ptr<QSGNode> root(layers.registry.createRoot(nullptr));
+    std::unique_ptr<QSGNode> profiles(layers.registry.createOutputRoot(chart::LayerPlane::Profiles));
+    std::unique_ptr<QSGNode> foreground(layers.registry.createOutputRoot(chart::LayerPlane::Foreground));
     layers.footprintCells.presentation().enabled = true;
     MappingFrameContext binFrame;
     binFrame.activeTimeframeMs = 1000; binFrame.raster = f.raster;
@@ -2720,11 +2721,11 @@ TEST(FootprintSource, EnabledFootprintDrawsCellGeometryAsTheOnlyFootprintNode) {
     ASSERT_TRUE(chart::FlowFeed::bin(layers.footprintCells.mailbox().back(), series, binFrame));
     layers.footprintCells.mailbox().post();
     layers.registry.sync(frame);
-    layers.registry.updateNodes(frame, {&window, &root, text, atlas, false});
+    layers.registry.updateNodes(frame, {&window, root.get(), text, atlas, false});
     EXPECT_TRUE(layers.footprintCells.drawing());
     EXPECT_GT(layers.footprintCells.vertexCount(), 0);
-    ASSERT_EQ(root.childAtIndex(1)->childCount(), 1);
-    EXPECT_EQ(root.childAtIndex(1)->firstChild()->type(), QSGNode::GeometryNodeType);
+    ASSERT_EQ(root->childAtIndex(1)->childCount(), 1);
+    EXPECT_EQ(root->childAtIndex(1)->firstChild()->type(), QSGNode::GeometryNodeType);
     f.overlays.footprint = false;
     layers.registry.sync(frame);
     EXPECT_FALSE(layers.footprintCells.drawing());

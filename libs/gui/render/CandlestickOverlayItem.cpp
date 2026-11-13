@@ -11,6 +11,7 @@ GPU-batched candlestick overlay (demo data only).
 #include "../datasources/CandleSeriesBuffer.hpp"
 #include "SentinelLogging.hpp"
 
+#include "chart/layers/ChartStack.hpp"
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
 #include <QElapsedTimer>
@@ -188,6 +189,7 @@ bool mappingChanged(const TimeAxisMapping& a, const TimeAxisMapping& b) {
 CandlestickOverlayItem::CandlestickOverlayItem(QQuickItem* parent)
     : QQuickItem(parent), m_pane(std::make_shared<ChartPaneClipLink>()) {
     setFlag(ItemHasContents, true);
+    setZ(chart::depth(chart::ChartDepth::Candles));
     connect(this, &QQuickItem::windowChanged, this, [this] { connectPaneWindow(); });
 }
 CandlestickOverlayItem::~CandlestickOverlayItem() {

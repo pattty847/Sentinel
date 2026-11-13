@@ -21,14 +21,18 @@ struct RenderLink {
 class TradeBubbleOverlayItem : public QQuickItem {
     Q_OBJECT
     QML_ELEMENT
+    Q_PROPERTY(bool tradesAboveCandles READ tradesAboveCandles WRITE setTradesAboveCandles NOTIFY tradesAboveCandlesChanged)
     Q_PROPERTY(QObject* renderer READ renderer WRITE setRenderer NOTIFY rendererChanged)
 public:
     explicit TradeBubbleOverlayItem(QQuickItem* parent = nullptr);
     ~TradeBubbleOverlayItem() override;
     QObject* renderer() const { return m_renderer.data(); }
     void setRenderer(QObject* renderer);
+    bool tradesAboveCandles() const;
+    void setTradesAboveCandles(bool above);
 signals:
     void rendererChanged();
+    void tradesAboveCandlesChanged();
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
 private:

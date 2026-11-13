@@ -46,6 +46,7 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
   m_visibility.setParent(this);
   m_look.setParent(this);
   setFlag(ItemHasContents, true);
+  m_layers.registry.bindOutputs(*this);
   setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
   setFlag(ItemAcceptsInputMethod, true);
 
@@ -82,7 +83,6 @@ UnifiedGridRenderer::UnifiedGridRenderer(QQuickItem *parent)
   };
   setAcceptHoverEvents(false); // Reduce event capture
   connect(this, &QQuickItem::windowChanged, this, [this](QQuickWindow* w) { bindWindow(w); });
-
   init();
   m_qml.view.bind(*m_view, *m_heatmapPort);
   m_qml.debug.bind(m_layers, m_frames.published, getViewState());
