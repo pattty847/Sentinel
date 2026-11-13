@@ -187,6 +187,7 @@ Client::FlowStatus flowStatus(const Json& value) {
     const auto s = value.get<std::string>();
     if (s == "complete") return Client::FlowStatus::Complete;
     if (s == "partial") return Client::FlowStatus::Partial;
+    if (s == "unrecorded") return Client::FlowStatus::Unrecorded;
     if (s == "building") return Client::FlowStatus::Building;
     if (s == "refused") return Client::FlowStatus::Refused;
     throw std::runtime_error("invalid flow status");

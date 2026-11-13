@@ -10,6 +10,7 @@
 #include <mutex>
 #include <map>
 #include <memory>
+#include <set>
 #include <stop_token>
 #include <thread>
 
@@ -50,6 +51,10 @@ class FlowStore {
         std::function<void()> afterCatalogConstructForTest;
         std::function<void()> afterWakeForTest;
         std::function<void(std::stop_token)> afterInventoryFileForTest;
+        std::function<int64_t()> nowMs = [] {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+        };
     };
     struct PassResult {
         uint64_t built = 0, failed = 0;
@@ -57,7 +62,7 @@ class FlowStore {
     };
     struct Range {
         int64_t fromMs = 0, toMs = 0; // half-open, including known empty buckets
-        std::string status; // complete, partial, building
+        std::string status; // complete, partial, building, unrecorded
         sentinel::flow::FlowScales scales;
         uint32_t revision = 0; // FLD1 day generation, including empty store ranges
     };
@@ -66,7 +71,7 @@ class FlowStore {
         std::vector<uint32_t> revisions; // parallel to bars, from the FLD1 index
         std::vector<Range> ranges;
         int64_t sealedThroughMs = 0;
-        // True if any intersecting hour is unsealed, missing, stale or corrupt.
+        // True if any intersecting hour is still awaiting store coverage.
         bool building = false;
     };
     explicit FlowStore(Options options);
@@ -127,9 +132,18 @@ class FlowStore {
     std::map<std::string, int64_t> builtThrough_;
     std::map<std::string, int64_t> liveRetentionFloor_;
     std::map<std::string, std::map<std::filesystem::path, FileIdentity>> journalInventory_;
+    std::set<std::string> journalProductDirectories_; // indexMutex_; retain across inventory failures
     mutable std::mutex catalogMutex_;
     std::map<std::string, std::shared_ptr<sentinel::roller::JournalReader>> catalogs_;
     std::map<std::string, std::map<int64_t, std::filesystem::path>> hmcPaths_;
+    // Earliest segment open per UTC day. Missing symbol means inventory unknown.
+    // RAWL2 rotates on every receive-clock hour change, including regressions.
+    std::map<std::string, std::map<int64_t, int64_t>> sourceDays_; // indexMutex_
+    std::map<std::string, int64_t> sourceKnownBeforeDay_; // only days closed when inventoried
+    std::shared_ptr<sentinel::roller::JournalReader> catalogFor(const std::string &symbol,
+                                                             std::stop_token stop);
+    enum class SourceState { Unknown, Present, ReceiveTailOnly, Absent };
+    SourceState sourceState(const std::string &symbol, int64_t from, int64_t to) const;
     std::map<std::string, int64_t> firstHour_; // builder thread only
     std::map<std::pair<std::string, int64_t>, uint64_t> buildFailures_; // builder thread only
     std::stop_source stopSource_;
@@ -146,6 +160,7 @@ class FlowStore {
     void publishIndex(const std::string &symbol, int64_t day, const DayIndex &index);
     void refreshBuiltThrough(const std::string &symbol);
     void noteBuildFailure(const std::string &symbol, int64_t hour, const std::string &reason);
-    std::map<std::filesystem::path, FileIdentity> inventory(const std::string &symbol, std::stop_token stop) const;
+    std::filesystem::path journalDirectory(const std::string &symbol);
+    std::map<std::filesystem::path, FileIdentity> inventory(const std::string &symbol, std::stop_token stop);
 };
 } // namespace recording

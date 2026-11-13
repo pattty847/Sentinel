@@ -271,6 +271,38 @@ struct Page {
     Json metadata;
     std::vector<sentinel::flow::FlowBar> bars;
 };
+// A mixed recorded/unrecorded interval is partial; it must not prove
+// complete coverage merely because the absent part has a terminal answer.
+std::string rangeStatus(const Json& ranges) {
+    bool building = false, partial = false, unrecorded = false, complete = false;
+    for (const auto& range : ranges) {
+        const auto status = range.at("status").get<std::string>();
+        building |= status == "building";
+        partial |= status == "partial";
+        unrecorded |= status == "unrecorded";
+        complete |= status == "complete";
+    }
+    return building ? "building" : partial || (unrecorded && complete) ? "partial" :
+        unrecorded ? "unrecorded" : "complete";
+}
+void appendSourceGaps(Reply& source, const Reply& stored, const Reply& live, int64_t seam) {
+    for (const auto& range : stored.ranges) {
+        if (range.status != "unrecorded" && range.status != "partial") continue;
+        auto from = std::max(range.fromMs, seam);
+        const auto add = [&](int64_t to) {
+            if (from >= to) return;
+            auto gap = range;
+            gap.fromMs = from; gap.toMs = to;
+            source.ranges.push_back(std::move(gap));
+        };
+        for (const auto& held : live.ranges) {
+            if (held.toMs <= from || held.fromMs >= range.toMs) continue;
+            add(held.fromMs);
+            from = std::max(from, held.toMs);
+        }
+        add(range.toMs);
+    }
+}
 Page buildPage(const Request& q, const ServerDataModel::FlowHistorySnapshot& snapshot,
                int64_t sealedThroughMs, std::stop_token stop = {}) {
     Reply source;
@@ -283,6 +315,9 @@ Page buildPage(const Request& q, const ServerDataModel::FlowHistorySnapshot& sna
     } else {
         auto stored = snapshot.store ? snapshot.store->window(q.symbol, q.from, q.to) : Reply{};
         const auto seam = std::clamp(sealedThroughMs, q.from, q.to);
+        // Absence is independent of the built-through watermark: an empty
+        // store has seal zero. Preserve actual RAM coverage where it exists.
+        appendSourceGaps(source, stored, snapshot.data, seam);
         append(source, std::move(stored), q.from, seam);
         append(source, snapshot.data, seam, q.to);
     }
@@ -297,14 +332,13 @@ Page buildPage(const Request& q, const ServerDataModel::FlowHistorySnapshot& sna
     }
     auto h = header(q);
     std::vector<sentinel::flow::FlowBar> bars;
-    bool anyBuilding = false, anyPartial = false;
     for (auto start = q.from; start < q.to; start += q.tf) {
         const auto end = start + q.tf;
         // The currently forming bucket is complete through the snapshot's observed clock.
         const auto neededEnd = snapshot.observedThroughMs > start && snapshot.observedThroughMs < end ?
             snapshot.observedThroughMs : end;
         auto covered = start;
-        bool building = false, partial = false;
+        bool building = false, partial = false, unrecorded = false, recorded = false;
         sentinel::flow::FlowScales scales{};
         for (const auto& r : source.ranges) {
             if (r.toMs <= start || r.fromMs >= neededEnd) continue;
@@ -312,11 +346,14 @@ Page buildPage(const Request& q, const ServerDataModel::FlowHistorySnapshot& sna
             covered = std::max(covered, r.toMs);
             building |= r.status == "building";
             partial |= r.status == "partial";
+            unrecorded |= r.status == "unrecorded";
+            recorded |= r.status != "unrecorded";
             if (r.scales.priceScale) scales = r.scales;
         }
         building |= covered < neededEnd;
-        const std::string status = building ? "building" : partial ? "partial" : "complete";
-        anyBuilding |= building; anyPartial |= partial;
+        partial |= unrecorded && recorded;
+        const std::string status = building ? "building" : partial ? "partial" :
+            unrecorded ? "unrecorded" : "complete";
         h["ranges"].push_back({{"from_ms", start}, {"to_ms", end}, {"status", status},
             {"price_scale", scales.priceScale}, {"row_tick_units", scales.rowTickUnits}});
         auto it = buckets.find(start);
@@ -355,7 +392,7 @@ Page buildPage(const Request& q, const ServerDataModel::FlowHistorySnapshot& sna
                               {"source", storeSource ? "store" : "live"}});
         bars.push_back(std::move(bar));
     }
-    h["status"] = anyBuilding ? "building" : anyPartial ? "partial" : "complete";
+    h["status"] = rangeStatus(h["ranges"]);
     if (!bars.empty()) {
         h["price_scale"] = bars.front().priceScale;
         h["row_tick_units"] = std::llround(bars.front().nativeTick * bars.front().priceScale);
@@ -376,9 +413,6 @@ std::string build(const Request& q, const ServerDataModel::FlowHistorySnapshot& 
         auto part = q;
         part.from = from; part.to = to;
         auto page = buildPage(part, snapshot, sealedThroughMs, stop);
-        if (page.metadata["status"] == "building" ||
-            (page.metadata["status"] == "partial" && h["status"] == "complete"))
-            h["status"] = page.metadata["status"];
         for (auto& range : page.metadata["ranges"]) h["ranges"].push_back(std::move(range));
         for (auto& entry : page.metadata["bars"]) h["bars"].push_back(std::move(entry));
         for (auto& bar : page.bars) {
@@ -394,6 +428,7 @@ std::string build(const Request& q, const ServerDataModel::FlowHistorySnapshot& 
         }
         from = to;
     }
+    h["status"] = rangeStatus(h["ranges"]);
     return envelope(std::move(h), bars);
 }
 } // namespace flow_history
