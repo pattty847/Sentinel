@@ -17,15 +17,16 @@ struct ChartLayers {
     TpoLayer tpo{&cvd.presentation()};
     FlowFooterLayer flowFooter{cvd};
     LadderLayer ladder{&cvd.presentation()};
-    ChartTextLayer text{heatmap, ladder, footprintCells, cvd, flowFooter};
+    ChartTextLayer text{heatmap, ladder, footprintCells, vp, cvd, flowFooter};
     LayerRegistry registry;
     BookLadderFeed ladderFeed{ladder.mailbox()};
     FlowFeed flowFeed{footprintCells.mailbox()};
     CvdFeed cvdFeed{cvd.mailbox(), cvd.presentation()};
-    void bindFlowFeeds(ChartViewController& view, const PublishedFrame& frames, LayerVisibility& visibility, ChartTpoQml& tpoSettings) {
+    void bindFlowFeeds(ChartViewController& view, const PublishedFrame& frames, LayerVisibility& visibility, ChartTpoQml& tpoSettings, CandleBufferSource& candles) {
         cvd.bindAxes(text.axes.get());
         flowFeed.bind(view, frames, visibility, footprintCells.presentation());
         cvdFeed.bind(view, frames, visibility, tpoSettings);
+        text.bindCandles(view, candles, visibility);
     }
     void onFlowFrameChanged() { flowFeed.onFrameChanged(); cvdFeed.onFrameChanged(); }
     ChartLayers() { registerChartLayers(registry, *this); }

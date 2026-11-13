@@ -69,7 +69,7 @@ void UnifiedGridRenderer::init() {
     chart::bindLadder({*this, m_layers, m_visibility, *getViewState(), m_frames.published,
                        [this](double bid, double ask) { m_view->livePlacement().setLiveBookTop(bid, ask); }});
     connect(this, &UnifiedGridRenderer::rasterChanged, &m_layers.ladderFeed, &chart::BookLadderFeed::onFrameChanged);
-    m_layers.bindFlowFeeds(*m_view, m_frames.published, m_visibility, m_look.tpo);
+    m_layers.bindFlowFeeds(*m_view, m_frames.published, m_visibility, m_look.tpo, m_candleSource);
     connect(this, &UnifiedGridRenderer::rasterChanged, &m_layers.cvdFeed, [this] { m_layers.onFlowFrameChanged(); });
     m_feeds->startProcessing();
     // Bootstrap the GPU view from the service or live price.

@@ -177,6 +177,7 @@ TEST(HeatmapLayer, AfterRenderingWithoutHostCallbacksConsumesFrameRequest) {
 #include "chart/shell/ChartLookSettings.hpp"
 #include "mainwindow/ChartAgentPort.hpp"
 #include "render/heatmap/HeatmapSettingsStore.hpp"
+#include "config/AgentHostMode.hpp"
 #include <QSGOpacityNode>
 #include <QSGGeometryNode>
 #include <QTemporaryDir>
@@ -797,6 +798,200 @@ TEST(FootprintCells, RegistrySlotAndNoData) {
     EXPECT_FALSE(layers.footprintCells.drawing());
     EXPECT_EQ(layers.footprintCells.vertexCount(), 0);
 }
+TEST(FootprintEmptyState, CoverageDistinguishesLoadingRefusedAndProvenEmpty) {
+    FlowSeriesBuffer::Series series;
+    using State = chart::FlowSnapshot::WindowState;
+    using Status = SentinelStreamClient::FlowStatus;
+    auto frame = footprintFrame();
+    frame.viewportTimeStart = 0; frame.viewportTimeEnd = 2000;
+    frame.raster.drawnEndMs = 2000.25; // the raster extends into an unrequested bucket
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Loading);
+    series.coverage[0] = {0, 1000, Status::Complete};
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Loading);
+    series.coverage[1000] = {1000, 2000, Status::Building};
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Loading);
+    series.coverage[1000].status = Status::Refused;
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Unavailable);
+    series.coverage[1000].status = Status::Complete;
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Ready);
+    series.coverage.clear();
+    series.coverage[0] = {0, 3600000, Status::Complete};
+    series.coverage[1000] = {1000, 2000, Status::Partial};
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Loading);
+    series.coverage[1000].status = Status::Building;
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Loading);
+    series.coverage.erase(1000);
+    EXPECT_EQ(chart::FlowFeed::windowState(series, frame), State::Ready);
+}
+TEST(FootprintEmptyState, MessageRequiresProvenEmptyVisibleWindow) {
+    chart::FootprintCellsLayer layer;
+    layer.presentation().enabled = true;
+    auto frame = footprintChartFrame();
+    auto publish = [&](const FlowSeriesBuffer::Series& series, chart::FlowSnapshot::WindowState state) {
+        ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), series, footprintFrame()));
+        layer.mailbox().back().windowState = state;
+        layer.mailbox().post();
+        layer.sync(frame);
+    };
+    FlowSeriesBuffer::Series empty;
+    publish(empty, chart::FlowSnapshot::WindowState::Loading);
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty());
+    publish(empty, chart::FlowSnapshot::WindowState::Unavailable);
+    EXPECT_EQ(layer.emptyStateText(frame), "Footprint: trade data unavailable for this window");
+    publish(empty, chart::FlowSnapshot::WindowState::Ready);
+    EXPECT_EQ(layer.emptyStateText(frame), "Footprint: no trade data recorded for this window");
+    frame.context.raster.drawnStartMs += 1;
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty()) << "the feed has not classified the new window yet";
+    frame.context.raster.drawnStartMs -= 1;
+    publish(footprintSeries(), chart::FlowSnapshot::WindowState::Ready);
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty());
+    auto priceFrame = footprintFrame();
+    priceFrame.raster.drawnMinPrice = 200; priceFrame.raster.drawnMaxPrice = 210;
+    auto chartPriceFrame = frame; chartPriceFrame.context.raster = priceFrame.raster;
+    ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), priceFrame));
+    layer.mailbox().back().windowState = chart::FlowSnapshot::WindowState::Ready;
+    EXPECT_EQ(layer.mailbox().back().visibleBarCount, 1);
+    EXPECT_EQ(layer.mailbox().back().maxRowVolume, 0);
+    layer.mailbox().post(); layer.sync(chartPriceFrame);
+    EXPECT_TRUE(layer.emptyStateText(chartPriceFrame).isEmpty());
+    ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(0.6), footprintFrame()));
+    EXPECT_EQ(layer.mailbox().back().barCount, 0);
+    EXPECT_EQ(layer.mailbox().back().skippedBars, 1);
+    EXPECT_EQ(layer.mailbox().back().visibleBarCount, 1) << "invalid geometry still means recorded trade data";
+    layer.mailbox().back().windowState = chart::FlowSnapshot::WindowState::Ready;
+    layer.mailbox().post(); layer.sync(frame);
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty());
+    auto timeFrame = footprintFrame();
+    timeFrame.viewportTimeStart = 1000; timeFrame.viewportTimeEnd = 2000;
+    ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), timeFrame));
+    EXPECT_EQ(layer.mailbox().back().visibleBarCount, 0) << "drawn overscan is outside the visible window";
+    frame.context.overlays.footprint = false;
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty());
+}
+TEST(VolumeProfileEmptyState, LoadingEmptyAndVisibleDataHaveDistinctResults) {
+    chart::VolumeProfileLayer layer;
+    QSGNode root;
+    ChartTextRenderer text;
+    ChartTextAtlas atlas;
+    chart::LayerNodeContext context{nullptr, &root, text, atlas, false};
+    auto frame = footprintChartFrame();
+    frame.context.overlays.volumeProfile = true;
+    frame.context.mapping.viewMinPrice = 95;
+    frame.context.mapping.viewMaxPrice = 105;
+    layer.updateNodes(frame, context);
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty());
+    VolumeProfileState::Snapshot snap;
+    snap.sessionStartMs = 500; snap.sessionEndMs = 1500;
+    snap.minPrice = 95; snap.tickSize = 1; snap.gridHeight = 10;
+    layer.renderer.enqueue({}, snap);
+    layer.updateNodes(frame, context);
+    EXPECT_EQ(layer.emptyStateText(frame), "Volume profile: no trade data for this window");
+    layer.renderer.enqueue(std::vector<float>(10, 0), snap);
+    layer.updateNodes(frame, context);
+    EXPECT_EQ(layer.emptyStateText(frame), "Volume profile: no trade data for this window");
+    layer.renderer.enqueue(std::vector<float>(10, 1), snap);
+    layer.updateNodes(frame, context);
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty());
+    ASSERT_EQ(root.childCount(), 3);
+    auto* bars = static_cast<QSGGeometryNode*>(root.firstChild()->nextSibling())->geometry();
+    EXPECT_NE(bars->indexDataAsUShort()[0], bars->indexDataAsUShort()[1]);
+    frame.context.raster.drawnStartMs = 3000; frame.context.raster.drawnEndMs = 5000;
+    layer.updateNodes(frame, context);
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty()) << "the current-session bars still draw on a past window";
+    EXPECT_NE(bars->indexDataAsUShort()[0], bars->indexDataAsUShort()[1]);
+    frame.context.mapping.viewMinPrice = 200; frame.context.mapping.viewMaxPrice = 210;
+    layer.updateNodes(frame, context);
+    EXPECT_EQ(layer.emptyStateText(frame), "Volume profile: current session only");
+    layer.renderer.enqueue(std::vector<float>(10, 0), snap);
+    layer.updateNodes(frame, context);
+    EXPECT_EQ(layer.emptyStateText(frame), "Volume profile: current session only");
+    layer.renderer.enqueue(std::vector<float>(10, 1), snap);
+    frame.context.raster.drawnStartMs = 0; frame.context.raster.drawnEndMs = 2000;
+    layer.updateNodes(frame, context);
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty()) << "profile volume exists outside this price range";
+    frame.context.overlays.volumeProfile = false;
+    EXPECT_TRUE(layer.emptyStateText(frame).isEmpty());
+}
+TEST(ChartEmptyStateText, EmptyLabelsUseMsdfAndAvoidVisibleCandles) {
+    QTemporaryDir cache;
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
+    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
+    chart::ChartLayers layers;
+    auto& atlas = layers.text.atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 64;
+    params.charset = " 0123456789.+-,:/<>$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    ASSERT_TRUE(atlas.build(params));
+    auto frame = footprintChartFrame();
+    frame.context.surfaceBounds = {0, 0, 800, 400};
+    frame.context.itemBounds = frame.context.surfaceBounds;
+    layers.footprintCells.presentation().enabled = true;
+    FlowSeriesBuffer::Series empty;
+    ASSERT_TRUE(chart::FlowFeed::bin(layers.footprintCells.mailbox().back(), empty, footprintFrame()));
+    layers.footprintCells.mailbox().back().windowState = chart::FlowSnapshot::WindowState::Ready;
+    layers.footprintCells.mailbox().post();
+    QSGNode root;
+    chart::LayerNodeContext context{nullptr, &root, layers.text.renderer, atlas, true};
+    for (double dpr : {1.0, 2.0}) {
+        frame.context.surfaceDpr = dpr;
+        frame.context.raster.dpr = dpr;
+        layers.footprintCells.sync(frame);
+        layers.text.updateNodes(frame, context);
+        const auto& glyphs = layers.text.emptyGlyphs();
+        ASSERT_GT(glyphs.size(), 30u);
+        EXPECT_EQ(glyphs.size(), size_t(layers.text.renderer.submittedGlyphs()));
+        double left = 1e9, right = -1e9, top = 1e9, bottom = -1e9;
+        for (const auto& glyph : glyphs) {
+            left = std::min(left, glyph.rect.left()); right = std::max(right, glyph.rect.right());
+            top = std::min(top, glyph.rect.top()); bottom = std::max(bottom, glyph.rect.bottom());
+            EXPECT_EQ(glyph.color, QColor(143, 163, 184));
+        }
+        EXPECT_NEAR((left + right) * 0.5, frame.context.surfaceBounds.center().x(), 2.0);
+        EXPECT_NEAR((top + bottom) * 0.5, frame.context.surfaceBounds.center().y(), 2.0);
+    }
+    chart::CandleBar candle;
+    candle.timeStartMs = 0; candle.timeEndMs = 2000;
+    candle.high = 95; candle.low = 92;
+    frame.context.surfaceDpr = 1; frame.context.raster.dpr = 1;
+    frame.context.raster.colPxF = 400;
+    layers.text.setCandleEnvelope({candle}, 2000);
+    layers.text.sync(frame);
+    layers.text.updateNodes(frame, context);
+    ASSERT_FALSE(layers.text.emptyGlyphs().empty());
+    double labelBottom = -1e9;
+    for (const auto& glyph : layers.text.emptyGlyphs()) labelBottom = std::max(labelBottom, glyph.rect.bottom());
+    EXPECT_LT(labelBottom, 177.0) << "the centre text box crosses this candle's wick";
+    layers.footprintCells.mailbox().back().windowState = chart::FlowSnapshot::WindowState::Loading;
+    layers.footprintCells.mailbox().post();
+    layers.footprintCells.sync(frame);
+    layers.text.updateNodes(frame, context);
+    EXPECT_TRUE(layers.text.emptyGlyphs().empty());
+
+    frame.context.overlays.footprint = false;
+    frame.context.overlays.volumeProfile = true;
+    frame.context.mapping.viewMinPrice = 95;
+    frame.context.mapping.viewMaxPrice = 105;
+    VolumeProfileState::Snapshot snap;
+    snap.sessionStartMs = 500; snap.sessionEndMs = 1500;
+    snap.minPrice = 95; snap.tickSize = 1; snap.gridHeight = 10;
+    std::unique_ptr<QSGNode> vpRoot(layers.vp.createContainer());
+    chart::LayerNodeContext vpContext{nullptr, vpRoot.get(), layers.text.renderer, atlas, true};
+    layers.vp.renderer.enqueue(std::vector<float>(10, 0), snap);
+    for (double dpr : {1.0, 2.0}) {
+        frame.context.surfaceDpr = dpr;
+        frame.context.raster.dpr = dpr;
+        layers.vp.updateNodes(frame, vpContext);
+        layers.text.updateNodes(frame, context);
+        EXPECT_GT(layers.text.emptyGlyphs().size(), 30u);
+        EXPECT_EQ(layers.text.emptyGlyphs().size(), size_t(layers.text.renderer.submittedGlyphs()));
+    }
+    layers.vp.renderer.enqueue(std::vector<float>(10, 1), snap);
+    layers.vp.updateNodes(frame, vpContext);
+    layers.text.updateNodes(frame, context);
+    EXPECT_TRUE(layers.text.emptyGlyphs().empty());
+}
 TEST(FootprintCells, TwoFramesAfterDataAndChangedSnapshotAllocateNothing) {
     chart::FootprintCellsLayer layer;
     layer.presentation().enabled = true;
@@ -866,7 +1061,6 @@ TEST(FootprintCells, FootprintHasNoSourceSettingAndStaleSavedKeyIsIgnored) {
 }
 } // namespace
 
-#include "config/AgentHostMode.hpp"
 TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     QTemporaryDir cache;
     QString error;

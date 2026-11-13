@@ -2,6 +2,8 @@
 #include "chart/layers/ChartLayers.hpp"
 #include "chart/core/ChartViewController.hpp"
 #include "chart/core/PublishedFrame.hpp"
+#include "chart/shell/CandleBufferSource.hpp"
+#include "chart/shell/LayerVisibility.hpp"
 #include "heatmap/HeatmapChartSettings.hpp"
 #include "chart/shell/TpoStyleStore.hpp"
 #include <QTemporaryDir>
@@ -39,6 +41,32 @@ struct Ports final : chart::IChartEnvironment, chart::ITickOracle, chart::IHeatm
     bool setAutoPriceTick(std::optional<int64_t>) override { return false; }
     void setView(const heatmap::gpu::ViewWindow&, bool) override {}
 };
+
+TEST(ChartTextLayer, CandleCaptureFollowsFootprintAndVolumeProfileVisibility) {
+    Ports ports;
+    chart::PublishedFrame published;
+    chart::ChartViewController view(ports, ports, ports, published);
+    chart::CandleBufferSource candles;
+    chart::LayerVisibility visibility;
+    chart::ChartLayers layers;
+    layers.text.bindCandles(view, candles, visibility);
+    EXPECT_EQ(layers.text.candleRefreshCount(), 0u);
+    QSignalSpy pans(view.viewPtr(), &GridViewState::panVisualOffsetChanged);
+    view.viewPtr()->setViewport(1000, 2000, 95, 105);
+    view.viewPtr()->handlePanStart({20, 20});
+    view.viewPtr()->handlePanMove({30, 20});
+    EXPECT_GT(pans.count(), 0);
+    EXPECT_EQ(layers.text.candleRefreshCount(), 0u);
+    visibility.setFootprintEnabled(true);
+    EXPECT_EQ(layers.text.candleRefreshCount(), 1u);
+    visibility.setVolumeProfileEnabled(true);
+    EXPECT_EQ(layers.text.candleRefreshCount(), 1u) << "switching between active overlays is not a new capture";
+    visibility.setVolumeProfileEnabled(false);
+    view.viewPtr()->setViewport(2000, 3000, 95, 105);
+    EXPECT_EQ(layers.text.candleRefreshCount(), 1u);
+    visibility.setVolumeProfileEnabled(true);
+    EXPECT_EQ(layers.text.candleRefreshCount(), 2u);
+}
 
 TEST(ChartLookSettings, TpoConfigAndStyleKeepNoticeOrder) {
     chart::ChartLayers layers;

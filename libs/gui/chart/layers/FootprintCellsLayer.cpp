@@ -58,6 +58,21 @@ void FootprintCellsLayer::sync(const ChartFrame& frame) {
     drawing_ = frame.context.overlays.footprint && stage_ != FootprintStage::Hidden && data.valid &&
         data.cellCount > 0 && data.tick == cam.tick && data.timeframeMs == frame.context.time.activeTimeframeMs;
 }
+QString FootprintCellsLayer::emptyStateText(const ChartFrame& frame) const {
+    const auto& cam = frame.context.raster;
+    const auto& data = *current_;
+    if (!frame.context.overlays.footprint || stage_ == FootprintStage::Hidden || !data.valid ||
+        data.tick != cam.tick || data.timeframeMs != frame.context.time.activeTimeframeMs)
+        return {};
+    if (data.windowFromMs != cam.drawnStartMs || data.windowToMs != cam.drawnEndMs ||
+        data.windowLow != cam.drawnMinPrice || data.windowHigh != cam.drawnMaxPrice ||
+        data.visibleBarCount > 0) return {};
+    if (data.windowState == FlowSnapshot::WindowState::Unavailable)
+        return QStringLiteral("Footprint: trade data unavailable for this window");
+    if (data.windowState == FlowSnapshot::WindowState::Ready)
+        return QStringLiteral("Footprint: no trade data recorded for this window");
+    return {};
+}
 QRectF FootprintCellsLayer::cellRect(const ChartFrame& frame, const FlowColumn& bar, const FlowCell& cell) const {
     const auto& f = frame.context;
     const auto& cam = f.raster;
