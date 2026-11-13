@@ -41,6 +41,7 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include "render/TradeBubbleOverlayItem.hpp"
+#include "chart/layers/ChartStack.hpp"
 #include <QFile>
 #include <QQuickView>
 #include <QQuickWindow>
@@ -5489,13 +5490,13 @@ TEST(UgrInput, EveryLayerMixHasFieldsCandlesProfilesBubblesThenText) {
             settings.tradesAboveCandles = above;
             chart->setHeatmapChartSettings(settings);
             EXPECT_EQ(candles->z(), candleDepth);
-            EXPECT_GT(candles->z(), 0); // the parent's field nodes draw first
+            EXPECT_GT(candles->z(), chart::depth(chart::ChartDepth::Fields)); // the parent's field nodes draw first
             EXPECT_LT(candles->z(), profiles->z());
             EXPECT_LT(profiles->z(), text->z());
             EXPECT_LT(bubbles->z(), text->z());
             if (above) EXPECT_GT(bubbles->z(), profiles->z());
             else {
-                EXPECT_GT(bubbles->z(), 0);
+                EXPECT_GT(bubbles->z(), chart::depth(chart::ChartDepth::Fields));
                 EXPECT_LT(bubbles->z(), candles->z());
             }
         }

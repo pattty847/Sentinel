@@ -18,6 +18,7 @@
 #include "lab/RhiBackend.hpp"
 #include "marketdata/model/TradeData.h"
 #include "render/CandlestickOverlayItem.hpp"
+#include "chart/layers/ChartStack.hpp"
 #include "render/DataProcessor.hpp"
 #include "render/TradeBubbleOverlayItem.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
@@ -174,14 +175,14 @@ struct Harness {
         candles->setCandleBuffer(&buffer);
         candles->setSymbol("BTC-USD");
         candles->setTimeframeMs(60000);
-        candles->setZ(2);
+        candles->setZ(chart::depth(chart::ChartDepth::Candles));
     }
     void addBubbles() {
         bubbles = new TradeBubbleOverlayItem; // parented after construction, as QML does: the item connects on windowChanged
         bubbles->setParentItem(scene.window()->contentItem());
         bubbles->setSize(ugr->size());
         bubbles->setRenderer(ugr);
-        bubbles->setZ(2.5);
+        bubbles->setZ(chart::depth(chart::ChartDepth::BubblesAbove));
         // QQuickRenderControl::sync() does not emit afterSynchronizing (the window render loops do), so the
         // bubble node would never take the frame's data: deliver it between sync and render, as a loop would.
         QObject::connect(scene.window(), &QQuickWindow::beforeRendering, scene.window(), [this] {
