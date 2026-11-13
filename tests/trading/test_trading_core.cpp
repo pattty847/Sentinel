@@ -235,7 +235,10 @@ TEST(TradingEngineTest, RejectsNonFiniteAttachedRiskPrices) {
             risk.takeProfitPrice = takeProfit ? bad : 0.0;
             risk.hasStopLoss = !takeProfit;
             risk.stopLossPrice = takeProfit ? 0.0 : bad;
-            expectNoUpdates(engine.onCommand(risk));
+            const auto result = engine.onCommand(risk);
+            EXPECT_EQ(result.rejectReason, takeProfit ? "invalid_take_profit_price" : "invalid_stop_loss_price");
+            expectNoUpdates(result);
+            EXPECT_TRUE(engine.getAllAttachedRisk().empty());
             const auto tick = engine.onTick("BTC-USD", 105.0, 1234);
             EXPECT_TRUE(tick.orderUpdates.empty());
             EXPECT_TRUE(tick.riskOrderUpdates.empty());
@@ -243,6 +246,62 @@ TEST(TradingEngineTest, RejectsNonFiniteAttachedRiskPrices) {
             ASSERT_TRUE(position.has_value());
             EXPECT_DOUBLE_EQ(position->netQty, 1.0);
         }
+    }
+}
+
+TEST(TradingEngineTest, RejectsNonPositiveAttachedRiskPricesOnEitherSide) {
+    for (const bool isLong : {true, false}) {
+        trading::TradingEngine engine([](const std::string&) { return 100.0; }, 0.0);
+        auto entry = marketBuy(1.0);
+        if (!isLong) entry.side = trading::OrderSide::Sell;
+        engine.onCommand(entry);
+
+        for (const bool takeProfit : {true, false}) {
+            for (const double bad : {0.0, -1.0}) {
+                const auto result = engine.onCommand(attachedRisk(takeProfit, bad));
+                EXPECT_EQ(result.rejectReason,
+                          takeProfit ? "invalid_take_profit_price" : "invalid_stop_loss_price")
+                    << "isLong=" << isLong << " bad=" << bad;
+                expectNoUpdates(result);
+                EXPECT_TRUE(engine.getAllAttachedRisk().empty());
+            }
+        }
+    }
+}
+
+TEST(TradingEngineTest, AcceptsValidAttachedRiskAndUnsetLegs) {
+    for (const bool isLong : {true, false}) {
+        trading::TradingEngine engine([](const std::string&) { return 100.0; }, 0.0);
+        auto entry = marketBuy(1.0);
+        if (!isLong) entry.side = trading::OrderSide::Sell;
+        engine.onCommand(entry);
+
+        auto risk = attachedRisk(true, isLong ? 110.0 : 90.0);
+        risk.hasStopLoss = true;
+        risk.stopLossPrice = isLong ? 90.0 : 110.0;
+        const auto attached = engine.onCommand(risk);
+        EXPECT_TRUE(attached.rejectReason.empty());
+        ASSERT_EQ(attached.riskOrderUpdates.size(), 1u);
+        EXPECT_TRUE(attached.riskOrderUpdates[0].hasTakeProfit);
+        EXPECT_TRUE(attached.riskOrderUpdates[0].hasStopLoss);
+
+        trading::TradeCommand unset;
+        unset.action = trading::TradeAction::SetAttachedRisk;
+        unset.symbol = "BTC-USD";
+        const auto cleared = engine.onCommand(unset);
+        EXPECT_TRUE(cleared.rejectReason.empty());
+        ASSERT_EQ(cleared.riskOrderUpdates.size(), 1u);
+        EXPECT_FALSE(cleared.riskOrderUpdates[0].hasTakeProfit);
+        EXPECT_FALSE(cleared.riskOrderUpdates[0].hasStopLoss);
+        EXPECT_TRUE(engine.getAllAttachedRisk().empty());
+
+        risk.hasStopLoss = false;
+        risk.stopLossPrice = -1.0; // A finite value for an unset leg remains ignored.
+        const auto onlyTakeProfit = engine.onCommand(risk);
+        EXPECT_TRUE(onlyTakeProfit.rejectReason.empty());
+        ASSERT_EQ(onlyTakeProfit.riskOrderUpdates.size(), 1u);
+        EXPECT_TRUE(onlyTakeProfit.riskOrderUpdates[0].hasTakeProfit);
+        EXPECT_FALSE(onlyTakeProfit.riskOrderUpdates[0].hasStopLoss);
     }
 }
 

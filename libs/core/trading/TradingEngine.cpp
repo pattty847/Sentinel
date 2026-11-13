@@ -270,8 +270,10 @@ PnlSnapshot TradingEngine::buildSnapshot(const std::string& symbol, double markP
 }
 
 TradingResult TradingEngine::onCommand(const TradeCommand& command) {
+    const bool isAttachedRisk = command.action == TradeAction::SetAttachedRisk;
     if (!std::isfinite(command.qty) || !std::isfinite(command.price) ||
-        !std::isfinite(command.takeProfitPrice) || !std::isfinite(command.stopLossPrice)) {
+        ((!isAttachedRisk || !command.hasTakeProfit) && !std::isfinite(command.takeProfitPrice)) ||
+        ((!isAttachedRisk || !command.hasStopLoss) && !std::isfinite(command.stopLossPrice))) {
         return rejected("non_finite_field");
     }
     switch (command.action) {
@@ -408,6 +410,12 @@ TradingResult TradingEngine::handleFlatten(const TradeCommand& command) {
 
 TradingResult TradingEngine::handleSetAttachedRisk(const TradeCommand& command) {
     TradingResult out;
+    if (command.hasTakeProfit && (!std::isfinite(command.takeProfitPrice) || command.takeProfitPrice <= 0.0)) {
+        return rejected("invalid_take_profit_price");
+    }
+    if (command.hasStopLoss && (!std::isfinite(command.stopLossPrice) || command.stopLossPrice <= 0.0)) {
+        return rejected("invalid_stop_loss_price");
+    }
     if (!command.algoId.empty()) {
         return rejected("algo_attached_risk_unsupported");
     }
@@ -480,17 +488,9 @@ TradingResult TradingEngine::handleTriggeredRiskExit(const std::string& symbol,
         return out;
     }
     const OrderSide exitSide = isLong ? OrderSide::Sell : OrderSide::Buy;
-    bool exitAtTakeProfit = tpTriggered;
-    double fillPrice = tpTriggered
+    const double fillPrice = tpTriggered
         ? risk.takeProfitPrice
         : m_execution.fillPrice(lastTradePrice, exitSide);
-    if ((!std::isfinite(fillPrice) || fillPrice <= 0.0) && slTriggered && tpTriggered) {
-        const double stopFillPrice = m_execution.fillPrice(lastTradePrice, exitSide);
-        if (std::isfinite(stopFillPrice) && stopFillPrice > 0.0) {
-            exitAtTakeProfit = false;
-            fillPrice = stopFillPrice;
-        }
-    }
     if (!std::isfinite(fillPrice) || fillPrice <= 0.0) {
         if (m_rejectedRiskSymbols.insert(symbol).second) {
             sLog_Warning("paper risk exit rejected: symbol=" << symbol << " trigger="
@@ -510,7 +510,7 @@ TradingResult TradingEngine::handleTriggeredRiskExit(const std::string& symbol,
     exitOrder.qty = std::abs(position.netQty);
     exitOrder.algoId.clear();
 
-    if (exitAtTakeProfit) {
+    if (tpTriggered) {
         exitOrder.orderType = OrderType::Limit;
         exitOrder.limitPrice = risk.takeProfitPrice;
     } else {
