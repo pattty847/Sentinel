@@ -7,6 +7,7 @@
 #include "UnifiedGridRenderer.h"
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/CandlePixelGeometry.hpp"
+#include "chart/core/FootprintLod.hpp"
 #include "render/TpoOverlayRenderer.hpp"
 #include "mainwindow/ChartAgentPort.hpp"
 #include "render/VolumeProfileRenderer.hpp"
@@ -516,12 +517,12 @@ TEST(CandleStyleTest, PhysicalWicksSnapAndDojiIsOnePixel) {
     }
 }
 
-TEST(CandleStyleTest, BodyUsesCappedWidthAndMinimumHeight) {
+TEST(CandleStyleTest, BodyUsesFractionAndCapWithMinimumHeight) {
     struct WidthCase { int columns, widthDpr1, widthDpr2; };
     for (double dpr : {1.0, 2.0}) {
         for (const auto [columns, widthDpr1, widthDpr2] : {
                 WidthCase{1, 1, 1}, {2, 2, 2}, {3, 1, 1}, {4, 2, 2},
-                {10, 8, 8}, {11, 9, 9}, {12, 10, 10}, {15, 13, 13}, {32, 13, 26}, {60, 13, 26}}) {
+                {10, 8, 8}, {11, 9, 9}, {12, 10, 10}, {15, 13, 13}, {32, 27, 27}, {60, 51, 51}}) {
             SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
             const int width = dpr == 1 ? widthDpr1 : widthDpr2;
             const int inset = (columns - width) / 2;
@@ -545,6 +546,58 @@ TEST(CandleStyleTest, BodyUsesCappedWidthAndMinimumHeight) {
             EXPECT_FLOAT_EQ(doji.y.hi * dpr, 21);
         }
     }
+}
+
+TEST(CandleStyleTest, WideBodiesScaleAndSmallRestWidthsStayUnchanged) {
+    for (double dpr : {1.0, 2.0}) {
+        for (int columns = 1; columns <= 14; ++columns) {
+            const int oldWidth = std::max(1, columns - (columns >= 3 ? 2 : 0));
+            const auto b = candle_pixels::body(0, columns / dpr, 10, 20, dpr);
+            EXPECT_NEAR((b.x.hi - b.x.lo) * dpr, oldWidth, 1e-5) << columns;
+        }
+    }
+    const auto atHundred = candle_pixels::body(0, 100, 10, 20, 1);
+    const auto atSixty = candle_pixels::body(0, 60, 10, 20, 1);
+    const auto retina = candle_pixels::body(0, 100, 10, 20, 2);
+    EXPECT_FLOAT_EQ(atHundred.x.hi - atHundred.x.lo, 71);
+    EXPECT_FLOAT_EQ(atSixty.x.hi - atSixty.x.lo, 51);
+    EXPECT_FLOAT_EQ((retina.x.hi - retina.x.lo) * 2, 142);
+    const auto narrow = candle_pixels::body(0, 100, 10, 20, 1, true, true, 0.3, 120);
+    EXPECT_FLOAT_EQ(narrow.x.hi - narrow.x.lo, 30);
+    const auto spine = candle_pixels::footprintSpine(10);
+    EXPECT_FLOAT_EQ(spine.hi - spine.lo, 6);
+    EXPECT_FLOAT_EQ(spine.lo, 12);
+}
+
+TEST(CandleStyleTest, BodySettingsApplyAtSmallColumnsWithoutZoomInShrinkage) {
+    for (double dpr : {1.0, 2.0}) {
+        for (double fraction : {0.3, 0.5, 0.85, 1.0}) {
+            for (int maxBody : {5, 71, 120}) {
+                double previousSnapped = 0, previousFree = 0;
+                // C2 -> C3 intentionally narrows under the preserved one-pixel-per-side gap rule.
+                for (int columns = 3; columns <= 120; ++columns) {
+                    const auto snapped = candle_pixels::body(0, columns / dpr, 10, 20, dpr,
+                                                               true, true, fraction, maxBody);
+                    const auto free = candle_pixels::body(0, columns / dpr, 10, 20, dpr,
+                                                            false, true, fraction, maxBody);
+                    const double snappedWidth = (snapped.x.hi - snapped.x.lo) * dpr;
+                    const double freeWidth = (free.x.hi - free.x.lo) * dpr;
+                    SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr
+                                                      << " f=" << fraction << " max=" << maxBody);
+                    EXPECT_GE(snappedWidth + 1e-4, previousSnapped);
+                    EXPECT_GE(freeWidth + 1e-4, previousFree);
+                    previousSnapped = snappedWidth;
+                    previousFree = freeWidth;
+                }
+            }
+        }
+    }
+    const auto capped = candle_pixels::body(0, 10, 10, 20, 1, true, true, 0.85, 5);
+    const auto cappedFree = candle_pixels::body(0, 10, 10, 20, 1, false, true, 0.85, 5);
+    EXPECT_FLOAT_EQ(capped.x.hi - capped.x.lo, 5);
+    EXPECT_FLOAT_EQ(cappedFree.x.hi - cappedFree.x.lo, 5);
+    const auto fractional = candle_pixels::body(0, 10, 10, 20, 1, true, true, 0.3, 120);
+    EXPECT_FLOAT_EQ(fractional.x.hi - fractional.x.lo, 3);
 }
 
 // Exercise the actual overlay vertex submission without a QRhi/Metal device.
@@ -617,7 +670,10 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
             ASSERT_EQ(rest.colPx, columns);
             const auto* v = submit(rest);
             ASSERT_NE(v, nullptr);
-            const double width = std::max(1.0, std::min(columns - (columns >= 3 ? 2.0 : 0.0), 13 * dpr));
+            const double gap = columns >= 3 ? 1.0 : 0.0;
+            const double width = std::max(1.0, std::min({columns - 2 * gap,
+                double(std::lround(columns * candle_pixels::kCandleBodyFraction)),
+                double(std::lround(candle_pixels::kCandleMaxBodyLogicalPx * dpr))}));
             const double inset = std::floor((columns - width) * 0.5);
             EXPECT_NEAR(v[0].x * dpr, rest.xDev(time) + inset, 1e-5);
             EXPECT_NEAR(v[2].x * dpr, rest.xDev(time) + inset + width, 1e-5);
@@ -631,6 +687,25 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
             EXPECT_FLOAT_EQ(wick[2].x, expectedWick.hi);
             EXPECT_NEAR((wick[0].x + wick[2].x) * dpr * 0.5 - bodyCentre * dpr,
                         int(width) % 2 == 0 ? 0.5 : 0.0, 1e-5);
+            if (columns == 60 && dpr == 1) {
+                auto* footprint = provider.footprintPresentation();
+                footprint->enabled = true;
+                footprint->spineCandles = true;
+                footprint->coverage.tick = rest.tick;
+                footprint->coverage.timeframeMs = rest.tfMs;
+                footprint->coverage.bars[0] = {double(time), double(time + tf), 98, 111};
+                footprint->coverage.barCount = 1;
+                ++footprint->coverage.revision;
+                const auto* spine = submit(rest);
+                ASSERT_NE(spine, nullptr);
+                EXPECT_NEAR(spine[0].x, rest.xDev(time) + 2, 1e-5);
+                EXPECT_NEAR(spine[2].x - spine[0].x, 6, 1e-5);
+                footprint->enabled = false;
+                footprint->coverage.barCount = 0;
+                ++footprint->coverage.revision;
+                v = submit(rest);
+                ASSERT_NE(v, nullptr);
+            }
             auto fromInput = in;
             fromInput.timeEnd = fromInput.timeStart + std::llround(640 * dpr * tf / (columns + 3));
             fromInput.maxPrice = 117.3;
@@ -641,7 +716,10 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
             v = submit(mid);
             ASSERT_NE(v, nullptr);
             const double gapF = std::clamp(mid.colPxF - 2.0, 0.0, 1.0);
-            const double glideWidth = std::max(1.0, std::min(mid.colPxF - 2.0 * gapF, 13 * dpr));
+            const double c = mid.colPxF;
+            const double glideWidth = std::max(1.0, std::min({c - 2.0 * gapF,
+                std::max(candle_pixels::kCandleBodyFraction * c, std::min(c, 2.0)),
+                candle_pixels::kCandleMaxBodyLogicalPx * dpr}));
             EXPECT_NEAR(v[0].x * dpr, mid.xDev(time + tf * 0.5) - glideWidth * 0.5, 1e-4);
             EXPECT_NEAR(v[2].x * dpr, mid.xDev(time + tf * 0.5) + glideWidth * 0.5, 1e-4);
             wick = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
@@ -673,14 +751,18 @@ TEST(CandleStyleTest, BodyWidthIsContinuousDuringTimeGlide) {
             return candle_pixels::body(left / dpr, (left + c) / dpr, 17.2 / dpr, 23.1 / dpr, dpr, false, true);
         };
         const auto atTwo = sample(2.0);
-        const auto restTwo = candle_pixels::body(left / dpr, (left + 2.0) / dpr, 17.2 / dpr, 23.1 / dpr, dpr, true, true);
-        EXPECT_NEAR((atTwo.x.hi - atTwo.x.lo) * dpr, (restTwo.x.hi - restTwo.x.lo) * dpr, 1e-5)
+        const auto restTwo = candle_pixels::body(left / dpr, (left + 2.0) / dpr,
+                                                 17.2 / dpr, 23.1 / dpr, dpr, true, true);
+        EXPECT_NEAR((atTwo.x.hi - atTwo.x.lo) * dpr,
+                    (restTwo.x.hi - restTwo.x.lo) * dpr, 1e-5)
             << "C2 has no gap in either the continuous or rest frame";
         for (double columns : {1.0, 2.0, 2.001, 2.7, 3.0, 3.01, 14.7, 15.0, 15.01, 27.7, 28.0, 28.01, 32.37, 60.2}) {
             SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr);
             const auto b = sample(columns);
             const double gapF = std::clamp(columns - 2.0, 0.0, 1.0);
-            const double width = std::max(1.0, std::min(columns - 2.0 * gapF, 13 * dpr));
+            const double width = std::max(1.0, std::min({columns - 2.0 * gapF,
+                std::max(columns * candle_pixels::kCandleBodyFraction, std::min(columns, 2.0)),
+                candle_pixels::kCandleMaxBodyLogicalPx * dpr}));
             EXPECT_NEAR(b.x.lo * dpr, left + (columns - width) * 0.5, 1e-5);
             EXPECT_NEAR(b.x.hi * dpr, left + (columns + width) * 0.5, 1e-5);
             EXPECT_FLOAT_EQ(b.y.lo * dpr, 17);
@@ -688,6 +770,25 @@ TEST(CandleStyleTest, BodyWidthIsContinuousDuringTimeGlide) {
             const auto next = sample(columns + 0.001);
             EXPECT_LE(std::abs(next.x.lo - b.x.lo) * dpr, 0.00101);
             EXPECT_LE(std::abs(next.x.hi - b.x.hi) * dpr, 0.00101);
+        }
+    }
+}
+
+TEST(CandleStyleTest, SmallColumnWidthsMatchWhenTimeAxisLands) {
+    for (double dpr : {1.0, 2.0}) {
+        for (double fraction : {0.85, 0.3}) {
+            for (int columns : {1, 2, 3}) {
+                SCOPED_TRACE(::testing::Message() << "C=" << columns << " dpr=" << dpr
+                                                  << " f=" << fraction);
+                const double left = 11.31 / dpr;
+                const double right = (11.31 + columns) / dpr;
+                const auto free = candle_pixels::body(left, right, 10, 20, dpr,
+                                                       false, true, fraction, 71);
+                const auto rest = candle_pixels::body(left, right, 10, 20, dpr,
+                                                       true, true, fraction, 71);
+                EXPECT_NEAR((free.x.hi - free.x.lo) * dpr,
+                            (rest.x.hi - rest.x.lo) * dpr, 1e-5);
+            }
         }
     }
 }
@@ -1122,14 +1223,19 @@ TEST(CandleStyleTest, SettingsValidateAndRoundTripPerChart) {
     EXPECT_EQ(defaults.candleWickColor, "auto");
     EXPECT_EQ(defaults.candleBodyOpacity, 1);
     EXPECT_EQ(defaults.candleWickWidth, 1);
+    EXPECT_DOUBLE_EQ(defaults.candleBodyFraction, 0.85);
+    EXPECT_EQ(defaults.candleMaxBodyPx, 71);
     ASSERT_TRUE(main.apply({{"candleUpColor", "#123ABC"}, {"candleDownColor", "#E45678"},
                             {"candleWickColor", "#F0F0F0"}, {"candleBodyOpacity", 0.65},
-                            {"candleWickWidth", 3}}).isEmpty());
+                            {"candleWickWidth", 3}, {"candleBodyFraction", 0.6},
+                            {"candleMaxBodyPx", 80}}).isEmpty());
     EXPECT_EQ(main.settings().candleUpColor, "#123ABC");
     EXPECT_EQ(main.settings().candleDownColor, "#E45678");
     EXPECT_EQ(main.settings().candleWickColor, "#F0F0F0");
     EXPECT_DOUBLE_EQ(main.settings().candleBodyOpacity, 0.65);
     EXPECT_EQ(main.settings().candleWickWidth, 3);
+    EXPECT_DOUBLE_EQ(main.settings().candleBodyFraction, 0.6);
+    EXPECT_EQ(main.settings().candleMaxBodyPx, 80);
     auto savedMain = main.settings();
     savedMain.sensitivityReady = true;
     auto savedOther = other.settings();
@@ -1141,12 +1247,19 @@ TEST(CandleStyleTest, SettingsValidateAndRoundTripPerChart) {
                                   QJsonObject{{"candleWickColor", "#12"}},
                                   QJsonObject{{"candleWickWidth", 0}},
                                   QJsonObject{{"candleWickWidth", 1.5}},
+                                  QJsonObject{{"candleMaxBodyPx", 1.5}},
                                   QJsonObject{{"candleBodyOpacity", "opaque"}}}) {
         EXPECT_FALSE(main.apply(bad).isEmpty());
         EXPECT_EQ(main.settings(), before);
     }
     ASSERT_TRUE(main.apply({{"candleWickColor", "auto"}}).isEmpty());
     EXPECT_EQ(t.reload().candleWickColor, "auto");
+    ASSERT_TRUE(main.apply({{"candleBodyFraction", 2.0}, {"candleMaxBodyPx", 999}}).isEmpty());
+    EXPECT_DOUBLE_EQ(t.reload().candleBodyFraction, 1.0);
+    EXPECT_EQ(t.reload().candleMaxBodyPx, 120);
+    ASSERT_TRUE(main.apply({{"candleBodyFraction", 0.1}, {"candleMaxBodyPx", -7}}).isEmpty());
+    EXPECT_DOUBLE_EQ(t.reload().candleBodyFraction, 0.3);
+    EXPECT_EQ(t.reload().candleMaxBodyPx, 5);
 }
 
 TEST(FlowSettingsDialog, EveryControlAppliesPersistsAndResets) {
@@ -1198,6 +1311,33 @@ TEST(CandleStyleTest, ChartControlsApplyLiveAndReset) {
     EXPECT_EQ(model.settings().candleUpColor, "#2EBD85");
     EXPECT_EQ(width->value(), 1);
     EXPECT_EQ(opacity->value(), 100);
+}
+
+TEST(CandleStyleTest, BodyWidthControlsPersistAndReset) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    auto *fraction = dialog.findChild<QSpinBox *>("candleBodyFraction");
+    auto *maximum = dialog.findChild<QSpinBox *>("candleMaxBodyPx");
+    ASSERT_NE(fraction, nullptr);
+    ASSERT_NE(maximum, nullptr);
+    EXPECT_EQ(fraction->minimum(), 30);
+    EXPECT_EQ(fraction->maximum(), 100);
+    EXPECT_EQ(maximum->minimum(), 5);
+    EXPECT_EQ(maximum->maximum(), 120);
+    EXPECT_EQ(fraction->value(), 85);
+    EXPECT_EQ(maximum->value(), 71);
+    fraction->setValue(60);
+    maximum->setValue(80);
+    EXPECT_DOUBLE_EQ(model.settings().candleBodyFraction, 0.6);
+    EXPECT_EQ(model.settings().candleMaxBodyPx, 80);
+    EXPECT_DOUBLE_EQ(t.reload().candleBodyFraction, 0.6);
+    EXPECT_EQ(t.reload().candleMaxBodyPx, 80);
+    child<QPushButton>(dialog, "resetChart")->click();
+    EXPECT_EQ(fraction->value(), 85);
+    EXPECT_EQ(maximum->value(), 71);
+    EXPECT_DOUBLE_EQ(t.reload().candleBodyFraction, 0.85);
+    EXPECT_EQ(t.reload().candleMaxBodyPx, 71);
 }
 
 TEST(CandleStyleTest, ModelChangesReachTheChartProperties) {

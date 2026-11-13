@@ -278,6 +278,8 @@ void parseClientConfig(const std::string& filePath, ClientConfig& cfg) {
         readScalar(heatmapNode, "initial_price_pct", cfg.heatmap.initialPricePct);
         readScalar(heatmapNode, "sensitivity_min", cfg.heatmap.sensitivityMin);
         readScalar(heatmapNode, "sensitivity_max", cfg.heatmap.sensitivityMax);
+        readScalar(heatmapNode, "candle_body_fraction", cfg.heatmap.candleBodyFraction);
+        readScalar(heatmapNode, "candle_max_body_px", cfg.heatmap.candleMaxBodyPx);
     }
 
     YAML::Node guiNode;

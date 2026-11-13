@@ -82,6 +82,8 @@ void clampSettings(HeatmapChartSettings &s) {
     if (s.candleWickColor != "auto" && !candleColor.match(QString::fromStdString(s.candleWickColor)).hasMatch()) s.candleWickColor = d.candleWickColor;
     s.candleBodyOpacity = finiteClamp(s.candleBodyOpacity, 0, 1, d.candleBodyOpacity);
     s.candleWickWidth = std::clamp(s.candleWickWidth, 1, 3);
+    s.candleBodyFraction = finiteClamp(s.candleBodyFraction, 0.3, 1.0, d.candleBodyFraction);
+    s.candleMaxBodyPx = std::clamp(s.candleMaxBodyPx, 5, 120);
     s.ladderWidthPx = std::clamp(s.ladderWidthPx, 60, 240);
     s.wallMultiple = finiteClamp(s.wallMultiple, 1.5, 20, d.wallMultiple);
 }
@@ -105,6 +107,8 @@ HeatmapChartSettings chartDefaults(const ClientHeatmapConfig &c) {
     s.prefetchTiles = c.prefetchTiles;
     s.liveMinIntervalMs = c.liveMinIntervalMs;
     s.showTelemetry = c.showTelemetry;
+    s.candleBodyFraction = c.candleBodyFraction;
+    s.candleMaxBodyPx = c.candleMaxBodyPx;
     clampSettings(s);
     return s;
 }
@@ -138,6 +142,8 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"candleWickColor", QString::fromStdString(s.candleWickColor)},
         {"candleBodyOpacity", s.candleBodyOpacity},
         {"candleWickWidth", s.candleWickWidth},
+        {"candleBodyFraction", s.candleBodyFraction},
+        {"candleMaxBodyPx", s.candleMaxBodyPx},
         {"flowFooter", s.flowFooter}, {"cvdStripPx", s.cvdStripPx}, {"cvdReset", QString::fromStdString(s.cvdReset)},
         {"cvdStyle", QString::fromStdString(s.cvdStyle)},
         {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
@@ -153,7 +159,7 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
 QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     const auto schema = settingsJson(HeatmapChartSettings{});
     auto merged = settingsJson(s);
-    const QStringList integers{"manualTick", "crossfadeMs", "gpuCapBytes", "uploadBudgetBytes", "prefetchTiles", "liveMinIntervalMs", "candleWickWidth", "ladderWidthPx"};
+    const QStringList integers{"manualTick", "crossfadeMs", "gpuCapBytes", "uploadBudgetBytes", "prefetchTiles", "liveMinIntervalMs", "candleWickWidth", "candleMaxBodyPx", "ladderWidthPx"};
     for (auto it = patch.begin(); it != patch.end(); ++it) {
         const auto &key = it.key();
         const auto v = it.value();
@@ -210,6 +216,8 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.candleWickColor = merged["candleWickColor"].toString().toStdString();
     out.candleBodyOpacity = merged["candleBodyOpacity"].toDouble();
     out.candleWickWidth = merged["candleWickWidth"].toInt();
+    out.candleBodyFraction = merged["candleBodyFraction"].toDouble();
+    out.candleMaxBodyPx = int(std::clamp(merged["candleMaxBodyPx"].toDouble(), -2147483647.0, 2147483647.0));
     out.flowFooter = merged["flowFooter"].toBool();
     out.cvdStripPx = int(std::clamp(merged["cvdStripPx"].toDouble(), 0.0, 400.0));
     out.cvdReset = merged["cvdReset"].toString().toStdString();

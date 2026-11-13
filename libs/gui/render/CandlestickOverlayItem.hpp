@@ -44,6 +44,8 @@ class CandlestickOverlayItem : public QQuickItem {
     Q_PROPERTY(QString wickColor READ wickColor WRITE setWickColor NOTIFY appearanceChanged)
     Q_PROPERTY(double bodyOpacity READ bodyOpacity WRITE setBodyOpacity NOTIFY appearanceChanged)
     Q_PROPERTY(int wickWidth READ wickWidth WRITE setWickWidth NOTIFY appearanceChanged)
+    Q_PROPERTY(double bodyFraction READ bodyFraction WRITE setBodyFraction NOTIFY appearanceChanged)
+    Q_PROPERTY(int maxBodyPx READ maxBodyPx WRITE setMaxBodyPx NOTIFY appearanceChanged)
 
 public:
     explicit CandlestickOverlayItem(QQuickItem* parent = nullptr);
@@ -64,11 +66,15 @@ public:
     QString wickColor() const { return m_wickColor; }
     double bodyOpacity() const { return m_bodyOpacity; }
     int wickWidth() const { return m_wickWidth; }
+    double bodyFraction() const { return m_bodyFraction; }
+    int maxBodyPx() const { return m_maxBodyPx; }
     void setUpColor(const QColor& value);
     void setDownColor(const QColor& value);
     void setWickColor(const QString& value);
     void setBodyOpacity(double value);
     void setWickWidth(int value);
+    void setBodyFraction(double value);
+    void setMaxBodyPx(int value);
 
 signals:
     void candleBufferChanged();
@@ -116,6 +122,8 @@ private:
     QColor m_customWickColor;
     double m_bodyOpacity = 1;
     int m_wickWidth = 1;
+    double m_bodyFraction = 0.85;
+    int m_maxBodyPx = 71;
     std::vector<CandleOverlayBar> m_visibleCandles;
     std::vector<CandleOverlayBar> m_filteredCandles;
     std::vector<CandleOverlayBar> m_continuousCandles;

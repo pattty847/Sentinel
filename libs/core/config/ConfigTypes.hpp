@@ -175,6 +175,8 @@ struct ClientHeatmapConfig {
     /// at or above max are brightest (log scale in between).
     double sensitivityMin = 0.05;
     double sensitivityMax = 50.0;
+    double candleBodyFraction = 0.85;
+    int candleMaxBodyPx = 71; // logical pixels
 };
 
 struct ClientGuiConfig {

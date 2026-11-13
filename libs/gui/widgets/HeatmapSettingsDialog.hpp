@@ -116,6 +116,8 @@ private:
     QPushButton *m_candleWickColor = nullptr;
     QPushButton *m_candleWickAuto = nullptr;
     QSpinBox *m_candleBodyOpacity = nullptr;
+    QSpinBox *m_candleBodyFraction = nullptr;
+    QSpinBox *m_candleMaxBodyPx = nullptr;
     QSpinBox *m_candleWickWidth = nullptr;
     QWidget *m_candlePreview = nullptr;
     // Tick

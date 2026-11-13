@@ -567,7 +567,8 @@ TEST_F(UgrGpu, CandleBodyEdgesAtEveryColumnWidthAndDeviceRatio) {
             const auto* geometry = static_cast<const QSGGeometryNode*>(root->lastChild())->geometry();
             const auto* v = geometry->vertexDataAsColoredPoint2D();
             ASSERT_GT(geometry->vertexCount(), 0);
-            const double width = std::min(columns - 2.0, 13 * dpr);
+            const double width = candle_pixels::snappedBodyWidth(
+                columns, dpr, candle_pixels::kCandleBodyFraction, candle_pixels::kCandleMaxBodyLogicalPx);
             const double inset = std::floor((columns - width) * 0.5);
             int checked = 0;
             for (int i = 0; i < geometry->vertexCount(); i += 6) {

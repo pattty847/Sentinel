@@ -158,9 +158,13 @@ TEST(ChartLookSettings, ToneAndCandleLookKeepClampsAndNotices) {
     settings.candleWickColor = "#abcdef";
     settings.candleBodyOpacity = 0.5;
     settings.candleWickWidth = 3;
+    settings.candleBodyFraction = 0.6;
+    settings.candleMaxBodyPx = 80;
     look.setCandleAppearance(settings);
     EXPECT_EQ(look.candleUpColor(), QColor("#123456"));
     EXPECT_EQ(look.candleWickWidth(), 3);
+    EXPECT_DOUBLE_EQ(look.candleBodyFraction(), 0.6);
+    EXPECT_EQ(look.candleMaxBodyPx(), 80);
     EXPECT_EQ(calls, (std::vector<std::string>{"notice", "appearance"}));
     calls.clear(); look.setCandleAppearance(settings);
     EXPECT_TRUE(calls.empty());

@@ -62,12 +62,15 @@ void ChartLookSettings::setCandleAppearance(const heatmap::HeatmapChartSettings&
     const QColor down(QString::fromStdString(settings.candleDownColor));
     const QString wick = QString::fromStdString(settings.candleWickColor);
     if (candleUpColor_ == up && candleDownColor_ == down && candleWickColor_ == wick &&
-        candleBodyOpacity_ == settings.candleBodyOpacity && candleWickWidth_ == settings.candleWickWidth) return;
+        candleBodyOpacity_ == settings.candleBodyOpacity && candleWickWidth_ == settings.candleWickWidth &&
+        candleBodyFraction_ == settings.candleBodyFraction && candleMaxBodyPx_ == settings.candleMaxBodyPx) return;
     candleUpColor_ = up;
     candleDownColor_ = down;
     candleWickColor_ = wick;
     candleBodyOpacity_ = settings.candleBodyOpacity;
     candleWickWidth_ = settings.candleWickWidth;
+    candleBodyFraction_ = settings.candleBodyFraction;
+    candleMaxBodyPx_ = settings.candleMaxBodyPx;
     changed(Notice::CandleAppearance);
 }
 
