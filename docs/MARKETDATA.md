@@ -322,14 +322,20 @@ Range statuses are:
 - `partial`: only part of the requested coverage is available (for example a
   restart inside a minute, a short journal or rejected trades). Returned bars
   have `complete: false`.
-- `building`: required coverage is pending: today's growing day, a closed day
-  with a journal awaiting a flow build/rebuild, or source inventory not yet known.
+- `building`: required coverage is pending: today's growing day, closed hours
+  with a possible journal source awaiting a flow build/rebuild, or source
+  inventory not yet known. Proven absent leading hours of a recorded day use
+  `unrecorded`, even while that day's later hours are still building.
   Stale/corrupt store files remain pending repair, never evidence of absence.
   Available constituents may be returned with `complete: false`; no empty
   complete bars are manufactured. Clients retry these ranges.
-- `unrecorded`: a closed UTC day has neither a flow source for the requested
-  hours nor a journal source for that day. This includes days before the first
-  journal. It is a terminal empty answer, with no bars and zero grid/revision
+- `unrecorded`: requested hours of a closed UTC day have neither a flow source
+  nor a possible journal source. This includes days before the first journal,
+  missing journal days, and leading hours before a day's first segment when the
+  previous day has no source: the hour end plus the one-minute receive tail must
+  be strictly earlier than that segment's open time. For a first segment at
+  04:53 UTC, 00:00–04:00 is unrecorded; 04:00–05:00 remains eligible for building.
+  It is a terminal empty answer, with no bars and zero grid/revision
   metadata, independent of `sealed_through_ms`; it does not advance that mark.
   It means no recording is available, whereas `complete` with no bars means
   observed coverage with no trades. Today and future days never use this status.
@@ -361,14 +367,19 @@ empty inventory even when the recorder watermark is zero. Until that inventory
 is known, minute requests remain `building`; additions/removals are discovered
 on the normal builder rescan (60 seconds by default). A day must have been
 closed when that inventory began; crossing midnight requires a new inventory,
-and inventory failure withdraws absence proof. RAWL2 rotates on receive
+and inventory failure withdraws absence proof. A product directory observed by
+an earlier inventory must remain available: its disappearance is a failure,
+even if the journal root remains readable. It must not be treated as an empty
+root-fallback catalog. RAWL2 rotates on receive
 hour changes, so segment headers identify source days without reading trade
 payloads. A discovered journal withdraws an earlier absence answer on subsequent
 requests; building its FLD1 follows the normal revision rules. Absence is not
 persisted as an FLD1 generation. One-second requests consult the same catalog
 and replay an available journal inline even if its minute flow file is not built;
-without a journal, a surviving minute flow file cannot prove second coverage
-and the second reply remains `partial`.
+when there are no journal files for the product at all, a surviving minute flow
+file cannot prove second coverage and the second reply remains `partial`. This
+does not describe a gap day when journals for other days are still available;
+that path may attempt replay from an older segment.
 
 Clients retain `unrecorded` as covered empty history, withdraw cached bars and
 loss markers in that range, and do not schedule a building retry for it. An

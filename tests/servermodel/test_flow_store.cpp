@@ -746,3 +746,100 @@ TEST_F(FlowStoreTest, CorruptFlowFileIsNotEvidenceOfUnrecordedHistory) {
     EXPECT_EQ(store.window("BTC-USD", from, from + Hour).ranges.front().status, "building");
     EXPECT_EQ(store.buildWindow("BTC-USD", from, from + Hour).ranges.front().status, "partial");
 }
+
+TEST_F(FlowStoreTest, FirstJournalAt0453LeavesLeadingClosedHoursUnrecorded) {
+    constexpr auto day = Epoch - 24 * Hour;
+    Journal j(journal);
+    j.snapshot(-20 * Hour + 53 * Minute);
+    j.heartbeat(Minute + 1); j.close();
+    through = 0;
+    FlowStore store(options());
+    ASSERT_EQ(store.runPass().failed, 0u);
+    for (int h = 0; h < 4; ++h) {
+        const auto from = day + h * Hour;
+        const auto minute = store.window("BTC-USD", from, from + Hour);
+        const auto second = store.buildWindow("BTC-USD", from, from + Hour);
+        ASSERT_EQ(minute.ranges.size(), 1u);
+        ASSERT_EQ(second.ranges.size(), 1u);
+        EXPECT_EQ(minute.ranges.front().status, "unrecorded");
+        EXPECT_EQ(second.ranges.front().status, "unrecorded");
+        EXPECT_FALSE(minute.building);
+        EXPECT_TRUE(minute.bars.empty());
+        EXPECT_TRUE(second.bars.empty());
+    }
+    // The hour containing the first segment must still await its build.
+    EXPECT_EQ(store.window("BTC-USD", day + 4 * Hour, day + 5 * Hour).ranges.front().status, "building");
+    through = Epoch;
+    ASSERT_EQ(store.runPass().built, 20u);
+    const auto leading = store.window("BTC-USD", day, day + 4 * Hour);
+    EXPECT_FALSE(leading.building);
+    for (const auto& range : leading.ranges) EXPECT_EQ(range.status, "unrecorded");
+    EXPECT_EQ(store.window("BTC-USD", day + 4 * Hour, day + 5 * Hour).ranges.front().status, "complete");
+}
+TEST_F(FlowStoreTest, LeadingHourProofRequiresAbsentPreviousDayAndStrictReceiveTail) {
+    Journal j(journal);
+    j.snapshot(-20 * Hour + Minute); j.close(); // 04:01, exactly one tail after 04:00.
+    through = 0;
+    FlowStore store(options());
+    ASSERT_EQ(store.runPass().failed, 0u);
+    constexpr auto day = Epoch - 24 * Hour;
+    EXPECT_EQ(store.window("BTC-USD", day + 3 * Hour, day + 4 * Hour).ranges.front().status, "building");
+    EXPECT_EQ(store.window("BTC-USD", day + 2 * Hour, day + 3 * Hour).ranges.front().status, "unrecorded");
+    Journal previous(journal);
+    previous.snapshot(-25 * Hour); previous.close();
+    ASSERT_EQ(store.runPass().failed, 0u);
+    EXPECT_EQ(store.window("BTC-USD", day + 2 * Hour, day + 3 * Hour).ranges.front().status, "building");
+}
+TEST_F(FlowStoreTest, MissingPreviouslyInventoriedProductDirectoryWithdrawsProof) {
+    fixture();
+    through = 0;
+    FlowStore store(options());
+    ASSERT_EQ(store.runPass().failed, 0u);
+    const auto from = Epoch - 48 * Hour;
+    ASSERT_EQ(store.window("BTC-USD", from, from + Hour).ranges.front().status, "unrecorded");
+    const auto product = journal / "BTC-USD", offline = base / "offline-product";
+    fs::rename(product, offline); // Synthetic fixture; the journal root stays available.
+    ASSERT_TRUE(fs::is_directory(journal));
+    EXPECT_THROW(store.buildWindow("BTC-USD", from, from + Hour), std::runtime_error);
+    EXPECT_EQ(store.window("BTC-USD", from, from + Hour).ranges.front().status, "building");
+    EXPECT_EQ(store.runPass().failed, 1u);
+    EXPECT_EQ(store.window("BTC-USD", from, from + Hour).ranges.front().status, "building");
+    // A second-history request must not republish an empty root-fallback catalog.
+    EXPECT_THROW(store.buildWindow("BTC-USD", from, from + Hour), std::runtime_error);
+    EXPECT_EQ(store.window("BTC-USD", from, from + Hour).ranges.front().status, "building");
+    EXPECT_EQ(store.runPass().failed, 1u);
+    fs::rename(offline, product);
+    EXPECT_EQ(store.runPass().failed, 0u);
+    EXPECT_EQ(store.window("BTC-USD", from, from + Hour).ranges.front().status, "unrecorded");
+}
+TEST_F(FlowStoreTest, MissingPreviouslyEmptyProductDirectoryIsNotAnEmptyInventory) {
+    fs::create_directory(journal / "BTC-USD");
+    through = 0;
+    FlowStore store(options());
+    ASSERT_EQ(store.runPass().failed, 0u);
+    fs::rename(journal / "BTC-USD", base / "offline-empty-product");
+    EXPECT_EQ(store.runPass().failed, 1u);
+    EXPECT_EQ(store.window("BTC-USD", Epoch - 48 * Hour, Epoch - 47 * Hour).ranges.front().status, "building");
+}
+
+TEST_F(FlowStoreTest, SurvivingMinuteFileWithNoProductJournalsCannotProveSeconds) {
+    Journal j(journal);
+    j.snapshot(-24 * Hour);
+    j.trades(-24 * Hour + 1000, {trade(-24 * Hour + 800, "stored", 100000)});
+    j.heartbeat(-23 * Hour + Minute + 1); j.close();
+    through = Epoch - 23 * Hour;
+    {
+        FlowStore store(options());
+        ASSERT_EQ(store.runPass().built, 1u);
+        ASSERT_EQ(store.window("BTC-USD", Epoch - 24 * Hour, through).bars.size(), 1u);
+    }
+    fs::rename(journal / "BTC-USD", base / "offline-product");
+    // A fresh store has never inventoried the product directory. Root fallback
+    // is allowed, but the persisted minute file still cannot prove second data.
+    FlowStore restarted(options());
+    ASSERT_EQ(restarted.runPass().failed, 0u);
+    const auto second = restarted.buildWindow("BTC-USD", Epoch - 24 * Hour, through);
+    ASSERT_EQ(second.ranges.size(), 1u);
+    EXPECT_EQ(second.ranges.front().status, "partial");
+    EXPECT_TRUE(second.bars.empty());
+}

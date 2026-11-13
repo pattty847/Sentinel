@@ -10,6 +10,7 @@
 #include <mutex>
 #include <map>
 #include <memory>
+#include <set>
 #include <stop_token>
 #include <thread>
 
@@ -131,6 +132,7 @@ class FlowStore {
     std::map<std::string, int64_t> builtThrough_;
     std::map<std::string, int64_t> liveRetentionFloor_;
     std::map<std::string, std::map<std::filesystem::path, FileIdentity>> journalInventory_;
+    std::set<std::string> journalProductDirectories_; // indexMutex_; retain across inventory failures
     mutable std::mutex catalogMutex_;
     std::map<std::string, std::shared_ptr<sentinel::roller::JournalReader>> catalogs_;
     std::map<std::string, std::map<int64_t, std::filesystem::path>> hmcPaths_;
@@ -158,6 +160,7 @@ class FlowStore {
     void publishIndex(const std::string &symbol, int64_t day, const DayIndex &index);
     void refreshBuiltThrough(const std::string &symbol);
     void noteBuildFailure(const std::string &symbol, int64_t hour, const std::string &reason);
-    std::map<std::filesystem::path, FileIdentity> inventory(const std::string &symbol, std::stop_token stop) const;
+    std::filesystem::path journalDirectory(const std::string &symbol);
+    std::map<std::filesystem::path, FileIdentity> inventory(const std::string &symbol, std::stop_token stop);
 };
 } // namespace recording

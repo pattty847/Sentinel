@@ -675,11 +675,22 @@ void FlowStore::noteBuildFailure(const std::string &symbol, int64_t hour, const 
         sLog_Warning("Flow hour build failed symbol=" << symbol << " hour=" << hour
                      << " count=" << count << " reason=" << reason);
 }
+fs::path FlowStore::journalDirectory(const std::string &symbol) {
+    const auto dir = options_.journalRoot / symbol;
+    const bool present = fs::is_directory(dir);
+    std::lock_guard lock(indexMutex_);
+    if (present)
+        journalProductDirectories_.insert(symbol);
+    else if (journalProductDirectories_.contains(symbol)) {
+        sourceDays_.erase(symbol);
+        sourceKnownBeforeDay_.erase(symbol);
+        throw std::runtime_error("previously inventoried journal product directory unavailable: " + dir.string());
+    }
+    return present ? dir : options_.journalRoot;
+}
 std::map<fs::path, FlowStore::FileIdentity> FlowStore::inventory(const std::string &symbol,
-                                                                 std::stop_token stop) const {
-    fs::path dir = options_.journalRoot / symbol;
-    if (!fs::is_directory(dir))
-        dir = options_.journalRoot;
+                                                                 std::stop_token stop) {
+    const auto dir = journalDirectory(symbol);
     std::map<fs::path, FileIdentity> result;
     for (fs::recursive_directory_iterator it(dir), end; it != end; ++it) {
         checkStop(stop);
@@ -741,8 +752,12 @@ FlowStore::PassResult FlowStore::runPass(std::stop_token stop) {
 std::shared_ptr<roller::JournalReader> FlowStore::catalogFor(const std::string &symbol, std::stop_token stop) {
     checkStop(stop);
     std::lock_guard lock(catalogMutex_);
+    journalDirectory(symbol);
     auto &cached = catalogs_[symbol];
-    if (cached) return cached;
+    if (cached) {
+        std::lock_guard indexLock(indexMutex_);
+        if (sourceDays_.contains(symbol)) return cached;
+    }
     const auto knownBefore = dayFloor(options_.nowMs());
     std::map<int64_t, int64_t> days;
     try {
@@ -755,6 +770,9 @@ std::shared_ptr<roller::JournalReader> FlowStore::catalogFor(const std::string &
         if (options_.afterCatalogConstructForTest) options_.afterCatalogConstructForTest();
         cached = std::move(catalog);
     } catch (const roller::NoJournalFiles &) {
+        // JournalReader may fall back to the root if the product directory
+        // disappears during construction. That is not an empty inventory.
+        journalDirectory(symbol);
         std::lock_guard indexLock(indexMutex_);
         sourceDays_[symbol] = {};
         sourceKnownBeforeDay_[symbol] = knownBefore;
@@ -772,7 +790,14 @@ FlowStore::SourceState FlowStore::sourceState(const std::string &symbol, int64_t
     std::lock_guard lock(indexMutex_);
     const auto known = sourceDays_.find(symbol);
     if (known == sourceDays_.end() || day >= sourceKnownBeforeDay_.at(symbol)) return SourceState::Unknown;
-    if (known->second.contains(day)) return SourceState::Present;
+    if (const auto first = known->second.find(day); first != known->second.end()) {
+        // A leading hour cannot be filled by a later first segment. Require an
+        // absent previous day too, so older replay/warmup sources stay possible.
+        const auto hourEnd = ((to - 1) / Hour + 1) * Hour;
+        if (!known->second.contains(day - Day) && hourEnd + TradeTail < first->second)
+            return SourceState::Absent;
+        return SourceState::Present;
+    }
     // Trades use exchange time. The next day's first segment can hold late
     // trades for a window ending near midnight, within the replay's receive tail.
     const auto next = known->second.find(day + Day);

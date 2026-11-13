@@ -796,3 +796,27 @@ TEST_F(FlowHistory, ClosedAbsentPrefixInsideRamRetentionDoesNotHideLiveCoverage)
     EXPECT_EQ(result.header["status"], "partial");
     ASSERT_EQ(result.bars.size(), 1u);
 }
+
+TEST_F(FlowHistory, FirstJournalAt0453DoesNotLeaveMinuteFourHourOrDayPagesBuilding) {
+    Journal writer(journal);
+    writer.snapshot(-20 * Hour + 53 * Minute);
+    writer.trades(-20 * Hour + 53 * Minute + 1000,
+                  {trade(-20 * Hour + 53 * Minute + 800, "first", 100000)});
+    writer.heartbeat(Minute + 1); writer.close();
+    through = Epoch;
+    ASSERT_EQ(store->runPass().built, 20u);
+    connect();
+    const auto day = Epoch - 24 * Hour;
+    const auto minute = request(Minute, day + 4 * Hour - Minute, 240);
+    EXPECT_EQ(minute.header["status"], "unrecorded");
+    EXPECT_TRUE(minute.bars.empty());
+    for (const auto& range : minute.header["ranges"]) EXPECT_EQ(range["status"], "unrecorded");
+    const auto fourHour = request(4 * Hour, day, 1);
+    EXPECT_EQ(fourHour.header["status"], "unrecorded");
+    EXPECT_TRUE(fourHour.bars.empty());
+    const auto daily = request(24 * Hour, day, 1);
+    EXPECT_EQ(daily.header["status"], "partial");
+    EXPECT_EQ(daily.header["ranges"][0]["status"], "partial");
+    ASSERT_EQ(daily.bars.size(), 1u);
+    EXPECT_FALSE(daily.header["bars"][0]["complete"].get<bool>());
+}
