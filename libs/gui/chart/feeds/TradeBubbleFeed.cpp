@@ -1,14 +1,39 @@
 #include "chart/feeds/TradeBubbleFeed.hpp"
-#include "render/heatmap/HeatmapPalette.hpp"
+#include "chart/shell/TradeBubbleStyleStore.hpp"
 #include <chrono>
 namespace chart {
+TradeBubbleFeed::TradeBubbleFeed(std::shared_ptr<TradeBubbleStyleStore> store)
+    : styleStore_(store ? std::move(store) : std::make_shared<TradeBubbleStyleStore>()) {
+    reloadStyle();
+    QObject::connect(&TradeBubbleStyleChanges::instance(), &TradeBubbleStyleChanges::changed,
+                     &styleContext_, [this] { reloadStyle(); });
+}
+void TradeBubbleFeed::reloadStyle() {
+    frame_->style = styleStore_->load(product_);
+    customMinimum_ = styleStore_->hasMinimum(product_);
+}
+void TradeBubbleFeed::selectProduct(const std::string& product) {
+    if (product.empty() || product_ == product) return;
+    product_ = product;
+    reloadStyle();
+}
+void TradeBubbleFeed::notePrice(double price, int64_t timeMs) {
+    TradeBubbleStyleStore::notePrice(product_, price, timeMs);
+    // The store holds a rounded, hysteretic default shared by this product's charts and editor.
+    if (!customMinimum_) frame_->style.minimumBaseSize = TradeBubbleStyleStore::minimum(product_);
+}
+
 bool TradeBubbleFeed::append(const Trade& trade) {
+    selectProduct(trade.product_id);
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count();
+    notePrice(trade.price, ms);
     const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(trade.timestamp.time_since_epoch()).count();
     return tape_->append({ms, trade.price, trade.size, trade.side, trade.trade_id, ns}) && show_;
 }
 size_t TradeBubbleFeed::appendHistory(const protocol::tradewire::Page& page) {
     if (page.status == "refused") return 0;
+    selectProduct(page.symbol);
+    if (!page.rows.empty()) notePrice(page.rows.back().price, page.rows.back().exchangeMs);
     size_t added = 0;
     for (const auto& row : page.rows) {
         if (row.exchangeMs > INT64_MAX / 1'000'000) continue;
@@ -18,7 +43,7 @@ size_t TradeBubbleFeed::appendHistory(const protocol::tradewire::Page& page) {
     return added;
 }
 void TradeBubbleFeed::setSettings(const heatmap::HeatmapChartSettings& settings, const std::function<void()>& notify) {
-    const auto gradients = heatmap::gpu::gradientsFor(settings);
+    selectProduct(settings.sensitivitySymbol);
     show_ = settings.showTrades;
     if (above_ != settings.tradesAboveCandles) {
         above_ = settings.tradesAboveCandles;
@@ -27,10 +52,6 @@ void TradeBubbleFeed::setSettings(const heatmap::HeatmapChartSettings& settings,
     minimum_ = settings.tradeMinNotional;
     requested_ = settings.bubblePlacement == "slot" ? bubbles::Mode::Slot :
                  settings.bubblePlacement == "auto" ? bubbles::Mode::Auto : bubbles::Mode::Individual;
-    const auto& bid = gradients.bid.back();
-    const auto& ask = gradients.ask.back();
-    buy_ = QColor(bid.r, bid.g, bid.b);
-    sell_ = QColor(ask.r, ask.g, ask.b);
 }
 void TradeBubbleFeed::publish(const TimeAxisMapping& mapping) {
     frame_->mapping = mapping;
@@ -55,7 +76,5 @@ void TradeBubbleFeed::publish(const TimeAxisMapping& mapping) {
         frame_->referencePending = statistics_.pending();
         frame_->referenceRetryMs = statistics_.retryAfterMs();
     }
-    frame_->buy = buy_;
-    frame_->sell = sell_;
 }
 } // namespace chart

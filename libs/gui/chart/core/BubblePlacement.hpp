@@ -32,9 +32,10 @@ struct Mark {
     double timeMs = 0, price = 0, notional = 0;
     double minPrice = 0, maxPrice = 0;
     int side = 0;
-    size_t sweepLevels = 1;
     bool moving = true, aggregate = false;
+    size_t sweepLevels = 1;
     double radiusCap = MaxRadius;
+    double baseSize = 0; // Sum of every fill; retained through sweeps and Slot aggregation.
 };
 class PlacementMode {
 public:
@@ -226,7 +227,7 @@ private:
     }
     template<class Rows> Mark sweep(const Rows& rows, size_t& i, double& previousPrice) {
         auto t = rows[i];
-        Mark mark{t.timeMs, t.price, 0, t.price, t.price, t.side, 1, false};
+        Mark mark{t.timeMs, t.price, 0, t.price, t.price, t.side, false};
         bool hasPrevious = previousPrice > 0;
         double size = 0;
         size_t levels = 0;
@@ -244,6 +245,7 @@ private:
         } while (i < rows.size() && i < Capacity && joins(t, rows[i]));
         std::sort(scratch_.get(), scratch_.get() + levels);
         mark.sweepLevels = size_t(std::unique(scratch_.get(), scratch_.get() + levels) - scratch_.get());
+        mark.baseSize = size;
         mark.price = mark.notional / size;
         return mark;
     }
@@ -253,6 +255,7 @@ private:
         side.timeMs = mark.timeMs;
         side.side = mark.side;
         side.notional += mark.notional;
+        side.baseSize += mark.baseSize;
         bar.sizes[size_t(mark.side)] += mark.notional / mark.price;
         ++bar.counts[size_t(mark.side)];
         side.moving = side.notional == mark.notional ? mark.moving : side.moving || mark.moving;

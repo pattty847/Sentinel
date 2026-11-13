@@ -49,6 +49,8 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSpinBox>
+#include <QSlider>
+#include "chart/shell/TradeBubbleStyleStore.hpp"
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTemporaryDir>
@@ -2243,6 +2245,63 @@ TEST(TradeBubbleControls, DialogPlacementAndMinimumPersistAndResetWithChartTab) 
     EXPECT_EQ(t.reload().tradeMinNotional, 0);
 }
 
+TEST(TradeBubbleControls, StyleSlidersPersistPerProductAndReset) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    model.selectSymbol("BTC-USD");
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    auto store = std::make_shared<chart::TradeBubbleStyleStore>(t.settings);
+    dialog.setBubbleStyleStore(store);
+    auto* opacity = child<QSlider>(dialog, "bubbleStyle.buy.opacity");
+    auto* radius = child<QSlider>(dialog, "bubbleStyle.buy.width");
+    auto* ring = child<QSlider>(dialog, "bubbleStyle.ring.width");
+    auto* minimum = child<QSlider>(dialog, "bubbleStyle.minimumBaseSize");
+    ASSERT_TRUE(opacity && radius && ring && minimum);
+    EXPECT_EQ(opacity->value(),40); EXPECT_EQ(radius->value(),180);
+    EXPECT_EQ(ring->value(),10); EXPECT_EQ(minimum->value(),380);
+    opacity->setValue(63); radius->setValue(240); ring->setValue(7); minimum->setValue(500);
+    const auto saved = store->load("BTC-USD");
+    EXPECT_DOUBLE_EQ(saved.buy.opacity,.63); EXPECT_DOUBLE_EQ(saved.buy.width,24);
+    EXPECT_DOUBLE_EQ(saved.ring.width,.7); EXPECT_DOUBLE_EQ(saved.minimumBaseSize,.5);
+    child<QSlider>(dialog,"bubbleStyle.sell.opacity")->setValue(22);
+    child<QSlider>(dialog,"bubbleStyle.sell.width")->setValue(120);
+    child<QSlider>(dialog,"bubbleStyle.ring.opacity")->setValue(80);
+    child<QCheckBox>(dialog,"bubbleStyle.ring.visible")->setChecked(false);
+    EXPECT_DOUBLE_EQ(store->load("BTC-USD").sell.opacity,.22);
+    EXPECT_DOUBLE_EQ(store->load("BTC-USD").sell.width,12);
+    EXPECT_DOUBLE_EQ(store->load("BTC-USD").ring.opacity,.8);
+    EXPECT_FALSE(store->load("BTC-USD").ring.visible);
+    model.selectSymbol("ETH-USD");
+    child<QDoubleSpinBox>(dialog,"bubbleStyle.minimumBaseSizeValue")->setValue(3);
+    EXPECT_DOUBLE_EQ(store->load("ETH-USD").minimumBaseSize,3);
+    EXPECT_DOUBLE_EQ(store->load("BTC-USD").minimumBaseSize,.5);
+    model.selectSymbol("BTC-USD");
+    child<QPushButton>(dialog,"resetChart")->click();
+    EXPECT_EQ(store->load("BTC-USD"),trade_bubbles::StyleModel{});
+    EXPECT_EQ(opacity->value(),40); EXPECT_EQ(radius->value(),180);
+    EXPECT_EQ(minimum->value(),380);
+    EXPECT_DOUBLE_EQ(store->load("ETH-USD").minimumBaseSize,3);
+}
+
+TEST(TradeBubbleControls, AppearanceSlidersLeaveAutomaticMinimumUnpinned) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    model.selectSymbol("BTC-USD");
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    auto store = std::make_shared<chart::TradeBubbleStyleStore>(t.settings);
+    dialog.setBubbleStyleStore(store);
+    child<QSlider>(dialog,"bubbleStyle.buy.opacity")->setValue(60);
+    EXPECT_FALSE(store->hasMinimum("BTC-USD"));
+    child<QSlider>(dialog,"bubbleStyle.minimumBaseSize")->setValue(500);
+    EXPECT_TRUE(store->hasMinimum("BTC-USD"));
+    EXPECT_DOUBLE_EQ(store->load("BTC-USD").minimumBaseSize,.5);
+    child<QSlider>(dialog,"bubbleStyle.sell.width")->setValue(240);
+    EXPECT_DOUBLE_EQ(store->load("BTC-USD").minimumBaseSize,.5);
+    child<QPushButton>(dialog,"resetChart")->click();
+    child<QSlider>(dialog,"bubbleStyle.ring.opacity")->setValue(70);
+    EXPECT_FALSE(store->hasMinimum("BTC-USD"));
+}
+
 // ----------------------------------------------------------- telemetry dock
 TEST(HeatmapTelemetryDockTest, PollsAt4HzOnlyWhileVisible) {
     HeatmapTelemetryDock dock;
@@ -2604,6 +2663,10 @@ TEST_F(HeatmapChartUi, LiveMinIntervalReachesTheController) {
 } // namespace
 
 int main(int argc, char **argv) {
+    // Renderer-owned style stores use the process default; keep these isolated too.
+    QTemporaryDir styleSettings;
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, styleSettings.path());
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
     lab::selectQuickSceneGraph(); // before any QQuickWindow: Qt fixes the backend at the first one

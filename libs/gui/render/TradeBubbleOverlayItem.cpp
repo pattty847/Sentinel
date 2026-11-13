@@ -1,5 +1,6 @@
 #include "TradeBubbleOverlayItem.hpp"
 #include "TradeBubbleNode.hpp"
+#include "chart/shell/TradeBubbleStyleStore.hpp"
 #include "chart/feeds/TradeBubbleFeed.hpp"
 #include <QQuickWindow>
 #include <QTimer>
@@ -29,7 +30,7 @@ void trade_bubbles::RenderLink::sync() {
     if (frame) {
         node->setBottomInset(presentation && frame->mapping.valid ?
             presentation->bottomInset(int64_t(frame->mapping.appendMs), frame->mapping.drawRect.height()) : 0);
-        node->sync(*frame->tape, frame->mapping, frame->enabled, frame->options, frame->buy, frame->sell);
+        node->sync(*frame->tape, frame->mapping, frame->enabled, frame->options, frame->style);
     } else {
         // Clearing a provider also clears its old mesh; no QObject is accessed here.
         node->clear();
@@ -37,6 +38,8 @@ void trade_bubbles::RenderLink::sync() {
 }
 TradeBubbleOverlayItem::TradeBubbleOverlayItem(QQuickItem* parent) : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
+    connect(&chart::TradeBubbleStyleChanges::instance(), &chart::TradeBubbleStyleChanges::changed,
+            this, [this] { update(); });
     connect(this, &QQuickItem::windowChanged, this, [this] { connectWindow(); });
 }
 TradeBubbleOverlayItem::~TradeBubbleOverlayItem() {

@@ -18,6 +18,13 @@ heatmap:
   sensitivity_min: 0.05
   sensitivity_max: 50
 
+bubbles:
+  fill_opacity: 0.40
+  max_radius: 18       # logical pixels, clamped to 4..48
+  minimum_btc: 0.38    # BTC-USD base size; other products use equivalent quote value
+  ring_width: 1        # logical pixels, clamped to 0..3
+  ring_visible: true   # chart-background (#0F1114) ring
+
 tpo:
   layout: collapsed   # collapsed (letters packed per session) | split (letters in their time column)
   theme: rainbow      # rainbow (period gradient) | calm (blue) | sage (green) | indigo (indigo -> sky)

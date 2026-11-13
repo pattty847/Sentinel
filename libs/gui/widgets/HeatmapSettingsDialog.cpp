@@ -4,6 +4,7 @@
 #include "SentinelLogging.hpp"
 #include "TopToolbar.hpp"
 #include "TpoStyleEditor.hpp"
+#include "TradeBubbleStyleEditor.hpp"
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -276,6 +277,8 @@ HeatmapSettingsDialog::HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *mode
     resize(520, 560);
     setStyleSheet("QDialog { background-color: #1B1F24; } QLabel, QCheckBox { color: #C9D4DD; }");
     buildUi();
+    connect(&chart::TradeBubbleStyleChanges::instance(), &chart::TradeBubbleStyleChanges::changed,
+            this, [this] { refreshBubbleStyle(); });
     if (m_model) connect(m_model, &heatmap::HeatmapSettingsModel::changed, this, [this] { refreshFromModel(); });
     if (m_model) connect(m_model, &heatmap::HeatmapSettingsModel::budgetsChanged, this, [this] { refreshFromModel(); });
     refreshFromModel();
@@ -373,6 +376,7 @@ QPushButton *HeatmapSettingsDialog::resetButton(const QString &tab, QWidget *par
             m_renderer->candles()->setHeatmapContrast(d.contrast);
             m_renderer->candles()->setHeatmapShaderFloor(d.shaderFloor);
         }
+        if (tab == "Chart") m_bubbleStyleStore->clear(bubbleProduct());
         if (tab == "TPO" && m_renderer) {
             m_renderer->tpo()->applyTpoConfig(m_tpoDefaults);
             m_renderer->tpo()->resetTpoLook();
@@ -406,6 +410,15 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
                       "Their size grows with the cell, up to the largest size.",
                       page));
     addFlowControls(form, page);
+    auto* bubbleGroup = new QGroupBox("Trade bubbles", page);
+    auto* bubbleLayout = new QVBoxLayout(bubbleGroup);
+    m_bubbleStyleEditor = new TradeBubbleStyleEditor(bubbleGroup);
+    bubbleLayout->addWidget(m_bubbleStyleEditor);
+    form->addRow(bubbleGroup);
+    connect(m_bubbleStyleEditor, &TradeBubbleStyleEditor::styleEdited, this,
+            [this](const trade_bubbles::StyleModel& style, bool minimumEdited) {
+                m_bubbleStyleStore->save(bubbleProduct(), style, minimumEdited);
+            });
     m_tradesAboveCandles = new QCheckBox("Trades above candles", page);
     m_tradesAboveCandles->setObjectName("tradesAboveCandles");
     m_tradesAboveCandles->setToolTip("Keep translucent executions visible over opaque candle bodies.");
@@ -437,7 +450,7 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     connect(m_tradeMinNotional, &QDoubleSpinBox::valueChanged, this, [this](double value) {
         if (m_tradeMinMode->currentData().toDouble() > 0) apply({{"tradeMinNotional", value}});
     });
-    describe(form, m_tradeMinMode, "All trades preserves the old visible set. Auto hides marks below "
+    describe(form, m_tradeMinMode, "All trades adds no quote filter. The base-size minimum above still applies. Auto hides marks below "
              "the visible median; Custom uses a fixed quote notional.");
     describe(form, m_bubblePlacement, "Individual uses exchange time. Slot groups each candle side at its VWAP, "
              "with the three largest executions at the candle centre. Auto switches near 40 pixels per candle; "
@@ -897,6 +910,7 @@ void HeatmapSettingsDialog::setTickSelectorState(const TopToolbar::TickSelectorS
 }
 
 void HeatmapSettingsDialog::refreshFromModel() {
+    refreshBubbleStyle();
     if (!m_model) return;
     const auto &s = m_model->settings();
     const bool was = m_loading;
@@ -1009,4 +1023,15 @@ void HeatmapSettingsDialog::logSettings() const {
     if (m_renderer)
         sLog_App("Heatmap tone: gamma=" << m_renderer->candles()->gamma() << " contrast=" << m_renderer->candles()->contrast()
                  << " shader_floor=" << m_renderer->candles()->shaderFloor());
+}
+
+std::string HeatmapSettingsDialog::bubbleProduct() const {
+    return m_model && !m_model->activeSymbol().empty() ? m_model->activeSymbol() : "BTC-USD";
+}
+void HeatmapSettingsDialog::refreshBubbleStyle() {
+    if (m_bubbleStyleEditor) m_bubbleStyleEditor->setStyleModel(m_bubbleStyleStore->load(bubbleProduct()));
+}
+void HeatmapSettingsDialog::setBubbleStyleStore(std::shared_ptr<chart::TradeBubbleStyleStore> store) {
+    m_bubbleStyleStore = std::move(store);
+    refreshBubbleStyle();
 }

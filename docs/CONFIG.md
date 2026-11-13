@@ -270,6 +270,53 @@ that accepts session type 6.
 - **`docs/ARCHITECTURE.md`** — How server and client use config (e.g. `server_config` on connect).
 - **`docs/PAPER_TRADING_QUICKSTART.md`** — Paper trading setup and hotkeys.
 
+## Trade bubble style
+
+`bubbles` in the client YAML sets the initial style (also accepted under `client.bubbles`):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `fill_opacity` | `0.40` | Buy and sell fill opacity, clamped to 0–1. |
+| `max_radius` | `18` | Maximum radius in logical pixels, clamped to 4–48. |
+| `minimum_btc` | `0.38` | Inclusive BTC-USD execution-size minimum in BTC; basis for other products. |
+| `ring_width` | `1` | Inward ring width in logical pixels, clamped to 0–3. |
+| `ring_visible` | `true` | Show the dark ring. |
+
+Settings → Chart → Trade bubbles uses the same element model as TPO: buy fill,
+sell fill and ring each have colour, opacity, visibility and radius/width.
+Buy/sell defaults use the app's positive/negative tokens (`#2EBD85` / `#F6465D`),
+and the ring uses the chart-background token (`#0F1114`) at full opacity.
+Passive marks (including the first without a predecessor) use 35% of each element's
+opacity: 14% fill at the default 40%. A sweep with a price change uses full opacity.
+Sliders edit opacity, radius and ring width; the minimum has a product-scaled slider
+and exact base-unit input. Logical sizes scale once with the window's DPR.
+
+Element edits are shared by charts and saved under `tradeBubbles/style/<element>.<property>`
+in the same `Sentinel/SentinelTerminal` QSettings store as TPO. Base-size minimums
+are saved only when the minimum control changes, separately under `tradeBubbles/minimum/<product>`;
+appearance edits leave automatic minimums automatic. Editing ETH-USD never
+changes BTC-USD's minimum. User edits override YAML. Reset Chart restores the configured
+element defaults and removes only the current product's minimum override.
+
+BTC-USD defaults to 0.38 BTC regardless of price. Other USD products use
+`minimum_btc × latest observed BTC-USD price / latest product price`. Until a BTC
+price is available, the reference is $100,000, matching the existing heatmap auto-sensitivity
+convention (thus a $38,000 notional minimum at the shipped default). Until a product
+price is available, its automatic base filter is zero. Unsaved automatic minimums
+are rounded to two significant figures and refresh on incoming trades only when the
+rounded candidate differs from the active minimum by more than 5%; saved minimums
+stay fixed. This uses prices already received by the chart feeds and makes no network request.
+
+The base-size filter applies to each completed mark's summed base size after sweep/slot
+placement; all fills contribute to a Slot aggregate and its VWAP. The separate quote
+minimum is an additional filter applied after sweep merging. Bubbles default above
+candles (`tradesAboveCandles=true`, z=2.5; false uses z=1.5). Nearby bubbles stay
+separate up to the 4,096-mark geometry budget. Above that budget,
+the density fallback merges each side into 6 px spatial bins, then the smallest fitting
+6 px multiple if needed. It preserves all qualifying notional with weighted centres,
+the largest capsule span and strongest opacity in each bin; no older marks are
+dropped. Existing exchange-time/slot placement and sweep semantics are unchanged.
+
 ## Chart timeframes and retained trades
 
 `chart.timeframes_ms` configures candle aggregation, the candle-history allowlist,

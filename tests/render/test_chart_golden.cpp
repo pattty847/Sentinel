@@ -35,6 +35,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QTemporaryDir>
+#include <QSettings>
 #include <rhi/qrhi.h>
 #include <chrono>
 #include <cmath>
@@ -129,6 +130,9 @@ QString hashOf(const QImage& image, const std::string& mapping) {
 }
 
 void configureFixture(QTemporaryDir& dir) {
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, dir.filePath("settings"));
+    QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, dir.filePath("system-settings"));
     writeRecording(dir, 4 * 60);
     lab::LabData::setLocalSymbolsForTest({"BTC-USD"});
     lab::LabData::configure(dir.path().toStdString(), epoch + 4 * kHourMs);

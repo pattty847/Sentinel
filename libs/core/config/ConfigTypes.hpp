@@ -204,7 +204,14 @@ struct ClientServerConfig {
     std::string caFile = "certs/sentinel-server.crt";
 };
 
+/// Bubble style defaults; user edits live in the GUI style store.
+struct ClientBubbleConfig {
+    double fillOpacity = .40, maxRadius = 18, minimumBtc = .38, ringWidth = 1;
+    bool ringVisible = true;
+};
+
 struct ClientConfig {
+    ClientBubbleConfig bubbles;
     ClientHeatmapConfig heatmap;
     ClientGuiConfig gui;
     ClientTpoConfig tpo;

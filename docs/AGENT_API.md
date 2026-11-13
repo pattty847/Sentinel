@@ -239,7 +239,7 @@ The same per-chart/named-layout settings are exposed in `heatmap/state` and acce
 POST this to `/api/v1/heatmap/settings`; `persist` defaults to true, and the normal
 operation/render acknowledgement applies. `showTrades` is boolean;
 `tradeMinNotional` accepts finite numbers clamped to -1..1e12: 0 (default)
-shows all trades, -1 hides marks below the visible median, and a positive value
+adds no quote filter (the base-size style minimum still applies), -1 hides marks below the visible median, and a positive value
 sets a fixed minimum in quote currency. `bubblePlacement` accepts exactly:
 
 - `individual` (default): exchange time and execution price, with sweep merging.
@@ -267,7 +267,8 @@ minimum filtering. A price change from the preceding retained trade gives full
 bubble opacity. The first execution without a predecessor is passive; same-price passive executions use 35% of that opacity. A sweep
 with any price change uses full bubble opacity.
 
-Sizing uses `radius = clamp(2, 18, 9 * sqrt(notional / ref))` in logical pixels.
+Default sizing uses `radius = clamp(2, 18, 9 * sqrt(notional / ref))` in logical pixels.
+The buy/sell style radius rescales this curve (18 px by default, editable from 4–48 px).
 Individual marks use the p95 of individual trade notionals in the visible
 half-open **time** window. Side aggregates and their notable marks use the p95
 of the side-bar aggregate notionals drawn in Slot mode. Each notable's radius
@@ -287,11 +288,24 @@ when needed for visibility. The size clamps limit scaling at the extremes.
 
 **Trades above candles** defaults on (`settings.tradesAboveCandles: true`). Set it
 to false to draw below candles; both orders remain above the heatmap and below
-algo/order overlays. Buy uses the bid palette endpoint and sell the ask endpoint.
-Full bubble opacity is 60%, passive opacity is 21%, with a darker outer pixel.
+algo/order overlays. Buy/sell use the app's direction tokens (`#2EBD85` / `#F6465D`),
+independent of the heatmap palette. Default fill opacity is 40%, or 14% for passive marks.
+The enabled inward ring defaults to `#0F1114`, 1 logical px and full opacity; passive
+marks apply the same 0.35 multiplier to the ring. Settings → Chart → Trade bubbles
+edits each element's colour, opacity, visibility and radius/width; saved values override
+client YAML defaults. See [Trade bubble style](CONFIG.md#trade-bubble-style).
+
+The additional base-size minimum defaults to 0.38 BTC for BTC-USD. It filters completed
+marks by summed base size after sweep/slot placement; sub-minimum fills still contribute
+to their sweep or Slot aggregate's size and VWAP. Other USD products derive an equivalent
+notional minimum from observed BTC/product prices, with the existing $100,000 BTC reference
+until a BTC price arrives. Automatic minimums use two significant figures and a >5% change
+threshold. Editing appearance does not pin the minimum; only a minimum-control edit
+creates a per-product override.
 Larger marks draw first so smaller executions stay on top.
 
-The existing 4,096-mark geometry cap remains. Above it, each side aggregates into
+The 4,096-mark geometry cap remains. Nearby marks stay separate within this budget.
+Above it, each side aggregates into
 6 px spatial bins with notional-weighted centres, then the smallest fitting 6 px
 multiple if needed. This density fallback applies to both placements, preserves
 qualifying notional, and may combine slot/notable marks or separate executions;

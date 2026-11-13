@@ -72,7 +72,9 @@ uint64_t cellHash(uint32_t x, uint32_t y, AggressorSide side) {
 Layout::Layout() : points_(std::make_unique<Point[]>(PointCapacity)),
                    fineSlots_(std::make_unique<uint32_t[]>(FineSlots)) {}
 std::span<const Bubble> Layout::build(Samples trades, const TimeAxisMapping& map,
-                                      const chart::bubbles::Options& options, double previousPrice) {
+                                      const chart::bubbles::Options& options, double previousPrice,
+                                      const StyleModel& style) {
+    const auto look = clamped(style);
     count_ = scannedRows_ = 0;
     binSize_ = 0;
     hashProbes_ = coarseCellVisits_ = fineCellCount_ = 0;
@@ -84,6 +86,10 @@ std::span<const Bubble> Layout::build(Samples trades, const TimeAxisMapping& map
     size_t pointCount = 0;
     double maxX = 0, maxY = 0;
     for (const auto& t : marks) {
+        // Placement has already combined fills into sweeps/side aggregates.
+        // Filtering here preserves every fill in the mark's size and VWAP.
+        const auto& element = t.side == int(AggressorSide::Buy) ? look.buy : look.sell;
+        if (!element.visible || t.baseSize < look.minimumBaseSize) continue;
         if (options.mode != chart::bubbles::Mode::Slot &&
             (t.timeMs < map.viewStartMs || t.timeMs >= map.viewEndMs)) continue;
         if (t.maxPrice < map.viewMinPrice || t.minPrice > map.viewMaxPrice) continue;
@@ -96,7 +102,9 @@ std::span<const Bubble> Layout::build(Samples trades, const TimeAxisMapping& map
     }
     const auto appendBubble = [&](const Point& p) {
         const double reference = options.mode == chart::bubbles::Mode::Slot ? options.reference.aggregateP95 : options.reference.p95;
-        bubbles_[count_++] = {float(p.x), float(p.y), float(std::min(p.radiusCap, radius(p.notional, reference))), p.side,
+        const auto& element = p.side == AggressorSide::Buy ? look.buy : look.sell;
+        const double r = std::min(p.radiusCap, radius(p.notional, reference)) * element.width / MaxRadius;
+        bubbles_[count_++] = {float(p.x), float(p.y), float(r), p.side,
                              float(p.minY), float(p.maxY), float(p.opacity), p.notional};
     };
     if (pointCount <= MaxBubbles) {

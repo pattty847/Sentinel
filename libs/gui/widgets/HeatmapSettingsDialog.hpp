@@ -14,6 +14,8 @@ class QFormLayout;
 #include <QPointer>
 #include <QWidget>
 #include <vector>
+#include "chart/shell/TradeBubbleStyleStore.hpp"
+#include <memory>
 
 class UnifiedGridRenderer;
 class QCheckBox;
@@ -53,6 +55,8 @@ private:
 class HeatmapSettingsDialog : public QDialog {
     Q_OBJECT
 public:
+    void setBubbleStyleStore(std::shared_ptr<chart::TradeBubbleStyleStore> store);
+
     HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *model, UnifiedGridRenderer *renderer,
                           QWidget *parent = nullptr);
     void setRenderer(UnifiedGridRenderer *renderer);
@@ -103,6 +107,10 @@ private:
     QCheckBox *m_showLabels = nullptr;
     void addFlowControls(QFormLayout*, QWidget*);
     void refreshFlowControls();
+    void refreshBubbleStyle();
+    std::string bubbleProduct() const;
+    class TradeBubbleStyleEditor* m_bubbleStyleEditor = nullptr;
+    std::shared_ptr<chart::TradeBubbleStyleStore> m_bubbleStyleStore = std::make_shared<chart::TradeBubbleStyleStore>();
     QComboBox *m_bubblePlacement = nullptr;
     QComboBox *m_tradeMinMode = nullptr;
     QDoubleSpinBox *m_tradeMinNotional = nullptr;

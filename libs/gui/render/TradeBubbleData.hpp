@@ -1,5 +1,6 @@
 #pragma once
 #include "TimeAxisMapping.hpp"
+#include "TradeBubbleStyle.hpp"
 #include "chart/core/BubblePlacement.hpp"
 #include "marketdata/model/TradeData.h"
 #include <array>
@@ -81,7 +82,7 @@ public:
     static constexpr double MaxRadius = chart::bubbles::MaxRadius;
     Layout();
     static double radius(double notional, double reference) { return chart::bubbles::radius(notional, reference); }
-    std::span<const Bubble> build(Samples trades, const TimeAxisMapping& map, const chart::bubbles::Options& options, double previousPrice = 0);
+    std::span<const Bubble> build(Samples trades, const TimeAxisMapping& map, const chart::bubbles::Options& options, double previousPrice = 0, const StyleModel& style = {});
     size_t scannedRows() const { return scannedRows_; }
     size_t hashProbes() const { return hashProbes_; }
     size_t coarseCellVisits() const { return coarseCellVisits_; }

@@ -87,6 +87,9 @@ set(GRID_CORE_SOURCES
     chart/shell/ChartTpoQml.cpp
     chart/shell/TpoStyleStore.hpp
     chart/shell/TpoStyleStore.cpp
+    chart/shell/TradeBubbleStyleStore.cpp
+    chart/shell/TradeBubbleStyleStore.hpp
+    widgets/TradeBubbleStyleEditor.cpp
     chart/shell/LayerVisibility.hpp
     chart/shell/ChartLookSettings.hpp
     chart/shell/ChartLookSettings.cpp
