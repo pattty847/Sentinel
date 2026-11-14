@@ -45,9 +45,9 @@ Use when primitives are sparse and semantic (bars, lines, labels) and must be in
 - Does not use heatmap `timeOffset`.
 
 **TPO profiles (`TpoOverlayRenderer`)**  
-- Contract: world-semantic per session, from `surfaceBounds` + view time/price (INV-037), never the heatmap `drawRect`/`srcRect`.  
+- Contract: world-semantic per session, from `surfaceBounds` + view time/price (INV-147), never the heatmap `drawRect`/`srcRect`.  
 - Geometry is built in session layout space: x from the session start (split: `period * periodPx`; collapsed: `k * cellW`), y from the top of the trade grid (`(topAbs - (G+1)*group) * tickPx`). A per-session `QSGTransformNode` translates it to the screen, so panning only changes the matrix.  
-- Split keeps the session X-domain `[sessionStartMs, sessionEndMs]` (INV-034). Collapsed profiles anchor at the session start and stick to the plot's left edge while the session is still on screen.
+- Split keeps the session X-domain `[sessionStartMs, sessionEndMs]`. Collapsed profiles anchor at the session start and stick to the plot's left edge while the session is still on screen.
 
 **Labels / axis text**  
 - Contract: world-semantic placement with pixel-density constraints.  
