@@ -58,6 +58,7 @@
 #include <gtest/gtest.h>
 #include "render/TradeBubbleNode.hpp"
 #include "render/TradeBubbleOverlayItem.hpp"
+#include "chart/layers/ChartStack.hpp"
 #include <QFile>
 #include <QQmlEngine>
 #include <QQmlContext>
@@ -2038,19 +2039,20 @@ TEST(TradeBubbleControls, LayerOrderUsesRealQmlBindingAndPersistedChartApiSettin
     ASSERT_NE(root,nullptr) << component.errorString().toStdString();
     auto* overlay=root->findChild<TradeBubbleOverlayItem*>("tradeBubbleOverlay");
     ASSERT_NE(overlay,nullptr);
-    EXPECT_DOUBLE_EQ(overlay->z(),2.5);
+    EXPECT_EQ(overlay->parentItem(), &renderer);
+    EXPECT_DOUBLE_EQ(overlay->z(), chart::depth(chart::ChartDepth::BubblesAbove));
     check->setChecked(false);
     EXPECT_FALSE(model.settings().tradesAboveCandles);
     EXPECT_FALSE(t.reload().tradesAboveCandles);
     EXPECT_FALSE(renderer.candles()->tradesAboveCandles());
-    EXPECT_DOUBLE_EQ(overlay->z(),1.5);
+    EXPECT_DOUBLE_EQ(overlay->z(), chart::depth(chart::ChartDepth::BubblesBelow));
     const AgentApi::Request request{"POST","/api/v1/heatmap/settings",{},
         R"({"tradesAboveCandles":true,"persist":false})"};
     const auto validated=AgentApi::validateControl(request,std::nullopt);
     ASSERT_EQ(validated.status,200);
     ASSERT_TRUE(model.apply(validated.body.heatmapSettings,validated.body.persistHeatmapSettings).isEmpty());
     EXPECT_TRUE(check->isChecked());
-    EXPECT_DOUBLE_EQ(overlay->z(),2.5);
+    EXPECT_DOUBLE_EQ(overlay->z(), chart::depth(chart::ChartDepth::BubblesAbove));
     EXPECT_FALSE(t.reload().tradesAboveCandles); // transient API patch
     EXPECT_TRUE(t.reload("other").tradesAboveCandles);
     EXPECT_FALSE(model.apply({{"tradesAboveCandles","yes"}}).isEmpty());

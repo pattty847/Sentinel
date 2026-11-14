@@ -116,6 +116,7 @@ Rectangle {
 
     CandlestickOverlayItem {
         id: candleOverlay
+        parent: unifiedGridRenderer
         anchors.fill: unifiedGridRenderer
         clip: true
         visible: root.showCandles
@@ -131,16 +132,14 @@ Rectangle {
         wickWidth: unifiedGridRenderer.candles.candleWickWidth
         bodyFraction: unifiedGridRenderer.candles.candleBodyFraction
         maxBodyPx: unifiedGridRenderer.candles.candleMaxBodyPx
-        // Candles go behind the TPO (it is slightly transparent) when no heatmap or footprint would cover them.
-        z: unifiedGridRenderer.layers.tpoLayerEnabled && !unifiedGridRenderer.layers.heatmapLayerEnabled
-           && !unifiedGridRenderer.layers.footprintLayerEnabled ? 0.5 : 2
     }
 
     TradeBubbleOverlayItem {
         objectName: "tradeBubbleOverlay"
+        parent: unifiedGridRenderer
         anchors.fill: unifiedGridRenderer
         renderer: unifiedGridRenderer
-        z: unifiedGridRenderer.candles.tradesAboveCandles ? 2.5 : 1.5
+        tradesAboveCandles: unifiedGridRenderer.candles.tradesAboveCandles
     }
 
     AlgoOverlayRenderer {
