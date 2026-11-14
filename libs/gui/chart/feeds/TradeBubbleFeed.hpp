@@ -20,7 +20,7 @@ public:
     size_t appendHistory(const protocol::tradewire::Page& page);
     void clear() { tape_->clear(); statistics_.reset(); product_.clear(); }
     void setSettings(const heatmap::HeatmapChartSettings&, const std::function<void()>& notify);
-    void publish(const TimeAxisMapping&);
+    void publish(const TimeAxisMapping&, bool footprintNumbersDrawn = false);
     void disableFrame() { frame_->enabled = false; }
     bool tradesAboveCandles() const { return above_; }
     std::shared_ptr<trade_bubbles::RenderFrame> tradeBubbleRenderFrame() const override { return frame_; }
@@ -28,6 +28,7 @@ private:
     std::shared_ptr<trade_bubbles::Tape> tape_ = std::make_shared<trade_bubbles::Tape>();
     std::shared_ptr<trade_bubbles::RenderFrame> frame_ = std::make_shared<trade_bubbles::RenderFrame>(tape_);
     bool above_ = true, show_ = false;
+    bool dimOverFootprint_ = false;
     double minimum_ = 0;
     void selectProduct(const std::string& product);
     void reloadStyle();

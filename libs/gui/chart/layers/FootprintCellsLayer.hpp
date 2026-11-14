@@ -24,6 +24,7 @@ public:
     FootprintStage stage() const { return stage_; }
     const FlowSnapshot& current() const { return *current_; }
     bool drawing() const { return drawing_; }
+    bool drawingNumbers() const { return drawing_ && stage_ == FootprintStage::Numbers && !glyphs_.empty(); }
     QString emptyStateText(const ChartFrame&) const;
     int vertexCount() const { return vertices_; }
     size_t glyphCount() const { return glyphs_.size(); }

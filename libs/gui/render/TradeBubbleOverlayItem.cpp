@@ -31,7 +31,7 @@ void trade_bubbles::RenderLink::sync() {
     if (frame) {
         node->setBottomInset(presentation && frame->mapping.valid ?
             presentation->bottomInset(int64_t(frame->mapping.appendMs), frame->mapping.drawRect.height()) : 0);
-        node->sync(*frame->tape, frame->mapping, frame->enabled, frame->options, frame->style);
+        node->sync(*frame->tape, frame->mapping, frame->enabled, frame->options, frame->style, frame->opacityScale);
     } else {
         // Clearing a provider also clears its old mesh; no QObject is accessed here.
         node->clear();

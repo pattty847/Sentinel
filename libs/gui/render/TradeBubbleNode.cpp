@@ -70,7 +70,8 @@ TradeBubbleNode::~TradeBubbleNode() {
     removeChildNode(&clip_);
 }
 void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMapping& m,
-                          bool enabled, const chart::bubbles::Options& options, const trade_bubbles::StyleModel& style) {
+                          bool enabled, const chart::bubbles::Options& options, const trade_bubbles::StyleModel& style,
+                          float opacityScale) {
     const auto look = trade_bubbles::clamped(style);
     auto clip = m.drawRect;
     if (bottomInset_ > 0) clip.setHeight(std::max(0.0, clip.height() - bottomInset_));
@@ -92,7 +93,7 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
     // inserts rows and evicts its oldest row, never edits existing executions.
     // This also ignores updates outside the viewport and duplicate replay rows.
     if (tape_ == &tape && rebuildCount_ && key == windowKey_ && enabled_ == enabled && options_ == options && mapping_.appendMs == m.appendMs &&
-        style_ == look && mapping_.valid == m.valid && mapping_.drawRect == m.drawRect &&
+        style_ == look && opacityScale_ == opacityScale && mapping_.valid == m.valid && mapping_.drawRect == m.drawRect &&
         scaleX(mapping_) == scaleX(m) && scaleY(mapping_) == scaleY(m) &&
         mapping_.priceToScreenY(m.viewMinPrice) == m.priceToScreenY(m.viewMinPrice) &&
         mapping_.viewMinPrice == m.viewMinPrice && mapping_.viewMaxPrice == m.viewMaxPrice) {
@@ -106,7 +107,7 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
     }
     tape_ = &tape;
     windowKey_ = key; enabled_ = enabled; options_ = options;
-    mapping_ = m; style_ = look;
+    mapping_ = m; style_ = look; opacityScale_ = opacityScale;
     transform_.setMatrix(QMatrix4x4{});
     const auto bubbles = enabled ? layout_.build(window.rows, m, options, window.previousPrice, look) : std::span<const trade_bubbles::Bubble>{};
     lastScanRows_ = enabled ? layout_.scannedRows() : 0;
@@ -118,9 +119,9 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
         if (!(b.radius > 0)) continue;
         const auto& element = b.side == AggressorSide::Buy ? look.buy : look.sell;
         const auto c = element.color;
-        const float alpha = float(element.opacity) * b.opacity;
+        const float alpha = float(element.opacity) * b.opacity * opacityScale;
         const auto ring = look.ring.color;
-        const float ringAlpha = float(look.ring.opacity) * b.opacity;
+        const float ringAlpha = float(look.ring.opacity) * b.opacity * opacityScale;
         const double length = double(b.maxY) - b.minY;
         const float radius = float(chart::bubbles::capsuleHalfWidth(b.radius, length));
         if (!(radius > 0)) continue;

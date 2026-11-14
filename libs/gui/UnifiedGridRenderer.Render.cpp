@@ -43,9 +43,9 @@ QSGNode* UnifiedGridRenderer::updateGpuPaintNode(QSGNode* oldNode, FrameContext&
     auto* root = m_layers.registry.createRoot(oldNode);
     const auto& sync = m_frames.producer.frame();
     m_layers.registry.sync(sync);
-    m_bubbles.publish(frame.mapping);
     m_layers.registry.updateNodes(sync, {window(), root, m_layers.text.renderer, m_layers.text.atlas,
                                          m_layers.text.atlasBuilt, profile ? &m_frameProfiler : nullptr});
+    m_bubbles.publish(frame.mapping, m_layers.footprintCells.drawingNumbers());
     m_frames.ack.submitted(frame);
     if (profile) {
         const QString report = m_frameProfiler.endFrame();

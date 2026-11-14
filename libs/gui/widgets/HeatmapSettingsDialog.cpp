@@ -314,7 +314,7 @@ QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
         return {"palettePreset", "bidGradient", "askGradient", "opacity",
-                "crossfadeMs", "showBandEdges", "smoothZoomOut", "paperPositionStyle"};
+                "crossfadeMs", "showBandEdges", "smoothZoomOut", "paperPositionStyle", "bubblesOverFootprint"};
     if (tab == "Budgets") return {"gpuCapBytes", "uploadBudgetBytes", "prefetchTiles"};
     if (tab == "Live") return {"liveMinIntervalMs"};
     if (tab == "Debug") return {"showTelemetry"};
@@ -612,6 +612,11 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     m_paperPositionStyle->addItem("Compact tag", "tag");
     m_paperPositionStyle->addItem("PnL band", "band");
     form->addRow("Paper position", m_paperPositionStyle);
+    m_bubblesOverFootprint = new QComboBox(page);
+    m_bubblesOverFootprint->setObjectName("bubblesOverFootprint");
+    m_bubblesOverFootprint->addItem("Over footprint", "over");
+    m_bubblesOverFootprint->addItem("Dim over numbers", "dim");
+    form->addRow("Trade bubbles", m_bubblesOverFootprint);
     m_bidGradient = new HeatmapGradientEditor("bidGradient", page);
     m_askGradient = new HeatmapGradientEditor("askGradient", page);
     form->addRow("Bid gradient (Custom)", m_bidGradient);
@@ -670,6 +675,7 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     form->addRow(resetButton("Look", page));
     describe(form, m_palette, "Choose the heatmap's bid and ask colour scale. Pick Custom to use the gradient stops below.");
     describe(form, m_paperPositionStyle, "Show a compact position and live PnL tag at the entry line, or shade the full interval between entry and mark.");
+    describe(form, m_bubblesOverFootprint, "Keep trade bubbles at full opacity, or dim their fill and ring to 35% while footprint numbers are drawn.");
     describe(form, m_bidGradient, "Set the bid-side colours from low to high liquidity. Edit stops to select the Custom palette.");
     describe(form, m_askGradient, "Set the ask-side colours from low to high liquidity. Edit stops to select the Custom palette.");
     describe(form, m_sensitivityMin, m_sensitivityMin->toolTip());
@@ -684,6 +690,9 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     connect(m_palette, &QComboBox::currentTextChanged, this, [this](const QString &p) { apply({{"palettePreset", p}}); });
     connect(m_paperPositionStyle, &QComboBox::currentIndexChanged, this, [this] {
         apply({{"paperPositionStyle", m_paperPositionStyle->currentData().toString()}});
+    });
+    connect(m_bubblesOverFootprint, &QComboBox::currentIndexChanged, this, [this] {
+        apply({{"bubblesOverFootprint", m_bubblesOverFootprint->currentData().toString()}});
     });
     // Editing a gradient selects the Custom palette (the presets ignore them).
     connect(m_bidGradient, &HeatmapGradientEditor::edited, this, [this] {
@@ -993,6 +1002,10 @@ void HeatmapSettingsDialog::refreshFromModel() {
     {
         const QSignalBlocker block(m_paperPositionStyle);
         m_paperPositionStyle->setCurrentIndex(std::max(0, m_paperPositionStyle->findData(QString::fromStdString(s.paperPositionStyle))));
+    }
+    {
+        const QSignalBlocker block(m_bubblesOverFootprint);
+        m_bubblesOverFootprint->setCurrentIndex(std::max(0, m_bubblesOverFootprint->findData(QString::fromStdString(s.bubblesOverFootprint))));
     }
     m_bidGradient->setStops(s.bidGradient);
     m_askGradient->setStops(s.askGradient);
