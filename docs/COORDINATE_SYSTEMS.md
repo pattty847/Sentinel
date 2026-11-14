@@ -81,7 +81,7 @@ Use when primitives are sparse and semantic (bars, lines, labels) and must be in
 3. If world-semantic, use `TimeAxisMapping` helpers only.
 4. If texture-semantic, document ring vs timeline semantics for X and Y separately.
 5. Add a single probe (`sLog_Probe("viewport.domains", ...)`, enabled with `SENTINEL_PROBES`) showing the active domains.
-6. When introducing a new mapping rule, add or update an invariant in `_agent/INVARIANTS.md`.
+6. When introducing a new mapping rule, hold it with a test; when no test can hold it, add an entry to `_agent/NOTES.md`.
 
 ## 7. Reference regression (TPO VerticalTimeline)
 
@@ -89,4 +89,4 @@ On `tpo-footprint-v1`, `TpoOverlayRenderer` VerticalTimeline previously used the
 
 ---
 
-*See also: `libs/gui/render/TimeAxisMapping.hpp`, `_agent/INVARIANTS.md` (INV-004, INV-005, INV-031–INV-036), and `docs/ARCHITECTURE.md` (Coordinate System: TimeAxisMapping).*
+*See also: `libs/gui/render/TimeAxisMapping.hpp`, `_agent/NOTES.md` (INV-004, INV-005, INV-031, INV-035), and `docs/ARCHITECTURE.md` (Coordinate System: TimeAxisMapping).*

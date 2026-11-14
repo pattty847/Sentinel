@@ -9,8 +9,8 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before any change. It holds the build an
 the core-vs-GUI boundary, threading, hot paths, chart-core rules, logging and probes, and how to
 run the GUI and take screenshots. Every coding agent follows it.
 
-Documentation starts at [docs/README.md](docs/README.md). Start with targeted search (`rg -n`,
-`rg --files`), not broad file reads.
+Documentation starts at [docs/README.md](docs/README.md). Find things with `rg`, then read what the task
+needs in full.
 
 The maintainer's own operations (agent roles, worktrees and landing, build queue, deploys,
 live state, task list, agent memory) are private. If you are an agent run by the maintainer, read
