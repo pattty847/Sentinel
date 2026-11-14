@@ -194,6 +194,7 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | (settings only) `candleWickColor` | `auto` | `auto` follows each body colour; `#RRGGBB` overrides both wicks. |
 | (settings only) `candleBodyOpacity` | 1 | 0..1; 1 is fully opaque. |
 | (settings only) `candleWickWidth` | 1 | Integer 1..3 device pixels, independent of zoom and display scale. |
+| (settings only) `paperPositionStyle` | `tag` | `tag` shows a compact position/PnL pill at a visible entry line; `band` restores the shaded entry-to-mark PnL band. The tag hides when the entry is off-screen. The Look tab and Agent API update it live. |
 | `candle_body_fraction` / `candleBodyFraction` | 0.85 | YAML default / per-chart setting. Body share of a column, clamped to 0.3..1.0. |
 | `candle_max_body_px` / `candleMaxBodyPx` | 71 | YAML default / per-chart setting. Body width cap in logical pixels, clamped to 5..120. At default settings, snapped columns of 1..14 device px retain their previous rest widths; custom settings also apply there. |
 | `show_volume_bars` / `showVolumeBars` | true | Volume bars inside the price pane, hidden when candles are hidden. |

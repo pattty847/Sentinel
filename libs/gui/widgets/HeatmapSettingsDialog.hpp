@@ -137,6 +137,7 @@ private:
     QDoubleSpinBox *m_hysteresis = nullptr;
     // Look
     QComboBox *m_palette = nullptr;
+    QComboBox *m_paperPositionStyle = nullptr;
     HeatmapGradientEditor *m_bidGradient = nullptr;
     HeatmapGradientEditor *m_askGradient = nullptr;
     QDoubleSpinBox *m_sensitivityMin = nullptr;

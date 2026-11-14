@@ -79,6 +79,13 @@ void ChartLookSettings::setCandleAppearance(const heatmap::HeatmapChartSettings&
     changed(Notice::CandleAppearance);
 }
 
+void ChartLookSettings::setPaperPositionStyle(const heatmap::HeatmapChartSettings& settings) {
+    const QString style = QString::fromStdString(settings.paperPositionStyle);
+    if (paperPositionStyle_ == style) return;
+    paperPositionStyle_ = style;
+    emit paperPositionStyleChanged();
+}
+
 void ChartLookSettings::applyTpoConfig(const ClientTpoConfig& config) {
     TpoOverlayRenderer::Style style = layers_.tpo.renderer.style();
     style.layout = tpo::parseLayout(config.layout, tpo::Layout::Collapsed);

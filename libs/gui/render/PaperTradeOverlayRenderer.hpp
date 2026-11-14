@@ -25,6 +25,7 @@ class PaperTradeOverlayRenderer : public QQuickItem {
     Q_PROPERTY(QObject* mappingProvider READ mappingProvider WRITE setMappingProvider NOTIFY mappingProviderChanged)
     Q_PROPERTY(QObject* overlayModel READ overlayModel WRITE setOverlayModel NOTIFY overlayModelChanged)
     Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY enabledChanged FINAL)
+    Q_PROPERTY(QString paperPositionStyle READ paperPositionStyle WRITE setPaperPositionStyle NOTIFY paperPositionStyleChanged)
     Q_PROPERTY(qulonglong mappingRevision READ mappingRevision NOTIFY mappingRevisionChanged)
 
 public:
@@ -38,6 +39,8 @@ public:
 
     bool enabled() const { return m_enabled; }
     void setEnabled(bool enabled);
+    QString paperPositionStyle() const { return m_paperPositionStyle; }
+    void setPaperPositionStyle(const QString& style);
     qulonglong mappingRevision() const { return m_mappingRevision; }
 
     Q_INVOKABLE double screenYForPrice(double price) const;
@@ -50,6 +53,7 @@ signals:
     void mappingProviderChanged();
     void overlayModelChanged();
     void enabledChanged();
+    void paperPositionStyleChanged();
     void mappingRevisionChanged();
 
 protected:
@@ -91,6 +95,7 @@ private:
     std::vector<QMetaObject::Connection> m_modelConnections;
 
     bool m_enabled = true;
+    QString m_paperPositionStyle = QStringLiteral("tag");
     bool m_dirty = true;
     qulonglong m_mappingRevision = 1;
 

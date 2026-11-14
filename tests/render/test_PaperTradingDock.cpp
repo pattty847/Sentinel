@@ -1,6 +1,8 @@
 #include "widgets/PaperTradingDock.hpp"
 #include "themes/ThemePalette.hpp"
 #include "render/PaperTradeOverlayModel.hpp"
+#include "render/PaperPositionBandGeometry.hpp"
+#include "render/heatmap/HeatmapSettingsStore.hpp"
 #include "../core/trading/LiveTradingSession.hpp"
 #include "datasources/IGridDataSource.hpp"
 #include "models/PriceUnits.hpp"
@@ -31,6 +33,34 @@
 #include <gtest/gtest.h>
 
 namespace {
+TEST(PaperPositionStyle, BandGeometryOnlyInBandVariant) {
+    EXPECT_FALSE(paperPositionBandSpan(false, 40.0f, 75.0f, 100.0f));
+    const auto band = paperPositionBandSpan(true, 40.0f, 75.0f, 100.0f);
+    ASSERT_TRUE(band);
+    EXPECT_EQ(band->first, 40.0f);
+    EXPECT_EQ(band->second, 75.0f);
+    EXPECT_FALSE(paperPositionBandSpan(true, -20.0f, -5.0f, 100.0f));
+}
+
+TEST(PaperPositionStyle, SettingsValidateAndRoundTrip) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    QSettings settings(dir.filePath("chart.ini"), QSettings::IniFormat);
+    heatmap::HeatmapSettingsStore store(settings);
+    ClientHeatmapConfig defaults;
+    auto chart = store.load("main", defaults);
+    EXPECT_EQ(chart.paperPositionStyle, "tag");
+    EXPECT_FALSE(heatmap::applySettingsPatch(chart, {{"paperPositionStyle", "neither"}}).isEmpty());
+    EXPECT_EQ(chart.paperPositionStyle, "tag");
+    EXPECT_TRUE(store.applyChartPatch("main", chart, {{"paperPositionStyle", "band"}}, true,
+                                      defaults, "", 0).isEmpty());
+    EXPECT_EQ(store.load("main", defaults).paperPositionStyle, "band");
+    EXPECT_TRUE(store.applyChartPatch("main", chart, {{"paperPositionStyle", "tag"}}, false,
+                                      defaults, "", 0).isEmpty());
+    EXPECT_EQ(chart.paperPositionStyle, "tag");
+    EXPECT_EQ(store.load("main", defaults).paperPositionStyle, "band");
+}
+
 class Source final : public IGridDataSource {
 public:
     bool connected = true;

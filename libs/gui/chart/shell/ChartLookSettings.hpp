@@ -25,6 +25,7 @@ class ChartLookSettings : public QObject {
     Q_PROPERTY(double heatmapShaderFloor READ shaderFloor WRITE setHeatmapShaderFloor NOTIFY heatmapShaderFloorChanged)
     Q_PROPERTY(bool tradesAboveCandles READ tradesAboveCandles NOTIFY tradeBubbleSettingsChanged)
     Q_PROPERTY(int candleStyle READ candleStyle WRITE setCandleStyle NOTIFY candleStyleChanged)
+    Q_PROPERTY(QString paperPositionStyle READ paperPositionStyle NOTIFY paperPositionStyleChanged)
     Q_PROPERTY(QColor candleUpColor READ candleUpColor NOTIFY candleAppearanceChanged)
     Q_PROPERTY(QColor candleDownColor READ candleDownColor NOTIFY candleAppearanceChanged)
     Q_PROPERTY(QString candleWickColor READ candleWickColor NOTIFY candleAppearanceChanged)
@@ -53,6 +54,7 @@ public:
     double contrast() const { return contrast_; }
     double shaderFloor() const { return shaderFloor_; }
     int candleStyle() const { return candleStyle_; }
+    QString paperPositionStyle() const { return paperPositionStyle_; }
     QColor candleUpColor() const { return candleUpColor_; }
     QColor candleDownColor() const { return candleDownColor_; }
     QString candleWickColor() const { return candleWickColor_; }
@@ -78,6 +80,7 @@ public:
     void setHeatmapShaderFloor(double floor);
     void setCandleStyle(int style);
     void setCandleAppearance(const heatmap::HeatmapChartSettings& settings);
+    void setPaperPositionStyle(const heatmap::HeatmapChartSettings& settings);
     void applyTpoConfig(const ClientTpoConfig& config);
     void setTpoTimeframeMs(int timeframeMs);
     void setTpoSessionType(int sessionType);
@@ -97,6 +100,7 @@ signals:
     void heatmapContrastChanged();
     void heatmapShaderFloorChanged();
     void tradeBubbleSettingsChanged();
+    void paperPositionStyleChanged();
 private:
     void changed(Notice notice);
     bool applyTpoLook(const tpo::StyleModel& look);
@@ -106,6 +110,7 @@ private:
     double contrast_ = 1.15;
     double shaderFloor_ = 0.01;
     int candleStyle_ = 0;
+    QString paperPositionStyle_ = QStringLiteral("tag");
     QColor candleUpColor_{"#2EBD85"}, candleDownColor_{"#F6465D"};
     QString candleWickColor_ = "auto";
     double candleBodyOpacity_ = 1;

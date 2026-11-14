@@ -1265,6 +1265,22 @@ TEST(CandleStyleTest, SettingsValidateAndRoundTripPerChart) {
     EXPECT_EQ(t.reload().candleMaxBodyPx, 5);
 }
 
+TEST(PaperPositionStyleDialog, AppliesPersistsAndResets) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    auto* style = child<QComboBox>(dialog, "paperPositionStyle");
+    EXPECT_EQ(style->currentData().toString(), "tag");
+    style->setCurrentIndex(style->findData("band"));
+    EXPECT_EQ(model.settings().paperPositionStyle, "band");
+    EXPECT_EQ(t.reload().paperPositionStyle, "band");
+    EXPECT_FALSE(model.apply({{"paperPositionStyle", "invalid"}}).isEmpty());
+    EXPECT_EQ(model.settings().paperPositionStyle, "band");
+    child<QPushButton>(dialog, "resetLook")->click();
+    EXPECT_EQ(style->currentData().toString(), "tag");
+    EXPECT_EQ(t.reload().paperPositionStyle, "tag");
+}
+
 TEST(FlowSettingsDialog, EveryControlAppliesPersistsAndResets) {
     TempStore t;
     HeatmapSettingsModel model(t.store, "main", t.config);

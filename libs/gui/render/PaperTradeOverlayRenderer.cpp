@@ -1,4 +1,5 @@
 #include "PaperTradeOverlayRenderer.hpp"
+#include "PaperPositionBandGeometry.hpp"
 
 #include "PaperTradeOverlayModel.hpp"
 #include "TimeAxisMapping.hpp"
@@ -143,6 +144,15 @@ void PaperTradeOverlayRenderer::setEnabled(bool enabled) {
     emit enabledChanged();
 }
 
+void PaperTradeOverlayRenderer::setPaperPositionStyle(const QString& style) {
+    const QString normalized = style == QStringLiteral("band") ? QStringLiteral("band") : QStringLiteral("tag");
+    if (m_paperPositionStyle == normalized) return;
+    m_paperPositionStyle = normalized;
+    m_dirty = true;
+    update();
+    emit paperPositionStyleChanged();
+}
+
 void PaperTradeOverlayRenderer::onMappingChanged() {
     ++m_mappingRevision;
     m_dirty = true;
@@ -278,10 +288,8 @@ QSGNode* PaperTradeOverlayRenderer::updatePaintNode(QSGNode* oldNode, UpdatePain
     if (position.active && position.entryPrice > 0.0 && position.markPrice > 0.0) {
         const float entryY = static_cast<float>(mapping.priceToScreenY(position.entryPrice));
         const float markY = static_cast<float>(mapping.priceToScreenY(position.markPrice));
-        const float topY = std::clamp(std::min(entryY, markY), 0.0f, heightPx);
-        const float bottomY = std::clamp(std::max(entryY, markY), 0.0f, heightPx);
-        if (bottomY > topY + 0.5f) {
-            addQuad(pnlBand.verts, 0.0f, topY, widthPx, bottomY);
+        if (const auto span = paperPositionBandSpan(m_paperPositionStyle == QStringLiteral("band"), entryY, markY, heightPx)) {
+            addQuad(pnlBand.verts, 0.0f, span->first, widthPx, span->second);
         }
 
         entryLine.verts.push_back({0.0f, entryY});
