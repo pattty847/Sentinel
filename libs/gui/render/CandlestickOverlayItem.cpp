@@ -6,6 +6,7 @@ GPU-batched candlestick overlay (demo data only).
 #include "chart/core/FootprintLod.hpp"
 #include "CandlePixelGeometry.hpp"
 #include "ChartPaneClip.hpp"
+#include "chart/layers/VolumeBarLayer.hpp"
 #include <QQuickWindow>
 #include "../chart/core/CandleInterval.hpp"
 #include "../datasources/CandleSeriesBuffer.hpp"
@@ -23,7 +24,7 @@ namespace {
 
 class CandleOverlayNode final : public ChartPaneClip {
 public:
-    explicit CandleOverlayNode(std::shared_ptr<ChartPaneClipLink> state) : pane(std::move(state)) {
+    explicit CandleOverlayNode(std::shared_ptr<ChartPaneClipLink> state, bool volumeOnly) : pane(std::move(state)) {
         pane->node = this;
         wickNode = new QSGGeometryNode();
         bodyNode = new QSGGeometryNode();
@@ -48,9 +49,17 @@ public:
 
         appendChildNode(wickNode);
         appendChildNode(bodyNode);
+        if (volumeOnly) {
+            volume = std::make_unique<chart::VolumeBarLayer>();
+            appendChildNode(volume->createContainer());
+            pane->syncInset = [this](double inset) { volume->setBottomInset(inset); };
+        }
     }
 
-    ~CandleOverlayNode() override { if (pane->node == this) pane->node = nullptr; }
+    ~CandleOverlayNode() override {
+        if (pane->node == this) { pane->node = nullptr; pane->syncInset = {}; }
+    }
+    std::unique_ptr<chart::VolumeBarLayer> volume;
     std::shared_ptr<ChartPaneClipLink> pane;
     QSGGeometryNode* wickNode = nullptr;
     QSGGeometryNode* bodyNode = nullptr;
@@ -64,6 +73,7 @@ public:
     uint64_t footprintRevision = 0;
     double surfaceDpr = 0;
     void setCounts(int wickCount, int bodyCount) {
+        if (volume && wickCount == 0 && bodyCount == 0) volume->clear();
         candle_pixels::setGeometryCount(*wickGeometry, wickCapacity, wickCount);
         candle_pixels::setGeometryCount(*bodyGeometry, bodyCapacity, bodyCount);
     }
@@ -186,10 +196,11 @@ bool mappingChanged(const TimeAxisMapping& a, const TimeAxisMapping& b) {
 
 } // namespace
 
-CandlestickOverlayItem::CandlestickOverlayItem(QQuickItem* parent)
-    : QQuickItem(parent), m_pane(std::make_shared<ChartPaneClipLink>()) {
+CandlestickOverlayItem::CandlestickOverlayItem(QQuickItem* parent) : CandlestickOverlayItem(parent, false) {}
+CandlestickOverlayItem::CandlestickOverlayItem(QQuickItem* parent, bool volumeOnly)
+    : QQuickItem(parent), m_pane(std::make_shared<ChartPaneClipLink>()), m_volumeOnly(volumeOnly) {
     setFlag(ItemHasContents, true);
-    setZ(chart::depth(chart::ChartDepth::Candles));
+    setZ(chart::depth(volumeOnly ? chart::ChartDepth::Volume : chart::ChartDepth::Candles));
     connect(this, &QQuickItem::windowChanged, this, [this] { connectPaneWindow(); });
 }
 CandlestickOverlayItem::~CandlestickOverlayItem() {
@@ -291,6 +302,18 @@ void CandlestickOverlayItem::setTimeframeMs(int ms) {
     emit timeframeMsChanged();
 }
 
+void CandlestickOverlayItem::setVolumeBandPercent(double value) {
+    if (!std::isfinite(value)) return;
+    value = std::clamp(value, 10.0, 40.0);
+    if (m_volumeBandPercent == value) return;
+    m_volumeBandPercent = value; markGeometryDirty(); emit appearanceChanged();
+}
+void CandlestickOverlayItem::setVolumeOpacity(double value) {
+    if (!std::isfinite(value)) return;
+    value = std::clamp(value, 0.1, 1.0);
+    if (m_volumeOpacity == value) return;
+    m_volumeOpacity = value; markGeometryDirty(); emit appearanceChanged();
+}
 void CandlestickOverlayItem::setCandleStyle(int style) {
     style = std::clamp(style, 0, 2);
     if (m_candleStyle == style) return;
@@ -393,7 +416,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     auto* root = static_cast<CandleOverlayNode*>(oldNode);
     if (root && root->pane != m_pane) { delete root; root = nullptr; }
     if (!root) {
-        root = new CandleOverlayNode(m_pane);
+        root = new CandleOverlayNode(m_pane, m_volumeOnly);
     }
 
     if (!m_mappingProvider || m_timeframeMs <= 0) {
@@ -525,7 +548,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     const int baseVisibleCount = static_cast<int>(filtered.size());
     const int64_t tfMs = static_cast<int64_t>(std::llround(mapping.appendMs));
     const int maxColumns = std::max(0, mapping.gridWidth);
-    const bool synthesize = cadenceMatches && tfMs > 0 && maxColumns > 0 &&
+    const bool synthesize = !m_volumeOnly && cadenceMatches && tfMs > 0 && maxColumns > 0 &&
                             chart::synthesizesQuietBars(m_timeframeMs);
     static const CandleCoverage kNoCoverage;
     const CandleCoverage* coveragePtr = m_candleBuffer ? m_candleBuffer->coverage(m_symbol, m_timeframeMs) : nullptr;
@@ -593,6 +616,12 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         root->setCounts(0, 0);
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
         root->bodyNode->markDirty(QSGNode::DirtyGeometry);
+        return root;
+    }
+
+    if (root->volume) {
+        root->volume->capture(frame, filtered, {m_upColor, m_downColor, m_bodyFraction,
+                              double(m_maxBodyPx), m_volumeBandPercent, m_volumeOpacity});
         return root;
     }
 

@@ -86,6 +86,8 @@ void clampSettings(HeatmapChartSettings &s) {
     s.candleWickWidth = std::clamp(s.candleWickWidth, 1, 3);
     s.candleBodyFraction = finiteClamp(s.candleBodyFraction, 0.3, 1.0, d.candleBodyFraction);
     s.candleMaxBodyPx = std::clamp(s.candleMaxBodyPx, 5, 120);
+    s.volumeBandPercent = finiteClamp(s.volumeBandPercent, 10, 40, d.volumeBandPercent);
+    s.volumeOpacity = finiteClamp(s.volumeOpacity, 0.1, 1, d.volumeOpacity);
     s.ladderWidthPx = std::clamp(s.ladderWidthPx, 60, 240);
     s.wallMultiple = finiteClamp(s.wallMultiple, 1.5, 20, d.wallMultiple);
 }
@@ -111,6 +113,9 @@ HeatmapChartSettings chartDefaults(const ClientHeatmapConfig &c) {
     s.showTelemetry = c.showTelemetry;
     s.candleBodyFraction = c.candleBodyFraction;
     s.candleMaxBodyPx = c.candleMaxBodyPx;
+    s.showVolumeBars = c.showVolumeBars;
+    s.volumeBandPercent = c.volumeBandPercent;
+    s.volumeOpacity = c.volumeOpacity;
     clampSettings(s);
     return s;
 }
@@ -146,6 +151,9 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"candleWickWidth", s.candleWickWidth},
         {"candleBodyFraction", s.candleBodyFraction},
         {"candleMaxBodyPx", s.candleMaxBodyPx},
+        {"showVolumeBars", s.showVolumeBars},
+        {"volumeBandPercent", s.volumeBandPercent},
+        {"volumeOpacity", s.volumeOpacity},
         {"flowFooter", s.flowFooter}, {"cvdStripPx", s.cvdStripPx}, {"cvdReset", QString::fromStdString(s.cvdReset)},
         {"cvdStyle", QString::fromStdString(s.cvdStyle)}, {"cvdFillAnchor", QString::fromStdString(s.cvdFillAnchor)},
         {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
@@ -222,6 +230,9 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.candleWickWidth = merged["candleWickWidth"].toInt();
     out.candleBodyFraction = merged["candleBodyFraction"].toDouble();
     out.candleMaxBodyPx = int(std::clamp(merged["candleMaxBodyPx"].toDouble(), -2147483647.0, 2147483647.0));
+    out.showVolumeBars = merged["showVolumeBars"].toBool();
+    out.volumeBandPercent = merged["volumeBandPercent"].toDouble();
+    out.volumeOpacity = merged["volumeOpacity"].toDouble();
     out.flowFooter = merged["flowFooter"].toBool();
     out.cvdStripPx = int(std::clamp(merged["cvdStripPx"].toDouble(), 0.0, 400.0));
     out.cvdReset = merged["cvdReset"].toString().toStdString();

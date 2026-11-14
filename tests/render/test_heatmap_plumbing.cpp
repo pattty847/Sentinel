@@ -456,11 +456,11 @@ TEST_F(HeatmapPlumbing, DefaultsComeFromYamlAndEveryNumericFieldClamps) {
     ini.setValue("heatmap/budgets/cpuCeiling", 1);
     EXPECT_TRUE(store.loadBudgets(config.heatmap).valid());
 }
-TEST_F(HeatmapPlumbing, CandleBodyYamlDefaultsClampBeforeRendering) {
+TEST_F(HeatmapPlumbing, CandleAndVolumeYamlDefaultsClampBeforeRendering) {
     QTemporaryDir dir;
     QFile yaml(dir.filePath("client.yaml"));
     ASSERT_TRUE(yaml.open(QIODevice::WriteOnly));
-    yaml.write("heatmap:\n  candle_body_fraction: 2.0\n  candle_max_body_px: 999\n");
+    yaml.write("heatmap:\n  candle_body_fraction: 2.0\n  candle_max_body_px: 999\n  show_volume_bars: false\n  volume_band_percent: 99\n  volume_opacity: -1\n");
     yaml.close();
     ClientConfig config;
     ASSERT_TRUE(ConfigLoader::loadClientConfig(yaml.fileName().toStdString(), &config));
@@ -469,6 +469,9 @@ TEST_F(HeatmapPlumbing, CandleBodyYamlDefaultsClampBeforeRendering) {
     const auto settings = store.load("main", config.heatmap);
     EXPECT_DOUBLE_EQ(settings.candleBodyFraction, 1.0);
     EXPECT_EQ(settings.candleMaxBodyPx, 120);
+    EXPECT_FALSE(settings.showVolumeBars);
+    EXPECT_DOUBLE_EQ(settings.volumeBandPercent, 40);
+    EXPECT_DOUBLE_EQ(settings.volumeOpacity, 0.1);
 }
 
 TEST_F(HeatmapPlumbing, TopLevelServerIsIgnoredWithPathWarning) {

@@ -177,6 +177,9 @@ struct ClientHeatmapConfig {
     double sensitivityMax = 50.0;
     double candleBodyFraction = 0.85;
     int candleMaxBodyPx = 71; // logical pixels
+    bool showVolumeBars = true;
+    double volumeBandPercent = 22;
+    double volumeOpacity = 0.45;
 };
 
 struct ClientGuiConfig {

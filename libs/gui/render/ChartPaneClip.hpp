@@ -2,6 +2,7 @@
 #include "chart/feeds/CvdFeed.hpp"
 #include <QSGClipNode>
 #include <QSGGeometry>
+#include <functional>
 
 // Keeps the unmodified price mapping and excludes a docked bottom pane.
 // The clip is detached at zero inset, preserving the original scene tree.
@@ -50,7 +51,11 @@ struct ChartPaneClipLink {
     ChartPaneClip* node = nullptr;
     QRectF surface;
     int64_t timeframeMs = 0;
+    std::function<void(double)> syncInset;
     void sync() const {
-        if (node) node->sync(surface, presentation ? presentation->bottomInset(timeframeMs, surface.height()) : 0);
+        if (!node) return;
+        const double inset = presentation ? presentation->bottomInset(timeframeMs, surface.height()) : 0;
+        if (syncInset) syncInset(inset);
+        node->sync(surface, inset);
     }
 };

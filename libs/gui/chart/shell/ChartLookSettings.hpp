@@ -32,6 +32,9 @@ class ChartLookSettings : public QObject {
     Q_PROPERTY(int candleWickWidth READ candleWickWidth NOTIFY candleAppearanceChanged)
     Q_PROPERTY(double candleBodyFraction READ candleBodyFraction NOTIFY candleAppearanceChanged)
     Q_PROPERTY(int candleMaxBodyPx READ candleMaxBodyPx NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(bool showVolumeBars READ showVolumeBars NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(double volumeBandPercent READ volumeBandPercent NOTIFY candleAppearanceChanged)
+    Q_PROPERTY(double volumeOpacity READ volumeOpacity NOTIFY candleAppearanceChanged)
 public:
     static QColor chartBackground() { return theme::chartBackground(); }
     static QColor footprintSellAggr() { return theme::negative(); }
@@ -57,6 +60,9 @@ public:
     int candleWickWidth() const { return candleWickWidth_; }
     double candleBodyFraction() const { return candleBodyFraction_; }
     int candleMaxBodyPx() const { return candleMaxBodyPx_; }
+    bool showVolumeBars() const { return showVolumeBars_; }
+    double volumeBandPercent() const { return volumeBandPercent_; }
+    double volumeOpacity() const { return volumeOpacity_; }
     int tpoTimeframeMs() const { return tpoTimeframeMs_; }
     int tpoSessionType() const { return tpoSessionType_; }
     int tpoSessions() const;
@@ -106,6 +112,8 @@ private:
     int candleWickWidth_ = 1;
     double candleBodyFraction_ = 0.85;
     int candleMaxBodyPx_ = 71;
+    bool showVolumeBars_ = true;
+    double volumeBandPercent_ = 22, volumeOpacity_ = 0.45;
     int tpoTimeframeMs_ = 1800000;
     int tpoSessionType_ = 4;
     tpo::Theme tpoConfigTheme_ = tpo::Theme::Rainbow;

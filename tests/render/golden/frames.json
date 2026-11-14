@@ -1,19 +1,19 @@
 {
     "keys": {
         "Metal:Apple M4": {
-            "01.rest-auto-candles": "25508f2ab9b3d4c733ce762b580cea40729eb468418a273775064008385a615a",
-            "02.manual-tick": "8c69cd14b536b8e161aa3fafb6af7f8017e30ceebeb68f7125245e220aff85cd",
-            "03.mid-glide-65ms": "cfcafffd6daae8fcf895f69750e0c805e1a33333f723bcf755f8bc8355ca31d3",
-            "04.drag-0.3px": "2248d5b380c886be4a3423d7757e0542a7b8919051fe3dec95723dd5f0c5b540",
+            "01.rest-auto-candles": "14c6a2bff5ed1b9662f08387508182f3b887ddbd879182344a3a66d6b0af899f",
+            "02.manual-tick": "5843ee0d3d03f805b2eb28c206bed2893c737e668e562d3bc839bbc95a9356f6",
+            "03.mid-glide-65ms": "ff1578122f07fa7bd5ce9f80d7d00a9ad6a563c075236838d6fa7d5646462071",
+            "04.drag-0.3px": "aba6433ce94d9d1bb2654e0b1d3d2a355654c5be9aa7f875100b82213d888d21",
             "05.follow-live-step": "c0584df17fb24c43eed0912e552b2b4cd24be4986a037dd7d66d4df842237638",
-            "06a.tpo-split": "2847240ac7b2205d80cd03dc04d14265f38c0addbcdb77953924a0dbd945bdb1",
-            "06b.tpo-collapsed": "99a5330b2cd8c0f69b7459e2e0573f0784f407df010a5d6cc5c78d417f15ef81",
-            "07.volume-profile": "073c4e6b99edfb29cfd90d4e11cabe339be1abdfb2beada802f73a471d2d68f5",
-            "08.footprint": "c768367039ba5e9a5fd640d1c3b79902bcb564614dab94adf476e7f00e2da7e7",
-            "09.labels": "ae94e5a9685f24b8a4b36f029e1f0d10ba0f7b2863e8df0681a3f0c9fb3e20fb",
-            "10.trade-bubbles": "c0d0b6258bad179762aa2755b61f8b379f14d2bd2e72596215994b72c4bb741b",
-            "11.after-1m-to-15m": "4ed040896a59834e0f722d7401d2916e3b4e3a0ad47e6593b71daabe035d0746",
-            "12.rest-dpr2": "a64b46d7635a9bdf0037379e5e7b046f8f42917fba1ccfd73e040b1405da9c0c"
+            "06a.tpo-split": "56814325835ead645c217b0637358af0314bf038d0026ffe6ad52d2165a808e6",
+            "06b.tpo-collapsed": "438727136810b11d5375d022dca73c35e58bfb599c7cd87177074bcf3bf2b1b1",
+            "07.volume-profile": "46daf63823ef288b0f68c56bb49a22b9e6939a23de5838a03cca6cc838d60bf5",
+            "08.footprint": "bf4bac1c369fafdab166b62ac365cdd4b4d384d0870d2cdf7abdd9c1c809cd36",
+            "09.labels": "950dc8200e76c4a3127f8db5f46c166c1030673ec56782ff3bd24cf9b64ec6af",
+            "10.trade-bubbles": "4751a16993839094fa50da005405ceb8e400ac3d0a259f15261598efc41ccc61",
+            "11.after-1m-to-15m": "584f07a139c7f69082b80ddb4f94538d5a3998be7ebeb515a9fffaf4d39f423b",
+            "12.rest-dpr2": "cb995052e331b8cb07613d1e71915bf94bfec0c3b422c5c39ecc95c957f4a7ee"
         }
     },
     "version": 1

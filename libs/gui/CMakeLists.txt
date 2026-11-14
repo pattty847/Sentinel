@@ -64,6 +64,7 @@ set(GRID_CORE_SOURCES
     chart/shell/ChartDebugText.cpp
     chart/shell/ChartInputRouter.cpp
     chart/layers/ChartLayerSet.cpp
+    chart/layers/VolumeBarLayer.cpp
     chart/layers/TradeLayers.cpp
     chart/layers/LadderLayer.cpp
     chart/layers/LadderBadges.cpp

@@ -134,6 +134,24 @@ Rectangle {
         maxBodyPx: unifiedGridRenderer.candles.candleMaxBodyPx
     }
 
+    VolumeBarOverlayItem {
+        objectName: "volumeBarOverlay"
+        parent: unifiedGridRenderer
+        anchors.fill: unifiedGridRenderer
+        clip: true
+        visible: root.showCandles && unifiedGridRenderer.candles.showVolumeBars
+        mappingProvider: unifiedGridRenderer
+        candleBuffer: dataSource ? dataSource.candleBuffer : null
+        symbol: root.symbol
+        timeframeMs: unifiedGridRenderer.view.timeframeMs
+        upColor: unifiedGridRenderer.candles.candleUpColor
+        downColor: unifiedGridRenderer.candles.candleDownColor
+        bodyFraction: unifiedGridRenderer.candles.candleBodyFraction
+        maxBodyPx: unifiedGridRenderer.candles.candleMaxBodyPx
+        volumeBandPercent: unifiedGridRenderer.candles.volumeBandPercent
+        volumeOpacity: unifiedGridRenderer.candles.volumeOpacity
+    }
+
     TradeBubbleOverlayItem {
         objectName: "tradeBubbleOverlay"
         parent: unifiedGridRenderer

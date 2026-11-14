@@ -46,6 +46,8 @@ class CandlestickOverlayItem : public QQuickItem {
     Q_PROPERTY(int wickWidth READ wickWidth WRITE setWickWidth NOTIFY appearanceChanged)
     Q_PROPERTY(double bodyFraction READ bodyFraction WRITE setBodyFraction NOTIFY appearanceChanged)
     Q_PROPERTY(int maxBodyPx READ maxBodyPx WRITE setMaxBodyPx NOTIFY appearanceChanged)
+    Q_PROPERTY(double volumeBandPercent READ volumeBandPercent WRITE setVolumeBandPercent NOTIFY appearanceChanged)
+    Q_PROPERTY(double volumeOpacity READ volumeOpacity WRITE setVolumeOpacity NOTIFY appearanceChanged)
 
 public:
     explicit CandlestickOverlayItem(QQuickItem* parent = nullptr);
@@ -75,6 +77,10 @@ public:
     void setWickWidth(int value);
     void setBodyFraction(double value);
     void setMaxBodyPx(int value);
+    double volumeBandPercent() const { return m_volumeBandPercent; }
+    double volumeOpacity() const { return m_volumeOpacity; }
+    void setVolumeBandPercent(double);
+    void setVolumeOpacity(double);
 
 signals:
     void candleBufferChanged();
@@ -85,6 +91,7 @@ signals:
     void appearanceChanged();
 
 protected:
+    CandlestickOverlayItem(QQuickItem* parent, bool volumeOnly);
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
     void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
 
@@ -124,10 +131,20 @@ private:
     int m_wickWidth = 1;
     double m_bodyFraction = 0.85;
     int m_maxBodyPx = 71;
+    bool m_volumeOnly = false;
+    double m_volumeBandPercent = 22, m_volumeOpacity = 0.45;
     std::vector<CandleOverlayBar> m_visibleCandles;
     std::vector<CandleOverlayBar> m_filteredCandles;
     std::vector<CandleOverlayBar> m_continuousCandles;
     std::vector<CandleSeriesBuffer::CandleBar> m_bufferSlice;
     struct ClosePoint { float cx, cy; uchar r, g, b, a; };
     std::vector<ClosePoint> m_closePoints;
+};
+
+// Uses the same candle selection, dirty tracking and C1 width settings as price.
+class VolumeBarOverlayItem : public CandlestickOverlayItem {
+    Q_OBJECT
+    QML_ELEMENT
+public:
+    explicit VolumeBarOverlayItem(QQuickItem* parent = nullptr) : CandlestickOverlayItem(parent, true) {}
 };

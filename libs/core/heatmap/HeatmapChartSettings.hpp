@@ -43,6 +43,9 @@ struct HeatmapChartSettings {
     int candleWickWidth = 1; // device pixels
     double candleBodyFraction = 0.85;
     int candleMaxBodyPx = 71; // logical pixels
+    bool showVolumeBars = true;
+    double volumeBandPercent = 22;
+    double volumeOpacity = 0.45;
     // Cumulative volume delta strip; height in logical px, 0..400 (0 disables).
     bool flowFooter = false;
     int cvdStripPx = 0;
