@@ -200,6 +200,14 @@ Rectangle {
             return Number(value).toFixed(4)
         }
 
+        function formatTagQty(value) {
+            const numeric = Number(value)
+            const fixed = Math.abs(numeric) >= 1e21
+                          ? numeric.toLocaleString(Qt.locale("C"), 'f', 0).replace(/,/g, "")
+                          : numeric.toFixed(12)
+            return fixed.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "")
+        }
+
         function formatPrice(value) {
             // A scaled unit (PEPE x1M) shows 5.04 for 0.00000504, named by the axis tag.
             const factor = priceAxisModel.unitFactor
@@ -288,6 +296,7 @@ Rectangle {
             model: Object.keys(paperTradeOverlayModel.activePosition).length ? 1 : 0
             delegate: Item {
                 id: positionOverlayItem
+                objectName: "positionOverlayItem"
                 anchors.fill: parent
                 readonly property var pos: paperTradeOverlayModel.activePosition
                 property real lineY: paperTradeOverlayLayer.priceToChartY(pos.entryPrice)
@@ -317,6 +326,7 @@ Rectangle {
 
                 Rectangle {
                     id: positionPill
+                    objectName: "positionPill"
                     visible: !compactTag || (lineY >= 0 && lineY <= parent.height)
                     x: Math.max(8, parent.width - width - (compactTag ? 8 : 18))
                     y: Math.max(6, Math.min(parent.height - height - 6, lineY - height * 0.5))
@@ -333,8 +343,9 @@ Rectangle {
                         spacing: 8
 
                         Text {
+                            objectName: "positionSideText"
                             text: compactTag
-                                  ? (isLong ? "LONG " : "SHORT ") + Number(pos.absQty).toString()
+                                  ? (isLong ? "LONG " : "SHORT ") + paperTradeOverlayLayer.formatTagQty(pos.absQty)
                                   : (isLong ? "Long " : "Short ") + paperTradeOverlayLayer.formatQty(pos.absQty)
                             color: "#d9e2ff"
                             font.pixelSize: 11
@@ -360,7 +371,8 @@ Rectangle {
 
                 Item {
                     id: positionActionRow
-                    visible: paperTradeOverlayModel.canShowRiskControls()
+                    objectName: "positionActionRow"
+                    visible: paperTradeOverlayModel.canShowRiskControls() && (!compactTag || positionPill.visible)
                     x: Math.max(8, positionPill.x - width - 10)
                     y: Math.max(6, Math.min(parent.height - height - 6, lineY - height * 0.5))
 

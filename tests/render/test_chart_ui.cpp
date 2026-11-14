@@ -21,6 +21,7 @@
 #include "mainwindow/AgentApiCodec.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapSettingsModel.hpp"
+#include "render/PaperTradeOverlayModel.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/TopToolbar.hpp"
 #include "widgets/ChartDock.hpp"
@@ -47,6 +48,7 @@
 #include <QTextDocument>
 #include <QToolTip>
 #include <QQuickWindow>
+#include <QQuickView>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -68,6 +70,7 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include <algorithm>
+#include <functional>
 
 void qml_register_types_Sentinel_Charts();
 
@@ -1033,6 +1036,68 @@ TEST(ChartQmlPin, ProductionSceneHasNoWarnings) {
     shell.reset();
     QCoreApplication::processEvents();
     EXPECT_TRUE(warnings.isEmpty()) << warnings.join('\n').toStdString();
+}
+
+TEST(ChartShell, PaperPositionTagFormatsSizeAndHidesOffscreenControls) {
+    QQuickView view;
+    view.setResizeMode(QQuickView::SizeRootObjectToView);
+    view.rootContext()->setContextProperty("uiTheme", QVariant::fromValue<QObject *>(nullptr));
+    view.rootContext()->setContextProperty("dataSource", QVariant::fromValue<QObject *>(nullptr));
+    view.resize(960, 640);
+    view.setSource(QUrl("qrc:/qt/qml/Sentinel/Charts/qml/DepthChartView.qml"));
+    ASSERT_EQ(view.status(), QQuickView::Ready) << view.errors().value(0).toString().toStdString();
+    view.show();
+    auto* shell = view.rootObject();
+    ASSERT_TRUE(shell);
+    auto* chart = shell->findChild<UnifiedGridRenderer *>("unifiedGridRenderer");
+    auto* paper = shell->findChild<PaperTradeOverlayModel *>("paperTradeOverlayModel");
+    ASSERT_TRUE(chart && paper);
+    paper->onPositionUpdated({"BTC-USD", 0.1 + 0.2, 100.0, 0.0, 0.0});
+    QTest::qWait(30);
+    ASSERT_FALSE(paper->activePosition().isEmpty());
+    const auto findVisual = [](QQuickItem* parent, const QString& name) {
+        std::function<QQuickItem*(QQuickItem*)> visit = [&](QQuickItem* item) -> QQuickItem* {
+            if (item->objectName() == name) return item;
+            for (auto* child : item->childItems())
+                if (auto* found = visit(child)) return found;
+            return nullptr;
+        };
+        return visit(parent);
+    };
+    auto* position = findVisual(shell, "positionOverlayItem");
+    auto* pill = findVisual(shell, "positionPill");
+    auto* actions = findVisual(shell, "positionActionRow");
+    auto* sideText = findVisual(shell, "positionSideText");
+    ASSERT_NE(position, nullptr);
+    ASSERT_NE(pill, nullptr);
+    ASSERT_NE(actions, nullptr);
+    ASSERT_NE(sideText, nullptr);
+    EXPECT_EQ(sideText->property("text").toString(), QStringLiteral("LONG 0.3"));
+
+    paper->onPositionUpdated({"BTC-USD", -5e-11, 100.0, 0.0, 0.0});
+    QCoreApplication::processEvents();
+    EXPECT_EQ(sideText->property("text").toString(), QStringLiteral("SHORT 0.00000000005"));
+    paper->onPositionUpdated({"BTC-USD", 1e21, 100.0, 0.0, 0.0});
+    QCoreApplication::processEvents();
+    EXPECT_EQ(sideText->property("text").toString(), QStringLiteral("LONG 1000000000000000000000"));
+    position->setProperty("lineY", 50.0);
+    position->setProperty("markY", 60.0);
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(pill->isVisible());
+    EXPECT_TRUE(actions->isVisible());
+
+    position->setProperty("lineY", -20.0);
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(position->isVisible()) << "the mark remains in view";
+    EXPECT_FALSE(pill->isVisible());
+    EXPECT_FALSE(actions->isVisible());
+
+    heatmap::HeatmapChartSettings band;
+    band.paperPositionStyle = "band";
+    chart->candles()->setPaperPositionStyle(band);
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(pill->isVisible()) << "band keeps the existing clamped pill";
+    EXPECT_TRUE(actions->isVisible()) << "band keeps the existing launcher row";
 }
 
 // Load the actual production shell without opening a window or starting a feed.
