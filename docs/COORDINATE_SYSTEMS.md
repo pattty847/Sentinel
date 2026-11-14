@@ -45,9 +45,9 @@ Use when primitives are sparse and semantic (bars, lines, labels) and must be in
 - Does not use heatmap `timeOffset`.
 
 **TPO profiles (`TpoOverlayRenderer`)**  
-- Contract: world-semantic per session, from `surfaceBounds` + view time/price (INV-037), never the heatmap `drawRect`/`srcRect`.  
+- Contract: world-semantic per session, from `surfaceBounds` + view time/price, never the heatmap `drawRect`/`srcRect`.  
 - Geometry is built in session layout space: x from the session start (split: `period * periodPx`; collapsed: `k * cellW`), y from the top of the trade grid (`(topAbs - (G+1)*group) * tickPx`). A per-session `QSGTransformNode` translates it to the screen, so panning only changes the matrix.  
-- Split keeps the session X-domain `[sessionStartMs, sessionEndMs]` (INV-034). Collapsed profiles anchor at the session start and stick to the plot's left edge while the session is still on screen.
+- Split keeps the session X-domain `[sessionStartMs, sessionEndMs]`. Collapsed profiles anchor at the session start and stick to the plot's left edge while the session is still on screen.
 
 **Labels / axis text**  
 - Contract: world-semantic placement with pixel-density constraints.  
@@ -81,7 +81,7 @@ Use when primitives are sparse and semantic (bars, lines, labels) and must be in
 3. If world-semantic, use `TimeAxisMapping` helpers only.
 4. If texture-semantic, document ring vs timeline semantics for X and Y separately.
 5. Add a single probe (`sLog_Probe("viewport.domains", ...)`, enabled with `SENTINEL_PROBES`) showing the active domains.
-6. When introducing a new mapping rule, add or update an invariant in `_agent/INVARIANTS.md`.
+6. When introducing a new mapping rule, hold it with a test; when no test can hold it, add an entry to `_agent/NOTES.md`.
 
 ## 7. Reference regression (TPO VerticalTimeline)
 
@@ -89,4 +89,4 @@ On `tpo-footprint-v1`, `TpoOverlayRenderer` VerticalTimeline previously used the
 
 ---
 
-*See also: `libs/gui/render/TimeAxisMapping.hpp`, `_agent/INVARIANTS.md` (INV-004, INV-005, INV-031–INV-036), and `docs/ARCHITECTURE.md` (Coordinate System: TimeAxisMapping).*
+*See also: `libs/gui/render/TimeAxisMapping.hpp`, `_agent/NOTES.md` (INV-004, INV-005, INV-031, INV-035), and `docs/ARCHITECTURE.md` (Coordinate System: TimeAxisMapping).*
