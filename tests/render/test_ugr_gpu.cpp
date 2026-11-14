@@ -3922,11 +3922,12 @@ TEST(UgrTickCpu, SymbolAndTimeframeChangesCancelTheStartupHold) {
             changedAt = elapsed.elapsed();
             layer.setAutoPriceTick(100);
             layer.chooseTickForView(view);
+            // Disconnect before draining queued deliveries and changing the view:
+            // a new-view snapshot would legitimately arm a fresh startup hold.
+            QObject::disconnect(layer.controller(), nullptr, &layer, nullptr);
             QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
             if (changeSymbol) layer.setSymbol("TINY-USD");
             else layer.setTimeframeMs(5 * minute);
-            // Isolate the old timer from a legitimate new snapshot for the new view.
-            QObject::disconnect(layer.controller(), nullptr, &layer, nullptr);
         });
         layer.setSymbol("BTC-USD");
         layer.setTimeframeMs(minute);
