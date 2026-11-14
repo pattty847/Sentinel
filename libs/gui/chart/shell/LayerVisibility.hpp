@@ -13,6 +13,7 @@ class LayerVisibility : public QObject {
     Q_PROPERTY(int cvdStripPx READ cvdStripPx WRITE writeCvdStripPx NOTIFY layerVisibilityChanged)
     Q_PROPERTY(QString cvdReset READ cvdReset WRITE writeCvdReset NOTIFY layerVisibilityChanged)
     Q_PROPERTY(QString cvdStyle READ cvdStyle WRITE writeCvdStyle NOTIFY layerVisibilityChanged)
+    Q_PROPERTY(QString cvdFillAnchor READ cvdFillAnchor WRITE writeCvdFillAnchor NOTIFY layerVisibilityChanged)
     Q_PROPERTY(int primaryField READ primaryField NOTIFY primaryFieldChanged)
     Q_PROPERTY(bool heatmapLayerEnabled READ heatmapEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(bool footprintLayerEnabled READ footprintEnabled NOTIFY layerVisibilityChanged)
@@ -53,6 +54,7 @@ public:
         return cvdReset_ == CvdReset::UtcDay ? QStringLiteral("utcDay") : QStringLiteral("tpoSession");
     }
     QString cvdStyle() const { return cvdArea_ ? QStringLiteral("area") : QStringLiteral("line"); }
+    QString cvdFillAnchor() const { return cvdFillAnchor_; }
     void setCvdStripPx(int px) {
         px = std::clamp(px, 0, 400);
         if (cvdStrip_ == px) return;
@@ -74,6 +76,11 @@ public:
         if (value != "line" && value != "area") return;
         setFootprintOption(cvdArea_, value == "area", "cvdStyle");
     }
+    void setCvdFillAnchor(const QString& value) {
+        if (value != "auto" && value != "zero" && value != "edge" && value != "none") return;
+        if (cvdFillAnchor_ == value) return;
+        cvdFillAnchor_ = value; changed("cvdFillAnchor", true);
+    }
     void writeCvdStripPx(int px) {
         setCvdStripPx(px);
         emit footprintSettingsRequested({{"cvdStripPx", cvdStrip_}});
@@ -85,6 +92,10 @@ public:
     void writeCvdStyle(const QString& value) {
         setCvdStyle(value);
         if (cvdStyle() == value) emit footprintSettingsRequested({{"cvdStyle", value}});
+    }
+    void writeCvdFillAnchor(const QString& value) {
+        setCvdFillAnchor(value);
+        if (cvdFillAnchor_ == value) emit footprintSettingsRequested({{"cvdFillAnchor", value}});
     }
     int primaryField() const { return primaryField_; }
     bool heatmapEnabled() const { return heatmap_; }
@@ -273,6 +284,7 @@ private:
     bool flowFooter_ = false;
     int cvdStrip_ = 0;
     CvdReset cvdReset_ = CvdReset::Visible;
+    QString cvdFillAnchor_ = QStringLiteral("auto");
     bool cvdArea_ = false;
     double footprintDust_ = 2500;
     bool footprintWindowIntensity_ = false, footprintSpine_ = true, footprintNumbers_ = true;

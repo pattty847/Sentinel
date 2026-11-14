@@ -116,6 +116,7 @@ in `GET /api/v1/state` under `layers`. QML exposes them on
 | `cvdStripPx` | integer 0..400, 0 | Order flow → Strip height |
 | `cvdReset` | `visible` (default), `utcDay`, `tpoSession` | Order flow → Reset |
 | `cvdStyle` | `line` (default), `area` | Order flow → Style |
+| `cvdFillAnchor` | `auto` (default), `zero`, `edge`, `none` | Order flow → Area fill anchor |
 
 `footprint:true` shows the footprint cells; there is no source choice. The former
 `footprintSource` key is gone: a request carrying it gets the normal unknown-field
@@ -160,11 +161,16 @@ curl -s -H 'Content-Type: application/json' -d '{"footprint":true,"footprintInte
 | `cvdStripPx` | Integer logical px, clamped to 0..400 by API and QML setters; 0 disables. Drawing also clamps to surface height. | `0` |
 | `cvdReset` | `visible`, `utcDay`, `tpoSession` | `visible` |
 | `cvdStyle` | `line`, `area` | `line` |
+| `cvdFillAnchor` | `auto`, `zero`, `edge`, `none` | `auto` |
 
 Both routes report the current knobs; `GET /api/v1/state` includes them under `layers`.
 Layer-route and QML writes persist, including writes of the current value. The heatmap
 settings route supports `persist:false` for lab comparisons without changing saved settings.
-CVD works with footprint on or off and has no footprint zoom gate.
+CVD works with footprint on or off and has no footprint zoom gate. With area style,
+`auto` fills to zero when visible and to the near plot-band edge when visible
+samples stay on one side of zero. `edge` also uses that plot-band edge for
+one-sign data, and fills to zero when data crosses zero. `zero` forces zero
+fill; `none` draws the line only.
 Sub-second charts use the loaded 1 s flow series.
 The default `visible` mode anchors at zero on the first bar whose start time is at
 or after the drawn window's left edge (`drawnStartMs`), then accumulates subsequent

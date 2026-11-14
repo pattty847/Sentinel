@@ -1329,6 +1329,114 @@ TEST(CvdLayer, LineAreaBoundsAndFreshFramesAllocateNothing) {
         EXPECT_GE(vertices[i].y, 99); EXPECT_LE(vertices[i].y, 100);
     }
 }
+using CvdVertex = QSGGeometry::ColoredPoint2D;
+std::vector<CvdVertex> cvdAreaVertices(const std::array<double, 3>& values, chart::CvdFillAnchor anchor,
+                                       bool area = true, int stripPx = 60) {
+    chart::CvdLayer layer;
+    layer.presentation().stripPx = stripPx;
+    layer.presentation().area = area;
+    layer.presentation().fillAnchor = anchor;
+    auto frame = footprintChartFrame();
+    frame.context.surfaceBounds = {0, 0, 300, 100};
+    frame.context.itemBounds = frame.context.surfaceBounds;
+    frame.context.raster.widthDev = 300;
+    frame.context.raster.drawnEndMs = 3000;
+    auto& snapshot = layer.mailbox().back();
+    snapshot.series.clear(); snapshot.timeframeMs = 1000; snapshot.reset = chart::CvdReset::Visible;
+    for (int i = 0; i < 3; ++i) snapshot.series.points[size_t(i)] = {i * 1000, 0, values[size_t(i)], 0};
+    snapshot.series.count = 3;
+    layer.mailbox().post(); layer.sync(frame);
+    std::unique_ptr<QSGNode> root(layer.createContainer());
+    ChartTextRenderer text; ChartTextAtlas atlas;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, false};
+    layer.updateNodes(frame, context);
+    const auto* vertices = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
+    return {vertices, vertices + layer.vertexCount()};
+}
+TEST(CvdLayer, AutoAnchorsNegativeAreaAtTopEdgeAndPositiveAtBottomEdge) {
+    const auto negative = cvdAreaVertices({-1130, -1060, -1100}, chart::CvdFillAnchor::Auto);
+    const auto positive = cvdAreaVertices({1130, 1060, 1100}, chart::CvdFillAnchor::Auto);
+    const auto forcedEdge = cvdAreaVertices({-1130, -1060, -1100}, chart::CvdFillAnchor::Edge);
+    // The panel and divider consume 12 vertices; an off-screen zero emits no zero line.
+    ASSERT_GE(negative.size(), 30u); ASSERT_GE(positive.size(), 30u);
+    const chart::CvdStripLayout layout{60, {}};
+    const float top = float(40 + layout.lineY(1));
+    const float bottom = float(40 + layout.lineY(0));
+    EXPECT_FLOAT_EQ(negative[13].y, top);
+    EXPECT_GT(negative[12].y, 40); EXPECT_LT(negative[12].y, 100);
+    EXPECT_FLOAT_EQ(positive[13].y, bottom);
+    EXPECT_FLOAT_EQ(forcedEdge[13].y, top);
+    EXPECT_GT(positive[12].y, 40); EXPECT_LT(positive[12].y, 100);
+    for (size_t i = 12; i < negative.size(); ++i) {
+        EXPECT_GE(negative[i].y, top); EXPECT_LE(negative[i].y, bottom);
+        EXPECT_GE(positive[i].y, top); EXPECT_LE(positive[i].y, bottom);
+    }
+}
+TEST(CvdLayer, EdgeFillUsesSeriesSignWhenFirstPointOrFlatBarIsAtExtreme) {
+    const chart::CvdStripLayout layout{60, {}};
+    const float top = float(40 + layout.lineY(1));
+    const float bottom = float(40 + layout.lineY(0));
+    for (const auto& values : {std::array<double, 3>{-1060, -1100, -1130},
+                               std::array<double, 3>{-1060, -1060, -1130}}) {
+        const auto vertices = cvdAreaVertices(values, chart::CvdFillAnchor::Auto);
+        ASSERT_GE(vertices.size(), 24u);
+        for (const size_t first : {12u, 18u}) {
+            EXPECT_GT(vertices[first].r, vertices[first].g);
+            EXPECT_FLOAT_EQ(vertices[first + 1].y, top);
+        }
+    }
+    for (const auto& values : {std::array<double, 3>{1060, 1100, 1130},
+                               std::array<double, 3>{1060, 1060, 1130}}) {
+        const auto vertices = cvdAreaVertices(values, chart::CvdFillAnchor::Auto);
+        ASSERT_GE(vertices.size(), 24u);
+        for (const size_t first : {12u, 18u}) {
+            EXPECT_GT(vertices[first].g, vertices[first].r);
+            EXPECT_FLOAT_EQ(vertices[first + 1].y, bottom);
+        }
+    }
+}
+TEST(CvdLayer, EdgeFillStaysBelowDividerAndTitleBand) {
+    constexpr int stripPx = 80;
+    const chart::CvdStripLayout layout{stripPx, {}};
+    ASSERT_TRUE(layout.titleFits());
+    const float plotTop = float(100 - stripPx + layout.lineY(1));
+    const float plotBottom = float(100 - stripPx + layout.lineY(0));
+    for (const auto& values : {std::array<double, 3>{-1060, -1100, -1130},
+                               std::array<double, 3>{1060, 1100, 1130}}) {
+        const auto vertices = cvdAreaVertices(values, chart::CvdFillAnchor::Auto, true, stripPx);
+        ASSERT_GE(vertices.size(), 30u);
+        for (size_t i = 12; i < vertices.size(); ++i) {
+            EXPECT_GE(vertices[i].y, plotTop);
+            EXPECT_LE(vertices[i].y, plotBottom);
+        }
+    }
+}
+TEST(CvdLayer, CrossingZeroKeepsZeroFillAndNoneUsesLineGeometry) {
+    const std::array<double, 3> values{-10, 5, -3};
+    const auto automatic = cvdAreaVertices(values, chart::CvdFillAnchor::Auto);
+    const auto legacy = cvdAreaVertices(values, chart::CvdFillAnchor::Zero);
+    const auto forcedEdge = cvdAreaVertices(values, chart::CvdFillAnchor::Edge);
+    ASSERT_EQ(automatic.size(), legacy.size());
+    ASSERT_EQ(forcedEdge.size(), legacy.size());
+    for (size_t i = 0; i < automatic.size(); ++i) {
+        EXPECT_FLOAT_EQ(automatic[i].x, legacy[i].x);
+        EXPECT_FLOAT_EQ(automatic[i].y, legacy[i].y);
+        EXPECT_EQ(automatic[i].a, legacy[i].a);
+        EXPECT_FLOAT_EQ(forcedEdge[i].x, legacy[i].x);
+        EXPECT_FLOAT_EQ(forcedEdge[i].y, legacy[i].y);
+        EXPECT_EQ(forcedEdge[i].a, legacy[i].a);
+    }
+    const auto forcedZero = cvdAreaVertices({-1130, -1060, -1100}, chart::CvdFillAnchor::Zero);
+    EXPECT_NE(forcedZero[13].y, 40);
+    const auto none = cvdAreaVertices(values, chart::CvdFillAnchor::None);
+    const auto line = cvdAreaVertices(values, chart::CvdFillAnchor::Auto, false);
+    ASSERT_EQ(none.size(), line.size());
+    for (size_t i = 0; i < none.size(); ++i) {
+        EXPECT_FLOAT_EQ(none[i].x, line[i].x);
+        EXPECT_FLOAT_EQ(none[i].y, line[i].y);
+        EXPECT_EQ(none[i].a, line[i].a);
+    }
+}
 TEST(CvdFeed, SumsAllLoadedBarsAndRespectsTpoOpenAndBaseScale) {
     auto source = footprintSeries();
     auto frame = footprintFrame();

@@ -55,6 +55,8 @@ QString symbolFromSegment(QString value) {
 void clampSettings(HeatmapChartSettings &s) {
     const HeatmapChartSettings d;
     s.cvdStripPx = std::clamp(s.cvdStripPx, 0, 400);
+    if (s.cvdFillAnchor != "auto" && s.cvdFillAnchor != "zero" && s.cvdFillAnchor != "edge" && s.cvdFillAnchor != "none")
+        s.cvdFillAnchor = d.cvdFillAnchor;
     if (s.tickMode != TickMode::Auto && s.tickMode != TickMode::Manual) s.tickMode = TickMode::Auto;
     s.manualTick = presetAtLeast(double(std::clamp<int64_t>(s.manualTick, 1, 1'000'000'000'000LL)), 1);
     s.minRowPx = finiteClamp(s.minRowPx, 0.5, 32, d.minRowPx);
@@ -145,7 +147,7 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"candleBodyFraction", s.candleBodyFraction},
         {"candleMaxBodyPx", s.candleMaxBodyPx},
         {"flowFooter", s.flowFooter}, {"cvdStripPx", s.cvdStripPx}, {"cvdReset", QString::fromStdString(s.cvdReset)},
-        {"cvdStyle", QString::fromStdString(s.cvdStyle)},
+        {"cvdStyle", QString::fromStdString(s.cvdStyle)}, {"cvdFillAnchor", QString::fromStdString(s.cvdFillAnchor)},
         {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
         {"footprintCandle", QString::fromStdString(s.footprintCandle)}, {"footprintDustNotional", s.footprintDustNotional}, {"footprintNumbers", s.footprintNumbers},
         {"showLadder", s.showLadder},
@@ -174,6 +176,8 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
             return "cvdStripPx must be an integer";
         if (key == "cvdReset" && v != "visible" && v != "utcDay" && v != "tpoSession") return "cvdReset must be visible, utcDay or tpoSession";
         if (key == "cvdStyle" && v != "line" && v != "area") return "cvdStyle must be line or area";
+        if (key == "cvdFillAnchor" && v != "auto" && v != "zero" && v != "edge" && v != "none")
+            return "cvdFillAnchor must be auto, zero, edge or none";
         if (key == "footprintCandle" && v != "spine" && v != "full") return "footprintCandle must be spine or full";
         if (key == "footprintDustNotional" && v.toDouble() < 0) return "footprintDustNotional must be nonnegative";
         if (key == "footprintIntensity" && v != "bar" && v != "window") return "footprintIntensity must be bar or window";
@@ -222,6 +226,7 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.cvdStripPx = int(std::clamp(merged["cvdStripPx"].toDouble(), 0.0, 400.0));
     out.cvdReset = merged["cvdReset"].toString().toStdString();
     out.cvdStyle = merged["cvdStyle"].toString().toStdString();
+    out.cvdFillAnchor = merged["cvdFillAnchor"].toString().toStdString();
     out.footprintIntensity = merged["footprintIntensity"].toString().toStdString();
     out.footprintCandle = merged["footprintCandle"].toString().toStdString();
     out.footprintDustNotional = merged["footprintDustNotional"].toDouble();

@@ -86,7 +86,7 @@ void ChartAgentPort::bindFlowSource(IGridDataSource& source) const {
 }
 QJsonObject ChartAgentPort::footprintSettings() const {
     if (!layers_) return {};
-    return {{"flowFooter", layers_->flowFooter()}, {"cvdStripPx", layers_->cvdStripPx()}, {"cvdReset", layers_->cvdReset()}, {"cvdStyle", layers_->cvdStyle()},
+    return {{"flowFooter", layers_->flowFooter()}, {"cvdStripPx", layers_->cvdStripPx()}, {"cvdReset", layers_->cvdReset()}, {"cvdStyle", layers_->cvdStyle()}, {"cvdFillAnchor", layers_->cvdFillAnchor()},
             {"footprintIntensity", layers_->footprintIntensity()},
             {"footprintDustNotional", layers_->footprintDustNotional()}, {"footprintCandle", layers_->footprintCandle()}, {"footprintNumbers", layers_->footprintNumbers()}};
 }
@@ -96,6 +96,7 @@ void ChartAgentPort::applyFootprintSettings(const QJsonObject& patch) const {
     if (patch.contains("cvdStripPx")) layers_->setCvdStripPx(int(std::clamp(patch["cvdStripPx"].toDouble(), 0.0, 400.0)));
     if (patch.contains("cvdReset")) layers_->setCvdReset(patch["cvdReset"].toString());
     if (patch.contains("cvdStyle")) layers_->setCvdStyle(patch["cvdStyle"].toString());
+    if (patch.contains("cvdFillAnchor")) layers_->setCvdFillAnchor(patch["cvdFillAnchor"].toString());
     if (patch.contains("footprintIntensity")) layers_->setFootprintIntensity(patch["footprintIntensity"].toString());
     if (patch.contains("footprintCandle")) layers_->setFootprintCandle(patch["footprintCandle"].toString());
     if (patch.contains("footprintDustNotional")) layers_->setFootprintDustNotional(patch["footprintDustNotional"].toDouble());
@@ -118,7 +119,7 @@ QJsonObject ChartAgentPort::tpoLook() const {
 
 QJsonObject ChartAgentPort::footprintPatch(const QJsonObject& patch) {
     QJsonObject out;
-    for (const auto& key : {"flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "footprintIntensity", "footprintCandle", "footprintDustNotional", "footprintNumbers"})
+    for (const auto& key : {"flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "cvdFillAnchor", "footprintIntensity", "footprintCandle", "footprintDustNotional", "footprintNumbers"})
         if (patch.contains(key)) out[key] = patch[key];
     return out;
 }
