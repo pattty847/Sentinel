@@ -61,6 +61,7 @@ void HeatmapChartControls::setRenderer(UnifiedGridRenderer *renderer) {
     renderer->setHeatmapTickMemory(m_model->manualTicks());
     renderer->setHeatmapChartSettings(m_model->settings());
     renderer->candles()->setCandleAppearance(m_model->settings());
+    renderer->candles()->setPaperPositionStyle(m_model->settings());
     connect(renderer->view(), &chart::ChartViewQml::timeframeChanged, this, &HeatmapChartControls::scheduleSync);
     connect(renderer->view(), &chart::ChartViewQml::viewportChanged, this, [this] {
         updateSensitivityContext();
@@ -506,6 +507,7 @@ void HeatmapChartControls::onModelChanged(bool explicitManualTick) {
     if (m_renderer) {
         m_renderer->setHeatmapChartSettings(s, explicitManualTick);
         m_renderer->candles()->setCandleAppearance(s);
+        m_renderer->candles()->setPaperPositionStyle(s);
     }
     applyLadderSettings();
     syncTelemetryVisibility();

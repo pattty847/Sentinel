@@ -70,6 +70,8 @@ void clampSettings(HeatmapChartSettings &s) {
     if (s.sensitivityMax <= s.sensitivityMin) s.sensitivityMax = s.sensitivityMin * 2;
     if (s.bubblePlacement != "individual" && s.bubblePlacement != "auto" && s.bubblePlacement != "slot")
         s.bubblePlacement = d.bubblePlacement;
+    if (s.paperPositionStyle != "tag" && s.paperPositionStyle != "band")
+        s.paperPositionStyle = d.paperPositionStyle;
     s.tradeMinNotional = finiteClamp(s.tradeMinNotional, -1, 1e12, d.tradeMinNotional);
     s.opacity = finiteClamp(s.opacity, 0, 1, d.opacity);
     s.gpuCapBytes = std::clamp<uint64_t>(s.gpuCapBytes, MiB, 4096 * MiB);
@@ -140,6 +142,7 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"tradesAboveCandles", s.tradesAboveCandles},
         {"tradeMinNotional", s.tradeMinNotional},
         {"bubblePlacement", QString::fromStdString(s.bubblePlacement)},
+        {"paperPositionStyle", QString::fromStdString(s.paperPositionStyle)},
         {"showLabels", s.showLabels},
         {"labelCurrency", QString::fromStdString(s.labelCurrency)},
         {"labelMinPx", s.labelMinPx},
@@ -180,6 +183,8 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
         if (integers.contains(key) && std::floor(v.toDouble()) != v.toDouble()) return "Expected an integer: " + key;
         if (key == "bubblePlacement" && v != "individual" && v != "auto" && v != "slot")
             return "bubblePlacement must be individual, auto or slot";
+        if (key == "paperPositionStyle" && v != "tag" && v != "band")
+            return "paperPositionStyle must be tag or band";
         if (key == "cvdStripPx" && std::floor(v.toDouble()) != v.toDouble())
             return "cvdStripPx must be an integer";
         if (key == "cvdReset" && v != "visible" && v != "utcDay" && v != "tpoSession") return "cvdReset must be visible, utcDay or tpoSession";
@@ -218,6 +223,7 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.showTrades = merged["showTrades"].toBool();
     out.tradesAboveCandles = merged["tradesAboveCandles"].toBool();
     out.bubblePlacement = merged["bubblePlacement"].toString().toStdString();
+    out.paperPositionStyle = merged["paperPositionStyle"].toString().toStdString();
     out.tradeMinNotional = merged["tradeMinNotional"].toDouble();
     out.showLabels = merged["showLabels"].toBool();
     out.labelCurrency = merged["labelCurrency"].toString().toStdString();

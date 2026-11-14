@@ -185,6 +185,7 @@ Rectangle {
         clip: true
         mappingProvider: unifiedGridRenderer
         overlayModel: paperTradeOverlayModel
+        paperPositionStyle: unifiedGridRenderer.candles.paperPositionStyle
         enabled: true
         z: 4
     }
@@ -199,6 +200,14 @@ Rectangle {
             return Number(value).toFixed(4)
         }
 
+        function formatTagQty(value) {
+            const numeric = Number(value)
+            const fixed = Math.abs(numeric) >= 1e21
+                          ? numeric.toLocaleString(Qt.locale("C"), 'f', 0).replace(/,/g, "")
+                          : numeric.toFixed(12)
+            return fixed.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "")
+        }
+
         function formatPrice(value) {
             // A scaled unit (PEPE x1M) shows 5.04 for 0.00000504, named by the axis tag.
             const factor = priceAxisModel.unitFactor
@@ -210,6 +219,11 @@ Rectangle {
         function formatPnl(value) {
             const numeric = Number(value)
             return (numeric >= 0 ? "+" : "") + "$" + numeric.toFixed(2)
+        }
+
+        function formatTagPnl(value) {
+            const numeric = Number(value)
+            return (numeric < 0 ? "-$" : "+$") + Math.abs(numeric).toFixed(2)
         }
 
         function formatPct(value) {
@@ -282,6 +296,7 @@ Rectangle {
             model: Object.keys(paperTradeOverlayModel.activePosition).length ? 1 : 0
             delegate: Item {
                 id: positionOverlayItem
+                objectName: "positionOverlayItem"
                 anchors.fill: parent
                 readonly property var pos: paperTradeOverlayModel.activePosition
                 property real lineY: paperTradeOverlayLayer.priceToChartY(pos.entryPrice)
@@ -289,6 +304,7 @@ Rectangle {
                 property bool isLong: pos.side === "LONG"
                 property color lineColor: isLong ? "#4f8cff" : "#f26d6d"
                 property color pnlColor: Number(pos.totalPnl) >= 0 ? "#5be39b" : "#ff8c82"
+                property bool compactTag: paperTradeOverlayRenderer.paperPositionStyle === "tag"
                 property real topY: Math.max(0, Math.min(lineY, markY))
                 property real bottomY: Math.min(parent.height, Math.max(lineY, markY))
                 property real bandHeight: Math.max(1, bottomY - topY)
@@ -310,7 +326,9 @@ Rectangle {
 
                 Rectangle {
                     id: positionPill
-                    x: Math.max(8, parent.width - width - 18)
+                    objectName: "positionPill"
+                    visible: !compactTag || (lineY >= 0 && lineY <= parent.height)
+                    x: Math.max(8, parent.width - width - (compactTag ? 8 : 18))
                     y: Math.max(6, Math.min(parent.height - height - 6, lineY - height * 0.5))
                     radius: 4
                     color: "#101724"
@@ -325,18 +343,24 @@ Rectangle {
                         spacing: 8
 
                         Text {
-                            text: (isLong ? "Long " : "Short ") + paperTradeOverlayLayer.formatQty(pos.absQty)
+                            objectName: "positionSideText"
+                            text: compactTag
+                                  ? (isLong ? "LONG " : "SHORT ") + paperTradeOverlayLayer.formatTagQty(pos.absQty)
+                                  : (isLong ? "Long " : "Short ") + paperTradeOverlayLayer.formatQty(pos.absQty)
                             color: "#d9e2ff"
                             font.pixelSize: 11
                             font.family: "Roboto Mono"
                         }
                         Text {
-                            text: paperTradeOverlayLayer.formatPnl(pos.openPnl) + " / " + paperTradeOverlayLayer.formatPct(pos.openPnlPct)
-                            color: pnlColor
+                            text: compactTag
+                                  ? "· " + paperTradeOverlayLayer.formatTagPnl(pos.openPnl)
+                                  : paperTradeOverlayLayer.formatPnl(pos.openPnl) + " / " + paperTradeOverlayLayer.formatPct(pos.openPnlPct)
+                            color: compactTag ? (Number(pos.openPnl) >= 0 ? "#5be39b" : "#ff8c82") : pnlColor
                             font.pixelSize: 11
                             font.family: "Roboto Mono"
                         }
                         Text {
+                            visible: !compactTag
                             text: "@ " + paperTradeOverlayLayer.formatPrice(pos.entryPrice)
                             color: "#98a9db"
                             font.pixelSize: 11
@@ -347,7 +371,8 @@ Rectangle {
 
                 Item {
                     id: positionActionRow
-                    visible: paperTradeOverlayModel.canShowRiskControls()
+                    objectName: "positionActionRow"
+                    visible: paperTradeOverlayModel.canShowRiskControls() && (!compactTag || positionPill.visible)
                     x: Math.max(8, positionPill.x - width - 10)
                     y: Math.max(6, Math.min(parent.height - height - 6, lineY - height * 0.5))
 
