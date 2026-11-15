@@ -16,5 +16,6 @@ struct RenderFrame {
     int referenceRetryMs = 0;
     chart::bubbles::Options options;
     StyleModel style;
+    float opacityScale = 1;
 };
 }

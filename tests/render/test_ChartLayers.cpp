@@ -1135,6 +1135,7 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
     layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
     ASSERT_GT(layer.glyphCount(), 0u);
+    EXPECT_TRUE(layer.drawingNumbers());
     for (int i = 0; i < 2; ++i) {
         footprintAllocations = 0; footprintCounting = true;
         layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
@@ -1185,6 +1186,7 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     layer.sync(frame); layer.submitLabels(frame, context);
     EXPECT_EQ(layer.glyphCount(), 0u);
     EXPECT_TRUE(layer.drawing());
+    EXPECT_FALSE(layer.drawingNumbers());
 }
 
 TEST(FootprintSource, CellsAreTheOnlyFootprintLayerAndNeedNoSourceSetting) {

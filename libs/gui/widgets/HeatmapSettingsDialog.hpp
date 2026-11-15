@@ -138,6 +138,7 @@ private:
     // Look
     QComboBox *m_palette = nullptr;
     QComboBox *m_paperPositionStyle = nullptr;
+    QComboBox *m_bubblesOverFootprint = nullptr;
     HeatmapGradientEditor *m_bidGradient = nullptr;
     HeatmapGradientEditor *m_askGradient = nullptr;
     QDoubleSpinBox *m_sensitivityMin = nullptr;

@@ -23,7 +23,7 @@ public:
     size_t rangeComparisons() const { return rangeComparisons_; }
     const QMatrix4x4& translation() const { return transform_.matrix(); }
     void sync(const trade_bubbles::Tape& tape, const TimeAxisMapping& mapping,
-              bool enabled, const chart::bubbles::Options& options, const trade_bubbles::StyleModel& style = {});
+              bool enabled, const chart::bubbles::Options& options, const trade_bubbles::StyleModel& style = {}, float opacityScale = 1);
 private:
     trade_bubbles::Layout layout_;
     QSGGeometry geometry_, clipGeometry_;
@@ -37,6 +37,7 @@ private:
     TimeAxisMapping mapping_;
     chart::bubbles::Options options_;
     bool enabled_ = false;
+    float opacityScale_ = 1;
     double bottomInset_ = 0;
     int usedVertexCount_ = 0;
     trade_bubbles::StyleModel style_;

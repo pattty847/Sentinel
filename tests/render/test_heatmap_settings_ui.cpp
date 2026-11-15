@@ -1281,6 +1281,29 @@ TEST(PaperPositionStyleDialog, AppliesPersistsAndResets) {
     EXPECT_EQ(t.reload().paperPositionStyle, "tag");
 }
 
+TEST(BubblesOverFootprintDialog, AgentApiAppliesPersistsAndResets) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    auto* setting = child<QComboBox>(dialog, "bubblesOverFootprint");
+    ASSERT_NE(setting, nullptr);
+    EXPECT_EQ(setting->currentData().toString(), "over");
+    setting->setCurrentIndex(setting->findData("dim"));
+    EXPECT_EQ(model.settings().bubblesOverFootprint, "dim");
+    EXPECT_EQ(t.reload().bubblesOverFootprint, "dim");
+    const AgentApi::Request request{"POST", "/api/v1/heatmap/settings", {},
+        R"({"bubblesOverFootprint":"over","persist":false})"};
+    const auto validated = AgentApi::validateControl(request, std::nullopt);
+    ASSERT_EQ(validated.status, 200);
+    ASSERT_TRUE(model.apply(validated.body.heatmapSettings, validated.body.persistHeatmapSettings).isEmpty());
+    EXPECT_EQ(setting->currentData().toString(), "over");
+    EXPECT_EQ(t.reload().bubblesOverFootprint, "dim");
+    EXPECT_FALSE(model.apply({{"bubblesOverFootprint", "under"}}).isEmpty());
+    child<QPushButton>(dialog, "resetLook")->click();
+    EXPECT_EQ(setting->currentData().toString(), "over");
+    EXPECT_EQ(t.reload().bubblesOverFootprint, "over");
+}
+
 TEST(FlowSettingsDialog, EveryControlAppliesPersistsAndResets) {
     TempStore t;
     HeatmapSettingsModel model(t.store, "main", t.config);

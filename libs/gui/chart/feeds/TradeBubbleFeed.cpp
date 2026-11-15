@@ -45,6 +45,7 @@ size_t TradeBubbleFeed::appendHistory(const protocol::tradewire::Page& page) {
 void TradeBubbleFeed::setSettings(const heatmap::HeatmapChartSettings& settings, const std::function<void()>& notify) {
     selectProduct(settings.sensitivitySymbol);
     show_ = settings.showTrades;
+    dimOverFootprint_ = settings.bubblesOverFootprint == "dim";
     if (above_ != settings.tradesAboveCandles) {
         above_ = settings.tradesAboveCandles;
         notify();
@@ -53,9 +54,10 @@ void TradeBubbleFeed::setSettings(const heatmap::HeatmapChartSettings& settings,
     requested_ = settings.bubblePlacement == "slot" ? bubbles::Mode::Slot :
                  settings.bubblePlacement == "auto" ? bubbles::Mode::Auto : bubbles::Mode::Individual;
 }
-void TradeBubbleFeed::publish(const TimeAxisMapping& mapping) {
+void TradeBubbleFeed::publish(const TimeAxisMapping& mapping, bool footprintNumbersDrawn) {
     frame_->mapping = mapping;
     frame_->enabled = show_;
+    frame_->opacityScale = dimOverFootprint_ && footprintNumbersDrawn ? .35f : 1.f;
     frame_->referencePending = false;
     frame_->referenceRetryMs = 0;
     frame_->options.minimum = minimum_;

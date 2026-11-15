@@ -103,6 +103,8 @@ curl -s 'http://127.0.0.1:17100/api/v1/screenshot?name=wheel&target=heatmap&afte
 
 `paperPositionStyle` is a per-chart look setting on `POST /api/v1/heatmap/settings`: `"tag"` (default) shows a compact side, size and live PnL pill on the visible entry line; `"band"` restores full-width entry-to-mark PnL shading. The tag hides when entry is off-screen. Both values apply live and are returned in `heatmap/state.settings`.
 
+`bubblesOverFootprint` is a per-chart Look setting on the same endpoint: `"over"` (default) keeps trade bubble opacity unchanged; `"dim"` multiplies bubble fill and ring alpha by 0.35 while the renderer draws footprint numbers. Both values apply live and appear in `heatmap/state.settings`. `"under"` is unavailable because the fixed chart depth order (INV-113) already puts bubbles below chart text; moving them behind the footprint cell plane would change that order.
+
 `POST /api/v1/layers` accepts the following persistent chart settings. The same
 keys work in `POST /api/v1/heatmap/settings` (including `persist:false`) and appear
 in `GET /api/v1/state` under `layers`. QML exposes them on

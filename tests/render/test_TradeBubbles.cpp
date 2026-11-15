@@ -555,6 +555,25 @@ TEST(TradeBubbleStyle, MeshUsesDirectionFillAndLogicalRingForBothSides) {
     node.sync(*tape,mapping(),true,{},look);
     EXPECT_EQ(node.usedVertexCount(),6);
 }
+TEST(TradeBubbleStyle, DimScalesFillAndRingOnlyWhileFootprintNumbersDraw) {
+    auto tape = std::make_unique<Tape>();
+    tape->append({1200,150,1,AggressorSide::Buy});
+    TradeBubbleNode node;
+    node.sync(*tape, mapping(), true, {});
+    ASSERT_EQ(node.usedVertexCount(), 6);
+    const auto* v = static_cast<const float*>(node.geometry()->vertexData());
+    const float fill = v[7], ring = v[12];
+    const auto baseBuilds = node.rebuildCount();
+    node.sync(*tape, mapping(), true, {}, {}, .35f);
+    EXPECT_EQ(node.rebuildCount(), baseBuilds + 1);
+    EXPECT_FLOAT_EQ(v[7], fill * .35f);
+    EXPECT_FLOAT_EQ(v[12], ring * .35f);
+    EXPECT_FLOAT_EQ(v[4], theme::positive().red()/255.f * fill * .35f);
+    EXPECT_FLOAT_EQ(v[9], 15/255.f * ring * .35f);
+    node.sync(*tape, mapping(), true, {}, {}, 1.f);
+    EXPECT_FLOAT_EQ(v[7], fill);
+    EXPECT_FLOAT_EQ(v[12], ring);
+}
 TEST(TradeBubbleStyle, HugeTradeCapsAtLogicalRadiusAcrossDprAndEdits) {
     auto tape = std::make_unique<Tape>();
     tape->append({1500,150,1e100,AggressorSide::Buy});
@@ -642,6 +661,23 @@ TEST(TradeBubbleStyle, FeedLoadsPersistedStyleAndUpdatesPlainFrameOnEdit) {
     EXPECT_EQ(reopened.tradeBubbleRenderFrame()->style,edited);
     store->clear("BTC-USD");
     EXPECT_EQ(frame->style,StyleModel{});
+}
+
+TEST(TradeBubbleStyle, FootprintDimUsesPublishedNumberState) {
+    chart::TradeBubbleFeed feed;
+    heatmap::HeatmapChartSettings settings;
+    settings.showTrades = true;
+    settings.bubblesOverFootprint = "dim";
+    feed.setSettings(settings, [] {});
+    feed.publish(mapping(), false);
+    const auto frame = feed.tradeBubbleRenderFrame();
+    EXPECT_FLOAT_EQ(frame->opacityScale, 1.f);
+    feed.publish(mapping(), true);
+    EXPECT_FLOAT_EQ(frame->opacityScale, .35f);
+    settings.bubblesOverFootprint = "over";
+    feed.setSettings(settings, [] {});
+    feed.publish(mapping(), true);
+    EXPECT_FLOAT_EQ(frame->opacityScale, 1.f);
 }
 
 TEST(TradeBubbleStyleReview, SubMinimumFillsFormOneQualifyingSweep) {
