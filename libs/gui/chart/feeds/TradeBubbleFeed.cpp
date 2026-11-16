@@ -74,7 +74,8 @@ void TradeBubbleFeed::publish(const TimeAxisMapping& mapping, bool footprintNumb
             std::chrono::steady_clock::now().time_since_epoch()).count();
         frame_->options.reference = statistics_.update(trade_bubbles::PolicyRows{window.rows},
             trade_bubbles::PolicyRows{expanded.rows}, {key.first, key.last, slotKey.first, slotKey.last, key.count, slotKey.count},
-            {mapping.viewStartMs, mapping.viewEndMs, mapping.appendMs, minimum_}, frame_->options.mode, nowMs);
+            {mapping.viewStartMs, mapping.viewEndMs, mapping.appendMs, minimum_, frame_->style.minimumBaseSize},
+            frame_->options.mode, nowMs);
         frame_->referencePending = statistics_.pending();
         frame_->referenceRetryMs = statistics_.retryAfterMs();
     }
