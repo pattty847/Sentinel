@@ -991,6 +991,38 @@ TEST_F(TradeOverlay, VolumeProfileCapsBarsAtUnsignedShortIndexLimit) {
     EXPECT_EQ(idx[maxBars * 6 - 2], 65535);
 }
 
+namespace {
+QStringList* g_vpLog = nullptr;
+void captureVpLog(QtMsgType, const QMessageLogContext&, const QString& message) {
+    if (g_vpLog && message.contains("Volume profile")) g_vpLog->append(message);
+}
+}
+
+TEST_F(TradeOverlay, VolumeProfileReportsBarsDroppedAtTheIndexLimitOnce) {
+    constexpr int maxBars = 16384;
+    VolumeProfileRenderer renderer;
+    QSGNode root;
+    VolumeProfileState::Snapshot snap;
+    snap.minPrice = 100;
+    snap.tickSize = 1;
+    snap.gridHeight = maxBars + 3;
+    const std::vector<float> bins(size_t(maxBars + 3), 1);
+    const QRectF surface(20, 30, 800, 400);
+    QStringList log;
+    g_vpLog = &log;
+    const auto previous = qInstallMessageHandler(captureVpLog);
+    renderer.render(&root, true, surface, 100, 100.0 + double(bins.size()), bins, snap, 1.0, true);
+    renderer.render(&root, true, surface, 99, 100.0 + double(bins.size()), bins, snap, 1.0, true); // rebuilt, still capped
+    snap.gridHeight = 4;
+    renderer.render(&root, true, surface, 100, 104, {1, 2, 3, 4}, snap, 1.0, true); // under the cap
+    qInstallMessageHandler(previous);
+    g_vpLog = nullptr;
+    ASSERT_EQ(log.size(), 1) << log.join('\n').toStdString();
+    EXPECT_TRUE(log[0].contains("visible=16387")) << log[0].toStdString();
+    EXPECT_TRUE(log[0].contains("drawn=16384")) << log[0].toStdString();
+    EXPECT_TRUE(log[0].contains("dropped=3")) << log[0].toStdString();
+}
+
 TEST_F(TradeOverlay, VolumeProfileBarsClipToThePlotWithoutAPaneClip) {
     // With the CVD pane off, PaneChartLayer adds no clip node: bars straddling the top or
     // bottom of the plot must be clipped by the renderer, as the VA band and POC are.

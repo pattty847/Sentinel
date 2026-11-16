@@ -259,6 +259,16 @@ void VolumeProfileRenderer::ensureNodes(QSGNode* parentNode) {
     }
 }
 
+void VolumeProfileRenderer::reportBarCap(int visible, int drawn) {
+    // 16-bit indices address four vertices per bar, so at most kMaxIndexedBars bars draw;
+    // the wire allows taller grids. The lowest-priced visible bins are the ones dropped.
+    if (m_barCapReported) return;
+    m_barCapReported = true;
+    sLog_Warning("Volume profile bars capped at the 16-bit index limit: visible=" << visible
+                 << " drawn=" << drawn << " dropped=" << (visible - drawn)
+                 << " (reported once per renderer)");
+}
+
 void VolumeProfileRenderer::clearGeometry() {
     // Hide the draw ranges; keep nodes and allocated buffers for reuse.
     if (m_vaNode)   setDrawCounts(m_vaNode->geometry(), 0, 0);
@@ -334,14 +344,16 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
         const double gridMaxPrice = snap.minPrice + static_cast<double>(n) * snap.tickSize;
 
         // Count visible bins first to size the geometry.
-        int visCount = 0;
-        for (int i = 0; i < n && visCount < kMaxIndexedBars; ++i) {
+        int visible = 0;
+        for (int i = 0; i < n; ++i) {
             if (!std::isfinite(bins[static_cast<size_t>(i)])) continue;
             const double binTop    = gridMaxPrice - static_cast<double>(i)       * snap.tickSize;
             const double binBottom = gridMaxPrice - static_cast<double>(i + 1)   * snap.tickSize;
             if (binTop < viewMinPrice || binBottom > viewMaxPrice) continue;
-            ++visCount;
+            ++visible;
         }
+        const int visCount = std::min(visible, kMaxIndexedBars);
+        if (visible > visCount) reportBarCap(visible, visCount);
 
         auto* geo = m_barsNode->geometry();
         if (visCount > m_barCapacity) {
