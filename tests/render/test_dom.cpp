@@ -1442,6 +1442,28 @@ TEST_F(DomDock, BestCellsFillInTheSideColourAndBarsUseTheRamp) {
     EXPECT_NE(pixel(next, DomModel::Bid, .45), pixel(next, DomModel::Bid, .55));
 }
 
+TEST_F(DomDock, DepthLineRunsUnderTheSizeTextAtThirtyFivePercent) {
+    // A deep wall far below keeps the cumulative line near the price side, inside the digits' box.
+    source.update({{true, 200, 10}, {true, 199.9, 5.0123}, {true, 199, 1000}, {false, 200.1, 5}});
+    dock.resize(650, 700);
+    show();
+    for (int i = 0; i < 2; ++i) QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
+    const QImage image = table->viewport()->grab().toImage();
+    const int row = rowAt(*model, 1999);
+    QStyleOptionViewItem opt;
+    opt.rect = table->visualRect(model->index(row, DomModel::Bid));
+    opt.font = table->font();
+    opt.fontMetrics = QFontMetrics(opt.font);
+    const QRect text = DomBarDelegate::sizeTextRect(opt, model->index(row, DomModel::Bid).data().toString());
+    const QRect area = opt.rect.adjusted(2, 2, -2, -2);
+    const int x = area.right() - int(std::lround(model->barFraction(model->size(row, true, true), true, true) * (area.width() - 1)));
+    ASSERT_GE(x, text.left() + 1);
+    ASSERT_LE(x, text.right() - 1);
+    EXPECT_NE(image.pixelColor(x, opt.rect.top()), image.pixelColor(x - 2, opt.rect.top())); // drawn above the text
+    EXPECT_EQ(image.pixelColor(x, text.top()), image.pixelColor(x - 2, text.top()));         // stopped at the digits
+    EXPECT_EQ(DomBarDelegate::DepthLineAlpha, 89);
+}
+
 TEST_F(DomDock, TradesLeaveTheWindowWithoutAnyNewEvent) {
     source.update({{true, 200, 1}, {false, 200.1, 1}});
     source.send(tradeAt(QDateTime::currentMSecsSinceEpoch() - DomTradeWindow::WindowMs + 300, 200, AggressorSide::Buy, 2));

@@ -322,21 +322,28 @@ void DomBarDelegate::paintSize(QPainter* painter, const QStyleOptionViewItem& op
     }
     if (m_model->dimmed(row, value)) light = theme::text3(); // de-emphasised, never hidden
     const QRect marks = paintPulse(painter, opt, row, bid, area, value, cumulative, label);
+    const QRect text = sizeTextRect(opt, label);
     if (!cumulative && !best) {
-        // Faint depth line: cumulative size from the touch, on the cumulative scale.
+        // Faint depth line: cumulative size from the touch, on the cumulative scale, at 35%
+        // and under the text: it stops at the digits' box instead of running through them.
         const double depth = m_model->barFraction(m_model->size(row, bid, true), bid, true);
         if (depth > 0) {
             const int offset = int(std::lround(depth * (span - 1)));
             QColor line = sizeTextColor(bid, depth);
-            line.setAlpha(70);
-            painter->fillRect(QRect(bid ? area.right() - offset : area.left() + offset, opt.rect.top(), 1, opt.rect.height()), line);
+            line.setAlpha(DepthLineAlpha);
+            const int x = bid ? area.right() - offset : area.left() + offset;
+            if (text.isEmpty() || x < text.left() - 1 || x > text.right() + 1) {
+                painter->fillRect(QRect(x, opt.rect.top(), 1, opt.rect.height()), line);
+            } else {
+                painter->fillRect(QRect(x, opt.rect.top(), 1, text.top() - opt.rect.top()), line);
+                painter->fillRect(QRect(x, text.bottom() + 1, 1, opt.rect.bottom() - text.bottom()), line);
+            }
         }
     }
     QColor offInk = inkOn(ground, light);
     QColor onInk = bar.isEmpty() ? offInk : inkOn(underBar, light);
     // Size text always wins (brief DOM-2): where a Pulse mark or the eaten-row flash lies under
     // the digits, they get a dark backing and light ink. Pulse marks themselves are unchanged.
-    const QRect text = sizeTextRect(opt, label);
     if (!text.isEmpty() && (marks.intersects(text) || m_model->pulse(row, true).eatenAlpha > 0 ||
                             m_model->pulse(row, false).eatenAlpha > 0)) {
         const QColor backing = textBacking();

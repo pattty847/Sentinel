@@ -52,6 +52,8 @@ public:
     // backing it gets wherever a Pulse mark lies under it.
     static QRect sizeTextRect(const QStyleOptionViewItem& opt, const QString& text);
     static QColor textBacking();
+    // The cumulative depth line in per-row mode: 35% alpha (brief DOM-8).
+    static constexpr int DepthLineAlpha = 89;
 private:
     // Pulse tags are drawn from glyph strips rendered once per font, scale and colour:
     // drawText, setPen(QColor) and setFont allocate in Qt on every call; drawImage does not.
