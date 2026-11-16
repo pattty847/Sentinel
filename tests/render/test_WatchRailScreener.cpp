@@ -3,6 +3,9 @@
 #include "protocol/SentinelStreamClient.hpp"
 #include "themes/FontManager.hpp"
 #include "themes/ThemeManager.hpp"
+#include "themes/WidgetToolTips.hpp"
+#include <QHelpEvent>
+#include <QToolTip>
 
 #include <QApplication>
 #include <QComboBox>
@@ -88,7 +91,10 @@ TEST(WatchRail, PendingAckRefusalKeyboardAndCatalogTruth) {
     EXPECT_FALSE(model->item(eth, 0)->text().startsWith("●"));
 
     dock.setChartSwitchState("ETH-USD", "");
-    EXPECT_TRUE(model->item(eth, 0)->text().startsWith("●"));
+    EXPECT_EQ(model->item(eth, 0)->text(), "ETH-USD");
+    EXPECT_TRUE(model->item(eth, 0)->data(WatchlistDock::ActiveRole).toBool());
+    EXPECT_EQ(model->item(eth, 0)->font().weight(), QFont::Medium);
+    EXPECT_EQ(model->item(eth, 0)->foreground().color(), QColor("#E6EDF3"));
     dock.setChartSwitchState("BTC-USD", "", "ETH-USD", "Connection cap reached");
     EXPECT_TRUE(model->item(eth, 0)->text().startsWith("!"));
     EXPECT_TRUE(status->text().contains("Connection cap"));
@@ -96,6 +102,116 @@ TEST(WatchRail, PendingAckRefusalKeyboardAndCatalogTruth) {
     QTest::keyClick(tree, Qt::Key_Return);
     EXPECT_EQ(selected.count(), 1);
     EXPECT_TRUE(status->text().contains("unavailable"));
+}
+
+TEST(WatchRail, NameColumnUsesTheExpandedDockWidth) {
+    WatchlistDock dock;
+    EXPECT_EQ(dock.maximumWidth(), QWIDGETSIZE_MAX);
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    dock.resize(320, 400);
+    dock.show();
+    QCoreApplication::processEvents();
+    const int symbolWidth = tree->columnWidth(0);
+    const int nameWidth = tree->columnWidth(1);
+    dock.resize(640, 400);
+    QCoreApplication::processEvents();
+    EXPECT_EQ(tree->columnWidth(0), symbolWidth);
+    EXPECT_GE(tree->columnWidth(1), nameWidth + 300);
+}
+
+TEST(WatchRail, ActiveRowPaintsOnlyTwoAccentPixelsAtTheLeft) {
+    WatchlistDock dock;
+    dock.resize(500, 400);
+    dock.show();
+    dock.setChartSwitchState("BTC-USD", "");
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    QCoreApplication::processEvents();
+    const auto rect = tree->visualRect(tree->model()->index(0, 0));
+    const auto image = tree->viewport()->grab().toImage();
+    EXPECT_EQ(image.pixelColor(0, rect.center().y()), QColor("#00AAFF"));
+    EXPECT_EQ(image.pixelColor(1, rect.center().y()), QColor("#00AAFF"));
+    EXPECT_NE(image.pixelColor(2, rect.center().y()), QColor("#00AAFF"));
+    QFont changed("Monaco", 14);
+    tree->setFont(changed);
+    const auto rowFont = tree->model()->index(0, 0).data(Qt::FontRole).value<QFont>().resolve(tree->font());
+    EXPECT_EQ(rowFont.family(), changed.family());
+    EXPECT_EQ(rowFont.pointSize(), changed.pointSize());
+    EXPECT_EQ(rowFont.weight(), QFont::Medium);
+    dock.setChartSwitchState("ETH-USD", "");
+    EXPECT_FALSE(tree->model()->index(0, 0).data(WatchlistDock::ActiveRole).toBool());
+    EXPECT_EQ(tree->model()->index(0, 0).data(Qt::FontRole).value<QFont>().weight(), QFont::Normal);
+}
+
+TEST(WatchRail, StripesStopAfterTheLastFilledRow) {
+    WatchlistDock dock;
+    dock.resize(500, 600);
+    dock.show();
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(tree->alternatingRowColors());
+    const auto image = tree->viewport()->grab().toImage();
+    const auto odd = tree->visualRect(tree->model()->index(1, 1));
+    EXPECT_EQ(image.pixelColor(odd.right() - 6, odd.center().y()), QColor("#1e2228"));
+    const auto last = tree->visualRect(tree->model()->index(tree->model()->rowCount() - 1, 0));
+    const int y = last.bottom() + 10;
+    ASSERT_LT(y + last.height(), image.height());
+    EXPECT_EQ(image.pixelColor(10, y), image.pixelColor(10, y + last.height()));
+}
+
+TEST(WatchRail, ActionsHaveAVisibleSurfaceAndReadableDisabledInk) {
+    WatchlistDock dock;
+    dock.show();
+    QCoreApplication::processEvents();
+    dock.findChild<QComboBox*>("watchPreset")->setCurrentIndex(2);
+    auto* pin = dock.findChild<QToolButton*>("watchPin");
+    auto* add = dock.findChild<QToolButton*>("watchAdd");
+    ASSERT_FALSE(pin->isEnabled());
+    EXPECT_EQ(pin->palette().color(QPalette::Disabled, QPalette::ButtonText), QColor("#6E7580"));
+    EXPECT_EQ(add->palette().color(QPalette::Active, QPalette::ButtonText), QColor("#E6EDF3"));
+    for (auto* button : {pin, add}) {
+        const auto pixels = button->grab().toImage();
+        EXPECT_EQ(pixels.pixelColor(2, button->height() / 2), QColor("#20252B"));
+        EXPECT_EQ(pixels.pixelColor(0, button->height() / 2), QColor("#2B3138"));
+    }
+}
+
+TEST(WatchRail, HoverHighlightsTheRowAndTooltipStaysBesideIt) {
+    WatchlistDock dock;
+    dock.findChild<QComboBox*>("watchPreset")->setCurrentIndex(0);
+    dock.resize(400, 400);
+    dock.move(0, 0);
+    dock.show();
+    dock.setChartSwitchState("BTC-USD", "");
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    QCoreApplication::processEvents();
+    const auto first = tree->visualRect(tree->model()->index(0, 0));
+    tree->clearSelection();
+    tree->setCurrentIndex({});
+    QTest::mouseMove(tree->viewport(), first.center());
+    QCoreApplication::processEvents();
+    const auto pixels = tree->viewport()->grab().toImage();
+    EXPECT_EQ(pixels.pixelColor(first.right() - 6, first.center().y()), QColor("#20252B"));
+    EXPECT_TRUE(tree->model()->index(0, 0).data(Qt::ToolTipRole).toString().isEmpty());
+    dock.setChartSwitchState("BTC-USD", "ETH-USD");
+    const QRect tipRow = tree->visualRect(tree->model()->index(1, 0));
+    const QPoint oddSample(tipRow.right() - 6, tipRow.center().y());
+    const QColor restingOdd = tree->viewport()->grab().toImage().pixelColor(oddSample);
+    EXPECT_EQ(restingOdd, QColor("#1e2228"));
+    QTest::mouseMove(tree->viewport(), tipRow.center());
+    QCoreApplication::processEvents();
+    const QColor hoveredOdd = tree->viewport()->grab().toImage().pixelColor(oddSample);
+    EXPECT_EQ(hoveredOdd, QColor("#20252B"));
+    EXPECT_NE(hoveredOdd, restingOdd);
+    auto* tips = WidgetToolTips::install(qApp);
+    QHelpEvent help(QEvent::ToolTip, tipRow.center(), tree->viewport()->mapToGlobal(tipRow.center()));
+    QApplication::sendEvent(tree->viewport(), &help);
+    EXPECT_TRUE(QToolTip::isVisible());
+    const QRect row(tree->viewport()->mapToGlobal(QPoint(0, tipRow.top())), QSize(tree->viewport()->width(), tipRow.height()));
+    for (auto* widget : QApplication::topLevelWidgets())
+        if (widget->objectName() == "qtooltip_label" && widget->isVisible())
+            EXPECT_FALSE(widget->geometry().intersects(row));
+    QToolTip::hideText();
+    delete tips;
 }
 
 TEST(WatchRail, PinsPersistWithDefaultFormatSettings) {

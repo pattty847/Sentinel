@@ -330,13 +330,13 @@ TopToolbar::TopToolbar(QWidget* parent)
         button->setAccessibleDescription(m_indicatorsAction->toolTip());
         button->setAttribute(Qt::WA_AlwaysShowToolTips);
     }
-    m_layoutsAction = new QAction(QIcon(":/svg/layout.svg"), "Layouts", this);
+    m_layoutsAction = new QAction("Layouts", this);
     m_layoutsAction->setToolTip("Save, restore or reset a workspace layout");
     m_layoutsAction->setObjectName("chartLayoutsAction");
 
     addSeparator();
 
-    QAction* quickSearchAction = new QAction(QIcon(":/svg/search.svg"), "Quick Search", this);
+    QAction* quickSearchAction = new QAction("Quick Search", this);
     quickSearchAction->setToolTip("Focus symbol search");
     quickSearchAction->setObjectName("chartQuickSearchAction");
     m_quickSearchAction = quickSearchAction;
@@ -345,7 +345,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_fullscreenAction->setCheckable(true);
     // F11 is already registered by ShortcutBinder; adding it here would make
     // both shortcuts ambiguous. Window-state changes update this action.
-    QAction* screenshotAction = new QAction(QIcon(":/svg/camera.svg"), "Screenshot", this);
+    QAction* screenshotAction = new QAction("Screenshot", this);
     screenshotAction->setToolTip("Save chart screenshot");
     screenshotAction->setObjectName("chartScreenshotAction");
     m_screenshotAction = screenshotAction;

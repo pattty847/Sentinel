@@ -1,5 +1,6 @@
 // Sentinel — ScreenerDock
 #include "ScreenerDock.hpp"
+#include "TableChrome.hpp"
 
 #include "../../core/protocol/SentinelStreamClient.hpp"
 
@@ -224,6 +225,7 @@ void ScreenerDock::buildUi() {
         "QTableView::item:selected { background:#2d5a8e; }"
         "QHeaderView::section { background:#252525; color:#aaa; border:none; padding:3px; }"
     );
+    tableChrome::apply(m_table);
     layout->addWidget(m_table, 1);
 
     // ── Status bar ───────────────────────────────────────────────────────────
@@ -536,6 +538,9 @@ void ScreenerDock::updateColumns() {
                       "Category", "Sector", "—", "Exchange"}
         : QStringList{"Symbol", "Name", "Price", "Change %", "Volume", "Rel Vol", "Mkt Cap",
                       "P/E", "Div Yield%", "Sector", "Exchange"});
+    for (int column = 0; column < kColCount; ++column)
+        tableChrome::align(m_model, column, (column >= kColPrice && column <= kColMktCap) ||
+                           (!crypto && (column == kColExtra1 || column == kColExtra2)));
     // The default crypto view keeps just the fields that can identify and compare pairs.
     m_adjustingColumnWidths = true;
     for (int col = 0; col < kColCount; ++col)

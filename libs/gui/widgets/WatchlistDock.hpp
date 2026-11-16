@@ -14,7 +14,7 @@ class QLabel;
 class WatchlistDock : public DockablePanel {
     Q_OBJECT
 public:
-    enum WatchlistItemRole { TickerRole = Qt::UserRole + 1, AssetTypeRole };
+    enum WatchlistItemRole { TickerRole = Qt::UserRole + 1, AssetTypeRole, ActiveRole };
     enum class AssetType { Stock, Crypto };
 
     explicit WatchlistDock(QWidget* parent = nullptr);

@@ -1,4 +1,5 @@
 #include "HeatmapTelemetryDock.hpp"
+#include "BookAgeText.hpp"
 #include <QCloseEvent>
 #include <QGridLayout>
 #include <QLabel>
@@ -291,9 +292,9 @@ void HeatmapTelemetryDock::refresh() {
         case MarketHealth::Transport::Disconnected: transport = "Disconnected"; break;
         }
         const auto fact = [](std::optional<bool> value) { return value ? (*value ? QStringLiteral("Yes") : QStringLiteral("No")) : QStringLiteral("Unknown"); };
-        m_healthDetail->setText(QStringLiteral("Transport: %1 · Subscription: %2\nBook receive age: %3 · Heatmap live receive age: %4\nHistory: %5\nLoading: %6 · Holding picture: %7%8")
+        m_healthDetail->setText(QStringLiteral("Transport: %1 · Subscription: %2\n%3 · Heatmap live receive age: %4\nHistory: %5\nLoading: %6 · Holding picture: %7%8")
             .arg(transport, s.acknowledged ? "Acknowledged" : "Waiting for subscription",
-                 MarketHealth::ageText(s.bookAgeMs), MarketHealth::ageText(s.heatmapAgeMs),
+                 bookAgeText(s.bookAgeMs), MarketHealth::ageText(s.heatmapAgeMs),
                  s.coverage.isEmpty() ? "Unknown" : s.coverage, fact(s.loading), fact(s.holding),
                  s.reason.isEmpty() ? QString{} : "\n" + s.reason));
     } else {

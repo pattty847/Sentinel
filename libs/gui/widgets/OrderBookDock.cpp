@@ -1,4 +1,6 @@
 #include "OrderBookDock.hpp"
+#include "TableChrome.hpp"
+#include "BookAgeText.hpp"
 #include "LeanGaugeWidget.hpp"
 #include "ServiceLocator.hpp"
 #include "SentinelLogging.hpp"
@@ -396,9 +398,7 @@ void OrderBookDock::buildLadder(QVBoxLayout* layout)
     m_table->setTextElideMode(Qt::ElideNone);
     m_table->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_table->verticalHeader()->hide();
-    m_table->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
-    m_table->verticalHeader()->setDefaultSectionSize(22);
-    m_table->verticalHeader()->setMinimumSectionSize(22);
+    tableChrome::apply(m_table);
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     m_table->horizontalHeader()->setDefaultAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_table->horizontalHeader()->setMinimumSectionSize(20);
@@ -991,9 +991,12 @@ void OrderBookDock::updateSummary()
     QString fullStatus;
     if (m_health) {
         const auto health = m_health->snapshot(m_symbol);
-        fullStatus = health.compact();
-        m_status->setToolTip(health.reason + "\nBook age is time since an accepted book message; quiet is not stale.");
+        // Repeat age locally during abnormal feed states, when it explains the problem.
+        fullStatus = health.text() + QStringLiteral(" · ") + bookAgeText(health.bookAgeMs);
+        m_status->setVisible(health.state != MarketHealth::State::Live);
+        m_status->setToolTip(health.reason);
     } else {
+        m_status->setVisible(true);
         // Non-remote sources retain their readiness facts with the shared words.
         const auto state = m_freshness.connected == false ? MarketHealth::State::Disconnected
             : m_freshness.snapshotStale ? MarketHealth::State::Stale

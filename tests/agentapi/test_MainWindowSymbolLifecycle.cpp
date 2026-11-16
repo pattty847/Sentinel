@@ -312,7 +312,7 @@ TEST(MainWindowHealthIntegration, AckRefusalSupersedeTimeoutAndReconnectAgreeAcr
     ASSERT_TRUE(chart && rail && telemetry && status);
     EXPECT_TRUE(health->activeSymbol().isEmpty());
     ASSERT_TRUE(watchItem(rail, "BTC-USD"));
-    EXPECT_FALSE(watchItem(rail, "BTC-USD")->text().startsWith("●"));
+    EXPECT_FALSE(watchItem(rail, "BTC-USD")->data(WatchlistDock::ActiveRole).toBool());
     EXPECT_TRUE(watchItem(rail, "ETH-USD")->toolTip().contains("unverified"));
 
     // Expose only the QWidget consumer in an offscreen test surface; never show
@@ -337,7 +337,7 @@ TEST(MainWindowHealthIntegration, AckRefusalSupersedeTimeoutAndReconnectAgreeAcr
     agreement("BTC-USD", MarketHealth::State::WaitingForBook);
     book(source, "BTC-USD");
     agreement("BTC-USD", MarketHealth::State::Live);
-    EXPECT_TRUE(watchItem(rail, "BTC-USD")->text().startsWith("●"));
+    EXPECT_TRUE(watchItem(rail, "BTC-USD")->data(WatchlistDock::ActiveRole).toBool());
     const qint64 observed = QDateTime::currentMSecsSinceEpoch() - 500;
     window.heatmapDataService()->onData([fetcher = window.heatmapDataService()->fetcher(), observed] {
         emit fetcher->liveAccepted("BTC-USD", observed);
@@ -385,7 +385,7 @@ TEST(MainWindowHealthIntegration, AckRefusalSupersedeTimeoutAndReconnectAgreeAcr
     select(window, chart->symbolInput(), "SOL-USD");
     acknowledge(source, "SOL-USD");
     agreement("SOL-USD", MarketHealth::State::WaitingForBook);
-    EXPECT_TRUE(watchItem(rail, "SOL-USD")->text().startsWith("●"));
+    EXPECT_TRUE(watchItem(rail, "SOL-USD")->data(WatchlistDock::ActiveRole).toBool());
     EXPECT_FALSE(health->snapshot().heatmapAgeMs);
     EXPECT_FALSE(health->snapshot().bookAgeMs);
     emit telemetry->visibilityChanged(false);
@@ -609,7 +609,7 @@ TEST(MainWindowHealthIntegration, LocalHostPolicyRefusalClearsOptimisticRailPend
         EXPECT_TRUE(row->text().startsWith("!"));
         EXPECT_TRUE(row->toolTip().contains("host session's symbol policy"));
         EXPECT_TRUE(rail->findChild<QLabel*>("watchStatus")->text().contains("excluded"));
-        EXPECT_TRUE(watchItem(rail, "BTC-USD")->text().startsWith("●"));
+        EXPECT_TRUE(watchItem(rail, "BTC-USD")->data(WatchlistDock::ActiveRole).toBool());
         EXPECT_EQ(source->marketHealth()->activeSymbol(), "BTC-USD");
         EXPECT_EQ(source->marketHealth()->snapshot().state, MarketHealth::State::Live);
         EXPECT_FALSE(MainWindowSymbolLifecyclePeer::switchTimeoutActive(window));
@@ -617,12 +617,49 @@ TEST(MainWindowHealthIntegration, LocalHostPolicyRefusalClearsOptimisticRailPend
     }
 }
 
-TEST(MainWindowHealthIntegration, DefaultLayoutPreservesNavigationRailCapAtNarrowAndWideWidths) {
+TEST(MainWindowHealthIntegration, StatusClusterIsAtTheLeftOfTheWindow) {
+    MainWindowGPU window;
+    auto* status = window.findChild<StatusBar*>();
+    ASSERT_TRUE(status);
+    // Expose the QWidget status host without starting the chart scene or GUI services.
+    auto* host = window.statusBar();
+    host->setParent(nullptr);
+    std::unique_ptr<QStatusBar> owner(host);
+    host->resize(1400, 28);
+    host->show();
+    QCoreApplication::processEvents();
+    EXPECT_LT(status->x(), 16);
+    auto* state = status->findChild<QLabel*>("marketState");
+    auto* age = status->findChild<QLabel*>("marketBookAge");
+    auto* message = status->findChild<QLabel*>("marketMessage");
+    ASSERT_TRUE(state && age && message);
+    for (const auto& text : {QString("Switching to ETH-USD..."), QString("Reconnecting..."),
+                             QString("Order book stale: BTC-USD")}) {
+        host->showMessage(text);
+        QCoreApplication::processEvents();
+        EXPECT_TRUE(status->isVisible());
+        EXPECT_TRUE(state->isVisible());
+        EXPECT_TRUE(age->isVisible());
+        EXPECT_TRUE(message->isVisible());
+        EXPECT_EQ(message->text(), text);
+        EXPECT_GT(message->x(), age->geometry().right());
+        EXPECT_GE(message->width(), message->fontMetrics().horizontalAdvance(text));
+        EXPECT_LT(status->x(), 16);
+    }
+    host->clearMessage();
+    EXPECT_TRUE(message->text().isEmpty());
+    EXPECT_TRUE(state->isVisible());
+    host->showMessage("Brief notice", 20);
+    ASSERT_TRUE(QTest::qWaitFor([&] { return message->text().isEmpty(); }));
+    EXPECT_TRUE(state->isVisible());
+}
+
+TEST(MainWindowHealthIntegration, DefaultLayoutKeepsNavigationRailUncappedAtNarrowAndWideWidths) {
     MainWindowGPU window;
     auto* rail = window.findChild<WatchlistDock*>();
     ASSERT_TRUE(rail);
     const int cap = rail->maximumWidth();
-    EXPECT_EQ(cap, 280);
+    EXPECT_EQ(cap, QWIDGETSIZE_MAX);
     for (int width : {960, 1920}) {
         window.resize(width, 800);
         MainWindowSymbolLifecyclePeer::arrange(window);

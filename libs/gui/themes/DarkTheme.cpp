@@ -174,6 +174,33 @@ QString DarkTheme::stylesheet() const {
             color: #FFFFFF;
         }
         
+        QMenu::indicator, QMenu::icon {
+            subcontrol-origin: padding;
+            subcontrol-position: center left;
+            left: 6px;
+        }
+        QMenu::icon { width: 14px; height: 14px; }
+
+        QMenu::indicator {
+            width: 12px;
+            height: 12px;
+            border: 1px solid #93A1AF;
+            border-radius: 2px;
+            background: transparent;
+        }
+        QMenu::indicator:checked {
+            background: #2A4A6A;
+            border-color: #3A6A9A;
+            image: url(:/svg/menu_check.svg);
+        }
+        QMenu::indicator:disabled { border-color: #6E7580; }
+
+        QMenu::right-arrow {
+            image: url(:/svg/menu_chevron.svg);
+            width: 6px;
+            height: 8px;
+        }
+
         QMenu::separator {
             height: 1px;
             background-color: #444;
@@ -279,16 +306,25 @@ QString DarkTheme::stylesheet() const {
             background-color: #1E1E1E;
         }
 
-        QMainWindow::separator {
-            background-color: #2E2E2E;
-            width: 6px;
-            height: 6px;
+        QMainWindow::separator, QSplitter::handle {
+            width: 5px;
+            height: 5px;
+        }
+        QMainWindow::separator:vertical, QSplitter::handle:horizontal {
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #1B1F24, stop:0.399 #1B1F24, stop:0.4 #2B3138,
+                stop:0.6 #2B3138, stop:0.601 #1B1F24, stop:1 #1B1F24);
+        }
+        QMainWindow::separator:horizontal, QSplitter::handle:vertical {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #1B1F24, stop:0.399 #1B1F24, stop:0.4 #2B3138,
+                stop:0.6 #2B3138, stop:0.601 #1B1F24, stop:1 #1B1F24);
+        }
+        QMainWindow::separator:hover, QMainWindow::separator:pressed,
+        QSplitter::handle:hover, QSplitter::handle:pressed {
+            background: rgba(0, 170, 255, 102);
         }
 
-        QMainWindow::separator:hover {
-            background-color: #3A4450;
-        }
-        
         QDockWidget::title {
             background-color: #252525;
             padding: 4px;

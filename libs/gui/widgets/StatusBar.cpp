@@ -1,5 +1,8 @@
 #include "StatusBar.hpp"
+#include "BookAgeText.hpp"
 #include "Version.hpp"
+#include "../themes/ThemePalette.hpp"
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QShowEvent>
@@ -13,19 +16,38 @@ StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
     m_symbolLabel->setObjectName("marketSymbol");
     m_stateLabel = new QLabel("Initializing", this);
     m_stateLabel->setObjectName("marketState");
-    m_ageLabel = new QLabel("Book age unknown", this);
+    m_ageLabel = new QLabel(bookAgeText(std::nullopt), this);
     m_ageLabel->setObjectName("marketBookAge");
     m_ageLabel->setToolTip("Time since the last accepted book message. A quiet market is not necessarily stale.");
+    m_messageLabel = new QLabel(this);
+    m_messageLabel->setObjectName("marketMessage");
+    m_messageLabel->setTextFormat(Qt::PlainText);
+    m_messageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_versionLabel = new QLabel(QString::fromStdString(Sentinel::getVersionString()), this);
     m_versionLabel->hide();
-    setStyleSheet("StatusBar QLabel { color: #a0a0a0; } QLabel#marketSymbol { color: #ddd; font-weight: bold; }");
+    setStyleSheet(QStringLiteral("StatusBar QLabel { color:%1; font-size:11px; font-weight:400; }"
+                                "QLabel#marketSymbol { color:%2; }")
+                      .arg(theme::text3().name(), theme::text().name()));
+    const auto separator = [this, layout] {
+        auto* line = new QFrame(this);
+        line->setObjectName("statusSeparator");
+        line->setFixedSize(1, 12);
+        line->setStyleSheet(QStringLiteral("background:%1;").arg(theme::line().name()));
+        layout->addWidget(line);
+    };
     layout->addWidget(m_symbolLabel);
+    separator();
     layout->addWidget(m_stateLabel);
-    layout->addStretch();
+    separator();
     layout->addWidget(m_ageLabel);
+    layout->addWidget(m_messageLabel, 1);
     layout->addWidget(m_versionLabel);
     m_ageTimer.setInterval(1000);
     connect(&m_ageTimer, &QTimer::timeout, this, &StatusBar::refresh);
+}
+void StatusBar::setMessage(const QString& message) {
+    m_messageLabel->setText(message);
+    m_messageLabel->setToolTip(message);
 }
 void StatusBar::setMarketHealth(MarketHealth* health) {
     if (m_health) disconnect(m_health, nullptr, this, nullptr);
@@ -43,7 +65,7 @@ void StatusBar::refresh() {
     if (!m_health) {
         m_symbolLabel->setText("No symbol");
         m_stateLabel->setText("Unavailable");
-        m_ageLabel->setText("Book age unknown");
+        m_ageLabel->setText(bookAgeText(std::nullopt));
         return;
     }
     m_health->refreshChartState();
@@ -54,7 +76,7 @@ void StatusBar::refresh() {
     const bool degraded = s.state == MarketHealth::State::Stale || s.state == MarketHealth::State::HistoryPartial || s.state == MarketHealth::State::Unavailable;
     const bool disconnected = s.state == MarketHealth::State::Disconnected || s.state == MarketHealth::State::Reconnecting;
     m_stateLabel->setStyleSheet(QString("color: %1;").arg(disconnected ? "#e57373" : degraded ? "#ffcc80" : "#b0b0b0"));
-    m_ageLabel->setText(s.bookAgeMs ? "Book " + MarketHealth::ageText(s.bookAgeMs) : "Book age unknown");
+    m_ageLabel->setText(bookAgeText(s.bookAgeMs));
 }
 void StatusBar::showEvent(QShowEvent* event) { QWidget::showEvent(event); refresh(); if (m_health) m_ageTimer.start(); }
 void StatusBar::hideEvent(QHideEvent* event) { m_ageTimer.stop(); QWidget::hideEvent(event); }

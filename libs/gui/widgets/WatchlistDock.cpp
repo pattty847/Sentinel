@@ -1,4 +1,7 @@
 #include "WatchlistDock.hpp"
+#include "TableChrome.hpp"
+#include "../themes/ThemePalette.hpp"
+#include <QPainter>
 
 #include <QBrush>
 #include <QEvent>
@@ -23,6 +26,11 @@ public:
     using QTreeView::QTreeView;
     std::function<void(const QModelIndex&)> keyboardActivate;
 protected:
+    void drawRow(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override {
+        QTreeView::drawRow(painter, option, index);
+        if (index.siblingAtColumn(0).data(WatchlistDock::ActiveRole).toBool())
+            painter->fillRect(QRect(option.rect.left(), option.rect.top(), 2, option.rect.height()), theme::accent());
+    }
     void keyPressEvent(QKeyEvent* event) override {
         if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
              event->key() == Qt::Key_Space) && currentIndex().isValid()) {
@@ -39,7 +47,6 @@ WatchlistDock::WatchlistDock(QWidget* parent)
     : DockablePanel("WatchlistDock", "Watchlist", parent)
     , m_tree(new WatchTreeView(m_contentWidget))
     , m_model(new QStandardItemModel(this)) {
-    setMaximumWidth(280);
     initPresets();
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
     settings.beginGroup(kSettingsGroup);
@@ -142,22 +149,37 @@ void WatchlistDock::buildUi() {
     m_addButton->setObjectName("watchAdd");
     m_addButton->setText("+");
     m_addButton->setToolTip("Add pair to Pinned");
+    const QString actionStyle = QStringLiteral(
+        "QToolButton { background:%1; color:%2; border:1px solid %3; border-radius:3px; padding:3px 8px; }"
+        "QToolButton:hover { border-color:%4; }"
+        "QToolButton:pressed { background:%5; }"
+        "QToolButton:disabled { color:%6; border-color:%3; }")
+        .arg(theme::bg2().name(), theme::text().name(), theme::line().name(),
+             theme::accent().name(), theme::sel().name(), theme::textOff().name());
+    m_pinButton->setStyleSheet(actionStyle);
+    m_addButton->setStyleSheet(actionStyle);
     addRow->addWidget(m_addButton);
     layout->addLayout(addRow);
 
     m_model->setHorizontalHeaderLabels({"Symbol", "Name"});
     m_tree->setObjectName("watchRows");
+    m_tree->setProperty("toolTipBesideRow", true);
+    m_tree->setMouseTracking(true);
     m_tree->setModel(m_model);
     m_tree->setRootIsDecorated(false);
     m_tree->setUniformRowHeights(true);
     m_tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_tree->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_tree->setAlternatingRowColors(true);
-    m_tree->setStyleSheet(
+    m_tree->setAlternatingRowColors(false);
+    m_tree->setStyleSheet(QStringLiteral(
         "QTreeView { background:#1a1a1a; alternate-background-color:#202020; color:#e0e0e0; }"
+        "QTreeView::item { height:22px; }"
+        "QTreeView::item:hover { background:%1; }"
         "QTreeView::item:selected { background:#3a4652; color:#fff; }"
-        "QHeaderView::section { background:#252525; color:#aaa; border:none; padding:3px; }");
+        "QHeaderView::section { background:#252525; color:#aaa; border:none; padding:3px; }")
+            .arg(theme::bg2().name()));
+    tableChrome::header(m_tree->header());
     m_tree->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_tree->header()->setStretchLastSection(true);
     layout->addWidget(m_tree, 1);
@@ -213,6 +235,16 @@ void WatchlistDock::loadPreset(int index) {
         ticker->setData(asset, AssetTypeRole);
         auto* name = new QStandardItem(entry.second);
         name->setForeground(QBrush(QColor("#aaa")));
+        if (m_model->rowCount() % 2) {
+            // Composite bg2 at half opacity over bg1; full bg2 remains the hover cue.
+            const auto base = theme::bg1();
+            const auto hover = theme::bg2();
+            const QColor stripe((base.red() + hover.red() + 1) / 2,
+                                (base.green() + hover.green() + 1) / 2,
+                                (base.blue() + hover.blue() + 1) / 2);
+            ticker->setBackground(stripe);
+            name->setBackground(stripe);
+        }
         m_model->appendRow({ticker, name});
         if (entry.first == selected) m_tree->setCurrentIndex(m_model->index(m_model->rowCount() - 1, 0));
     }
@@ -280,14 +312,22 @@ void WatchlistDock::refreshRowState() {
         const bool pending = isCrypto && symbol == m_pendingSymbol;
         const bool refused = isCrypto && symbol == m_refusedSymbol;
         const QString marker = pending ? QStringLiteral("… ") : refused ? QStringLiteral("! ")
-                               : active ? QStringLiteral("● ") : QString();
+                               : QString();
         item->setText(marker + symbol);
+        item->setData(active, ActiveRole);
+        for (int column = 0; column < m_model->columnCount(); ++column) {
+            auto* cell = m_model->item(row, column);
+            QFont font; // Resolve family and size from the view, including later font changes.
+            font.setWeight(active ? QFont::Medium : QFont::Normal);
+            cell->setFont(font);
+            if (column > 0) cell->setForeground(active ? theme::text() : theme::text3());
+        }
         item->setForeground(QBrush(QColor(pending ? "#e6c07b" : refused ? "#ef8178"
-                                         : active ? "#84d4a1" : unavailable ? "#777" : "#e0e0e0")));
+                                         : active ? theme::text().name() : unavailable ? "#777" : "#e0e0e0")));
         item->setToolTip(pending ? QStringLiteral("Waiting for chart confirmation")
                           : refused ? m_refusalReason
                           : unavailable ? QStringLiteral("Not in the current market catalog")
-                          : active ? QStringLiteral("Active chart")
+                          : active ? QString()
                           : isCrypto ? QStringLiteral("Availability unverified until selected") : QString());
     }
     if (m_pendingSymbol.isEmpty() && m_refusedSymbol.isEmpty()) {

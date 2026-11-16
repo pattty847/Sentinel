@@ -39,13 +39,14 @@ QString savedInstalledFamily;
 QStringList testFamilies;
 
 void settle() { QTest::qWait(30); }
-void expectLabels(QWidget& widget, const QString& family) {
+void expectLabels(QWidget& widget, const QString& family, int chromePixels = -1) {
     const auto labels = widget.findChildren<QLabel*>();
     ASSERT_FALSE(labels.isEmpty());
     for (auto* label : labels) {
         SCOPED_TRACE(label->objectName().toStdString() + " " + label->text().toStdString());
         EXPECT_EQ(QFontInfo(label->font()).family(), family);
-        EXPECT_DOUBLE_EQ(label->font().pointSizeF(), 10.0);
+        if (chromePixels > 0) EXPECT_EQ(label->font().pixelSize(), chromePixels);
+        else EXPECT_DOUBLE_EQ(label->font().pointSizeF(), 10.0);
     }
 }
 
@@ -123,19 +124,19 @@ TEST(FontWidgets, TwoInstalledFamiliesReachExistingHiddenAndRecreatedWidgets) {
         SCOPED_TRACE(requested.toStdString());
         ASSERT_TRUE(FontManager::instance().applyFontFamily(requested, qApp)); settle();
         const auto family = FontManager::instance().currentFontFamily();
-        expectLabels(status, family); expectLabels(telemetry, family); expectLabels(dialog, family);
-        EXPECT_TRUE(status.findChild<QLabel*>("marketSymbol")->font().bold());
+        expectLabels(status, family, 11); expectLabels(telemetry, family); expectLabels(dialog, family);
+        EXPECT_FALSE(status.findChild<QLabel*>("marketSymbol")->font().bold());
         EXPECT_TRUE(telemetry.findChild<QLabel*>("telemetry.marketHealth")->font().bold());
         status.hide(); telemetry.hide(); dialog.hide();
         const auto other = requested == testFamilies[0] ? testFamilies[1] : testFamilies[0];
         ASSERT_TRUE(FontManager::instance().applyFontFamily(other, qApp)); settle();
-        expectLabels(status, other); expectLabels(telemetry, other); expectLabels(dialog, other);
+        expectLabels(status, other, 11); expectLabels(telemetry, other); expectLabels(dialog, other);
         status.show(); telemetry.show(); dialog.show(); settle();
-        expectLabels(status, other); expectLabels(telemetry, other);
+        expectLabels(status, other, 11); expectLabels(telemetry, other);
         EXPECT_EQ(dialog.findChild<QComboBox*>("uiFontFamily")->currentText(), other);
         StatusBar newStatus; HeatmapTelemetryDock newTelemetry;
         newStatus.ensurePolished(); newTelemetry.ensurePolished();
-        expectLabels(newStatus, other); expectLabels(newTelemetry, other);
+        expectLabels(newStatus, other, 11); expectLabels(newTelemetry, other);
     }
 }
 
@@ -147,12 +148,12 @@ TEST(FontWidgets, InheritedPixelFontRemainsReadableAndSelectionRestoresPointBase
     status.show(); telemetry.show(); settle();
     for (QWidget* widget : {static_cast<QWidget*>(&status), static_cast<QWidget*>(&telemetry)}) {
         for (auto* label : widget->findChildren<QLabel*>()) {
-            EXPECT_EQ(label->font().pixelSize(), 14);
+            EXPECT_EQ(label->font().pixelSize(), widget == &status ? 11 : 14);
             EXPECT_GE(label->fontMetrics().height(), 10);
         }
     }
     ASSERT_TRUE(FontManager::instance().applyFontFamily(testFamilies.front(), qApp)); settle();
-    expectLabels(status, FontManager::instance().currentFontFamily());
+    expectLabels(status, FontManager::instance().currentFontFamily(), 11);
     expectLabels(telemetry, FontManager::instance().currentFontFamily());
 }
 
