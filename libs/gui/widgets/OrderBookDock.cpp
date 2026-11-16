@@ -26,8 +26,10 @@
 #include <QTableView>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <tuple>
 #include <array>
 #include <cmath>
+#include <limits>
 
 namespace {
 // Bars use the upper part of each side's palette ramp: its low end is black,
@@ -59,10 +61,43 @@ QColor DomBarDelegate::barColor(bool bid, double fraction)
 
 QColor DomBarDelegate::sizeTextColor(bool bid, double fraction)
 {
+    // Opacity rises with the fraction from a floor that keeps 4.5:1 on the dark ladder.
     const QColor bar = barColor(bid, fraction);
     const auto tint = [](int channel) { return channel + (255 - channel) * 7 / 10; };
     return QColor(tint(bar.red()), tint(bar.green()), tint(bar.blue()),
-                  int(std::lround(255 * (0.5 + 0.5 * std::clamp(fraction, 0.0, 1.0)))));
+                  int(std::lround(255 * (0.8 + 0.2 * std::clamp(fraction, 0.0, 1.0)))));
+}
+
+QColor DomBarDelegate::over(const QColor& top, const QColor& bottom)
+{
+    const double a = top.alphaF();
+    const auto mix = [&](int t, int b) { return int(std::lround(t * a + b * (1 - a))); };
+    return QColor(mix(top.red(), bottom.red()), mix(top.green(), bottom.green()), mix(top.blue(), bottom.blue()));
+}
+
+double DomBarDelegate::contrast(const QColor& a, const QColor& b)
+{
+    const auto luminance = [](const QColor& c) {
+        const auto channel = [](double v) { return v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * channel(c.redF()) + 0.7152 * channel(c.greenF()) + 0.0722 * channel(c.blueF());
+    };
+    const double la = luminance(a), lb = luminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+QColor DomBarDelegate::inkOn(const QColor& under, const QColor& light)
+{
+    // The side's tint while it reads at the floor on what is under it, else dark ink; on a
+    // mid-luminance fill only pure white or black reach 4.5:1 (one always does).
+    if (contrast(over(light, under), under) >= ReadingFloor) return light;
+    QColor best = light;
+    double bestContrast = contrast(over(light, under), under);
+    for (const QColor& ink : {QColor(10, 14, 18), QColor(Qt::white), QColor(Qt::black)}) {
+        const double c = contrast(ink, under);
+        if (c >= ReadingFloor) return ink;
+        if (c > bestContrast) { best = ink; bestContrast = c; }
+    }
+    return best;
 }
 
 QColor DomBarDelegate::bestFill(bool bid) { return barColor(bid, 0.75); }
@@ -217,6 +252,31 @@ void DomBarDelegate::drawFitted(QPainter* painter, const QStyleOptionViewItem& o
     painter->drawText(opt.rect.adjusted(3, 0, -3, 0), Qt::AlignRight | Qt::AlignVCenter, text);
 }
 
+void DomBarDelegate::drawSplit(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text,
+                               const QColor& onBar, const QColor& offBar, int edge, bool barRight)
+{
+    if (text.isEmpty()) return;
+    const QRect box = opt.rect.adjusted(3, 0, -3, 0);
+    const int left = box.right() + 1 - std::min(box.width(), opt.fontMetrics.horizontalAdvance(text));
+    // Wholly on one side of the bar edge: one pass.
+    const bool allOn = barRight ? edge <= left : edge > box.right();
+    const bool allOff = barRight ? edge > box.right() : edge <= left;
+    if (allOn || allOff || onBar == offBar) {
+        drawFitted(painter, opt, text, allOn ? onBar : offBar);
+        return;
+    }
+    // Straddling: the same text twice, each pass clipped to its side (no substrings).
+    const QRect barSide = barRight ? QRect(edge, opt.rect.top(), opt.rect.right() - edge + 1, opt.rect.height())
+                                   : QRect(opt.rect.left(), opt.rect.top(), edge - opt.rect.left(), opt.rect.height());
+    const QRect offSide = barRight ? QRect(opt.rect.left(), opt.rect.top(), edge - opt.rect.left(), opt.rect.height())
+                                   : QRect(edge, opt.rect.top(), opt.rect.right() - edge + 1, opt.rect.height());
+    painter->setClipRect(barSide);
+    drawFitted(painter, opt, text, onBar);
+    painter->setClipRect(offSide);
+    drawFitted(painter, opt, text, offBar);
+    painter->setClipping(false);
+}
+
 void DomBarDelegate::paintSize(QPainter* painter, const QStyleOptionViewItem& opt, const QModelIndex& index, const QString& label) const
 {
     const bool bid = index.column() == DomModel::Bid;
@@ -226,21 +286,27 @@ void DomBarDelegate::paintSize(QPainter* painter, const QStyleOptionViewItem& op
     const bool best = m_model->isBest(row, bid);
     const QRect area = opt.rect.adjusted(2, 2, -2, -2);
     const int span = std::max(0, area.width());
-    QColor text = sizeTextColor(bid, 0);
+    // Ink per side of the bar edge, each at the reading floor on what is under it.
+    const QColor ground = opt.palette.color(QPalette::Base);
+    QColor light = sizeTextColor(bid, 0), underBar = ground;
+    QRect bar;
     if (best) {
-        painter->fillRect(area, bestFill(bid));
-        text = QColor(10, 14, 18);
+        bar = area;
+        underBar = bestFill(bid);
+        painter->fillRect(area, underBar);
     } else if (value > 0) {
         const double fraction = m_model->barFraction(value, bid, cumulative);
         const int width = int(std::lround(fraction * span));
-        QRect bar = area;
+        bar = area;
         if (bid) bar.setLeft(area.right() - width + 1);
         else bar.setWidth(width);
         QColor fill = barColor(bid, fraction);
         fill.setAlpha(150);
         painter->fillRect(bar, fill);
-        text = sizeTextColor(bid, fraction);
+        underBar = over(fill, ground);
+        light = sizeTextColor(bid, fraction);
     }
+    if (m_model->dimmed(row, value)) light = theme::text3(); // de-emphasised, never hidden
     paintPulse(painter, opt, row, bid, area, value, cumulative, label);
     if (!cumulative && !best) {
         // Faint depth line: cumulative size from the touch, on the cumulative scale.
@@ -252,7 +318,11 @@ void DomBarDelegate::paintSize(QPainter* painter, const QStyleOptionViewItem& op
             painter->fillRect(QRect(bid ? area.right() - offset : area.left() + offset, opt.rect.top(), 1, opt.rect.height()), line);
         }
     }
-    drawFitted(painter, opt, label, text);
+    const QColor offInk = inkOn(ground, light);
+    const QColor onInk = bar.isEmpty() ? offInk : inkOn(underBar, light);
+    const int edge = bar.isEmpty() ? (bid ? std::numeric_limits<int>::max() : std::numeric_limits<int>::min())
+                                   : bid ? bar.left() : bar.right() + 1;
+    drawSplit(painter, opt, label, onInk, offInk, edge, bid);
 }
 
 void DomBarDelegate::paintPrice(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text) const
@@ -542,7 +612,19 @@ void OrderBookDock::buildGrouping(QHBoxLayout* line)
     const QString mode = settings.value("OrderBookDock/grouping", "auto").toString();
     m_groupMode = mode == "fixed" ? Grouping::Fixed : mode == "link" ? Grouping::Link : Grouping::Auto;
     m_fixedTick = settings.value("OrderBookDock/groupTick", 0.0).toDouble();
+    m_model->setSizeFormat(DomModel::sizeFormatFromKey(settings.value("OrderBookDock/domSizeFormat").toString()));
+    buildSizeMenu();
     updateGroupButton();
+}
+
+void OrderBookDock::setSizeFormat(DomModel::SizeFormat format)
+{
+    m_model->setSizeFormat(format);
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+    settings.setValue("OrderBookDock/domSizeFormat", DomModel::sizeFormatKey(format));
+    m_footerVersion = UINT64_MAX; // the footer totals use the same format
+    m_dirty = true;
+    if (m_displayActive) refreshDisplay();
 }
 
 void OrderBookDock::setGrouping(Grouping mode, double fixedTick)
@@ -594,6 +676,32 @@ void OrderBookDock::fillGroupMenu()
         const double tick = double(g) * native;
         const QString text = m_model->shownPrice(tick, tick) + (g == 1 ? QStringLiteral(" (server tick)") : QString());
         add(text, m_groupMode == Grouping::Fixed && m_model->requestedGroup() == g, [this, tick] { setGrouping(Grouping::Fixed, tick); });
+    }
+    m_groupMenu->addSeparator();
+    m_groupMenu->addMenu(m_sizeMenu);
+    for (QAction* action : m_sizeMenu->actions())
+        action->setChecked(action->data().toInt() == int(m_model->sizeFormat()));
+}
+
+void OrderBookDock::buildSizeMenu()
+{
+    // Size format lab (brief DOM-3): the owner compares the candidates live.
+    m_sizeMenu = new QMenu(QStringLiteral("Size format"), m_grouping);
+    m_sizeMenu->setObjectName("domSizeFormatMenu");
+    auto* formats = new QActionGroup(m_sizeMenu);
+    for (const auto& [format, text, tip] : {
+             std::tuple{DomModel::SizeFormat::Compact, "Compact: 3 digits (.0642)", "Three significant digits, no leading zero; under .0001 shows <.0001."},
+             std::tuple{DomModel::SizeFormat::Adaptive, "Adaptive digits (0.0642)",
+                        "Three significant digits, up to five while neighbouring sizes would read alike; leading zero."},
+             std::tuple{DomModel::SizeFormat::AdaptiveDim, "Adaptive, dim under $100",
+                        "Adaptive digits; sizes worth under $100 at their price are drawn dim (never hidden)."}}) {
+        QAction* action = m_sizeMenu->addAction(QString::fromUtf8(text));
+        action->setObjectName(QStringLiteral("domSizeFormat-") + DomModel::sizeFormatKey(format));
+        action->setToolTip(QString::fromUtf8(tip));
+        action->setData(int(format));
+        action->setCheckable(true);
+        formats->addAction(action);
+        connect(action, &QAction::triggered, this, [this, format] { setSizeFormat(format); });
     }
 }
 
@@ -1040,6 +1148,6 @@ void OrderBookDock::updatePulseFooter()
     m_pulseFooter->setToolTip(QStringLiteral("Book changes over the last %1 s in the rows on screen (plus %2 rows each way), all sizes:\n%3\n"
                                              "Added: asks %4 · bids %5 %6. Pulled = cancelled before price got there; eaten = removed by trades.")
         .arg(DomModel::PulseWindowMs / 1000).arg(DomModel::PulseMarginRows).arg(full)
-        .arg(DomModel::sizeText(totals.side[1].added), DomModel::sizeText(totals.side[0].added),
+        .arg(m_model->shownSize(totals.side[1].added), m_model->shownSize(totals.side[0].added),
              m_symbol.section('-', 0, 0)));
 }

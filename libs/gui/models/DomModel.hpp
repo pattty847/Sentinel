@@ -126,18 +126,45 @@ public:
     QString shownPrice(double price, double tick) const;
     // The quote currency, with the display unit's tag when scaled: "USD x1M".
     QString quoteUnit() const;
-    // Three significant digits, leading zero dropped, k/m/b suffixes: .634, 5.87, 13.6, 1.36k.
-    // Positive dust below 1e-4 shows "<.0001".
-    static QString sizeText(double value);
-    // Signed (delta) form: +1.25, -.5; magnitudes below 1e-4, including exact cancellation, show "≈0".
-    static QString signedSizeText(double value);
+    // How a size reads: significant digits, the leading zero, and the dust floor below which a
+    // positive size shows "<floor" (never zero, never dropped).
+    struct SizeStyle {
+        int digits = 3;
+        bool leadingZero = false;
+        double dust = 1e-4;
+    };
+    // The owner's size-format lab (brief DOM-3 / L-15), one setting (OrderBookDock domSizeFormat):
+    // Compact: 3 significant digits, no leading zero, "<.0001" floor (.0642, 1.11).
+    // Adaptive: 3 significant digits, raised up to 5 while neighbouring sizes would read alike,
+    //   leading zero, floor 1e-8 (0.0642, 1.114). The default: the brief's recommendation.
+    // AdaptiveDim: Adaptive, and sizes worth under DimNotional quote units are drawn dim.
+    enum class SizeFormat { Compact, Adaptive, AdaptiveDim };
+    static constexpr SizeFormat DefaultSizeFormat = SizeFormat::Adaptive;
+    static constexpr int MaxSizeDigits = 5;
+    static constexpr double DimNotional = 100;
+    // Fewer digits apply only after this long without a collision (no flicker on a live book).
+    static constexpr qint64 SizeDigitsHoldMs = 2000;
+    static QString sizeFormatKey(SizeFormat format);
+    static SizeFormat sizeFormatFromKey(const QString& key);
+    void setSizeFormat(SizeFormat format);
+    SizeFormat sizeFormat() const { return m_sizeFormat; }
+    SizeStyle sizeStyle() const;
+    // A size in the current format (footer totals, tags and cells share it).
+    QString shownSize(double value) const { return sizeText(value, sizeStyle()); }
+    // AdaptiveDim and a USD-quoted size worth less than DimNotional at its row's price.
+    bool dimmed(int row, double value) const;
+    // Three significant digits, leading zero dropped, k/m/b/t suffixes: .634, 5.87, 13.6, 1.36k.
+    // Positive dust below 1e-4 shows "<.0001". Never an exponent below 1,000t.
+    static QString sizeText(double value, SizeStyle style = {});
+    // Signed (delta) form: +1.25, -.5; magnitudes below the dust floor, including exact cancellation, show "≈0".
+    static QString signedSizeText(double value, SizeStyle style = {});
     // Tooltip text: the precision of the server's float sizes, without float noise.
     static QString fullSizeText(double value);
     // sizeText into a Latin-1 buffer without allocating; returns the length (0 if it does not fit).
-    static int formatSize(char* out, int capacity, double value);
-    // Every character formatSize can emit (exponent form included: 7.1e+03b), plus the
+    static int formatSize(char* out, int capacity, double value, SizeStyle style = {});
+    // Every character formatSize can emit (the exponent form only from 1,000t up), plus the
     // tag prefixes. Glyph strips that draw tags must cover all of it.
-    static constexpr char TagAlphabet[] = "0123456789.+-e<kmb\xD7";
+    static constexpr char TagAlphabet[] = "0123456789.+-e<kmbt\xD7";
 
     // Liquidity Pulse. pulseStep classifies the rows just published (visible rows
     // plus a margin) against the previous step with trades stamped on receipt, all
@@ -192,6 +219,12 @@ private:
     void addTrades(const DomTradeWindow& trades, const LiveOrderBook::DenseBookSnapshotView& view,
                    qint64 origin, qint64 nowMs);
     bool updateScales(qint64 nowMs);
+    int neededSizeDigits(const std::array<Row, Rows>& rows, int first, int last) const;
+    bool updateSizeDigits(int first, int last, qint64 nowMs);
+    SizeFormat m_sizeFormat = DefaultSizeFormat;
+    int m_sizeDigits = 3;
+    qint64 m_sizeDigitsSince = -1; // since when fewer digits would do (-1: they would not)
+    bool m_sizeStyleChanged = false;
     QString m_base = "base", m_quote = "quote", m_symbol = "this product";
     double m_tick = 0, m_nativeTick = 0;
     int64_t m_group = 1, m_requestedGroup = 1, m_appliedRequest = 1;

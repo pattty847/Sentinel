@@ -81,48 +81,55 @@ QString DomModel::quoteUnit() const
     return unit.scaled() ? m_quote + QLatin1Char(' ') + QLatin1String(unit.tag()) : m_quote;
 }
 
-QString DomModel::sizeText(double value)
+QString DomModel::sizeText(double value, SizeStyle style)
 {
-    if (!std::isfinite(value)) return {};
-    // Dust (a 1e-07 BTC trade) would print in e-notation; the tooltip keeps the value.
-    if (value > 0 && value < 1e-4) return QStringLiteral("<.0001");
-    static constexpr const char* suffixes[] = {"", "k", "m", "b"};
+    char buffer[40];
+    return QString::fromLatin1(buffer, formatSize(buffer, int(sizeof buffer), value, style));
+}
+
+namespace {
+// Decimals that show `digits` significant digits of a positive value (no exponent).
+int sizeDecimals(double value, int digits)
+{
+    return std::clamp(digits - 1 - int(std::floor(std::log10(value))), 0, 10);
+}
+} // namespace
+
+int DomModel::formatSize(char* out, int capacity, double value, SizeStyle style)
+{
+    // Locale-independent std::to_chars; never allocates. sizeText is this text.
+    if (!std::isfinite(value) || capacity <= 0) return 0;
+    char* const end = out + capacity;
+    char* at = out;
+    if (value > 0 && value < style.dust) {
+        // Dust (a 1e-07 BTC trade) is never shown as zero or in e-notation; the tooltip keeps the value.
+        *at++ = '<';
+        const int n = formatSize(at, int(end - at), style.dust, {style.digits, style.leadingZero, 0});
+        return n > 0 ? n + 1 : 0;
+    }
+    static constexpr char suffixes[] = {0, 'k', 'm', 'b', 't'};
     double scaled = std::abs(value);
     int suffix = 0;
     // 999.5 rounds to 1000 at three significant digits: move to the next suffix first.
-    while (suffix < 3 && scaled >= 999.5) {
+    while (suffix < 4 && scaled >= 999) {
+        const double step = std::pow(10.0, -sizeDecimals(scaled, style.digits));
+        if (std::round(scaled / step) * step < 1000) break;
         scaled /= 1000;
         ++suffix;
     }
-    QString text = QString::number(scaled, 'g', 3);
-    if (text.startsWith(QLatin1String("0."))) text.remove(0, 1);
-    text += QLatin1String(suffixes[suffix]);
-    return value < 0 ? QLatin1Char('-') + text : text;
-}
-
-int DomModel::formatSize(char* out, int capacity, double value)
-{
-    // The same text as sizeText, through locale-independent std::to_chars.
-    if (!std::isfinite(value) || capacity <= 0) return 0;
-    if (value > 0 && value < 1e-4) {
-        static constexpr char dust[] = "<.0001";
-        if (capacity < int(sizeof dust) - 1) return 0;
-        std::memcpy(out, dust, sizeof dust - 1);
-        return int(sizeof dust - 1);
-    }
-    static constexpr char suffixes[] = {0, 'k', 'm', 'b'};
-    double scaled = std::abs(value);
-    int suffix = 0;
-    while (suffix < 3 && scaled >= 999.5) {
-        scaled /= 1000;
-        ++suffix;
-    }
-    char* const end = out + capacity;
-    char* at = out;
     if (value < 0) *at++ = '-';
-    const auto result = std::to_chars(at, end, scaled, std::chars_format::general, 3);
+    std::to_chars_result result;
+    if (scaled >= 1000) result = std::to_chars(at, end, scaled, std::chars_format::general, style.digits); // beyond 999t
+    else if (scaled == 0) result = std::to_chars(at, end, 0);
+    else {
+        result = std::to_chars(at, end, scaled, std::chars_format::fixed, sizeDecimals(scaled, style.digits));
+        if (result.ec == std::errc{} && std::find(at, result.ptr, '.') != result.ptr) {
+            while (result.ptr[-1] == '0') --result.ptr; // trailing zeros carry no precision
+            if (result.ptr[-1] == '.') --result.ptr;
+        }
+    }
     if (result.ec != std::errc{}) return 0;
-    if (result.ptr - at >= 2 && at[0] == '0' && at[1] == '.') {
+    if (!style.leadingZero && result.ptr - at >= 2 && at[0] == '0' && at[1] == '.') {
         std::memmove(at, at + 1, size_t(result.ptr - at - 1));
         at = result.ptr - 1;
     } else at = result.ptr;
@@ -133,11 +140,97 @@ int DomModel::formatSize(char* out, int capacity, double value)
     return int(at - out);
 }
 
-QString DomModel::signedSizeText(double value)
+QString DomModel::signedSizeText(double value, SizeStyle style)
 {
     if (!std::isfinite(value)) return {};
-    if (std::abs(value) < 1e-4) return QStringLiteral("≈0");
-    return value > 0 ? QLatin1Char('+') + sizeText(value) : sizeText(value);
+    if (std::abs(value) < std::max(style.dust, 1e-12)) return QStringLiteral("≈0");
+    return value > 0 ? QLatin1Char('+') + sizeText(value, style) : sizeText(value, style);
+}
+
+QString DomModel::sizeFormatKey(SizeFormat format)
+{
+    return format == SizeFormat::Compact ? QStringLiteral("compact")
+        : format == SizeFormat::AdaptiveDim ? QStringLiteral("adaptiveDim") : QStringLiteral("adaptive");
+}
+
+DomModel::SizeFormat DomModel::sizeFormatFromKey(const QString& key)
+{
+    return key == QLatin1String("compact") ? SizeFormat::Compact
+        : key == QLatin1String("adaptiveDim") ? SizeFormat::AdaptiveDim
+        : key == QLatin1String("adaptive") ? SizeFormat::Adaptive : DefaultSizeFormat;
+}
+
+DomModel::SizeStyle DomModel::sizeStyle() const
+{
+    if (m_sizeFormat == SizeFormat::Compact) return {};
+    return {m_sizeDigits, true, 1e-8};
+}
+
+void DomModel::setSizeFormat(SizeFormat format)
+{
+    if (format == m_sizeFormat) return;
+    m_sizeFormat = format;
+    m_sizeDigits = 3;
+    m_sizeDigitsSince = -1;
+    m_sizeStyleChanged = true;
+    m_textValid.fill(0);
+    m_pulseTextValid.fill(0);
+    if (m_ready) emit dataChanged(index(0, 0), index(Rows - 1, Columns - 1));
+}
+
+bool DomModel::dimmed(int row, double value) const
+{
+    if (m_sizeFormat != SizeFormat::AdaptiveDim || !m_ready || row < 0 || row >= Rows || !(value > 0)) return false;
+    if (m_quote != QLatin1String("USD") && m_quote != QLatin1String("USDC") && m_quote != QLatin1String("USDT")) return false;
+    return value * double(m_top - row) * m_tick < DimNotional;
+}
+
+int DomModel::neededSizeDigits(const std::array<Row, Rows>& rows, int first, int last) const
+{
+    // The fewest digits (from 3) at which no two neighbouring nonzero sizes of a column that
+    // differ read alike. Stack buffers only: this runs on every publication.
+    char a[24], b[24];
+    for (int digits = 3; digits < MaxSizeDigits; ++digits) {
+        const SizeStyle style{digits, true, 1e-8};
+        bool collide = false;
+        for (int col = 0; col < 2 && !collide; ++col) {
+            double previous = 0;
+            int previousLength = 0;
+            for (int r = first; r <= last && !collide; ++r) {
+                const auto& row = rows[size_t(r)];
+                const double value = col == 0 ? (m_cumulative ? row.cumBid : row.bid) : (m_cumulative ? row.cumAsk : row.ask);
+                if (!(value > 0)) continue;
+                const int length = formatSize(b, int(sizeof b), value, style);
+                collide = previous > 0 && value != previous && length == previousLength && std::memcmp(a, b, size_t(length)) == 0;
+                std::memcpy(a, b, size_t(length));
+                previousLength = length;
+                previous = value;
+            }
+        }
+        if (!collide) return digits;
+    }
+    return MaxSizeDigits;
+}
+
+bool DomModel::updateSizeDigits(int first, int last, qint64 nowMs)
+{
+    if (m_sizeFormat == SizeFormat::Compact) return false;
+    const int needed = neededSizeDigits(m_next, first, last);
+    int digits = m_sizeDigits;
+    if (needed > m_sizeDigits) {
+        digits = needed; // more precision applies at once
+        m_sizeDigitsSince = -1;
+    } else if (needed < m_sizeDigits) {
+        if (m_sizeDigitsSince < 0) m_sizeDigitsSince = nowMs;
+        if (nowMs - m_sizeDigitsSince >= SizeDigitsHoldMs) {
+            digits = needed;
+            m_sizeDigitsSince = -1;
+        }
+    } else m_sizeDigitsSince = -1;
+    if (digits == m_sizeDigits) return false;
+    m_sizeDigits = digits;
+    m_pulseTextValid.fill(0);
+    return true;
 }
 
 QString DomModel::fullSizeText(double value)
@@ -225,21 +318,22 @@ const QString& DomModel::cachedText(int r, int col) const
     m_textValid[r] |= uint8_t(1u << col);
     const auto& row = m_rows[r];
     const double delta = row.buys - row.sells;
+    const SizeStyle style = sizeStyle();
     switch (col) {
     case Bid: {
         const double value = m_cumulative ? row.cumBid : row.bid;
-        text = value > 0 ? sizeText(value) : QString();
+        text = value > 0 ? sizeText(value, style) : QString();
         break;
     }
     case Ask: {
         const double value = m_cumulative ? row.cumAsk : row.ask;
-        text = value > 0 ? sizeText(value) : QString();
+        text = value > 0 ? sizeText(value, style) : QString();
         break;
     }
     case Price: text = shownPrice((m_top - r) * m_tick, m_tick); break;
-    case Buys: text = row.buys > 0 ? sizeText(row.buys) : QString(); break;
-    case Sells: text = row.sells > 0 ? sizeText(row.sells) : QString(); break;
-    default: text = row.buys <= 0 && row.sells <= 0 ? QString() : signedSizeText(delta); break;
+    case Buys: text = row.buys > 0 ? sizeText(row.buys, style) : QString(); break;
+    case Sells: text = row.sells > 0 ? sizeText(row.sells, style) : QString(); break;
+    default: text = row.buys <= 0 && row.sells <= 0 ? QString() : signedSizeText(delta, style); break;
     }
     return text;
 }
@@ -261,6 +355,9 @@ void DomModel::clear(const QString& symbol)
     m_scales.fill({});
     m_rows.fill({});
     m_textValid.fill(0);
+    m_sizeDigits = 3;
+    m_sizeDigitsSince = -1;
+    m_sizeStyleChanged = false;
     m_depthKey.reset();
     ++m_pulseSeries;
     resetPulse();
@@ -534,10 +631,13 @@ void DomModel::publish(const LiveOrderBook& book, const DomTradeWindow& trades, 
     for (size_t i = 0; i < m_scales.size(); ++i) m_scales[i].target = targets[i];
     m_visibleChanged = false;
     const bool scaleChanged = updateScales(nowMs);
+    // A new digit count or format re-reads every size cell, like a window move.
+    const bool restyled = updateSizeDigits(firstVisible, lastVisible, nowMs) || m_sizeStyleChanged;
+    m_sizeStyleChanged = false;
     int firstChanged = Rows, lastChanged = -1;
     for (int r = 0; r < Rows; ++r) {
-        const bool valueChanged = moved || !(m_next[r] == m_rows[r]);
-        if (valueChanged) m_textValid[r] &= uint8_t(~textChanges(m_rows[r], m_next[r], moved));
+        const bool valueChanged = moved || restyled || !(m_next[r] == m_rows[r]);
+        if (valueChanged) m_textValid[r] &= uint8_t(~textChanges(m_rows[r], m_next[r], moved || restyled));
         if (valueChanged || scaleChanged || pulseRepaint(r)) {
             firstChanged = std::min(firstChanged, r);
             lastChanged = r;
@@ -855,7 +955,7 @@ const QString& DomModel::pulseTag(int row, bool bid, bool eaten) const
     int length = 0;
     if (value != 0) {
         buffer[0] = eaten ? '\xD7' : value > 0 ? '+' : '-'; // U+00D7 multiplication sign, in TagAlphabet
-        const int digits = formatSize(buffer + 1, PulseTagCapacity - 1, std::abs(value));
+        const int digits = formatSize(buffer + 1, PulseTagCapacity - 1, std::abs(value), sizeStyle());
         length = digits > 0 ? digits + 1 : 0;
     }
     // Refill in place: truncate keeps the reserved capacity of an unshared string.
@@ -871,13 +971,13 @@ QString DomModel::pulseSummary(PulseText form) const
     const auto& ask = t.side[sentinel::book::sideIndex(sentinel::book::Side::Ask)];
     if (form == PulseText::Tiny)
         return QStringLiteral("Ask %1/%2 · Bid %3/%4")
-            .arg(sizeText(ask.pulled), sizeText(ask.eaten), sizeText(bid.pulled), sizeText(bid.eaten));
+            .arg(shownSize(ask.pulled), shownSize(ask.eaten), shownSize(bid.pulled), shownSize(bid.eaten));
     QString text = form == PulseText::Full
         ? QStringLiteral("Asks pulled %1 eaten %2 · Bids pulled %3 eaten %4")
         : QStringLiteral("Ask pull %1 eat %2 · Bid pull %3 eat %4");
-    text = text.arg(sizeText(ask.pulled), sizeText(ask.eaten), sizeText(bid.pulled), sizeText(bid.eaten));
+    text = text.arg(shownSize(ask.pulled), shownSize(ask.eaten), shownSize(bid.pulled), shownSize(bid.eaten));
     if (t.largestPull && m_tick > 0 && form != PulseText::NoMax)
         text += (form == PulseText::Compact ? QStringLiteral(" · max %1 @ %2") : QStringLiteral(" · biggest pull %1 @ %2"))
-            .arg(sizeText(t.largestPull->size), shownPrice(t.largestPull->price, m_tick));
+            .arg(shownSize(t.largestPull->size), shownPrice(t.largestPull->price, m_tick));
     return text;
 }

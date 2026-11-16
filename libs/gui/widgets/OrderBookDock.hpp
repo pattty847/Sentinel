@@ -33,6 +33,12 @@ public:
     static QColor barColor(bool bid, double fraction);
     // A light tint of the bar colour whose opacity rises with the fraction.
     static QColor sizeTextColor(bool bid, double fraction);
+    // Reading floor (brief principle 5): every shown digit is at least 4.5:1 against what is under it.
+    static constexpr double ReadingFloor = 4.5;
+    static QColor over(const QColor& top, const QColor& bottom);
+    static double contrast(const QColor& a, const QColor& b);
+    // `light` when it reads at the floor on `under`, otherwise dark ink.
+    static QColor inkOn(const QColor& under, const QColor& light);
     // Fill of the best bid / best ask size cell.
     static QColor bestFill(bool bid);
     // Characters of a price text drawn dim: everything before its last three digits.
@@ -61,6 +67,10 @@ private:
     void paintSize(QPainter* painter, const QStyleOptionViewItem& opt, const QModelIndex& index, const QString& text) const;
     void paintPrice(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text) const;
     static void drawFitted(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text, const QColor& color);
+    // A size split at a bar edge: glyphs over the bar in `onBar`, the rest in `offBar`.
+    // barRight: the bar lies right of `edge` (bids), else left of it (asks).
+    static void drawSplit(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text,
+                          const QColor& onBar, const QColor& offBar, int edge, bool barRight);
     DomModel* m_model;
     mutable TagGlyphs m_tags;
 };
@@ -86,6 +96,9 @@ public:
     uint64_t autoGroupChanges() const { return m_autoHold.changes(); }
     // Heatmap tick shown now (Manual: the locked preset; Auto: the drawn tick), in quote units.
     void setHeatmapTick(qint64 units, double priceScale, bool manual);
+    // Size format lab (brief DOM-3), persisted as OrderBookDock/domSizeFormat.
+    void setSizeFormat(DomModel::SizeFormat format);
+    DomModel::SizeFormat sizeFormat() const { return m_model->sizeFormat(); }
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -115,6 +128,7 @@ private:
     void applyHeadingStyle(bool compact);
     void buildGrouping(QHBoxLayout* line);
     void fillGroupMenu();
+    void buildSizeMenu();
     void updateGrouping(const LiveOrderBook& book);
     void updateGroupButton();
     void refreshLean();
@@ -161,6 +175,7 @@ private:
     bool m_headingCompact = false;
     QToolButton* m_grouping = nullptr;
     QMenu* m_groupMenu = nullptr;
+    QMenu* m_sizeMenu = nullptr;
     Grouping m_groupMode = Grouping::Auto;
     double m_fixedTick = 0, m_linkTick = 0, m_linkScale = 0, m_groupNative = 0, m_shownNative = -1, m_shownLinkTick = -1, m_shownLinkScale = -1;
     qint64 m_linkUnits = 0, m_bandLevels = 0;

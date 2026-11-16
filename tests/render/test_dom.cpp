@@ -2,6 +2,7 @@
 #include "models/DomGrouping.hpp"
 #include "mainwindow/AgentApiSnapshots.hpp"
 #include "themes/DarkTheme.hpp"
+#include "themes/ThemePalette.hpp"
 #include "widgets/OrderBookDock.hpp"
 #include "widgets/LeanGaugeWidget.hpp"
 #include "render/heatmap/HeatmapPalette.hpp"
@@ -174,7 +175,7 @@ TEST(DomModel, TradesAreVolumeOverTheTrailingMinuteByTradeTimeUnknownNeverSells)
     EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Sells), .25);
     EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Delta), 1.25);
     EXPECT_EQ(model.index(r, DomModel::Buys).data().toString(), "1.5");
-    EXPECT_EQ(model.index(r, DomModel::Sells).data().toString(), ".25");
+    EXPECT_EQ(model.index(r, DomModel::Sells).data().toString(), "0.25"); // the default Adaptive format
     EXPECT_EQ(model.index(r, DomModel::Delta).data().toString(), "+1.25");
     const auto summary = model.executionSummary();
     EXPECT_TRUE(summary.contains("Traded volume in BTC · last 60 s by trade time · 5 trades")) << summary.toStdString();
@@ -511,13 +512,88 @@ TEST(DomModel, SizesShowThreeSignificantDigitsWithoutFloatNoise) {
     model.clear("BTC-USD");
     model.publish(book, {}, true);
     const auto bid = model.index(rowAt(model, 2000), DomModel::Bid);
-    EXPECT_EQ(bid.data().toString(), ".0032");
+    EXPECT_EQ(bid.data().toString(), "0.0032"); // the default Adaptive format keeps the leading zero
     EXPECT_DOUBLE_EQ(bid.data(DomModel::QuantityRole).toDouble(), noisy); // full value stays in data
     const auto tip = bid.data(Qt::ToolTipRole).toString();
     EXPECT_TRUE(tip.startsWith("0.0032 BTC resting bid")) << tip.toStdString();
     EXPECT_FALSE(tip.contains("0.00319999"));
     EXPECT_TRUE(model.index(rowAt(model, 2001), DomModel::Ask).data(Qt::ToolTipRole).toString().startsWith("1.234568 BTC"));
     EXPECT_EQ(model.index(rowAt(model, 2001), DomModel::Ask).data().toString(), "1.23");
+}
+
+TEST(DomModel, SizeFormatsNeverHideNeverZeroAndNeverUseAnExponent) {
+    const DomModel::SizeStyle adaptive{3, true, 1e-8}, four{4, true, 1e-8};
+    EXPECT_EQ(DomModel::sizeText(.0642, adaptive), "0.0642");
+    EXPECT_EQ(DomModel::sizeText(.000235, adaptive), "0.000235");
+    EXPECT_EQ(DomModel::sizeText(2.35e-5, adaptive), "0.0000235"); // compact shows <.0001
+    EXPECT_EQ(DomModel::sizeText(2.35e-5), "<.0001");
+    EXPECT_EQ(DomModel::sizeText(1.2e-9, adaptive), "<0.00000001");
+    EXPECT_EQ(DomModel::sizeText(1.114, adaptive), "1.11");
+    EXPECT_EQ(DomModel::sizeText(1.114, four), "1.114");
+    EXPECT_EQ(DomModel::sizeText(999.96, four), "1k");
+    EXPECT_EQ(DomModel::sizeText(999.94, four), "999.9");
+    EXPECT_EQ(DomModel::sizeText(1364.2, four), "1.364k");
+    EXPECT_EQ(DomModel::sizeText(7.1e12), "7.1t"); // was 7.1e+03b
+    EXPECT_EQ(DomModel::signedSizeText(-2.5e-6, adaptive), "-0.0000025");
+    EXPECT_EQ(DomModel::signedSizeText(0.1 + 0.2 - 0.3, adaptive), "≈0"); // float noise is cancellation
+    for (double v = 1.37e-8; v < 9e14; v *= 1.37)
+        for (const auto& style : {DomModel::SizeStyle{}, adaptive, four}) {
+            const QString text = DomModel::sizeText(v, style);
+            EXPECT_FALSE(text.contains('e')) << v;
+            EXPECT_NE(text, "0") << v;
+            EXPECT_FALSE(text.isEmpty()) << v;
+        }
+    for (const auto format : {DomModel::SizeFormat::Compact, DomModel::SizeFormat::Adaptive, DomModel::SizeFormat::AdaptiveDim})
+        EXPECT_EQ(DomModel::sizeFormatFromKey(DomModel::sizeFormatKey(format)), format);
+    EXPECT_EQ(DomModel::sizeFormatFromKey("junk"), DomModel::SizeFormat::Adaptive); // the brief's recommendation
+}
+
+TEST(DomModel, AdaptiveDigitsTellNeighbouringLevelsApartAndSettleWithoutFlicker) {
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 1.111}, {true, 199.9, 1.114}, {false, 200.1, 5}});
+    DomModel model;
+    model.clear("BTC-USD");
+    ASSERT_EQ(model.sizeFormat(), DomModel::SizeFormat::Adaptive);
+    qint64 now = 1'800'000'000'000;
+    model.publish(book, {}, true, now);
+    const auto text = [&](qint64 key) { return model.index(rowAt(model, key), DomModel::Bid).data().toString(); };
+    EXPECT_EQ(model.sizeStyle().digits, 4);
+    EXPECT_EQ(text(2000), "1.111");
+    EXPECT_EQ(text(1999), "1.114");
+    apply(book, {{true, 199.9, 3}}); // no two neighbours read alike at three digits any more
+    model.publish(book, {}, true, now += 67);
+    EXPECT_EQ(model.sizeStyle().digits, 4) << "held: no flicker on a live book";
+    EXPECT_EQ(text(2000), "1.111");
+    model.publish(book, {}, true, now += DomModel::SizeDigitsHoldMs);
+    EXPECT_EQ(model.sizeStyle().digits, 3);
+    EXPECT_EQ(text(2000), "1.11");
+    model.setSizeFormat(DomModel::SizeFormat::Compact);
+    EXPECT_EQ(text(2000), "1.11");
+    EXPECT_EQ(model.index(rowAt(model, 2001), DomModel::Ask).data().toString(), "5");
+    // Dimming: AdaptiveDim only, by notional at the row's price (USD quote).
+    EXPECT_FALSE(model.dimmed(rowAt(model, 2000), 0.4));
+    model.setSizeFormat(DomModel::SizeFormat::AdaptiveDim);
+    EXPECT_TRUE(model.dimmed(rowAt(model, 2000), 0.4));  // $80
+    EXPECT_FALSE(model.dimmed(rowAt(model, 2000), 0.6)); // $120
+}
+
+TEST(DomDelegate, EverySizeInkKeepsTheReadingFloorOnBarsAndBackground) {
+    for (const QColor ground : {QColor("#1E1E1E"), QColor("#1B1F24"), QColor("#0F1114")})
+        for (const bool bid : {true, false})
+            for (double f = 0; f <= 1.0001; f += 0.05) {
+                const QColor light = DomBarDelegate::sizeTextColor(bid, f);
+                const QColor off = DomBarDelegate::inkOn(ground, light);
+                EXPECT_GE(DomBarDelegate::contrast(DomBarDelegate::over(off, ground), ground), DomBarDelegate::ReadingFloor) << bid << f;
+                QColor fill = DomBarDelegate::barColor(bid, f);
+                fill.setAlpha(150);
+                const QColor bar = DomBarDelegate::over(fill, ground);
+                const QColor on = DomBarDelegate::inkOn(bar, light);
+                EXPECT_GE(DomBarDelegate::contrast(DomBarDelegate::over(on, bar), bar), DomBarDelegate::ReadingFloor) << bid << f;
+                const QColor best = DomBarDelegate::bestFill(bid);
+                EXPECT_GE(DomBarDelegate::contrast(DomBarDelegate::inkOn(best, light), best), DomBarDelegate::ReadingFloor) << bid;
+            }
+    EXPECT_GE(DomBarDelegate::contrast(theme::text3(), QColor("#1E1E1E")), DomBarDelegate::ReadingFloor); // dimmed sizes
 }
 
 TEST(DomModel, ManualAnchorAndRecenterAcrossRapidBookMoves) {
@@ -1540,12 +1616,12 @@ TEST(DomPulse, TagAlphabetCoversEverythingFormatSizeEmits) {
 
 TEST_F(DomPulseDock, ExponentTagsRenderEveryGlyph) {
     dock.resize(650, 700); QCoreApplication::processEvents();
-    source.update({{true, 199.9, 7.1e12}});
+    source.update({{true, 199.9, 7.1e15}}); // beyond 999t: the one exponent form
     for (int i = 0; i < 20; ++i) tick(); // the add fades
     source.update({{true, 199.9, 0}});
     tick();
     const int row = rowAt(*model, 1999);
-    ASSERT_EQ(model->pulseTag(row, true, false), "-7.1e+03b");
+    ASSERT_EQ(model->pulseTag(row, true, false), "-7.1e+03t");
     const QImage image = table->viewport()->grab().toImage();
     const QRect cell = table->visualRect(model->index(row, DomModel::Bid));
     const QRect plain = table->visualRect(model->index(rowAt(*model, 1990), DomModel::Bid));
@@ -2379,6 +2455,35 @@ TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
     tick();
     EXPECT_EQ(dock.grouping(), OrderBookDock::Grouping::Auto);
     EXPECT_EQ(button->text(), "Auto ▾");
+}
+
+TEST_F(DomDock, SizeFormatIsOneSettingInTheDockMenuAndPersists) {
+    source.update({{true, 200, 1.111}, {true, 199.9, 1.114}, {false, 200.1, 2.35e-5}});
+    show();
+    ASSERT_EQ(dock.sizeFormat(), DomModel::SizeFormat::Adaptive); // the brief's recommendation by default
+    auto* menu = dock.findChild<QMenu*>("domGroupingMenu");
+    emit menu->aboutToShow();
+    emit menu->aboutToShow(); // reopening keeps one submenu
+    EXPECT_EQ(dock.findChildren<QMenu*>("domSizeFormatMenu").size(), 1);
+    auto* compact = dock.findChild<QAction*>("domSizeFormat-compact");
+    ASSERT_NE(compact, nullptr);
+    EXPECT_FALSE(compact->isChecked());
+    EXPECT_TRUE(dock.findChild<QAction*>("domSizeFormat-adaptive")->isChecked());
+    const auto text = [&](qint64 key, int col) { return model->index(rowAt(*model, key), col).data().toString(); };
+    EXPECT_EQ(text(2001, DomModel::Ask), "0.0000235");
+    EXPECT_EQ(text(2000, DomModel::Bid), "1.111");
+    compact->trigger();
+    EXPECT_EQ(model->sizeFormat(), DomModel::SizeFormat::Compact);
+    EXPECT_EQ(text(2001, DomModel::Ask), "<.0001");
+    EXPECT_EQ(text(2000, DomModel::Bid), "1.11");
+    {
+        Source other;
+        OrderBookDock reopened{nullptr, &other};
+        EXPECT_EQ(reopened.sizeFormat(), DomModel::SizeFormat::Compact);
+    }
+    dock.findChild<QAction*>("domSizeFormat-adaptiveDim")->trigger();
+    EXPECT_EQ(model->sizeFormat(), DomModel::SizeFormat::AdaptiveDim);
+    dock.setSizeFormat(DomModel::SizeFormat::Adaptive); // later tests read the default
 }
 
 TEST_F(DomDock, PageScrollAndScrollbarJumpFillExposedGroupedRowsBeforePaint) {
