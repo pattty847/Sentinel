@@ -112,9 +112,12 @@ TEST(BubblePlacement, ReferenceExcludesTradesBelowDrawnMinimum) {
     for (double notional : {100., 200., 400.}) EXPECT_DOUBLE_EQ(radius(notional, unfiltered.p95), MaxRadius);
     const auto filtered = stats.reference(rows, 50);
     EXPECT_DOUBLE_EQ(filtered.p95, 400);
-    EXPECT_LT(radius(100, filtered.p95), radius(200, filtered.p95));
-    EXPECT_LT(radius(200, filtered.p95), radius(400, filtered.p95));
-    EXPECT_LT(radius(400, filtered.p95), MaxRadius);
+    BubblePlacement placement;
+    const auto drawn = placement.build(rows, {Mode::Individual, filtered, 50}, 60'000);
+    ASSERT_EQ(drawn.size(), 3u);
+    EXPECT_LT(radius(drawn[0].notional, filtered.p95), radius(drawn[1].notional, filtered.p95));
+    EXPECT_LT(radius(drawn[1].notional, filtered.p95), radius(drawn[2].notional, filtered.p95));
+    EXPECT_LT(radius(drawn[2].notional, filtered.p95), MaxRadius);
     EXPECT_DOUBLE_EQ(stats.reference(rows, 0, 2).p95, 400);
 }
 TEST(BubblePlacement, SweepIsFilteredAfterMergeAndSlotsIncludeAllSideNotional) {
