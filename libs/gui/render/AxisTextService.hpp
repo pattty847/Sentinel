@@ -33,8 +33,6 @@ public:
 
     explicit AxisTextService(const ChartTextAtlas& atlas, QObject* parent = nullptr);
     static QColor textColor();
-    static bool tickClearOfDate(const QRectF& tick, const QRectF& date);
-    static constexpr int kDatePx = 13;
 
     void setPriceAxisSource(QObject* source);
     void setTimeAxisSource(QObject* source);
@@ -88,7 +86,6 @@ private:
     mutable std::mutex m_axisSnapshotMutex;
     std::vector<AxisTickSnapshot> m_priceAxisTicks;
     std::vector<AxisTickSnapshot> m_timeAxisTicks;
-    QString m_timeAxisDate;
     mutable std::mutex m_axisLayoutMutex;
     AxisLayoutSnapshot m_axisLayoutSnapshot;
     double m_effectiveAxisLabelPx = AxisLayout::kAutoAxisLabelBasePx;

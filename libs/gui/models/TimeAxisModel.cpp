@@ -22,11 +22,6 @@ QString TimeAxisModel::timezone() const {
     return QString::fromLatin1(m_timezone.id());
 }
 
-QString TimeAxisModel::leftDate() const {
-    if (!m_effectiveViewportValid) return {};
-    return QDateTime::fromMSecsSinceEpoch(qint64(m_effectiveStart), m_timezone).toString("d MMM yyyy");
-}
-
 void TimeAxisModel::setTimezone(const QString& tzId) {
     QTimeZone newTz;
     if (tzId == "UTC" || tzId == "utc") {
@@ -108,16 +103,12 @@ void TimeAxisModel::calculateTicks() {
     }
     m_lastNiceStepMs = step;
     qint64 firstTick = (timeStart / step) * step;
-    bool firstVisible = true;
     for (qint64 timestamp = firstTick; timestamp <= timeEnd + step; timestamp += step) {
         if (timestamp < timeStart - step) continue;
         double screenX = valueToScreenPosition(static_cast<double>(timestamp));
         if (screenX >= 0 && screenX <= getViewportWidth()) {
-            QString label = firstVisible && step < 86'400'000
-                ? QDateTime::fromMSecsSinceEpoch(timestamp, m_timezone).toString(step < 60000 ? "HH:mm:ss" : "HH:mm")
-                : formatTimeLabel(timestamp, step);
+            QString label = formatTimeLabel(timestamp, step);
             addTick(static_cast<double>(timestamp), screenX, label, true);
-            firstVisible = false;
         }
     }
     

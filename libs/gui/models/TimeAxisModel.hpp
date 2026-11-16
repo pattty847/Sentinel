@@ -23,7 +23,6 @@ public:
     
     // Timezone support
     QString timezone() const;
-    QString leftDate() const;
     void setTimezone(const QString& tzId);
     
 signals:

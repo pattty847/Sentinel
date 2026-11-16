@@ -4,7 +4,6 @@
 #include "render/AxisTextService.hpp"
 #include "render/GridViewState.hpp"
 #include "models/PriceAxisModel.hpp"
-#include "models/TimeAxisModel.hpp"
 #include "render/ChartTextLayout.hpp"
 
 namespace {
@@ -32,49 +31,6 @@ TEST(AxisLayout, ResolveEffectiveAxisLabelPx_PrefersEnvThenConfigThenAuto) {
 
 TEST(AxisLayout, AxisInkUsesSecondaryTextColour) {
     EXPECT_EQ(AxisTextService::textColor(), QColor("#B6C2CF"));
-}
-
-TEST(AxisLayout, FirstVisibleTimeTickHasFullClockAndDateAtLeft) {
-    GridViewState view;
-    TimeAxisModel axis;
-    axis.setViewportSize(800, 900);
-    axis.setGridViewState(&view);
-    const qint64 start = QDateTime(QDate(2026, 11, 16), QTime(12, 3, 20), QTimeZone::utc()).toMSecsSinceEpoch();
-    view.setViewport(start, start + 600'000, 100, 200);
-    std::vector<AxisModel::TickSnapshot> ticks;
-    axis.copyTicks(ticks);
-    ASSERT_FALSE(ticks.empty());
-    EXPECT_EQ(ticks.front().label, QStringLiteral("12:04"));
-    EXPECT_EQ(axis.leftDate(), QStringLiteral("16 Nov 2026"));
-    ASSERT_GT(ticks.size(), 1u);
-    EXPECT_EQ(ticks[1].label, QStringLiteral(":05"));
-}
-
-TEST(AxisLayout, DateSharesOriginalTimeAxisRowAndDisplacesOverlappingTick) {
-    const ChartTextAtlas atlas = buildAtlas();
-    const float scale = 13.0f / atlas.fontPx();
-    EXPECT_EQ(AxisTextService::kDatePx, 13);
-    EXPECT_LT(AxisLayout::measureTimeAxisHeightPx(atlas, scale), 36);
-    AxisTextService axes(atlas);
-    axes.refreshAxisLayout();
-    EXPECT_LT(axes.timeAxisHeightPx(), 36) << "the date must not enlarge the plot gutter";
-    const QRectF date(4, 603, 92, 14);
-    EXPECT_FALSE(AxisTextService::tickClearOfDate(QRectF(91, 603, 30, 14), date));
-    EXPECT_TRUE(AxisTextService::tickClearOfDate(QRectF(101, 603, 30, 14), date));
-}
-
-TEST(AxisLayout, DailyStepsKeepDayLabelsOnFirstTick) {
-    GridViewState view;
-    TimeAxisModel axis;
-    axis.setViewportSize(800, 900);
-    axis.setGridViewState(&view);
-    const qint64 start = QDateTime(QDate(2026, 11, 16), QTime(12, 0), QTimeZone::utc()).toMSecsSinceEpoch();
-    view.setViewport(start, start + 60LL * 86'400'000, 100, 200);
-    std::vector<AxisModel::TickSnapshot> ticks;
-    axis.copyTicks(ticks);
-    ASSERT_GE(ticks.size(), 2u);
-    ASSERT_GE(ticks[1].value - ticks[0].value, 86'400'000);
-    EXPECT_FALSE(ticks[0].label.contains(':'));
 }
 
 // The grouped price labels (no "$", step decimals) keep the axis column, and with it
