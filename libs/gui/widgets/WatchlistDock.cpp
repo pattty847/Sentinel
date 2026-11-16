@@ -172,12 +172,13 @@ void WatchlistDock::buildUi() {
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_tree->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_tree->setAlternatingRowColors(false);
-    m_tree->setStyleSheet(
+    m_tree->setStyleSheet(QStringLiteral(
         "QTreeView { background:#1a1a1a; alternate-background-color:#202020; color:#e0e0e0; }"
         "QTreeView::item { height:22px; }"
-        "QTreeView::item:hover { background:#20252B; }"
+        "QTreeView::item:hover { background:%1; }"
         "QTreeView::item:selected { background:#3a4652; color:#fff; }"
-        "QHeaderView::section { background:#252525; color:#aaa; border:none; padding:3px; }");
+        "QHeaderView::section { background:#252525; color:#aaa; border:none; padding:3px; }")
+            .arg(theme::bg2().name()));
     tableChrome::header(m_tree->header());
     m_tree->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_tree->header()->setStretchLastSection(true);
