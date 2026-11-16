@@ -7,9 +7,7 @@
 #include <memory>
 #include <array>
 #include <mutex>
-#include <span>
 
-class QSGGeometryNode;
 namespace chart {
 class HeatmapLayer;
 class LadderLayer;
@@ -22,16 +20,14 @@ class CandleBufferSource;
 class LayerVisibility;
 class ChartTextLayer final : public IChartLayer {
 public:
-    static constexpr double kPlotIdPx = 13;
     ChartTextLayer(HeatmapLayer& heatmap, LadderLayer& ladder, FootprintCellsLayer& footprint,
                    VolumeProfileLayer& vp, CvdLayer& cvd, FlowFooterLayer& footer)
         : heatmap_(heatmap), ladder_(ladder), footprint_(footprint), vp_(vp), cvd_(cvd), footer_(footer) {
         emptyGlyphs_.reserve(128);
-        plotIdGlyphs_.reserve(64);
     }
     std::string_view name() const override { return "text"; }
-    void onRootRebuilt() override;
-    QSGNode* createContainer() override;
+    void onRootRebuilt() override { renderer.onRootRebuilt(); }
+    QSGNode* createContainer() override { return renderer.createRoot(); }
     void updateNodes(const ChartFrame&, LayerNodeContext&) override;
     void sync(const ChartFrame&) override;
     void bindCandles(ChartViewController&, CandleBufferSource&, LayerVisibility&);
@@ -39,11 +35,6 @@ public:
     uint64_t candleRefreshCount() const { return candleRefreshCount_; }
     void candlesDirty(const QString& symbol, int64_t timeframeMs, int64_t start, int64_t end);
     void setCandleEnvelope(std::vector<CandleBar> bars, int64_t end);
-    static QString formatPlotId(const QString& symbol, int64_t timeframeMs);
-    static bool clearOfLabels(const QRectF& box, std::span<const ChartGlyphInstance> glyphs);
-    static bool candleCrosses(const std::vector<CandleBar>& bars, int64_t windowEnd,
-                              const chart_raster::RasterCamera& raster, const QRectF& plot,
-                              const QRectF& box);
     void buildMsdfAtlas();
     QString getMsdfAtlasMemory() const;
     const std::vector<ChartGlyphInstance>& emptyGlyphs() const { return emptyGlyphs_; }
@@ -54,21 +45,13 @@ public:
 private:
     void submitOverlayLabels(const ChartFrame&, LayerNodeContext&);
     void submitEmptyLabels(const ChartFrame&, LayerNodeContext&);
-    void submitPlotId(const ChartFrame&, LayerNodeContext&);
-    void updatePlotIdPill(const QRectF& box);
     std::array<QRectF, kFootprintMaxBars + 1> occlusion_{};
     std::vector<ChartGlyphInstance> emptyGlyphs_;
-    std::vector<ChartGlyphInstance> plotIdGlyphs_;
     std::mutex candleMutex_;
     std::vector<CandleBar> captureCandles_, pendingCandles_, candles_;
     int64_t pendingEnd_ = 0, candleEnd_ = 0;
     bool candlePending_ = false;
-    QString plotSymbol_, pendingPlotId_, plotId_;
-    int64_t plotTimeframeMs_ = 0;
-    bool plotIdPending_ = false;
-    QSGGeometryNode* plotIdPill_ = nullptr;
-    QRectF plotIdPillRect_;
-    bool plotIdPillInitialized_ = false;
+    bool candleCaptureEnabled_ = false;
     uint64_t candleRefreshCount_ = 0;
     ChartViewController* candleView_ = nullptr;
     CandleBufferSource* candleSource_ = nullptr;

@@ -13,9 +13,6 @@
 #include "render/FrameProfiler.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "SentinelLogging.hpp"
-#include <QSGGeometryNode>
-#include <QSGVertexColorMaterial>
-#include <algorithm>
 
 namespace {
 bool envFloatValue(const char *name, float &out) {
@@ -45,7 +42,7 @@ bool envIntValue(const char *name, int &out) {
   out = parsed;
   return true;
 }
-bool candleEnvelopeCrosses(const std::vector<chart::CandleBar>& bars, int64_t windowEnd,
+bool candleCrosses(const std::vector<chart::CandleBar>& bars, int64_t windowEnd,
                    const chart_raster::RasterCamera& raster, const QRectF& plot, const QRectF& box) {
   if (!(raster.dpr > 0) || !(raster.tick > 0) || !(raster.tfMs > 0)) return false;
   const auto crosses = [&](double from, double to, double high, double low) {
@@ -70,60 +67,30 @@ bool fitsEmptyRun(const FrameContext& frame, const ChartTextAtlas& atlas, const 
                   const std::vector<chart::CandleBar>& bars, int64_t candleEnd, double bottom) {
   QRectF box;
   return ChartTextLayout::measureRunRect(atlas, run, box) && frame.surfaceBounds.contains(box) &&
-         box.bottom() <= bottom && !candleEnvelopeCrosses(bars, candleEnd, frame.raster, frame.surfaceBounds, box);
+         box.bottom() <= bottom && !candleCrosses(bars, candleEnd, frame.raster, frame.surfaceBounds, box);
 }
 } // namespace
 
 namespace chart {
-void ChartTextLayer::onRootRebuilt() {
-    renderer.onRootRebuilt();
-    plotIdPill_ = nullptr;
-    plotIdPillRect_ = {};
-    plotIdPillInitialized_ = false;
-}
-
-QSGNode* ChartTextLayer::createContainer() {
-    auto* root = renderer.createRoot();
-    plotIdPill_ = new QSGGeometryNode;
-    auto* geometry = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 6);
-    geometry->setDrawingMode(QSGGeometry::DrawTriangles);
-    geometry->setVertexDataPattern(QSGGeometry::DynamicPattern);
-    plotIdPill_->setGeometry(geometry);
-    plotIdPill_->setFlag(QSGNode::OwnsGeometry);
-    plotIdPill_->setMaterial(new QSGVertexColorMaterial);
-    plotIdPill_->setFlag(QSGNode::OwnsMaterial);
-    root->appendChildNode(plotIdPill_);
-    updatePlotIdPill({});
-    return root;
-}
-
-bool ChartTextLayer::candleCrosses(const std::vector<CandleBar>& bars, int64_t windowEnd,
-                                   const chart_raster::RasterCamera& raster, const QRectF& plot,
-                                   const QRectF& box) {
-    return candleEnvelopeCrosses(bars, windowEnd, raster, plot, box);
-}
-
-void ChartTextLayer::bindCandles(ChartViewController& view, CandleBufferSource& source, LayerVisibility&) {
+void ChartTextLayer::bindCandles(ChartViewController& view, CandleBufferSource& source, LayerVisibility& visibility) {
     candleView_ = &view;
     candleSource_ = &source;
-    auto refresh = [this] { refreshCandles(); };
+    auto refresh = [this] { if (candleCaptureEnabled_) refreshCandles(); };
     QObject::connect(view.viewPtr(), &GridViewState::viewportChanged, &view, refresh);
     QObject::connect(view.viewPtr(), &GridViewState::panVisualOffsetChanged, &view, refresh);
     QObject::connect(&view, &ChartViewController::timeframeChanged, &view, refresh);
-    refreshCandles();
+    auto onVisibility = [this, &visibility] {
+        const bool enabled = visibility.footprintEnabled() || visibility.volumeProfileEnabled();
+        const bool wasEnabled = candleCaptureEnabled_;
+        candleCaptureEnabled_ = enabled;
+        if (enabled && !wasEnabled) refreshCandles();
+    };
+    QObject::connect(&visibility, &LayerVisibility::layerVisibilityChanged, &view, onVisibility);
+    onVisibility();
 }
 
 void ChartTextLayer::refreshCandles() {
-    if (!candleView_) return;
-    const auto& session = candleView_->session();
-    if (session.symbol != plotSymbol_ || session.timeframeMs != plotTimeframeMs_) {
-        plotSymbol_ = session.symbol;
-        plotTimeframeMs_ = session.timeframeMs;
-        std::lock_guard lock(candleMutex_);
-        pendingPlotId_ = formatPlotId(plotSymbol_, plotTimeframeMs_);
-        plotIdPending_ = true;
-    }
-    if (!candleSource_) return;
+    if (!candleCaptureEnabled_ || !candleView_ || !candleSource_) return;
     ++candleRefreshCount_;
     auto* view = candleView_->viewPtr();
     const auto [start, end] = view->displayedTimeWindow();
@@ -138,7 +105,7 @@ void ChartTextLayer::refreshCandles() {
 }
 
 void ChartTextLayer::candlesDirty(const QString& symbol, int64_t timeframeMs, int64_t start, int64_t end) {
-    if (!candleView_ || symbol != candleView_->session().symbol ||
+    if (!candleCaptureEnabled_ || !candleView_ || symbol != candleView_->session().symbol ||
         timeframeMs != candleView_->session().timeframeMs) return;
     const auto [visibleStart, visibleEnd] = candleView_->viewPtr()->displayedTimeWindow();
     if (end > visibleStart && start < visibleEnd) refreshCandles();
@@ -153,7 +120,6 @@ void ChartTextLayer::setCandleEnvelope(std::vector<CandleBar> bars, int64_t end)
 
 void ChartTextLayer::sync(const ChartFrame&) {
     std::lock_guard lock(candleMutex_);
-    if (plotIdPending_) { plotId_.swap(pendingPlotId_); plotIdPending_ = false; }
     if (!candlePending_) return;
     candles_.swap(pendingCandles_);
     candleEnd_ = pendingEnd_;
@@ -170,74 +136,11 @@ void ChartTextLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& cont
             cvd_.submitLabels(frame, context);
             footer_.submitLabels(frame, context);
             ladder_.submitLabels(frame, context);
-            submitPlotId(frame, context);
         },
         [&](int stage) {
             if (context.profiler && stage < 2)
                 context.profiler->mark(stage == 0 ? FrameProfiler::AxisText : FrameProfiler::Labels);
         });
-}
-
-QString ChartTextLayer::formatPlotId(const QString& symbol, int64_t timeframeMs) {
-    if (symbol.isEmpty() || timeframeMs <= 0) return {};
-    const auto unit = timeframeMs % 86'400'000 == 0 ? 86'400'000 :
-                      timeframeMs % 3'600'000 == 0 ? 3'600'000 :
-                      timeframeMs % 60'000 == 0 ? 60'000 : timeframeMs % 1000 == 0 ? 1000 : 1;
-    const QChar suffix = unit == 86'400'000 ? 'd' : unit == 3'600'000 ? 'h' :
-                         unit == 60'000 ? 'm' : 's';
-    return symbol + QStringLiteral(" · ") + QString::number(timeframeMs / unit) +
-        (unit == 1 ? QStringLiteral("ms") : QString(suffix));
-}
-
-bool ChartTextLayer::clearOfLabels(const QRectF& box, std::span<const ChartGlyphInstance> glyphs) {
-    return std::none_of(glyphs.begin(), glyphs.end(), [&](const auto& glyph) { return glyph.rect.intersects(box); });
-}
-
-void ChartTextLayer::updatePlotIdPill(const QRectF& box) {
-    if (!plotIdPill_ || (plotIdPillInitialized_ && box == plotIdPillRect_)) return;
-    plotIdPillRect_ = box;
-    plotIdPillInitialized_ = true;
-    auto* vertices = plotIdPill_->geometry()->vertexDataAsColoredPoint2D();
-    const QPointF points[6] = {box.topLeft(), box.topRight(), box.bottomLeft(),
-                               box.bottomLeft(), box.topRight(), box.bottomRight()};
-    // Same premultiplied dark backing as the chart-edge wall badges.
-    constexpr uchar r = 11, g = 15, b = 20, a = 235;
-    for (int i = 0; i < 6; ++i)
-        vertices[i].set(float(points[i].x()), float(points[i].y()), r, g, b, box.isEmpty() ? 0 : a);
-    plotIdPill_->geometry()->markVertexDataDirty();
-    plotIdPill_->markDirty(QSGNode::DirtyGeometry);
-}
-
-void ChartTextLayer::submitPlotId(const ChartFrame& frame, LayerNodeContext& context) {
-    if (plotId_.isEmpty() || !context.atlasReady || frame.context.overlays.tpo || frame.context.overlays.volumeProfile) {
-        updatePlotIdPill({});
-        return;
-    }
-    ChartTextRun run;
-    run.text = plotId_;
-    run.anchor = frame.context.surfaceBounds.topLeft() + QPointF(7, 11);
-    run.color = QColor(147, 161, 175);
-    run.scale = float(kPlotIdPx / context.atlas.fontPx());
-    run.hAlign = ChartTextRun::HorizontalAlign::Left;
-    run.vAlign = ChartTextRun::VerticalAlign::Center;
-    run.pixelSnap = true;
-    QRectF box;
-    if (!ChartTextLayout::measureRunRect(context.atlas, run, box)) {
-        updatePlotIdPill({});
-        return;
-    }
-    const QRectF pill = box.adjusted(-3, -2, 3, 2);
-    if (!frame.context.surfaceBounds.contains(pill) ||
-        !clearOfLabels(pill, heatmap_.labelGlyphs()) || !clearOfLabels(pill, footprint_.glyphs()) ||
-        !clearOfLabels(pill, emptyGlyphs_) ||
-        candleCrosses(candles_, candleEnd_, frame.context.raster, frame.context.surfaceBounds, pill)) {
-        updatePlotIdPill({});
-        return;
-    }
-    updatePlotIdPill(pill);
-    plotIdGlyphs_.clear();
-    ChartTextLayout::appendRun(context.atlas, run, plotIdGlyphs_);
-    context.text.submitGlyphs(plotIdGlyphs_, ChartTextRenderer::Priority::High);
 }
 
 void ChartTextLayer::submitOverlayLabels(const ChartFrame& frame, LayerNodeContext& context) {
@@ -299,7 +202,7 @@ void ChartTextLayer::buildMsdfAtlas() {
   params.fontPx = 64;
   params.pxRange = 4.0f;
   params.charset = QStringLiteral(
-      " 0123456789.+-,:/<>·"
+      " 0123456789.+-,:/<>"
       "$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
   params.resourceFont =
       QStringLiteral(":/fonts/RobotoMono/RobotoMono-Regular.ttf");
