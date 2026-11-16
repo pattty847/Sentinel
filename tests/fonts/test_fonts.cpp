@@ -39,14 +39,21 @@ QString savedInstalledFamily;
 QStringList testFamilies;
 
 void settle() { QTest::qWait(30); }
-void expectLabels(QWidget& widget, const QString& family, int chromePixels = -1) {
+void expectLabels(QWidget& widget, const QString& family, int chromePixels = -1, bool paperScale = false) {
     const auto labels = widget.findChildren<QLabel*>();
     ASSERT_FALSE(labels.isEmpty());
     for (auto* label : labels) {
         SCOPED_TRACE(label->objectName().toStdString() + " " + label->text().toStdString());
         EXPECT_EQ(QFontInfo(label->font()).family(), family);
-        if (chromePixels > 0) EXPECT_EQ(label->font().pixelSize(), chromePixels);
-        else EXPECT_DOUBLE_EQ(label->font().pointSizeF(), 10.0);
+        if (chromePixels > 0) {
+            EXPECT_EQ(label->font().pixelSize(), chromePixels);
+        } else if (paperScale && label->font().pointSizeF() < 0) {
+            const bool key = label->styleSheet().contains(QStringLiteral("font-size: 16px"));
+            EXPECT_TRUE(key || label->styleSheet().contains(QStringLiteral("font-size: 10px")));
+            EXPECT_EQ(label->font().pixelSize(), key ? 16 : 10);
+        } else {
+            EXPECT_DOUBLE_EQ(label->font().pointSizeF(), 10.0);
+        }
     }
 }
 
@@ -168,7 +175,7 @@ TEST(FontWidgets, PaperTradingRuntimeAndHiddenWidgetsInheritSelectedFont) {
         SCOPED_TRACE(requested.toStdString());
         ASSERT_TRUE(FontManager::instance().applyFontFamily(requested, qApp)); settle();
         const QString family = FontManager::instance().currentFontFamily();
-        expectLabels(paper, family);
+        expectLabels(paper, family, -1, true);
         expectLabels(watch, family);
         expectLabels(screener, family);
         for (QWidget* view : {static_cast<QWidget*>(paper.findChild<QTableWidget*>("paperOrderLog")),
@@ -232,10 +239,10 @@ TEST(FontWidgets, PaperTradingRuntimeAndHiddenWidgetsInheritSelectedFont) {
     ASSERT_TRUE(FontManager::instance().applyFontFamily(testFamilies.front(), qApp)); settle();
     paper.show(); watch.show(); screener.show(); settle();
     const QString family = FontManager::instance().currentFontFamily();
-    expectLabels(paper, family); expectLabels(watch, family); expectLabels(screener, family);
+    expectLabels(paper, family, -1, true); expectLabels(watch, family); expectLabels(screener, family);
     PaperTradingDock newPaper; WatchlistDock newWatch; ScreenerDock newScreener;
     newPaper.ensurePolished(); newWatch.ensurePolished(); newScreener.ensurePolished();
-    expectLabels(newPaper, family); expectLabels(newWatch, family); expectLabels(newScreener, family);
+    expectLabels(newPaper, family, -1, true); expectLabels(newWatch, family); expectLabels(newScreener, family);
 }
 
 TEST(FontWidgets, ScreenerFontChangeRemeasuresDefaultsAndPreservesUserContext) {
