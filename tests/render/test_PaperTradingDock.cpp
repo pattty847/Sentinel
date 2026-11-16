@@ -1165,7 +1165,7 @@ TEST(PaperPolish, OrderRowsUseTwentyTwoPixels) {
     auto* table = dock.findChild<QTableWidget*>("paperOrderLog");
     ASSERT_NE(table, nullptr);
     EXPECT_EQ(table->verticalHeader()->defaultSectionSize(), 22);
-    EXPECT_EQ(table->verticalHeader()->sectionResizeMode(), QHeaderView::Fixed);
+    EXPECT_EQ(table->verticalHeader()->sectionResizeMode(0), QHeaderView::Fixed);
     QFont large = table->font();
     large.setPointSize(16);
     table->setFont(large);
