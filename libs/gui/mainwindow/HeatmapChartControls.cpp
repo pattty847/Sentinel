@@ -556,9 +556,7 @@ void HeatmapChartControls::syncNow() {
                                      s.sensitivityMin, s.sensitivityMax);
         m_toolbar->setLabelOptions(s.showLabels, s.labelCurrency == "usd");
         m_toolbar->setColorPreset(QString::fromStdString(s.palettePreset));
-        m_toolbar->chartTypeCombo()->setEnabled(bool(m_renderer));
-        m_toolbar->tpoSessionCombo()->setEnabled(bool(m_renderer));
-        m_toolbar->tpoLayoutCombo()->setEnabled(bool(m_renderer));
+        m_toolbar->setChartAttached(bool(m_renderer));
         if (m_renderer) {
             m_toolbar->setTpoState(m_renderer->tpo()->tpoSessionType(), m_renderer->tpo()->tpoLayout());
             if (auto *combo = m_toolbar->chartTypeCombo(); combo && combo->currentIndex() != m_renderer->candles()->candleStyle()) {

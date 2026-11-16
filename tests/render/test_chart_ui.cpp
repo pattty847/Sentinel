@@ -75,6 +75,7 @@
 #include <algorithm>
 #include <functional>
 #include <cmath>
+#include <optional>
 
 void qml_register_types_Sentinel_Charts();
 
@@ -281,19 +282,26 @@ TEST(ChartToolbar, ControlVisibilityRulesPerMode) {
     const std::vector<Case> cases{
         {"heatmap + candles", {true, false, false, false, true},
          {true, false, false, true, true, false, false, false}},
-        {"tpo", {false, false, true, false, true}, {false, false, false, false, true, true, true, false}},
+        {"tpo", {false, false, true, false, true}, {true, false, false, false, true, true, true, false}},
         {"volume profile", {false, false, false, true, false},
-         {false, false, false, false, false, true, false, false}},
+         {true, false, false, false, true, true, false, false}},
         {"footprint only", {false, true, false, false, false},
-         {false, false, false, false, false, false, false, false}},
+         {true, false, false, false, true, false, false, false}},
         {"heatmap + footprint, no candles", {true, true, false, false, false},
-         {true, false, false, true, false, false, false, false}},
+         {true, false, false, true, true, false, false, false}},
     };
     TopToolbar toolbar;
+    toolbar.setTickSelectorState({true, {}, false, 10, 0, {10, 20}, 100, {}});
     for (const auto &c : cases) {
         SCOPED_TRACE(c.what);
         EXPECT_EQ(TopToolbar::controlVisibility(c.mode), c.shown);
         toolbar.setModeState(c.mode);
+        // Fixed slots (TB-3): tick and candle style stay, disabled with a reason while their layer is off.
+        EXPECT_EQ(toolbar.tickModeCombo()->isEnabled(), c.mode.heatmap);
+        EXPECT_EQ(toolbar.tickPresetCombo()->isEnabled(), c.mode.heatmap);
+        EXPECT_EQ(toolbar.chartTypeCombo()->isEnabled(), c.mode.candles);
+        if (!c.mode.heatmap) EXPECT_TRUE(toolbar.tickModeCombo()->toolTip().contains("Enable the heatmap"));
+        if (!c.mode.candles) EXPECT_TRUE(toolbar.chartTypeCombo()->toolTip().contains("Enable candles"));
         EXPECT_EQ(toolbar.shownControls(), c.shown) << "the toolbar applies the rules";
         EXPECT_EQ(toolbar.tpoSessionCombo()->isVisibleTo(&toolbar), c.shown.tpoSession);
         EXPECT_EQ(toolbar.rangeSlider()->isVisibleTo(&toolbar), c.shown.rangeSlider);
@@ -675,7 +683,8 @@ TEST(ChartToolbar, RealOverflowRestoresInlineControlsAcrossWidthModeAndFontChang
                     });
                 } else {
                     EXPECT_GE(width, 960);
-                    EXPECT_EQ(toolbar.tickModeCombo()->isVisible(), mode.heatmap);
+                    EXPECT_TRUE(toolbar.tickModeCombo()->isVisible());
+                    EXPECT_EQ(toolbar.tickModeCombo()->isEnabled(), mode.heatmap);
                     EXPECT_EQ(toolbar.tpoSessionCombo()->isVisible(), mode.tpo || mode.volumeProfile);
                 }
                 const QRect buttonRect = toolbar.controlsButton()->geometry();
@@ -690,6 +699,107 @@ TEST(ChartToolbar, RealOverflowRestoresInlineControlsAcrossWidthModeAndFontChang
     toolbar.resize(1920, 48);
     QTest::qWait(30);
     EXPECT_FALSE(toolbar.controlsButton()->isVisible());
+}
+
+// TB-3: fixed slots in a fixed order. Switching modes moves nothing outside the
+// mode-specific slot, and the actions stay pinned right.
+TEST(ChartToolbar, ModeSwitchesNeverMoveTheSharedSlots) {
+    TopToolbar toolbar;
+    toolbar.setTickSelectorState({true, {}, false, 10, 0, {10, 20}, 100, {}});
+    toolbar.resize(3200, 44);
+    toolbar.show();
+    QToolButton *fullscreen = nullptr;
+    for (auto *button : toolbar.findChildren<QToolButton *>())
+        if (button->defaultAction() == toolbar.findChild<QAction *>("chartFullscreenAction")) fullscreen = button;
+    ASSERT_TRUE(fullscreen);
+    auto *timeframe = toolbar.findChild<QComboBox *>("chartTimeframeCombo");
+    const QList<QWidget *> shared{timeframe, toolbar.tickModeCombo(), toolbar.tickPresetCombo(),
+                                  toolbar.chartTypeCombo(), fullscreen, toolbar.chartMenuButton()};
+    auto x = [&](QWidget *w) { return w->mapTo(&toolbar, QPoint(0, 0)).x(); };
+    std::optional<QList<int>> first;
+    for (const Mode mode : {Mode{}, Mode{false, false, true, false, true}, Mode{false, true, false, false, true},
+                           Mode{false, false, false, true, false}, Mode{true, false, true, true, true},
+                           Mode{false, true, false, false, false}}) {
+        SCOPED_TRACE(::testing::Message() << "heatmap=" << mode.heatmap << " tpo=" << mode.tpo << " candles=" << mode.candles);
+        toolbar.setModeState(mode);
+        QTest::qWait(20);
+        ASSERT_FALSE(toolbar.controlsButton()->isVisible());
+        QList<int> at;
+        for (auto *w : shared) {
+            EXPECT_TRUE(w->isVisible());
+            at << x(w);
+        }
+        if (!first) first = at;
+        EXPECT_EQ(at, *first);
+        // symbol, modes, timeframe, tick, style, mode-specific, actions
+        EXPECT_LT(x(toolbar.subscribeButton()), x(toolbar.findChild<QToolButton *>("chartHeatmapButton")));
+        EXPECT_LT(x(toolbar.findChild<QToolButton *>("chartVolumeProfileButton")), x(timeframe));
+        EXPECT_LT(x(timeframe), x(toolbar.tickModeCombo()));
+        EXPECT_LT(x(toolbar.tickPresetCombo()), x(toolbar.chartTypeCombo()));
+        for (QWidget *specific : QList<QWidget *>{toolbar.rangeSlider(), toolbar.tpoSessionCombo(), toolbar.tpoLayoutCombo()})
+            if (specific->isVisible()) {
+                EXPECT_GT(x(specific), x(toolbar.chartTypeCombo()));
+                EXPECT_LT(x(specific), x(fullscreen));
+            }
+    }
+}
+
+// TB-3: at the default width the heatmap keeps its liquidity range inline, and a
+// hidden slot never sits behind the overflow beside a blank that would hold it.
+TEST(ChartToolbar, DefaultWidthKeepsTheLiquidityRangeAndLeavesNoBlankBesideOverflow) {
+    TopToolbar toolbar;
+    toolbar.setTickSelectorState({true, {}, false, 500, 0, {100, 500, 1000}, 100, {}});
+    toolbar.setLiquidityRange(1e-9, 12, 6.7e-08, 9.41);
+    toolbar.show();
+    toolbar.resize(1146, 44); // the brief's capture width (D1)
+    QTest::qWait(20);
+    EXPECT_TRUE(toolbar.rangeSlider()->isVisible()) << "hint=" << toolbar.sizeHint().width();
+    EXPECT_TRUE(toolbar.rangeLabel()->isVisible());
+    QToolButton *fullscreen = nullptr;
+    for (auto *button : toolbar.findChildren<QToolButton *>())
+        if (button->defaultAction() == toolbar.findChild<QAction *>("chartFullscreenAction")) fullscreen = button;
+    ASSERT_TRUE(fullscreen);
+    auto *stretch = toolbar.findChild<QWidget *>("chartToolbarStretch");
+    ASSERT_TRUE(stretch);
+    // Narrowing until the large liquidity slot overflows refills the space with the smaller actions.
+    const int full = toolbar.sizeHint().width();
+    bool sawRangeHidden = false;
+    for (int width = full; width > 500 && !sawRangeHidden; width -= 3) {
+        toolbar.resize(width, 44);
+        QCoreApplication::processEvents();
+        if (toolbar.controlsButton()->isVisible() && !fullscreen->isVisible())
+            EXPECT_LT(stretch->width(), fullscreen->sizeHint().width() + 2 * toolbar.style()->pixelMetric(QStyle::PM_ToolBarItemSpacing))
+                << "width=" << width;
+        if (!toolbar.rangeSlider()->isVisible()) {
+            sawRangeHidden = true;
+            EXPECT_TRUE(fullscreen->isVisible()) << "width=" << width << ": the blank holds the action";
+        }
+    }
+    EXPECT_TRUE(sawRangeHidden);
+}
+
+// TB-3: current-mode controls outrank a slot the mode leaves disabled.
+TEST(ChartToolbar, OverflowHidesDisabledSlotsBeforeCurrentModeControls) {
+    TopToolbar toolbar;
+    toolbar.setTickSelectorState({true, {}, false, 10, 0, {10, 20}, 100, {}});
+    toolbar.setModeState({false, false, true, false, true}); // TPO with candles: the tick slot is disabled
+    toolbar.resize(3200, 44);
+    toolbar.show();
+    QTest::qWait(20);
+    ASSERT_TRUE(toolbar.tickModeCombo()->isVisible());
+    ASSERT_FALSE(toolbar.tickModeCombo()->isEnabled());
+    const int full = toolbar.sizeHint().width();
+    bool sawTickHidden = false;
+    for (int width = full; width > 400; width -= 3) {
+        toolbar.resize(width, 44);
+        QCoreApplication::processEvents();
+        if (!toolbar.tickModeCombo()->isVisible()) sawTickHidden = true;
+        if (!toolbar.tpoLayoutCombo()->isVisible() || !toolbar.tpoSessionCombo()->isVisible()) {
+            EXPECT_FALSE(toolbar.tickModeCombo()->isVisible()) << "width=" << width;
+            break;
+        }
+    }
+    EXPECT_TRUE(sawTickHidden);
 }
 
 TEST(ChartToolbar, OverflowAppearsOnlyBelowExactSizeHintBoundary) {
@@ -772,8 +882,8 @@ TEST(ChartToolbar, AllHiddenControlsKeepToolbarOrderAndSeparatorGroups) {
     toolbar.resize(220, 44);
     QTest::qWait(20);
     const QStringList expected{"Candles", "Heatmap", "Footprint", "TPO", "Volume profile", "|",
-        "Timeframe", "Heatmap tick mode", "Heatmap tick size", "Candle style",
-        "TPO / volume profile session", "TPO layout", "|", "Liquidity range", "|", "Fullscreen"};
+        "Timeframe", "|", "Heatmap tick mode", "Heatmap tick size", "|", "Candle style", "|",
+        "Liquidity range", "TPO / volume profile session", "TPO layout", "|", "Fullscreen"};
     QSignalSpy heatmap(&toolbar, &TopToolbar::heatmapToggled);
     useOverflow(toolbar, [&](QMenu *menu) {
         EXPECT_EQ(menuEntries(menu), expected);
