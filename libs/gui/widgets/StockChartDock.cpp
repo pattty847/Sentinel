@@ -76,9 +76,9 @@ void StockChartDock::buildUi() {
     m_tickerInput->setPlaceholderText("Ticker…");
     m_tickerInput->setFixedWidth(80);
     m_tickerInput->setMaxLength(10);
-    m_tickerInput->setStyleSheet(
-        "QLineEdit { background:#141a20; color:#c0ccd8; border:1px solid #253040;"
-        " border-radius:3px; padding:2px 6px; }");
+    m_tickerInput->setStyleSheet(QStringLiteral(
+        "QLineEdit { background:%1; color:%2; border:1px solid %3; border-radius:3px; padding:2px 6px; }")
+        .arg(theme::bg2().name(), theme::text().name(), theme::line().name()));
     toolbar->addWidget(m_tickerInput);
 
     // Period buttons
