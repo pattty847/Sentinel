@@ -236,8 +236,14 @@ void WatchlistDock::loadPreset(int index) {
         auto* name = new QStandardItem(entry.second);
         name->setForeground(QBrush(QColor("#aaa")));
         if (m_model->rowCount() % 2) {
-            ticker->setBackground(theme::bg2());
-            name->setBackground(theme::bg2());
+            // Composite bg2 at half opacity over bg1; full bg2 remains the hover cue.
+            const auto base = theme::bg1();
+            const auto hover = theme::bg2();
+            const QColor stripe((base.red() + hover.red() + 1) / 2,
+                                (base.green() + hover.green() + 1) / 2,
+                                (base.blue() + hover.blue() + 1) / 2);
+            ticker->setBackground(stripe);
+            name->setBackground(stripe);
         }
         m_model->appendRow({ticker, name});
         if (entry.first == selected) m_tree->setCurrentIndex(m_model->index(m_model->rowCount() - 1, 0));

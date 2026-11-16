@@ -151,7 +151,7 @@ TEST(WatchRail, StripesStopAfterTheLastFilledRow) {
     EXPECT_FALSE(tree->alternatingRowColors());
     const auto image = tree->viewport()->grab().toImage();
     const auto odd = tree->visualRect(tree->model()->index(1, 1));
-    EXPECT_EQ(image.pixelColor(odd.right() - 6, odd.center().y()), QColor("#20252B"));
+    EXPECT_EQ(image.pixelColor(odd.right() - 6, odd.center().y()), QColor("#1e2228"));
     const auto last = tree->visualRect(tree->model()->index(tree->model()->rowCount() - 1, 0));
     const int y = last.bottom() + 10;
     ASSERT_LT(y + last.height(), image.height());
@@ -194,7 +194,14 @@ TEST(WatchRail, HoverHighlightsTheRowAndTooltipStaysBesideIt) {
     EXPECT_TRUE(tree->model()->index(0, 0).data(Qt::ToolTipRole).toString().isEmpty());
     dock.setChartSwitchState("BTC-USD", "ETH-USD");
     const QRect tipRow = tree->visualRect(tree->model()->index(1, 0));
+    const QPoint oddSample(tipRow.right() - 6, tipRow.center().y());
+    const QColor restingOdd = tree->viewport()->grab().toImage().pixelColor(oddSample);
+    EXPECT_EQ(restingOdd, QColor("#1e2228"));
     QTest::mouseMove(tree->viewport(), tipRow.center());
+    QCoreApplication::processEvents();
+    const QColor hoveredOdd = tree->viewport()->grab().toImage().pixelColor(oddSample);
+    EXPECT_EQ(hoveredOdd, QColor("#20252B"));
+    EXPECT_NE(hoveredOdd, restingOdd);
     auto* tips = WidgetToolTips::install(qApp);
     QHelpEvent help(QEvent::ToolTip, tipRow.center(), tree->viewport()->mapToGlobal(tipRow.center()));
     QApplication::sendEvent(tree->viewport(), &help);
