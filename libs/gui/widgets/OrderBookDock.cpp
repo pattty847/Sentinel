@@ -180,9 +180,10 @@ int DomBarDelegate::tagWidth(const TagGlyphs& glyphs, const QString& text) const
     return width;
 }
 
-void DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& opt, int row, bool bid,
-                                const QRect& area, double value, bool cumulative, const QString& label) const
+QRect DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& opt, int row, bool bid,
+                                 const QRect& area, double value, bool cumulative, const QString& label) const
 {
+    QRect marks;
     const DomPulseCell pulse = m_model->pulse(row, bid);
     const int span = std::max(0, area.width());
     // A bar extent [inner, outer] in fractions of the cell, drawn from the price side.
@@ -196,7 +197,8 @@ void DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& o
         // Added: a bright segment that grows outward from the old bar end.
         const double inner = m_model->barFraction(std::max(0.0, value - pulse.change), bid, cumulative);
         const double outer = m_model->barFraction(value, bid, cumulative);
-        painter->fillRect(extent(inner, inner + (outer - inner) * pulse.grow), addedColor(bid, pulse.changeAlpha));
+        marks = extent(inner, inner + (outer - inner) * pulse.grow);
+        painter->fillRect(marks, addedColor(bid, pulse.changeAlpha));
     } else if (pulse.change < 0 && pulse.changeAlpha > 0) {
         // Pulled: a dashed outline of the removed size beyond the bar.
         const double inner = m_model->barFraction(value, bid, cumulative);
@@ -210,16 +212,17 @@ void DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& o
             painter->fillRect(QRect(x, box.bottom(), w, 1), grey);
         }
         painter->fillRect(QRect(bid ? box.left() : box.right(), box.top(), 1, box.height()), grey);
+        marks = box;
     }
     // One tag per cell, the newer flash; left-aligned, opposite the right-aligned size.
     const bool eaten = pulse.eatenAlpha > 0 && pulse.eatenAlpha >= pulse.changeAlpha;
     const double alpha = eaten ? pulse.eatenAlpha : pulse.changeAlpha;
-    if (alpha <= 0) return;
+    if (alpha <= 0) return marks;
     const QString& tag = m_model->pulseTag(row, bid, eaten);
-    if (tag.isEmpty()) return;
+    if (tag.isEmpty()) return marks;
     const auto& glyphs = tagGlyphs(opt.font, painter->device()->devicePixelRatioF());
     const int needed = tagWidth(glyphs, tag) + (label.isEmpty() ? 0 : tagWidth(glyphs, label) + 6);
-    if (needed > opt.rect.width() - 6) return; // a cramped cell keeps the bar effect only
+    if (needed > opt.rect.width() - 6) return marks; // a cramped cell keeps the bar effect only
     // Eaten: the aggressor's colour (buyers eat asks: bid colour); added: the side's tint; pulled: grey.
     const int colour = eaten ? (bid ? 4 : 3) : pulse.change > 0 ? (bid ? 0 : 1) : 2;
     const QImage& strip = glyphs.strips[colour];
@@ -237,6 +240,7 @@ void DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& o
         x += w;
     }
     painter->setOpacity(1);
+    return marks;
 }
 
 void DomBarDelegate::drawFitted(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text, const QColor& color)
@@ -252,6 +256,16 @@ void DomBarDelegate::drawFitted(QPainter* painter, const QStyleOptionViewItem& o
     painter->drawText(opt.rect.adjusted(3, 0, -3, 0), Qt::AlignRight | Qt::AlignVCenter, text);
 }
 
+QRect DomBarDelegate::sizeTextRect(const QStyleOptionViewItem& opt, const QString& text)
+{
+    if (text.isEmpty()) return {};
+    const QRect box = opt.rect.adjusted(3, 0, -3, 0);
+    const int width = std::min(box.width(), opt.fontMetrics.horizontalAdvance(text));
+    return {box.right() + 1 - width, opt.rect.top() + 2, width, std::max(0, opt.rect.height() - 4)};
+}
+
+QColor DomBarDelegate::textBacking() { return theme::bg0(); }
+
 void DomBarDelegate::drawSplit(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text,
                                const QColor& onBar, const QColor& offBar, int edge, bool barRight)
 {
@@ -261,7 +275,7 @@ void DomBarDelegate::drawSplit(QPainter* painter, const QStyleOptionViewItem& op
     // Wholly on one side of the bar edge: one pass.
     const bool allOn = barRight ? edge <= left : edge > box.right();
     const bool allOff = barRight ? edge > box.right() : edge <= left;
-    if (allOn || allOff || onBar == offBar) {
+    if (allOn || allOff) { // geometry alone decides the passes: Pulse never changes the paint calls
         drawFitted(painter, opt, text, allOn ? onBar : offBar);
         return;
     }
@@ -307,7 +321,7 @@ void DomBarDelegate::paintSize(QPainter* painter, const QStyleOptionViewItem& op
         light = sizeTextColor(bid, fraction);
     }
     if (m_model->dimmed(row, value)) light = theme::text3(); // de-emphasised, never hidden
-    paintPulse(painter, opt, row, bid, area, value, cumulative, label);
+    const QRect marks = paintPulse(painter, opt, row, bid, area, value, cumulative, label);
     if (!cumulative && !best) {
         // Faint depth line: cumulative size from the touch, on the cumulative scale.
         const double depth = m_model->barFraction(m_model->size(row, bid, true), bid, true);
@@ -318,8 +332,17 @@ void DomBarDelegate::paintSize(QPainter* painter, const QStyleOptionViewItem& op
             painter->fillRect(QRect(bid ? area.right() - offset : area.left() + offset, opt.rect.top(), 1, opt.rect.height()), line);
         }
     }
-    const QColor offInk = inkOn(ground, light);
-    const QColor onInk = bar.isEmpty() ? offInk : inkOn(underBar, light);
+    QColor offInk = inkOn(ground, light);
+    QColor onInk = bar.isEmpty() ? offInk : inkOn(underBar, light);
+    // Size text always wins (brief DOM-2): where a Pulse mark or the eaten-row flash lies under
+    // the digits, they get a dark backing and light ink. Pulse marks themselves are unchanged.
+    const QRect text = sizeTextRect(opt, label);
+    if (!text.isEmpty() && (marks.intersects(text) || m_model->pulse(row, true).eatenAlpha > 0 ||
+                            m_model->pulse(row, false).eatenAlpha > 0)) {
+        const QColor backing = textBacking();
+        painter->fillRect(text.adjusted(-2, 0, 2, 0).intersected(area), backing);
+        onInk = offInk = inkOn(backing, sizeTextColor(bid, 1));
+    }
     const int edge = bar.isEmpty() ? (bid ? std::numeric_limits<int>::max() : std::numeric_limits<int>::min())
                                    : bid ? bar.left() : bar.right() + 1;
     drawSplit(painter, opt, label, onInk, offInk, edge, bid);

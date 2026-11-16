@@ -1592,6 +1592,33 @@ TEST_F(DomPulseDock, FlashesPaintInTheirColours) {
     EXPECT_GT(ink, 8);
 }
 
+TEST_F(DomPulseDock, SizeTextWinsOverPulseMarks) {
+    dock.resize(650, 700); QCoreApplication::processEvents();
+    source.update({{false, 200.2, 10.1}}); // +6.1: the added segment reaches the ask cell's outer end
+    for (int i = 0; i < 4; ++i) tick();     // fully grown, still bright
+    const int row = rowAt(*model, 2002);
+    ASSERT_GT(cell(2002, false).change, 0);
+    ASSERT_GT(cell(2002, false).changeAlpha, 0.5);
+    const QImage image = table->viewport()->grab().toImage();
+    QStyleOptionViewItem opt;
+    opt.rect = table->visualRect(model->index(row, DomModel::Ask));
+    opt.font = table->font();
+    opt.fontMetrics = QFontMetrics(opt.font);
+    const QRect text = DomBarDelegate::sizeTextRect(opt, model->index(row, DomModel::Ask).data().toString());
+    ASSERT_FALSE(text.isEmpty());
+    // Above the digits, inside the text box: the dark backing, not the bright segment.
+    EXPECT_EQ(image.pixelColor(text.center().x(), text.top()), DomBarDelegate::textBacking());
+    // Beside the box the segment still shows: the mark is kept, only the digits win.
+    const QColor segment = image.pixelColor(text.left() - 5, text.top());
+    EXPECT_NE(segment, DomBarDelegate::textBacking());
+    EXPECT_GT(segment.lightness(), 100);
+    // An unflashed size of the same column has no backing.
+    const QRect plain = DomBarDelegate::sizeTextRect(QStyleOptionViewItem([&] {
+        QStyleOptionViewItem o(opt); o.rect = table->visualRect(model->index(rowAt(*model, 2001), DomModel::Ask)); return o; }()),
+        model->index(rowAt(*model, 2001), DomModel::Ask).data().toString());
+    EXPECT_NE(image.pixelColor(plain.center().x(), plain.top()), DomBarDelegate::textBacking());
+}
+
 TEST(DomPulse, InPlaceTagDigitsMatchTheLadderSizeText) {
     for (double v : {0.0, 0.00005, 0.0001, 0.000123, 0.0032, 0.4, 0.634, 1.0, 2.5, 2.8, 6.8, 13.6, 100.0, 999.4,
                      999.5, 1360.0, 12345.0, 999'500.0, 2.5e9, 7.1e12}) {

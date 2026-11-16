@@ -48,6 +48,10 @@ public:
     static QColor eatenColor(bool bidLevel, double alpha);
     static QColor addedColor(bool bid, double alpha);
     static QColor pulledColor(double alpha);
+    // Where a right-aligned size text sits in its cell (inside the 2 px inset), and the dark
+    // backing it gets wherever a Pulse mark lies under it.
+    static QRect sizeTextRect(const QStyleOptionViewItem& opt, const QString& text);
+    static QColor textBacking();
 private:
     // Pulse tags are drawn from glyph strips rendered once per font, scale and colour:
     // drawText, setPen(QColor) and setFont allocate in Qt on every call; drawImage does not.
@@ -62,7 +66,8 @@ private:
     };
     const TagGlyphs& tagGlyphs(const QFont& font, qreal scale) const;
     int tagWidth(const TagGlyphs& glyphs, const QString& text) const;
-    void paintPulse(QPainter* painter, const QStyleOptionViewItem& opt, int row, bool bid,
+    // Draws the cell's Pulse marks; returns the area of the bar marks (added, pulled).
+    QRect paintPulse(QPainter* painter, const QStyleOptionViewItem& opt, int row, bool bid,
                     const QRect& area, double value, bool cumulative, const QString& label) const;
     void paintSize(QPainter* painter, const QStyleOptionViewItem& opt, const QModelIndex& index, const QString& text) const;
     void paintPrice(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text) const;
