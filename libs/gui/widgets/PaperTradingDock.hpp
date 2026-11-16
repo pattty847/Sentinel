@@ -103,6 +103,7 @@ private:
     QString sendAlgoCommand(const std::string& action, const trading::AlgoParams& params, const QString& symbol);
     void updateNotional();
     void showFlatPosition();
+    void refreshManualReadiness();
     void refreshEmptyStates();
     void updatePricePrecision(double price);
     void sendManualCommand(trading::TradeAction action,

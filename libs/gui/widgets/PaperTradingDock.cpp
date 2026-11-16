@@ -113,6 +113,7 @@ PaperTradingDock::PaperTradingDock(QWidget* parent)
 }
 
 void PaperTradingDock::setDataSource(IGridDataSource* source) {
+    if (m_dataSource != source) m_account.invalidate();
     if (m_dataSource) disconnect(m_dataSource, nullptr, this, nullptr);
     if (m_marketHealth) disconnect(m_marketHealth, nullptr, this, nullptr);
     m_marketHealth = nullptr;
@@ -142,6 +143,7 @@ void PaperTradingDock::setDataSource(IGridDataSource* source) {
                     m_pendingAlgoCommandId.clear();
                     m_algoRunningConfirmed = false;
                     m_account.invalidate();
+                    refreshManualReadiness();
                     refreshEmptyStates();
                     if (m_waitingLabel) {
                         m_waitingLabel->setText(connected ? QStringLiteral("Awaiting update")
@@ -165,6 +167,7 @@ void PaperTradingDock::setDataSource(IGridDataSource* source) {
                          : m_streamAvailable ? QStringLiteral("Awaiting the server's trading snapshot")
                                              : QStringLiteral("Trading stream disconnected"),
                  m_streamAvailable && !m_symbol.isEmpty(), false);
+    refreshManualReadiness();
     refreshEmptyStates();
     refreshMarketHealth();
 }
@@ -853,6 +856,7 @@ void PaperTradingDock::resetForSymbolChange() {
         else if (m_account.known()) showFlatPosition();
     }
     refreshAlgoView();
+    refreshManualReadiness();
     refreshEmptyStates();
 }
 
@@ -900,19 +904,7 @@ void PaperTradingDock::refreshAlgoView(const QString& stoppedReason) {
 
 void PaperTradingDock::updateNotional() {
     if (!m_notionalLabel || !m_manualQtySpin) return;
-    bool displayedValid = false;
-    const double displayedPrice = m_limitPriceSpin
-        ? m_limitPriceSpin->locale().toDouble(m_limitPriceSpin->cleanText(), &displayedValid) : 0.0;
-    const double limitPrice = m_limitPriceSpin ? m_limitPriceSpin->value() : 0.0;
-    const bool canPlaceLimit = displayedValid && std::isfinite(displayedPrice) && displayedPrice > 0.0
-        && std::isfinite(limitPrice) && limitPrice > 0.0;
-    for (auto* button : {m_buyLimitBtn, m_sellLimitBtn}) {
-        if (button && button->isEnabled() != canPlaceLimit) {
-            button->setEnabled(canPlaceLimit);
-            button->setToolTip(canPlaceLimit ? QString()
-                : QStringLiteral("Enter a positive limit price to place a limit order."));
-        }
-    }
+    refreshManualReadiness();
     const double price = m_limitPriceSpin && m_limitPriceSpin->value() > 0.0
         ? m_limitPriceSpin->value() : m_lastPrice;
     const QString quote = m_symbol.section('-', 1, 1);
@@ -922,6 +914,30 @@ void PaperTradingDock::updateNotional() {
               QString::number(notional, 'f', priceDecimals(notional)),
               quote.isEmpty() ? QStringLiteral("quote") : quote)
         : QStringLiteral("Est. quote notional: —"));
+}
+
+void PaperTradingDock::refreshManualReadiness() {
+    if (!m_manualQtySpin || !m_limitPriceSpin) return;
+    bool displayedValid = false;
+    const double displayed = m_limitPriceSpin->locale().toDouble(m_limitPriceSpin->cleanText(), &displayedValid);
+    const bool ready = m_dataSource && m_streamAvailable && m_account.known() && !m_symbol.isEmpty();
+    const bool hasLimit = displayedValid && std::isfinite(displayed) && displayed > 0.0
+        && std::isfinite(m_limitPriceSpin->value()) && m_limitPriceSpin->value() > 0.0;
+    const QString reason = !m_dataSource ? QStringLiteral("No data source.")
+        : !m_streamAvailable ? QStringLiteral("Trading stream disconnected.")
+        : !m_account.known() ? QStringLiteral("Awaiting the server's trading snapshot.")
+        : m_symbol.isEmpty() ? QStringLiteral("Select a symbol to trade.") : QString();
+    for (auto* button : {m_buyMarketBtn, m_sellMarketBtn, m_flattenBtn, m_cancelAllBtn}) {
+        if (!button) continue;
+        button->setEnabled(ready);
+        button->setToolTip(reason);
+    }
+    for (auto* button : {m_buyLimitBtn, m_sellLimitBtn}) {
+        if (!button) continue;
+        button->setEnabled(ready && hasLimit);
+        button->setToolTip(!reason.isEmpty() ? reason : hasLimit ? QString()
+            : QStringLiteral("Enter a positive limit price to place a limit order."));
+    }
 }
 
 void PaperTradingDock::refreshEmptyStates() {
@@ -1288,6 +1304,7 @@ void PaperTradingDock::onTradingSnapshot(const trading::TradingSnapshot& snapsho
         else if (m_account.known()) showFlatPosition();
     }
     applyAlgoSnapshot(snapshot);
+    refreshManualReadiness();
     refreshEmptyStates();
     if (stopAcknowledged) onStopAcknowledged(snapshot);
 }

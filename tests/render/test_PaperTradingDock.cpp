@@ -160,6 +160,7 @@ TEST(PaperTicket, EditedLimitSurvivesTradesFocusQuantityAndButtons) {
     Source source;
     PaperTradingDock dock;
     dock.setDataSource(&source);
+    { trading::TradingSnapshot ready; ready.epoch = "e1"; dock.onTradingSnapshot(ready); }
     dock.setSymbol("DOGE-USD");
     auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
     auto* qty = dock.findChild<QDoubleSpinBox*>("paperBaseQty");
@@ -192,7 +193,10 @@ TEST(PaperTicket, EditedLimitSurvivesTradesFocusQuantityAndButtons) {
 }
 
 TEST(PaperTicket, LimitButtonsFollowDisplayedPrice) {
+    Source source;
     PaperTradingDock dock;
+    dock.setDataSource(&source);
+    { trading::TradingSnapshot ready; ready.epoch = "e1"; dock.onTradingSnapshot(ready); }
     auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
     auto* buy = dock.findChild<QPushButton*>("paperBuyLimit");
     auto* sell = dock.findChild<QPushButton*>("paperSellLimit");
@@ -204,7 +208,7 @@ TEST(PaperTicket, LimitButtonsFollowDisplayedPrice) {
         for (auto* button : {buy, sell}) {
             EXPECT_EQ(button->isEnabled(), enabled);
             if (enabled) EXPECT_TRUE(button->toolTip().isEmpty());
-            else EXPECT_TRUE(button->toolTip().contains("positive limit price"));
+            else EXPECT_FALSE(button->toolTip().isEmpty());
         }
     };
 
@@ -241,7 +245,10 @@ TEST(PaperTicket, LimitButtonsFollowDisplayedPrice) {
 }
 
 TEST(PaperTicket, LimitEditorFocusOutReconcilesButtons) {
+    Source source;
     PaperTradingDock dock;
+    dock.setDataSource(&source);
+    { trading::TradingSnapshot ready; ready.epoch = "e1"; dock.onTradingSnapshot(ready); }
     dock.setSymbol("DOGE-USD");
     dock.show();
     auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
@@ -333,6 +340,7 @@ TEST(PaperTicket, SubmittedPriceUsesDisplayedPrecision) {
     Source source;
     PaperTradingDock dock;
     dock.setDataSource(&source);
+    { trading::TradingSnapshot ready; ready.epoch = "e1"; dock.onTradingSnapshot(ready); }
     dock.setSymbol("BTC-USD");
     auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
     ASSERT_NE(price, nullptr);
@@ -1009,4 +1017,22 @@ TEST(PaperPolish, EmptyOrderAndCurveTextFollowReadiness) {
     emit source.connectionStatusChanged(false);
     QCoreApplication::processEvents();
     EXPECT_EQ(empty->text(), QStringLiteral("Trading stream disconnected"));
+}
+
+TEST(PaperPolish, ManualButtonsRequireConnectedAccountSnapshot) {
+    Source source;
+    PaperTradingDock dock;
+    dock.setDataSource(&source);
+    dock.setSymbol("BTC-USD");
+    auto* buy = dock.findChild<QPushButton*>("paperBuyMarket");
+    ASSERT_NE(buy, nullptr);
+    EXPECT_FALSE(buy->isEnabled());
+    EXPECT_TRUE(buy->toolTip().contains("snapshot"));
+    trading::TradingSnapshot ready; ready.epoch = "e1";
+    dock.onTradingSnapshot(ready);
+    EXPECT_TRUE(buy->isEnabled());
+    emit source.connectionStatusChanged(false);
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(buy->isEnabled());
+    EXPECT_TRUE(buy->toolTip().contains("disconnected"));
 }
