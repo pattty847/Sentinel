@@ -267,6 +267,13 @@ QRect DomBarDelegate::sizeTextRect(const QStyleOptionViewItem& opt, const QStrin
 
 QColor DomBarDelegate::textBacking() { return theme::bg0(); }
 
+QColor DomBarDelegate::rowRule()
+{
+    QColor rule = theme::line();
+    rule.setAlpha(128);
+    return rule;
+}
+
 void DomBarDelegate::drawSplit(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text,
                                const QColor& onBar, const QColor& offBar, int edge, bool barRight)
 {
@@ -385,6 +392,8 @@ void DomBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option
     opt.text.clear();
     const auto* style = opt.widget ? opt.widget->style() : QApplication::style();
     style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
+    // Rows are separated by a horizontal hairline only; no vertical rules (brief DOM-13).
+    painter->fillRect(QRect(opt.rect.left(), opt.rect.bottom(), opt.rect.width(), 1), rowRule());
     painter->save();
     // Eaten: the whole row flashes in the aggressor's colour while it fades.
     for (const bool bidLevel : {true, false}) {
@@ -497,6 +506,7 @@ void OrderBookDock::buildLadder(QVBoxLayout* layout)
     m_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_table->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     m_table->setTextElideMode(Qt::ElideNone);
+    m_table->setShowGrid(false); // the delegate draws the row hairline
     m_table->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_table->verticalHeader()->hide();
     tableChrome::apply(m_table);

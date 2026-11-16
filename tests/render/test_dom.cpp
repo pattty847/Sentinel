@@ -1464,6 +1464,28 @@ TEST_F(DomDock, DepthLineRunsUnderTheSizeTextAtThirtyFivePercent) {
     EXPECT_EQ(DomBarDelegate::DepthLineAlpha, 89);
 }
 
+TEST_F(DomDock, RowsHaveHorizontalHairlinesAndNoVerticalRules) {
+    source.update({{true, 200, 1}, {false, 200.1, 1}});
+    show();
+    EXPECT_FALSE(table->showGrid());
+    const QImage image = table->viewport()->grab().toImage();
+    const int row = rowAt(*model, 1990); // an empty row
+    const QRect bid = table->visualRect(model->index(row, DomModel::Bid));
+    const QRect price = table->visualRect(model->index(row, DomModel::Price));
+    const QColor ground = image.pixelColor(bid.center().x(), bid.center().y());
+    // Between two cells of the row: plain background, no vertical rule.
+    EXPECT_EQ(image.pixelColor(bid.right(), bid.center().y()), ground);
+    EXPECT_EQ(image.pixelColor(price.left(), price.center().y()), ground);
+    // The row's bottom pixel row: the line token at 50% over the background.
+    const QColor rule = image.pixelColor(bid.center().x(), bid.bottom());
+    const QColor expected = DomBarDelegate::over(DomBarDelegate::rowRule(), ground);
+    EXPECT_NEAR(rule.red(), expected.red(), 2);
+    EXPECT_NEAR(rule.green(), expected.green(), 2);
+    EXPECT_NEAR(rule.blue(), expected.blue(), 2);
+    EXPECT_EQ(DomBarDelegate::rowRule().alpha(), 128);
+    EXPECT_EQ(DomBarDelegate::rowRule().rgb(), theme::line().rgb());
+}
+
 TEST_F(DomDock, TradesLeaveTheWindowWithoutAnyNewEvent) {
     source.update({{true, 200, 1}, {false, 200.1, 1}});
     source.send(tradeAt(QDateTime::currentMSecsSinceEpoch() - DomTradeWindow::WindowMs + 300, 200, AggressorSide::Buy, 2));

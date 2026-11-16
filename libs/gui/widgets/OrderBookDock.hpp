@@ -53,6 +53,8 @@ public:
     // backing it gets wherever a Pulse mark lies under it.
     static QRect sizeTextRect(const QStyleOptionViewItem& opt, const QString& text);
     static QColor textBacking();
+    // The hairline under each row: the line token at 50%.
+    static QColor rowRule();
     // The cumulative depth line in per-row mode: 35% alpha (brief DOM-8).
     static constexpr int DepthLineAlpha = 89;
 private:
