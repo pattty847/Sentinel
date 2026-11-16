@@ -177,6 +177,7 @@ TEST(WatchRail, ActionsHaveAVisibleSurfaceAndReadableDisabledInk) {
 
 TEST(WatchRail, HoverHighlightsTheRowAndTooltipStaysBesideIt) {
     WatchlistDock dock;
+    dock.findChild<QComboBox*>("watchPreset")->setCurrentIndex(0);
     dock.resize(400, 400);
     dock.move(0, 0);
     dock.show();
