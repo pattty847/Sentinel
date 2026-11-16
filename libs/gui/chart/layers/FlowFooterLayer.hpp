@@ -32,7 +32,7 @@ private:
     static constexpr int kColumns = 1024, kGlyphs = kColumns * 18 + 16;
     using Vertex = QSGGeometry::ColoredPoint2D;
     double measure(const char*, const ChartTextAtlas&) const;
-    void text(const char*, const QRectF&, const ChartTextAtlas&);
+    void text(const char*, const QRectF&, const ChartTextAtlas&, const QColor&);
     void drawColumns(const ChartFrame&, const ChartTextAtlas&, Vertex*&);
     void measureAtlas(const ChartTextAtlas&);
     qint64 measuredAtlas_ = 0;
@@ -46,7 +46,7 @@ private:
     QSGGeometryNode* node_ = nullptr;
     QRectF bounds_;
     FlowFooterLayout layout_;
-    double maximum_ = 0, bottomInset_ = 0;
+    double bottomInset_ = 0;
     bool drawing_ = false, reserved_ = false;
     int columns_ = 0, vertices_ = 0;
     std::vector<ChartGlyphInstance> glyphs_;

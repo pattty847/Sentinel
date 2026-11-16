@@ -216,8 +216,8 @@ that exceeds the available width is omitted whole.
 The optional footer uses three 13 px rows (55 px including padding), docked above the
 strip or at the surface bottom when the strip is off. DELTA uses signed flow-bar
 delta with an explicit positive `+` (magnitudes below .01 show `0` without a pill),
-a CVD-green/red pill scaled to visible maximum
-absolute delta; CUM reads the exact CVD value and reset anchor; VOL uses unsigned
+one pill style for every bar (the direction pair at 25% fill, the value in the
+direction colour; down text `#FF8C82` for contrast); CUM reads the exact CVD value and reset anchor; VOL uses unsigned
 flow-bar volume. No flow bar means no values. The atlas keeps ASCII row labels
 DELTA / CUM / VOL. Narrow bars show every k-th absolute bar index. The stride uses the widest possible
 formatted value at the current atlas size, so panning, re-anchoring and live magnitude

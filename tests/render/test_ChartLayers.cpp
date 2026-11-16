@@ -1802,6 +1802,61 @@ TEST(FlowFooter, PanAndMagnitudeChangesKeepTheSameAbsoluteColumnPhase) {
 #endif
 }
 
+// OVL-3: every DELTA pill is the direction pair at 25%, whatever its magnitude; the
+// value is in the direction colour (down: the small-text token #FF8C82).
+TEST(FlowFooter, DeltaPillsShareOneStyleInTheDirectionPair) {
+    QTemporaryDir cache;
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error));
+    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
+    ChartTextAtlas atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 64; params.charset = " 0123456789.+-<>kMBDELTACUMVO";
+    ASSERT_TRUE(atlas.build(params));
+    chart::CvdLayer cvd; chart::FlowFooterLayer footer(cvd);
+    cvd.presentation().flowFooter = true;
+    auto source = footprintSeries();
+    const auto delta = [](int i) { return (i % 2 ? -1 : 1) * (i + 1) * 100LL; }; // +-1 .. +-13
+    for (int i = 0; i <= 12; ++i) {
+        auto& bar = source.bars[i * 1000].bar;
+        bar.startMs = i * 1000; bar.timeframeMs = 1000; bar.baseScale = 100;
+        bar.delta = delta(i); bar.buyVol = std::max(0LL, bar.delta); bar.sellVol = std::max(0LL, -bar.delta);
+    }
+    auto frame = footprintChartFrame(); frame.context.surfaceBounds = {0, 0, 1200, 180};
+    frame.context.raster.colPxF = 90; frame.context.raster.leftF = 0;
+    frame.context.raster.drawnStartMs = 0; frame.context.raster.drawnEndMs = 13000;
+    auto feedFrame = footprintFrame(); feedFrame.raster = frame.context.raster;
+    chart::CvdFeed::build(cvd.mailbox().back(), source, feedFrame, chart::CvdReset::Visible, 4);
+    cvd.mailbox().post(); cvd.sync(frame); footer.sync(frame);
+    std::unique_ptr<QSGNode> root(footer.createContainer());
+    ChartTextRenderer text;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
+    footer.updateNodes(frame, context);
+    ASSERT_EQ(footer.columnStride(), 1);
+    ASSERT_GE(footer.columnCount(), 8);
+    const auto* vertices = static_cast<QSGGeometryNode*>(root->firstChild())->geometry()->vertexDataAsColoredPoint2D();
+    int up = 0, down = 0;
+    for (int i = 0; i < footer.columnCount(); ++i) {
+        const auto& centre = vertices[6 + i * 36];
+        const auto bar = int(std::llround((centre.x - 45) / 90));
+        const QColor want = delta(bar) > 0 ? theme::positive() : theme::negative();
+        (delta(bar) > 0 ? up : down) += 1;
+        EXPECT_EQ(centre.a, 64) << "bar " << bar << ": 25% for every magnitude";
+        EXPECT_EQ(centre.r, want.red() * 64 / 255);
+        EXPECT_EQ(centre.g, want.green() * 64 / 255);
+        EXPECT_EQ(centre.b, want.blue() * 64 / 255);
+    }
+    EXPECT_GT(up, 1); EXPECT_GT(down, 1);
+    int upText = 0, downText = 0;
+    for (const auto& glyph : footer.glyphs()) {
+        upText += glyph.color == theme::positive();
+        downText += glyph.color == QColor(0xFF, 0x8C, 0x82);
+        EXPECT_NE(glyph.color, theme::negative()) << "below 4.5:1 on its pill";
+    }
+    EXPECT_GT(upText, 0); EXPECT_GT(downText, 0);
+}
+
 TEST(FlowFooter, TpoAndVpSubtreesRespectTheCombinedPaneWithoutAllocating) {
     chart::CvdPresentation presentation;
     chart::VolumeProfileLayer vp(&presentation); chart::TpoLayer tpo(&presentation);
