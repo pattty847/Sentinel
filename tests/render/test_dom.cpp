@@ -1976,6 +1976,12 @@ TEST_F(DomDock, LeanOnlyWorksOnExposedTicksAndResets) {
     QTest::qWait(90); EXPECT_EQ(dock.leanGauge().state(), sentinel::book::LeanGauge::State::Empty);
 }
 
+TEST_F(DomDock, LeanStatesItsQuoteUnitOnce) {
+    EXPECT_TRUE(static_cast<LeanGaugeWidget*>(dock.findChild<QWidget*>("domLeanStrip"))->caption().contains("USD"));
+    dock.onSymbolChanged("ETH-BTC");
+    EXPECT_TRUE(static_cast<LeanGaugeWidget*>(dock.findChild<QWidget*>("domLeanStrip"))->caption().contains("BTC"));
+}
+
 TEST_F(DomDock, LeanIgnoresPinnedLadderAndUsesNativeTick) {
     source.update({{true, 199, 3}, {false, 201, 1}, {true, 195, 5}, {false, 300, 50}});
     show();
@@ -2052,6 +2058,35 @@ TEST(DomLean, InheritsLargeFontAndMarksCrossedValuesStale) {
     const QRect status(2, 2 * std::max(14, fm.height()) + 14, 230, fm.height());
     EXPECT_NE(fresh.copy(status), stale.copy(status)); // stale must override near/far disagreement
     EXPECT_EQ(fresh.copy(0, 0, 500, 2 * fm.height()), stale.copy(0, 0, 500, 2 * fm.height()));
+}
+
+TEST(DomLean, NearBandsLeftFarBandsRightInTheDimTokenWithTheUnitOnce) {
+    std::array<double, 401> bids{}, asks{};
+    bids[199] = 3; asks[201] = 1; asks[230] = 10; // inside ±50 only: ±5 and ±15 lean bid, ±50 and ±100 ask
+    sentinel::book::LeanGauge gauge;
+    gauge.update({bids, asks, 0, 1, 199, 201}, 0, 0);
+    ASSERT_GT(gauge.bands()[1].imbalance, 0);
+    ASSERT_LT(gauge.bands()[2].imbalance, 0);
+    LeanGaugeWidget widget(gauge);
+    widget.setUnit("USD");
+    EXPECT_EQ(widget.caption(), QString::fromUtf8("±15 USD · 2m"));
+    widget.resize(400, widget.sizeHint().height());
+    QImage image(widget.size(), QImage::Format_ARGB32_Premultiplied);
+    image.fill(QColor("#1E1E1E"));
+    QPainter painter(&image); widget.paint(painter); painter.end();
+    const QFontMetrics fm(widget.font());
+    const int row = std::max(14, fm.height());
+    const int label = fm.horizontalAdvance("±100") + 4, value = fm.horizontalAdvance("-100%") + 4;
+    const int center = label + (200 - label - value) / 2;
+    // Column-major: ±15 (bid) under ±5 on the left, ±50 (ask) at the top of the right column.
+    EXPECT_EQ(image.pixelColor(center - 4, row + row / 2), DomBarDelegate::barColor(true, 1));
+    EXPECT_EQ(image.pixelColor(200 + center + 4, row / 2), DomBarDelegate::barColor(false, 1));
+    // Labels read in the dim text token, not the 3.6:1 disabled grey.
+    int brightest = 0;
+    for (int y = 0; y < row; ++y)
+        for (int x = 2; x < label; ++x) brightest = std::max(brightest, image.pixelColor(x, y).lightness());
+    EXPECT_GE(brightest, theme::text3().lightness() - 8);
+    EXPECT_GE(DomBarDelegate::contrast(theme::text3(), QColor("#1E1E1E")), 4.5);
 }
 
 TEST(DomLean, PaintMirrorsBidLeftAskRightAndDrawsHistory) {

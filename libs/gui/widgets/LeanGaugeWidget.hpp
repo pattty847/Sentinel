@@ -10,6 +10,9 @@ public:
     // Public paint entry for the allocation/pixel test; no data access or computation here.
     void paint(QPainter& painter);
     QSize sizeHint() const override { return {280, minimumHeight()}; }
+    // The quote unit of the band distances ("USD"), shown once in the history caption.
+    void setUnit(const QString& unit);
+    QString caption() const;
 protected:
     void paintEvent(QPaintEvent*) override;
     bool event(QEvent* event) override;
@@ -20,6 +23,7 @@ private:
     void paintDepth(QPainter& painter);
     void paintHistory(QPainter& painter);
     const sentinel::book::LeanGauge& m_gauge;
+    QString m_unit;
     qreal m_scale = 0;
     int m_rowHeight = 16, m_labelWidth = 34, m_valueWidth = 37, m_historyLeft = 55;
     std::array<QImage, 201> m_percent;

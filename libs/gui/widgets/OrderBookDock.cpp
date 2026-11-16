@@ -937,6 +937,7 @@ void OrderBookDock::onSymbolChanged(const QString& symbol)
     m_symbolId = symbol.toStdString();
     ++m_leanGeneration;
     m_leanGauge.reset();
+    m_leanStrip->setUnit(symbol.contains('-') ? symbol.section('-', 1, 1) : QString());
     m_leanStrip->update();
     m_trades.clear();
     m_pulseTrades.clear();

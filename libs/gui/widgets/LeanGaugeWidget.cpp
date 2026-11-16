@@ -1,5 +1,6 @@
 #include "LeanGaugeWidget.hpp"
 #include "OrderBookDock.hpp"
+#include "../themes/ThemePalette.hpp"
 #include <QPainter>
 #include <QEvent>
 #include <QtMath>
@@ -30,11 +31,27 @@ LeanGaugeWidget::LeanGaugeWidget(const sentinel::book::LeanGauge& gauge, QWidget
     setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     updateMetrics();
     setToolTip("Lean: (bid size − ask size) / (bid size + ask size). Positive = bids (left).\n"
-               "Bands are quote-price distances from the native book midpoint, independent of ladder rows.\n"
+               "Bands are quote-price distances from the native book midpoint, independent of ladder rows:\n"
+               "near ±5 and ±15 on the left, far ±50 and ±100 on the right.\n"
                "Depth: cumulative size from mid to ±100. History: ±15 over the last two minutes.\n"
                "Near/far disagree compares ±5 and ±100. One-sided books use the remaining touch.\n"
                "Locked native buckets are valid. Crossed books hold the last values and history, marked stale.\n"
                "Empty books clear history. Hidden below 280 px dock width.");
+}
+
+void LeanGaugeWidget::setUnit(const QString& unit)
+{
+    if (unit == m_unit) return;
+    m_unit = unit;
+    m_scale = 0;
+    updateMetrics();
+    update();
+}
+
+QString LeanGaugeWidget::caption() const
+{
+    // The distances' unit, stated once.
+    return m_unit.isEmpty() ? QStringLiteral("±15 · 2m") : QStringLiteral("±15 %1 · 2m").arg(m_unit);
 }
 
 void LeanGaugeWidget::updateMetrics()
@@ -43,7 +60,7 @@ void LeanGaugeWidget::updateMetrics()
     m_rowHeight = std::max(14, metrics.height());
     m_labelWidth = metrics.horizontalAdvance("±100") + 4;
     m_valueWidth = metrics.horizontalAdvance("-100%") + 4;
-    m_historyLeft = metrics.horizontalAdvance("±15 · 2m") + 6;
+    m_historyLeft = metrics.horizontalAdvance(caption()) + 6;
     setFixedHeight(3 * m_rowHeight + 14 + std::max(16, m_rowHeight));
 }
 
@@ -56,20 +73,23 @@ void LeanGaugeWidget::prepareText()
         const QString text = (i > 0 ? "+" : "") + QString::number(i) + "%";
         m_percent[i + 100] = textImage(text, textFont, m_scale, DomBarDelegate::sizeTextColor(i >= 0, 1));
     }
+    // Labels and states in the dim text token (4.5:1 and up, brief DOM-6), not the disabled grey.
+    const QColor label = theme::text3();
     for (size_t i = 0; i < m_labels.size(); ++i)
-        m_labels[i] = textImage("±" + QString::number(sentinel::book::LeanGauge::Distances[i]), textFont, m_scale, m_dim.color());
+        m_labels[i] = textImage("±" + QString::number(sentinel::book::LeanGauge::Distances[i]), textFont, m_scale, label);
     const std::array<QString, 7> states{"Waiting for book", "", "Bid only", "Ask only", "Invalid book", "Crossed · stale", "Near / far disagree"};
-    for (size_t i = 0; i < states.size(); ++i) m_status[i] = textImage(states[i], textFont, m_scale, m_dim.color());
-    m_depthLabel = textImage("Depth ±100", textFont, m_scale, m_dim.color());
-    m_historyLabel = textImage("±15 · 2m", textFont, m_scale, m_dim.color());
+    for (size_t i = 0; i < states.size(); ++i) m_status[i] = textImage(states[i], textFont, m_scale, label);
+    m_depthLabel = textImage("Depth ±100", textFont, m_scale, label);
+    m_historyLabel = textImage(caption(), textFont, m_scale, label);
 }
 
 void LeanGaugeWidget::paintBands(QPainter& p)
 {
     const int half = width() / 2;
     for (size_t i = 0; i < 4; ++i) {
-        const int x = int(i % 2) * half;
-        const int y = int(i / 2) * m_rowHeight;
+        // Near bands in the left column, far in the right: ±5 over ±15 | ±50 over ±100.
+        const int x = int(i / 2) * half;
+        const int y = int(i % 2) * m_rowHeight;
         const double value = m_gauge.bands()[i].imbalance;
         const int center = x + m_labelWidth + (half - m_labelWidth - m_valueWidth) / 2;
         const int reach = std::max(0, (half - m_labelWidth - m_valueWidth) / 2);
