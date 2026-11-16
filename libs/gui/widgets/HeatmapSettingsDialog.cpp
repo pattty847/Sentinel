@@ -415,8 +415,10 @@ HeatmapSettingsDialog::HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *mode
     setWindowTitle("Chart Settings");
     setModal(false);
     setSizeGripEnabled(true);
-    setStyleSheet(dialogStyle());
     buildUi();
+    // After buildUi: rules select on object names and roles, which a widget
+    // polished before it was named would miss.
+    setStyleSheet(dialogStyle());
     // Resizable; the size the user left it at comes back next time.
     const QSize saved = sizeSettings().value(kSizeKey).toSize();
     resize(saved.isValid() ? saved : QSize(600, 720));
