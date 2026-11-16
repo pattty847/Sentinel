@@ -514,8 +514,8 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     form->addRow(candles);
     form->addRow(resetButton("Chart", page));
     describe(form, m_showLabels, "Show liquidity sizes on GPU heatmap cells above the range low when text fits. Turn off to reduce clutter.");
-    describe(form, m_labelCurrency, "Show liquidity as USD notional or base-asset size. Use USD to compare value, or Asset to compare quantity.");
-    describe(form, m_labelCurrencySymbol, "Show a dollar sign before USD liquidity numbers in heatmap cells.");
+    describe(form, currencyRow, "Show liquidity as USD notional or base-asset size. Use USD to compare value, or Asset to compare quantity.");
+    m_labelCurrencySymbol->setToolTip("Show a dollar sign before USD liquidity numbers in heatmap cells.");
     describe(form, m_labelMinPx, "Smallest GPU liquidity text, in pixels (8-24); labels that cannot fit at this size are hidden. Raise it for readability.");
     describe(form, m_labelMaxPx, "Largest GPU liquidity text, in pixels (8-32). Raise it for bigger labels when cells have room.");
     describe(form, m_tradesAboveCandles, m_tradesAboveCandles->toolTip());
