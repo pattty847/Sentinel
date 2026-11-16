@@ -7,7 +7,9 @@
 // The ends span the liquidity of the current view (setDomain, from the label
 // window), widened to always include both handles. While a handle is dragged the
 // ends stay where they were at the press, so the handle never jumps under the
-// cursor. GUI thread only.
+// cursor. GUI thread only. Track and handles use the shared theme tokens:
+// textOff below the low handle (cells there are off), sel to accent between
+// the handles, accent above the high one.
 #include <QWidget>
 
 class LiquidityRangeSlider final : public QWidget {
@@ -31,6 +33,11 @@ public:
     // Track geometry (tests): the x of a value and the value at an x.
     double xOf(double value) const;
     double valueAt(double x) const;
+
+    // One amount grammar for the label, tooltips and menus (brief principle 8):
+    // three significant digits in fixed notation, thousands separators from
+    // 1,000, never an exponent, and "<0.0001" instead of a tiny value or zero.
+    static QString amountText(double value);
 
     QSize sizeHint() const override { return {170, 22}; }
     QSize minimumSizeHint() const override { return {90, 18}; }

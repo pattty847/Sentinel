@@ -28,6 +28,7 @@
 #include "themes/ThemeManager.hpp"
 #include "themes/WidgetToolTips.hpp"
 #include "themes/FontManager.hpp"
+#include "themes/ThemePalette.hpp"
 #include "SyntheticHmc2Fixture.hpp"
 #include <QAction>
 #include <QApplication>
@@ -68,10 +69,12 @@
 #include <QStyleOptionSlider>
 #include <QWidgetAction>
 #include <QPointer>
+#include <QRegularExpression>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <algorithm>
 #include <functional>
+#include <cmath>
 
 void qml_register_types_Sentinel_Charts();
 
@@ -391,6 +394,46 @@ TEST(ChartToolbar, GearPaintsACleanGearWithoutAMenuIndicator) {
     plain.show();
     QCoreApplication::processEvents();
     EXPECT_EQ(gear->grab().toImage(), plain.grab().toImage());
+}
+
+// TB-4 / B-2: the liquidity range reads "<0.0001 – 9.41 BTC", never in scientific
+// notation, in the label, its tooltip, the slider tooltip and the menu entry.
+TEST(ChartToolbar, LiquidityRangeTextHasNoExponentAndAFloor) {
+    const std::vector<std::pair<double, QString>> amounts{
+        {6.7e-08, "<0.0001"}, {0.0001, "0.0001"}, {0.000235, "0.000235"}, {0.0642, "0.0642"},
+        {0.2, "0.2"}, {9.41, "9.41"}, {20, "20"}, {999.4, "999"}, {12345.6, "12,346"}};
+    for (const auto &[value, text] : amounts) EXPECT_EQ(LiquidityRangeSlider::amountText(value), text) << value;
+    TopToolbar toolbar;
+    toolbar.setLiquidityRange(1e-9, 12, 6.7e-08, 9.41);
+    EXPECT_EQ(toolbar.rangeLabel()->text(), QStringLiteral("<0.0001 \u2013 9.41 BTC"));
+    emit toolbar.controlsMenu()->aboutToShow();
+    const QStringList surfaces{toolbar.rangeLabel()->toolTip(), toolbar.rangeSlider()->toolTip(),
+                               menuAction(toolbar.controlsMenu(), "controlsLiquidityRange")->text()};
+    for (const QString &text : surfaces) {
+        SCOPED_TRACE(text.toStdString());
+        EXPECT_FALSE(text.contains(QRegularExpression("\\de[-+]\\d")));
+        EXPECT_TRUE(text.contains("<0.0001"));
+    }
+}
+
+// TB-4: the slider's track and handles use the shared theme tokens.
+TEST(ChartToolbar, LiquiditySliderPaintsThemeColours) {
+    LiquidityRangeSlider slider;
+    slider.resize(170, 22);
+    slider.setDomain(0.01, 100);
+    slider.setValues(0.1, 10);
+    QImage image(slider.size(), QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    slider.render(&image);
+    const int cy = slider.height() / 2;
+    const int low = int(std::lround(slider.xOf(0.1))), high = int(std::lround(slider.xOf(10)));
+    EXPECT_EQ(image.pixelColor((int(slider.xOf(0.01)) + low - 6) / 2, cy), theme::textOff()) << "below the low handle";
+    EXPECT_EQ(image.pixelColor((high + 6 + slider.width() - 7) / 2, cy), theme::accent()) << "above the high handle";
+    EXPECT_EQ(image.pixelColor(low, cy), theme::text3()) << "an idle handle";
+    EXPECT_EQ(image.pixelColor(high, cy), theme::text3()) << "an idle handle";
+    TopToolbar toolbar;
+    toolbar.rangeLabel()->ensurePolished();
+    EXPECT_EQ(toolbar.rangeLabel()->palette().color(toolbar.rangeLabel()->foregroundRole()), theme::text3());
 }
 
 TEST(ChartToolbar, WideChartNamesTickAndSeparatesAppearance) {
@@ -1709,7 +1752,7 @@ TEST_F(ChartControls, RangeSliderDragAppliesLiveAndPersistsOnRelease) {
     ASSERT_TRUE(model->apply({{"sensitivityMin", 0.2}, {"sensitivityMax", 20.0}}).isEmpty());
     EXPECT_DOUBLE_EQ(slider->low(), 0.2);
     EXPECT_DOUBLE_EQ(slider->high(), 20.0);
-    EXPECT_TRUE(toolbar->rangeLabel()->text().contains("0.2 - 20"));
+    EXPECT_TRUE(toolbar->rangeLabel()->text().contains(QStringLiteral("0.2 \u2013 20")));
 }
 
 // The low handle never passes the high one, and the ends always contain both.

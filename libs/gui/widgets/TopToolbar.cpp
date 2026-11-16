@@ -1,5 +1,6 @@
 #include "TopToolbar.hpp"
 #include "SentinelLogging.hpp"
+#include "themes/ThemePalette.hpp"
 #include <QAction>
 #include <QActionEvent>
 #include <QToolButton>
@@ -317,7 +318,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     });
     m_rangeLabel = new QLabel(this);
     m_rangeLabel->setObjectName("liquidityRangeLabel");
-    m_rangeLabel->setStyleSheet("QLabel { color: #8FA3B8; padding-left: 4px; }");
+    m_rangeLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; padding-left: 4px; }").arg(theme::text3().name()));
     m_rangeLabel->setMinimumWidth(72);
     m_rangeLabelAction = addWidget(m_rangeLabel);
 
@@ -670,8 +671,8 @@ void TopToolbar::refreshOverflowMenu() {
 
 void TopToolbar::refreshRangeLabel() {
     if (!m_rangeLabel || !m_rangeSlider) return;
-    const QString range = QString::number(m_rangeSlider->low(), 'g', 3) + QStringLiteral(" - ") +
-                          QString::number(m_rangeSlider->high(), 'g', 3) + QStringLiteral(" ") + m_baseAssetSymbol;
+    const QString range = LiquidityRangeSlider::amountText(m_rangeSlider->low()) + QStringLiteral(" \u2013 ") +
+                          LiquidityRangeSlider::amountText(m_rangeSlider->high()) + QStringLiteral(" ") + m_baseAssetSymbol;
     m_rangeLabel->setText(range);
     m_rangeLabel->setToolTip(QStringLiteral("Base-asset size per heatmap cell: %1").arg(range));
     if (m_overflowRangeLabel) {
