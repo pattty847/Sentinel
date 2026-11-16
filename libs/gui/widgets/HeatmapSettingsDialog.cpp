@@ -537,7 +537,7 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_tradeMinMode->addItem("All trades", 0);
     m_tradeMinMode->addItem("Auto (visible median)", -1);
     m_tradeMinMode->addItem("Custom minimum", 1);
-    form->addRow("Minimum trade notional (quote)", m_tradeMinMode);
+    form->addRow("Minimum notional (quote)", m_tradeMinMode);
     m_tradeMinNotional = doubleSpin(page, "tradeMinNotional", 0.01, 1e12, 100, 2);
     m_tradeMinNotional->setValue(100);
     form->addRow("Custom minimum (quote)", m_tradeMinNotional);
@@ -584,7 +584,7 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     candleForm->addRow("Body opacity", m_candleBodyOpacity);
     candleForm->addRow("Body width (column)", m_candleBodyFraction);
     candleForm->addRow("Maximum body width", m_candleMaxBodyPx);
-    candleForm->addRow("Wick width (device pixels)", m_candleWickWidth);
+    candleForm->addRow("Wick width", m_candleWickWidth);
     m_showVolumeBars = new QCheckBox("Show volume bars", candles);
     m_showVolumeBars->setObjectName("showVolumeBars");
     m_volumeBandPercent = intSpin(candles, "volumeBandPercent", 10, 40, 1, "%");
@@ -669,19 +669,24 @@ QWidget *HeatmapSettingsDialog::buildTickTab() {
     m_manualTick = new QComboBox(page);
     m_manualTick->setObjectName("manualTick");
     form->addRow("Tick preset", m_manualTick);
-    m_minRowPx = doubleSpin(page, "minRowPx", 0.5, 32, 0.25, 2);
-    m_minRowPx->setSuffix(" px");
-    form->addRow("Min row height (Auto)", m_minRowPx);
-    m_hysteresis = doubleSpin(page, "hysteresis", 0, 0.9, 0.05, 2);
-    form->addRow("Hysteresis h (Auto)", m_hysteresis);
     addHelp(form, "GPU heatmap: Auto chooses a tick that keeps rows at least the minimum height; "
-                  "hysteresis limits switching near that height. Picking a preset locks Manual. "
+                  "the switch margin (hysteresis) limits switching near that height. Picking a preset locks Manual. "
                   "The choice is remembered per symbol and timeframe; entering Manual restores it or locks the drawn tick. "
                   "Loaded data offers the presets. Columns that cannot build a locked tick are veiled.", page);
+    // Auto's tuning: internal, so it sits in an Advanced group.
+    auto *advanced = new QGroupBox("Advanced", page);
+    advanced->setObjectName("tickAdvanced");
+    auto *advancedForm = new QFormLayout(advanced);
+    m_minRowPx = doubleSpin(advanced, "minRowPx", 0.5, 32, 0.25, 2);
+    m_minRowPx->setSuffix(" px");
+    advancedForm->addRow("Min row height (Auto)", m_minRowPx);
+    m_hysteresis = doubleSpin(advanced, "hysteresis", 0, 0.9, 0.05, 2);
+    advancedForm->addRow("Switch margin (Auto)", m_hysteresis);
+    form->addRow(advanced);
     describe(form, m_tickMode, "Auto adjusts GPU heatmap price rows as you zoom. Manual restores the tick remembered for this symbol and timeframe, or locks the drawn tick.");
     describe(form, m_manualTick, "Presets some loaded data can build. Picking one locks Manual.");
-    describe(form, m_minRowPx, "Target minimum GPU heatmap row height in physical pixels (0.5-32) in Auto. Raise it for coarser, taller rows.");
-    describe(form, m_hysteresis, "Margin around Auto's row-height threshold (0-0.9; 0 = no margin). Raise it to reduce tick switching during small zoom changes.");
+    describe(advancedForm, m_minRowPx, "Target minimum GPU heatmap row height in physical pixels (0.5-32) in Auto. Raise it for coarser, taller rows.");
+    describe(advancedForm, m_hysteresis, "Margin around Auto's row-height threshold (0-0.9; 0 = no margin). Raise it to reduce tick switching during small zoom changes.");
 
     connect(m_tickMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         if (m_loading) return;
@@ -734,7 +739,7 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
         if (const auto error = m_model->resetSensitivityToAuto(); !error.isEmpty()) showStatus(error, true);
     });
     m_opacity = doubleSpin(page, "opacity", 0, 1, 0.05, 2);
-    form->addRow("Opacity (0–1)", m_opacity);
+    form->addRow("Opacity", m_opacity);
     m_smoothZoomOut = new QCheckBox("Blend cells when zoomed out", page);
     m_smoothZoomOut->setObjectName("smoothZoomOut");
     form->addRow("Zoom-out smoothing", m_smoothZoomOut);
@@ -747,7 +752,8 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     fadeRow->addWidget(m_crossfadeOn);
     fadeRow->addWidget(m_crossfadeMs);
     form->addRow("Transition", fadeRow);
-    auto *tone = new QGroupBox("Tone mapping (this session)", page);
+    auto *tone = new QGroupBox("Advanced: tone mapping (this session)", page);
+    tone->setObjectName("lookAdvanced");
     auto *toneForm = new QFormLayout(tone);
     auto [gammaSlider, gammaLabel] = makeSlider(tone, 10, 500, 85);
     m_gammaSlider = gammaSlider;
@@ -769,7 +775,7 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     auto *floorRow = new QHBoxLayout;
     floorRow->addWidget(m_floorSlider);
     floorRow->addWidget(m_floorLabel);
-    toneForm->addRow("Shader floor", floorRow);
+    toneForm->addRow("Intensity floor", floorRow);
     form->addRow(tone);
     describe(form, m_palette, "Choose the heatmap's bid and ask colour scale. Pick Custom to use the gradient stops below.");
     describe(form, m_paperPositionStyle, "Show a compact position and live PnL tag at the entry line, or shade the full interval between entry and mark.");
@@ -867,7 +873,7 @@ QWidget *HeatmapSettingsDialog::buildLiveTab() {
     auto *page = new QWidget(this);
     auto *form = new QFormLayout(page);
     m_liveMinInterval = intSpin(page, "liveMinIntervalMs", 100, 5000, 50, " ms");
-    form->addRow("Live min interval", m_liveMinInterval);
+    form->addRow("Minimum refresh interval", m_liveMinInterval);
     addHelp(form, "The shortest spacing of live-edge compositions (the server publishes at 1 Hz). Slow "
                   "compositions back off to at least 5 s.", page);
     describe(form, m_liveMinInterval, "Minimum spacing of GPU refreshes of the newest heatmap columns in milliseconds (100-5000); the server publishes at 1 Hz. Raise it to reduce refresh work; slow refreshes back off to at least 5 seconds.");
@@ -901,24 +907,24 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
     m_tpoTimeframeCombo->addItem("1h", 3600000);
     m_tpoTimeframeCombo->addItem("4h", 14400000);
     m_tpoTimeframeCombo->addItem("1D", 86400000);
-    form->addRow("TPO Bracket", m_tpoTimeframeCombo);
+    form->addRow("Bracket (this session)", m_tpoTimeframeCombo);
     m_tpoSessionCombo = new QComboBox(page);
     for (const auto &[name, id] : std::initializer_list<std::pair<const char *, int>>{
              {"New York", 0}, {"London", 1}, {"Asia", 2}, {"Australia", 3}, {"24H", 4}, {"1W", 5}, {"1M", 6}})
         m_tpoSessionCombo->addItem(name, id);
-    form->addRow("TPO Session", m_tpoSessionCombo);
+    form->addRow("Session (this session)", m_tpoSessionCombo);
     m_tpoLayoutCombo = new QComboBox(page);
     m_tpoLayoutCombo->setObjectName("tpoLayout");
     m_tpoLayoutCombo->addItem("Collapsed", "collapsed");
     m_tpoLayoutCombo->addItem("Split", "split");
-    form->addRow("TPO Layout", m_tpoLayoutCombo);
+    form->addRow("Layout (this session)", m_tpoLayoutCombo);
     m_tpoThemeCombo = new QComboBox(page);
     m_tpoThemeCombo->setObjectName("tpoTheme");
     m_tpoThemeCombo->addItem("Rainbow", "rainbow");
     m_tpoThemeCombo->addItem("Calm", "calm");
     m_tpoThemeCombo->addItem("Sage", "sage");
     m_tpoThemeCombo->addItem("Indigo -> Sky", "indigo");
-    form->addRow("TPO Theme", m_tpoThemeCombo);
+    form->addRow("Theme", m_tpoThemeCombo);
     m_tpoStyleEditor = new TpoStyleEditor(page);
     m_tpoStyleEditor->setObjectName("tpoStyleEditor");
     form->addRow(m_tpoStyleEditor);
@@ -949,9 +955,11 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
 }
 
 void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
-    const auto combo = [this](QFormLayout* rows, QWidget* group, const char* key, const char* label, QStringList choices, const char* help) {
+    // Choices: {shown name, setting value}.
+    using Choices = std::initializer_list<std::pair<const char*, const char*>>;
+    const auto combo = [this](QFormLayout* rows, QWidget* group, const char* key, const char* label, Choices choices, const char* help) {
         auto* control = new QComboBox(group); control->setObjectName(key);
-        for (const auto& choice : choices) control->addItem(choice, choice);
+        for (const auto& [name, value] : choices) control->addItem(name, value);
         rows->addRow(label, control);
         describe(rows, control, help);
         connect(control, &QComboBox::currentIndexChanged, this, [this, control, key] {
@@ -960,15 +968,15 @@ void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
     };
     auto* footprint = new QGroupBox("Footprint", page);
     auto* rows = new QFormLayout(footprint);
-    combo(rows, footprint, "footprintIntensity", "Volume scale", {"bar", "window"}, "Scale outward bars against the largest single-side cell in this candle or visible window.");
-    combo(rows, footprint, "footprintCandle", "Candle", {"spine", "full"}, "Use a narrow candle at the left of each flow card, or the full candle appearance.");
+    combo(rows, footprint, "footprintIntensity", "Volume scale", {{"Per candle", "bar"}, {"Visible window", "window"}}, "Scale outward bars against the largest single-side cell in this candle or visible window.");
+    combo(rows, footprint, "footprintCandle", "Candle", {{"Spine", "spine"}, {"Full candle", "full"}}, "Use a narrow candle at the left of each flow card, or the full candle appearance.");
     auto* numbers = new QCheckBox("Show numbers", footprint); numbers->setObjectName("footprintNumbers");
     rows->addRow("Numbers", numbers);
     describe(rows, numbers, "Show 13 px bid and ask amounts when both columns fit. Zero sides stay blank.");
     connect(numbers, &QCheckBox::toggled, this, [this](bool on) { apply({{"footprintNumbers", on}}); });
     auto* dust = new QDoubleSpinBox(footprint); dust->setObjectName("footprintDustNotional");
     dust->setRange(0, 9007199254740991.0); dust->setDecimals(2); dust->setSingleStep(100);
-    rows->addRow("Dust threshold (quote currency)", dust);
+    rows->addRow("Dust threshold (quote)", dust);
     describe(rows, dust, "Side volume times its row price below this quote amount gets faint text and no volume fill.");
     connect(dust, &QDoubleSpinBox::valueChanged, this, [this](double value) { apply({{"footprintDustNotional", value}}); });
     form->addRow(footprint);
@@ -981,9 +989,9 @@ void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
     height->setSuffix(" px"); height->setSpecialValueText("Off"); rows->addRow("Strip height", height);
     describe(rows, height, "Cumulative volume delta strip height in pixels. Zero hides the strip.");
     connect(height, &QSpinBox::valueChanged, this, [this](int value) { apply({{"cvdStripPx", value}}); });
-    combo(rows, cvd, "cvdReset", "Reset", {"utcDay", "visible", "tpoSession"}, "Anchor cumulative delta at UTC midnight, the visible window, or the TPO session open.");
-    combo(rows, cvd, "cvdStyle", "Style", {"line", "area"}, "Draw cumulative volume delta as a line or a filled area around zero.");
-    combo(rows, cvd, "cvdFillAnchor", "Area fill anchor", {"auto", "zero", "edge", "none"},
+    combo(rows, cvd, "cvdReset", "Resets at", {{"UTC day", "utcDay"}, {"Visible window", "visible"}, {"TPO session", "tpoSession"}}, "Anchor cumulative delta at UTC midnight, the visible window, or the TPO session open.");
+    combo(rows, cvd, "cvdStyle", "Style", {{"Line", "line"}, {"Area", "area"}}, "Draw cumulative volume delta as a line or a filled area around zero.");
+    combo(rows, cvd, "cvdFillAnchor", "Area fill anchor", {{"Auto", "auto"}, {"Zero", "zero"}, {"Plot edge", "edge"}, {"None", "none"}},
           "Auto fills to zero when crossed, or to the near plot edge for one-sign data. Edge also fills to zero when crossed. None draws the line only.");
     form->addRow(cvd);
 }

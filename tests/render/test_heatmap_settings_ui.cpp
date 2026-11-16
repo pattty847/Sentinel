@@ -2150,6 +2150,36 @@ TEST(HeatmapSettingsDialogLook, LongHelpSitsBehindAQuestionMarkPerGroup) {
         EXPECT_TRUE(help.join('\n').contains(phrase)) << phrase;
 }
 
+// SET-6: plain names (labels and choices only; keys and values unchanged) and an
+// Advanced group for internal tuning.
+TEST(HeatmapSettingsDialogLook, PlainNamesAndAnAdvancedGroupForInternals) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    QStringList names;
+    for (auto *label : dialog.findChildren<QLabel *>()) names << label->text();
+    for (auto *group : dialog.findChildren<QGroupBox *>()) names << group->title();
+    for (const char *internal : {"Hysteresis", "Shader", "TPO Bracket", "TPO Session", "device pixels", "Live min",
+                                 "(0–1)", "quote currency"})
+        for (const auto &name : names) EXPECT_FALSE(name.contains(internal)) << name.toStdString();
+    auto *tick = child<QGroupBox>(dialog, "tickAdvanced");
+    ASSERT_TRUE(tick);
+    EXPECT_EQ(tick->title(), "Advanced");
+    EXPECT_TRUE(tick->isAncestorOf(child<QDoubleSpinBox>(dialog, "minRowPx")));
+    EXPECT_TRUE(tick->isAncestorOf(child<QDoubleSpinBox>(dialog, "hysteresis")));
+    EXPECT_TRUE(child<QGroupBox>(dialog, "lookAdvanced")->title().startsWith("Advanced"));
+    for (const char *key : {"footprintIntensity", "footprintCandle", "cvdReset", "cvdStyle", "cvdFillAnchor"}) {
+        auto *combo = child<QComboBox>(dialog, key);
+        for (int i = 0; i < combo->count(); ++i)
+            EXPECT_NE(combo->itemText(i), combo->itemData(i).toString()) << key << " shows its raw value";
+    }
+    auto *reset = child<QComboBox>(dialog, "cvdReset");
+    EXPECT_EQ(reset->itemText(reset->findData("utcDay")), "UTC day");
+    // The keys stay: picking a plain name still writes the setting value.
+    reset->setCurrentIndex(reset->findData("tpoSession"));
+    EXPECT_EQ(model.settings().cvdReset, "tpoSession");
+}
+
 // Qt fixes the scene graph backend at the first QQuickWindow of the process,
 // shown or not. The tests below construct plain windows, so main() selects the
 // rhi backend first; otherwise every OffscreenQuick after them fails with
