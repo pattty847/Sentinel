@@ -36,6 +36,7 @@
 #include <QTimer>
 #include <QFrame>
 #include <QSplitter>
+#include <QStackedLayout>
 #include <QUuid>
 #include <cmath>
 #include <algorithm>
@@ -108,6 +109,7 @@ PaperTradingDock::PaperTradingDock(QWidget* parent)
         else m_healthTimer->stop();
     });
     setAlgoState(QStringLiteral("UNAVAILABLE"), QStringLiteral("No data source"), false, false);
+    refreshEmptyStates();
 }
 
 void PaperTradingDock::setDataSource(IGridDataSource* source) {
@@ -140,6 +142,7 @@ void PaperTradingDock::setDataSource(IGridDataSource* source) {
                     m_pendingAlgoCommandId.clear();
                     m_algoRunningConfirmed = false;
                     m_account.invalidate();
+                    refreshEmptyStates();
                     if (m_waitingLabel) {
                         m_waitingLabel->setText(connected ? QStringLiteral("Awaiting update")
                             : QStringLiteral("Trading stream disconnected"));
@@ -162,6 +165,7 @@ void PaperTradingDock::setDataSource(IGridDataSource* source) {
                          : m_streamAvailable ? QStringLiteral("Awaiting the server's trading snapshot")
                                              : QStringLiteral("Trading stream disconnected"),
                  m_streamAvailable && !m_symbol.isEmpty(), false);
+    refreshEmptyStates();
     refreshMarketHealth();
 }
 
@@ -396,7 +400,21 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     m_orderLog->verticalHeader()->setVisible(false);
     m_orderLog->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_orderLog->setMaximumHeight(120);
-    layout->addWidget(m_orderLog);
+    auto* orderArea = new QWidget(parent);
+    auto* orderStack = new QStackedLayout(orderArea);
+    orderStack->setStackingMode(QStackedLayout::StackAll);
+    orderStack->setContentsMargins(0, 0, 0, 0);
+    orderStack->addWidget(m_orderLog);
+    m_orderEmptyLabel = new QLabel(orderArea);
+    m_orderEmptyLabel->setObjectName(QStringLiteral("paperOrderEmpty"));
+    m_orderEmptyLabel->setAlignment(Qt::AlignCenter);
+    m_orderEmptyLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_orderEmptyLabel->setAttribute(Qt::WA_TranslucentBackground);
+    m_orderEmptyLabel->setStyleSheet("color: #93A1AF;");
+    orderStack->addWidget(m_orderEmptyLabel);
+    m_orderEmptyLabel->raise();
+    layout->addWidget(orderArea);
+    refreshEmptyStates();
 
     layout->addStretch();
 }
@@ -835,6 +853,7 @@ void PaperTradingDock::resetForSymbolChange() {
         else if (m_account.known()) showFlatPosition();
     }
     refreshAlgoView();
+    refreshEmptyStates();
 }
 
 // The algo panel from the account state; a command in flight keeps its pending text.
@@ -903,6 +922,18 @@ void PaperTradingDock::updateNotional() {
               QString::number(notional, 'f', priceDecimals(notional)),
               quote.isEmpty() ? QStringLiteral("quote") : quote)
         : QStringLiteral("Est. quote notional: —"));
+}
+
+void PaperTradingDock::refreshEmptyStates() {
+    const QString state = !m_streamAvailable ? QStringLiteral("Trading stream disconnected")
+        : !m_account.known() ? QStringLiteral("Awaiting update")
+        : QStringLiteral("No orders this session");
+    if (m_orderEmptyLabel) {
+        m_orderEmptyLabel->setText(state);
+        m_orderEmptyLabel->setVisible(m_orderLog && m_orderLog->rowCount() == 0);
+    }
+    if (m_pnlCurve) m_pnlCurve->setEmptyText(!m_streamAvailable ? QStringLiteral("Trading stream disconnected")
+        : !m_account.known() ? QStringLiteral("Awaiting update") : QStringLiteral("No PnL this session"));
 }
 
 void PaperTradingDock::showFlatPosition() {
@@ -1012,6 +1043,7 @@ void PaperTradingDock::onOrderUpdated(const trading::OrderUpdate& update) {
     m_orderLog->item(row, 4)->setText(shownPrice(m_symbol, logPrice));
     m_orderLog->item(row, 5)->setText(QString::fromUtf8(trading::toString(update.status)));
     if (follow) m_orderLog->scrollToBottom();
+    refreshEmptyStates();
 
     if (!update.algoId.empty() && update.status == trading::OrderStatus::Filled) {
         if (!m_countedAlgoFillIds.contains(oid)) {
@@ -1256,11 +1288,13 @@ void PaperTradingDock::onTradingSnapshot(const trading::TradingSnapshot& snapsho
         else if (m_account.known()) showFlatPosition();
     }
     applyAlgoSnapshot(snapshot);
+    refreshEmptyStates();
     if (stopAcknowledged) onStopAcknowledged(snapshot);
 }
 
 void PaperTradingDock::clearOrderHistory() {
     if (m_orderLog) m_orderLog->setRowCount(0);
+    refreshEmptyStates();
     m_orderIdToRow.clear();
     if (m_pnlCurve) m_pnlCurve->clear();
     m_algoFillCount = 0;

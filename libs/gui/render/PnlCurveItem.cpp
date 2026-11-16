@@ -42,6 +42,13 @@ void PnlCurveItem::clear() {
     update();
 }
 
+void PnlCurveItem::setEmptyText(const QString& text) {
+    if (m_emptyText == text) return;
+    m_emptyText = text;
+    setProperty("emptyText", text);
+    update();
+}
+
 QVector<PnlCurveItem::PnlPoint> PnlCurveItem::filteredPoints(const QVector<PnlPoint>& src) const {
     if (m_window == Window::All || src.isEmpty()) {
         return src;
@@ -114,6 +121,13 @@ void PnlCurveItem::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.fillRect(rect(), QColor(18, 20, 24));
+    if (m_allPoints.isEmpty()) {
+        painter.setPen(QColor("#93A1AF")); // text3
+        painter.setFont(QFont("Roboto Mono", 11));
+        painter.drawText(rect(), Qt::AlignCenter, m_emptyText);
+        return;
+    }
+
 
     const int margin = 4;
     const QRect area = rect().adjusted(margin + 30, margin, -margin, -margin);

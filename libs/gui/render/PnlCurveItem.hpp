@@ -38,6 +38,7 @@ private:
     QVector<PnlPoint> m_allPoints;
     QVector<PnlPoint> m_algoPoints; // separate series for algo-only
     Window m_window = Window::All;
+    QString m_emptyText;
 
     QVector<PnlPoint> filteredPoints(const QVector<PnlPoint>& src) const;
     void drawSeries(QPainter& painter, const QVector<PnlPoint>& pts, const QRect& area, const QColor& color);

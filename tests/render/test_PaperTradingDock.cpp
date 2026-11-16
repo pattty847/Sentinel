@@ -991,3 +991,22 @@ TEST(PaperPolish, TicketFormatsStepAndGroupedPriceWithUnits) {
     dock.onTradeReceived(tick("BTC-USD", 73778.93));
     EXPECT_EQ(price->text(), QStringLiteral("73,778.93 USD"));
 }
+
+TEST(PaperPolish, EmptyOrderAndCurveTextFollowReadiness) {
+    Source source;
+    PaperTradingDock dock;
+    dock.setDataSource(&source);
+    dock.setSymbol("BTC-USD");
+    auto* empty = dock.findChild<QLabel*>("paperOrderEmpty");
+    auto* curve = dock.findChild<PnlCurveItem*>();
+    ASSERT_NE(empty, nullptr);
+    ASSERT_NE(curve, nullptr);
+    EXPECT_EQ(empty->text(), QStringLiteral("Awaiting update"));
+    trading::TradingSnapshot ready; ready.epoch = "e1";
+    dock.onTradingSnapshot(ready);
+    EXPECT_EQ(empty->text(), QStringLiteral("No orders this session"));
+    EXPECT_EQ(curve->property("emptyText").toString(), QStringLiteral("No PnL this session"));
+    emit source.connectionStatusChanged(false);
+    QCoreApplication::processEvents();
+    EXPECT_EQ(empty->text(), QStringLiteral("Trading stream disconnected"));
+}
