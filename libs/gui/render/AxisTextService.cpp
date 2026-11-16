@@ -1,6 +1,7 @@
 #include "AxisTextService.hpp"
 
 #include "models/AxisModel.hpp"
+#include "models/TimeAxisModel.hpp"
 #include "SentinelLogging.hpp"
 #include "ChartTextLayout.hpp"
 #include "themes/ThemePalette.hpp"
@@ -8,6 +9,7 @@
 #include <QQuickWindow>
 #include <QScreen>
 #include <QElapsedTimer>
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -78,6 +80,7 @@ void AxisTextService::syncAxisTicks(
         {
             std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
             storage.clear();
+            if (&storage == &m_timeAxisTicks) m_timeAxisDate.clear();
         }
         refreshAxisLayout();
         emit needsUpdate();
@@ -98,6 +101,10 @@ void AxisTextService::refreshAxisTickSnapshot(
             for (const auto &tick : ticks) {
                 storage.push_back({tick.position, tick.label, tick.isMajorTick});
             }
+        }
+        if (&storage == &m_timeAxisTicks) {
+            const auto* timeModel = dynamic_cast<TimeAxisModel*>(model);
+            m_timeAxisDate = timeModel ? timeModel->leftDate() : QString{};
         }
     }
     refreshAxisLayout();
@@ -175,8 +182,8 @@ void AxisTextService::refreshAxisLayout() {
 
     const int nextPriceAxisWidth = AxisLayout::measurePriceAxisWidthPx(
         m_atlas, axisScale, priceLabels, m_priceAxisWidthPx);
-    const int nextTimeAxisHeight = AxisLayout::measureTimeAxisHeightPx(
-        m_atlas, axisScale, m_timeAxisHeightPx);
+    const int nextTimeAxisHeight = std::max(36, AxisLayout::measureTimeAxisHeightPx(
+        m_atlas, axisScale, m_timeAxisHeightPx));
 
     {
         std::lock_guard<std::mutex> lock(m_axisLayoutMutex);
@@ -220,11 +227,13 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
 
     std::vector<AxisTickSnapshot> priceTicks;
     std::vector<AxisTickSnapshot> timeTicks;
+    QString timeDate;
     AxisLayoutSnapshot axisLayout;
     {
         std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
         priceTicks = m_priceAxisTicks;
         timeTicks = m_timeAxisTicks;
+        timeDate = m_timeAxisDate;
     }
     {
         std::lock_guard<std::mutex> lock(m_axisLayoutMutex);
@@ -328,7 +337,7 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
         0.5 * static_cast<qreal>(atlas.glyphTopPx() +
                                  atlas.glyphBottomPx()) *
         static_cast<qreal>(axisLayout.axisScale);
-    const qreal timeAnchorY = timeSafeRect.center().y();
+    const qreal timeAnchorY = timeSafeRect.bottom() - 0.5 * axisLayout.axisLabelPx;
     const QColor axisColor = textColor();
     for (const auto &tick : priceTicks) {
         ChartTextRun run;
@@ -370,5 +379,18 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
             continue;
         }
         renderer.submitRun(run, ChartTextRenderer::Priority::High);
+    }
+    if (!timeDate.isEmpty()) {
+        ChartTextRun date;
+        date.text = timeDate;
+        date.anchor = QPointF(timeSafeRect.left() + 4, timeSafeRect.top() + 5);
+        date.color = axisColor;
+        date.scale = 10.0f / atlas.fontPx();
+        date.hAlign = ChartTextRun::HorizontalAlign::Left;
+        date.vAlign = ChartTextRun::VerticalAlign::Center;
+        date.useStableMetrics = true;
+        date.pixelSnap = axisPixelSnap;
+        if (AxisLayout::runFitsRect(atlas, date, timeSafeRect))
+            renderer.submitRun(date, ChartTextRenderer::Priority::High);
     }
 }

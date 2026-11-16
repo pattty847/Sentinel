@@ -2,6 +2,8 @@
 
 #include "render/AxisLayout.hpp"
 #include "render/AxisTextService.hpp"
+#include "render/GridViewState.hpp"
+#include "models/TimeAxisModel.hpp"
 #include "render/ChartTextLayout.hpp"
 
 namespace {
@@ -29,6 +31,22 @@ TEST(AxisLayout, ResolveEffectiveAxisLabelPx_PrefersEnvThenConfigThenAuto) {
 
 TEST(AxisLayout, AxisInkUsesSecondaryTextColour) {
     EXPECT_EQ(AxisTextService::textColor(), QColor("#B6C2CF"));
+}
+
+TEST(AxisLayout, FirstVisibleTimeTickHasFullClockAndDateAtLeft) {
+    GridViewState view;
+    TimeAxisModel axis;
+    axis.setViewportSize(800, 900);
+    axis.setGridViewState(&view);
+    const qint64 start = QDateTime(QDate(2026, 11, 16), QTime(12, 3, 20), QTimeZone::utc()).toMSecsSinceEpoch();
+    view.setViewport(start, start + 600'000, 100, 200);
+    std::vector<AxisModel::TickSnapshot> ticks;
+    axis.copyTicks(ticks);
+    ASSERT_FALSE(ticks.empty());
+    EXPECT_EQ(ticks.front().label, QStringLiteral("12:04"));
+    EXPECT_EQ(axis.leftDate(), QStringLiteral("16 Nov 2026"));
+    ASSERT_GT(ticks.size(), 1u);
+    EXPECT_EQ(ticks[1].label, QStringLiteral(":05"));
 }
 
 TEST(AxisLayout, MeasurePriceAxisWidthPx_TracksLabelMagnitudeWithHysteresis) {
