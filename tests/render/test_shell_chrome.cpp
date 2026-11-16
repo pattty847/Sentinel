@@ -1,5 +1,6 @@
 #include "widgets/DockablePanel.hpp"
 #include "widgets/WatchlistDock.hpp"
+#include "widgets/TopToolbar.hpp"
 #include "widgets/ScreenerDock.hpp"
 #include "widgets/OrderBookDock.hpp"
 #include "widgets/SecFilingDock.hpp"
@@ -183,6 +184,15 @@ TEST(ShellChrome, MenuTogglesHaveAnEmptyIndicatorAndADistinctCheckedState) {
     auto on = menu.grab().toImage();
     EXPECT_NE(on.copy(QRect(row.left(), row.top(), 24, row.height())),
               off.copy(QRect(row.left(), row.top(), 24, row.height())));
+}
+
+TEST(ShellChrome, ChartMenuCommandsDoNotAddLoneIcons) {
+    TopToolbar toolbar;
+    for (const char* name : {"chartQuickSearchAction", "chartScreenshotAction", "chartLayoutsAction"}) {
+        auto* action = toolbar.findChild<QAction*>(name);
+        ASSERT_TRUE(action);
+        EXPECT_TRUE(action->icon().isNull());
+    }
 }
 
 TEST(ShellChrome, MenuChecksAndIconsUseTheSameLeftColumn) {
