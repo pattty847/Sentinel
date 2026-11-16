@@ -1043,3 +1043,13 @@ TEST(PaperPolish, OrderRowsUseTwentyTwoPixels) {
     ASSERT_NE(table, nullptr);
     EXPECT_EQ(table->verticalHeader()->defaultSectionSize(), 22);
 }
+
+TEST(PaperPolish, RangeButtonsShowSelectedState) {
+    PaperTradingDock dock;
+    auto* all = static_cast<QToolButton*>(nullptr);
+    for (auto* button : dock.findChildren<QToolButton*>()) if (button->text() == "All") all = button;
+    ASSERT_NE(all, nullptr);
+    EXPECT_TRUE(all->isChecked());
+    EXPECT_TRUE(all->styleSheet().contains("QToolButton:checked"));
+    EXPECT_TRUE(all->styleSheet().contains("#2A4A6A"));
+}

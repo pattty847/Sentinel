@@ -777,6 +777,7 @@ void PaperTradingDock::buildPnlPanel(QWidget* parent) {
         btn->setText(label);
         btn->setCheckable(true);
         btn->setFixedWidth(32);
+        btn->setStyleSheet("QToolButton { background: transparent; color: #B6C2CF; border: 1px solid #2B3138; } QToolButton:checked { background: #2A4A6A; color: #E6EDF3; border-color: #3A6A9A; }"); // toggle tokens
         windowButtons->addButton(btn);
         if (w == PnlCurveItem::Window::All) btn->setChecked(true);
         connect(btn, &QToolButton::clicked, this, [this, w]() {
