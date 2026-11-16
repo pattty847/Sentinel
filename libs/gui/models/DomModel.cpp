@@ -1,6 +1,7 @@
 #include "DomModel.hpp"
 #include "DomGrouping.hpp"
 #include "PriceUnits.hpp"
+#include "../themes/ThemePalette.hpp"
 #include "SentinelLogging.hpp"
 #include <QColor>
 #include <QDateTime>
@@ -291,6 +292,8 @@ QVariant DomModel::data(const QModelIndex& index, int role) const
     if (role == CumulativeRole) return col == Bid ? row.cumBid : col == Ask ? row.cumAsk : 0.0;
     if (role == Qt::ForegroundRole) {
         static const QColor buyColor("#65ce8a"), sellColor("#ee8585");
+        // "≈0" is no direction: dim neutral, never red or green (brief DOM-11).
+        if (col == Delta && std::abs(delta) < std::max(sizeStyle().dust, 1e-12)) return theme::text3();
         if (col == Buys || (col == Delta && delta > 0)) return buyColor;
         if (col == Sells || (col == Delta && delta < 0)) return sellColor;
         return {};

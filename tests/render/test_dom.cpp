@@ -197,6 +197,26 @@ TEST(DomModel, TradesAreVolumeOverTheTrailingMinuteByTradeTimeUnknownNeverSells)
     EXPECT_TRUE(model.index(r, DomModel::Delta).data().toString().isEmpty());
 }
 
+TEST(DomModel, AboutZeroDeltaIsDimNeutralNotRedOrGreen) {
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 1}, {false, 200.1, 1}});
+    DomTradeWindow trades;
+    trades.ingest(trade(200, AggressorSide::Buy, 0.3));
+    trades.ingest(trade(200, AggressorSide::Sell, 0.1));
+    trades.ingest(trade(200, AggressorSide::Sell, 0.2)); // 0.3 - 0.1 - 0.2 is float noise, not a direction
+    trades.ingest(trade(200.1, AggressorSide::Buy, 0.5));
+    DomModel model;
+    model.clear("BTC-USD");
+    model.publish(book, trades, true);
+    const auto delta = [&](qint64 key) { return model.index(rowAt(model, key), DomModel::Delta); };
+    ASSERT_NE(delta(2000).data(DomModel::QuantityRole).toDouble(), 0.0);
+    EXPECT_EQ(delta(2000).data().toString(), "≈0");
+    EXPECT_EQ(delta(2000).data(Qt::ForegroundRole).value<QColor>(), theme::text3());
+    EXPECT_EQ(delta(2001).data().toString(), "+0.5");
+    EXPECT_NE(delta(2001).data(Qt::ForegroundRole).value<QColor>(), theme::text3());
+}
+
 TEST(DomModel, RingEvictsOldestAndLabelsAWindowItCannotCover) {
     const qint64 now = 1'800'000'000'000;
     DomTradeWindow trades;
