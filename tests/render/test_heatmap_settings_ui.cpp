@@ -1420,7 +1420,7 @@ TEST(LadderControls, ChartMenuToggleAndWidthPersistAndReachTheLayers) {
     TempStore t;
     HeatmapSettingsModel model(t.store, "main", t.config);
     EXPECT_FALSE(model.settings().showLadder);
-    EXPECT_EQ(model.settings().ladderWidthPx, 120);
+    EXPECT_EQ(model.settings().ladderWidthPx, 64);
     UnifiedGridRenderer renderer;
     TopToolbar toolbar;
     HeatmapChartControls controls(&model);
@@ -1436,7 +1436,7 @@ TEST(LadderControls, ChartMenuToggleAndWidthPersistAndReachTheLayers) {
     EXPECT_FALSE(renderer.layers()->ladderEnabled());
     toggle->trigger();
     EXPECT_TRUE(renderer.layers()->ladderEnabled());
-    EXPECT_EQ(renderer.layers()->ladderWidthPx(), 120);
+    EXPECT_EQ(renderer.layers()->ladderWidthPx(), 64);
     EXPECT_TRUE(t.reload().showLadder);
     wide->trigger();
     EXPECT_EQ(renderer.layers()->ladderWidthPx(), 180);

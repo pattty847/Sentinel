@@ -104,7 +104,7 @@ TEST(LayerVisibility, LadderIsIndependentAndReservesItsStripOnlyWhenOn) {
     EXPECT_EQ(layers.ladderWidthPx(), chart::LayerVisibility::kLadderMinWidthPx);
     layers.setLadderWidthPx(1000);
     EXPECT_EQ(layers.ladderWidthPx(), chart::LayerVisibility::kLadderMaxWidthPx);
-    EXPECT_EQ(chart::LayerVisibility::kLadderWidthPx, 120);
+    EXPECT_EQ(chart::LayerVisibility::kLadderWidthPx, 64);
 }
 
 // The wall radar is independent of the primary field and the ladder flag; its threshold clamps.
