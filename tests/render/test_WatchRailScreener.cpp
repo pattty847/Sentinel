@@ -21,6 +21,7 @@
 #include <QHeaderView>
 #include <QSettings>
 #include <QScrollBar>
+#include <QSlider>
 #include <QSignalSpy>
 #include <QStandardItemModel>
 #include <QTableView>
@@ -422,7 +423,7 @@ TEST(Screener, LongNamesKeepQuoteColumnsVisibleAndManualWidthAcrossRefreshAndRes
     QCoreApplication::processEvents();
     auto* autoCheck = dock.findChild<QCheckBox*>();
     ASSERT_NE(autoCheck, nullptr);
-    EXPECT_EQ(autoCheck->text(), "Auto");
+    EXPECT_EQ(autoCheck->text(), "Auto every");
     EXPECT_GE(autoCheck->width(), autoCheck->sizeHint().width());
     auto* table = dock.findChild<QTableView*>("screenerRows");
     auto* model = qobject_cast<QStandardItemModel*>(table->model());
@@ -707,6 +708,40 @@ TEST(Screener, EmptyTableSaysNoDataYetWithALabelledRefreshInTheTable) {
     dock.findChild<QComboBox*>("screenerAsset")->setCurrentIndex(1);
     EXPECT_TRUE(empty->isVisible());
     EXPECT_EQ(note->text(), "No data yet");
+}
+
+TEST(Screener, AutoRefreshIsOneCheckboxWithItsIntervalAndOneLabelledRefresh) {
+    ScreenerDock dock;
+    SentinelStreamClient client("127.0.0.1", "1");
+    dock.setStreamClient(&client);
+    dock.resize(480, 360);
+    dock.show();
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(dock.findChildren<QSlider*>().isEmpty());
+    auto* autoCheck = dock.findChild<QCheckBox*>("screenerAuto");
+    auto* interval = dock.findChild<QComboBox*>("screenerInterval");
+    ASSERT_TRUE(autoCheck && interval);
+    EXPECT_EQ(autoCheck->text(), "Auto every");
+    EXPECT_TRUE(autoCheck->icon().isNull());
+    EXPECT_EQ(interval->currentText(), "120 s");
+    EXPECT_GT(interval->x(), autoCheck->x());
+    EXPECT_LE(interval->x() - autoCheck->geometry().right(), 12);
+    auto* table = dock.findChild<QTableView*>("screenerRows");
+    QList<QToolButton*> toolbarButtons;
+    for (auto* button : dock.findChildren<QToolButton*>())
+        if (!table->isAncestorOf(button) && button->isVisible() && button->parentWidget() != &dock)
+            toolbarButtons.append(button);
+    ASSERT_EQ(toolbarButtons.size(), 1);
+    EXPECT_EQ(toolbarButtons.front()->objectName(), "screenerRefresh");
+    EXPECT_EQ(toolbarButtons.front()->text(), "Refresh");
+    EXPECT_EQ(toolbarButtons.front()->toolButtonStyle(), Qt::ToolButtonTextBesideIcon);
+    interval->setCurrentIndex(interval->findText("60 s"));
+    autoCheck->setChecked(true);
+    auto* autoTimer = dock.findChild<QTimer*>("screenerAutoTimer");
+    ASSERT_TRUE(autoTimer->isActive());
+    EXPECT_EQ(autoTimer->interval(), 60000);
+    interval->setCurrentIndex(interval->findText("300 s"));
+    EXPECT_EQ(autoTimer->interval(), 300000);
 }
 
 TEST(WatchRailScreener, NativeVisualFixtures) {

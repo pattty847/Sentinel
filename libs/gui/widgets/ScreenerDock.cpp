@@ -18,7 +18,6 @@
 #include <QLabel>
 #include <QCheckBox>
 #include <QComboBox>
-#include <QSlider>
 #include <QToolButton>
 #include <QIcon>
 #include <QTableView>
@@ -174,35 +173,30 @@ void ScreenerDock::buildUi() {
     m_assetCombo->setFixedWidth(80);
     toolbar->addWidget(m_assetCombo);
 
-    toolbar->addWidget(new QLabel("Interval:", m_contentWidget));
-
-    m_intervalSlider = new QSlider(Qt::Horizontal, m_contentWidget);
-    m_intervalSlider->setRange(30, 300);
-    m_intervalSlider->setSingleStep(30);
-    m_intervalSlider->setPageStep(60);
-    m_intervalSlider->setValue(m_intervalSec);
-    m_intervalSlider->setFixedWidth(100);
-    toolbar->addWidget(m_intervalSlider);
-
-    m_intervalLabel = new QLabel(QString("%1s").arg(m_intervalSec), m_contentWidget);
-    m_intervalLabel->setFixedWidth(36);
-    toolbar->addWidget(m_intervalLabel);
-
-    m_autoCheck = new QCheckBox("Auto", m_contentWidget);
+    m_autoCheck = new QCheckBox("Auto every", m_contentWidget);
+    m_autoCheck->setObjectName("screenerAuto");
     m_autoCheck->setChecked(false);
-    m_autoCheck->setIcon(QIcon(":/svg/auto-refresh.svg"));
-    m_autoCheck->setToolTip("Automatically refresh at the set interval");
+    m_autoCheck->setToolTip("Refresh automatically at the chosen interval");
     m_autoCheck->setMinimumWidth(m_autoCheck->sizeHint().width() + 4);
     toolbar->addWidget(m_autoCheck);
 
-    m_runBtn = new QToolButton(m_contentWidget);
-    m_runBtn->setObjectName("screenerRefresh");
-    m_runBtn->setIcon(QIcon(":/svg/refresh.svg"));
-    m_runBtn->setToolTip("Fetch screener data once");
-    m_runBtn->setFixedSize(28, 28);
-    toolbar->addWidget(m_runBtn);
+    m_intervalCombo = new QComboBox(m_contentWidget);
+    m_intervalCombo->setObjectName("screenerInterval");
+    for (int seconds : {30, 60, 120, 180, 300})
+        m_intervalCombo->addItem(QStringLiteral("%1 s").arg(seconds), seconds);
+    m_intervalCombo->setCurrentIndex(m_intervalCombo->findData(m_intervalSec));
+    toolbar->addWidget(m_intervalCombo);
 
     toolbar->addStretch();
+
+    m_runBtn = new QToolButton(m_contentWidget);
+    m_runBtn->setObjectName("screenerRefresh");
+    m_runBtn->setText("Refresh");
+    m_runBtn->setIcon(QIcon(":/svg/refresh.svg"));
+    m_runBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_runBtn->setToolTip("Fetch screener data once");
+    toolbar->addWidget(m_runBtn);
+
     layout->addLayout(toolbar);
 
     // ── Table ────────────────────────────────────────────────────────────────
@@ -255,7 +249,7 @@ void ScreenerDock::buildUi() {
     // Signals
     connect(m_assetCombo,     QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ScreenerDock::onAssetChanged);
-    connect(m_intervalSlider, &QSlider::valueChanged,
+    connect(m_intervalCombo,  QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ScreenerDock::onIntervalChanged);
     connect(m_autoCheck,      &QCheckBox::toggled,
             this, &ScreenerDock::onAutoToggled);
@@ -659,11 +653,12 @@ void ScreenerDock::onAssetChanged(int index) {
                        .arg(m_currentAsset == "crypto" ? QStringLiteral("Crypto") : QStringLiteral("Stocks")));
 }
 
-void ScreenerDock::onIntervalChanged(int value) {
-    m_intervalSec = value;
-    m_intervalLabel->setText(QString("%1s").arg(value));
+void ScreenerDock::onIntervalChanged(int index) {
+    const int seconds = m_intervalCombo->itemData(index).toInt();
+    if (seconds <= 0) return;
+    m_intervalSec = seconds;
     if (m_autoEnabled) {
-        m_autoTimer->setInterval(value * 1000);
+        m_autoTimer->setInterval(seconds * 1000);
     }
 }
 
