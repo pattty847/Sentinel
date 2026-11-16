@@ -183,6 +183,27 @@ TEST(StockResearch, EmptyHintNamesTheTickerFieldAndHeaderAndFooterWaitForData) {
     EXPECT_FALSE(header->isVisible());
     EXPECT_FALSE(footer->isVisible());
 }
+TEST(StockResearch, RangeButtonsReadAtTheDimTokenAndUseTheSharedOnLook) {
+    FixtureProvider provider, sec;
+    StockChartDock dock(nullptr, &provider, &sec);
+    dock.show(); QCoreApplication::processEvents();
+    auto luminance = [](const QColor& c) {
+        auto channel = [](double v) { v /= 255.0; return v <= 0.03928 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * channel(c.red()) + 0.7152 * channel(c.green()) + 0.0722 * channel(c.blue());
+    };
+    int ranges = 0;
+    for (auto* button : dock.findChildren<QToolButton*>()) {
+        if (!QStringList({"1y", "2y", "5y", "10y", "max"}).contains(button->text())) continue;
+        ++ranges;
+        const QColor ink = button->palette().color(QPalette::Active, QPalette::ButtonText);
+        EXPECT_EQ(ink, QColor("#93A1AF")) << button->text().toStdString();
+        const double a = luminance(ink), b = luminance(QColor("#20252B"));
+        EXPECT_GE((std::max(a, b) + 0.05) / (std::min(a, b) + 0.05), 4.5);
+        EXPECT_TRUE(button->styleSheet().contains("#2a4a6a") && button->styleSheet().contains("#3a6a9a"))
+            << "checked range uses sel and selLine";
+    }
+    EXPECT_EQ(ranges, 5);
+}
 TEST(SecResearch, FinancialHistoriesDisplayActualObservationWithoutInventingUnits) {
     FixtureProvider provider;
     SecFilingDock dock(nullptr, &provider);

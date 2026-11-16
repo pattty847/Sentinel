@@ -1,6 +1,7 @@
 // Sentinel — StockChartDock
 #include "StockChartDock.hpp"
 
+#include "../themes/ThemePalette.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QDir>
@@ -27,11 +28,13 @@ static QToolButton* makePeriodBtn(const QString& label, QWidget* parent) {
     btn->setText(label);
     btn->setCheckable(true);
     btn->setMinimumHeight(22);
-    btn->setStyleSheet(
-        "QToolButton { background:#1a2028; color:#6a8090; border:1px solid #253040;"
-        " border-radius:3px; padding:0 6px; }"
-        "QToolButton:checked { background:#1e3a50; color:#60c0e0; border-color:#2a6080; }"
-        "QToolButton:hover { color:#c0d0dc; }");
+    // Off ranges read at the dim text role; the chosen one takes the shared toggle-on look.
+    btn->setStyleSheet(QStringLiteral(
+        "QToolButton { background:%1; color:%2; border:1px solid %3; border-radius:3px; padding:0 6px; }"
+        "QToolButton:checked { background:%4; color:%5; border-color:%6; }"
+        "QToolButton:hover { color:%5; }")
+        .arg(theme::bg2().name(), theme::text3().name(), theme::line().name(),
+             theme::sel().name(), theme::text().name(), theme::selLine().name()));
     return btn;
 }
 
