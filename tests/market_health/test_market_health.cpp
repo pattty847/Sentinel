@@ -15,6 +15,7 @@
 #include <QTemporaryDir>
 #include <QSettings>
 #include <QToolButton>
+#include <QGridLayout>
 #include "themes/ThemeManager.hpp"
 #include "themes/FontManager.hpp"
 #include "protocol/SentinelStreamClientTransport.hpp"
@@ -327,7 +328,7 @@ TEST(MarketHealthWidgets, StatusAndTelemetryStopPollingWhileHiddenAndKeepUnknown
     EXPECT_EQ(dock.valueText("residentBytes"), "Unknown");
     EXPECT_EQ(dock.valueText("holding"), "Unknown");
     EXPECT_TRUE(dock.frameHistory().empty());
-    EXPECT_TRUE(dock.valueText("marketDetail").contains("Heatmap live receive age: Unknown"));
+    EXPECT_TRUE(dock.valueText("marketDetail").contains("Heatmap age: Unknown"));
     dock.hide(); const auto hiddenPolls = polls;
     dock.refresh();
     QElapsedTimer hiddenDockWindow;
@@ -337,6 +338,57 @@ TEST(MarketHealthWidgets, StatusAndTelemetryStopPollingWhileHiddenAndKeepUnknown
         EXPECT_EQ(polls, hiddenPolls);
     }
     EXPECT_EQ(polls, hiddenPolls);
+}
+TEST(MarketHealthWidgets, TelemetryHealthIsAKeyValueGridInPlainWords) {
+    MarketHealth health; ready(health);
+    MarketHealth::ChartFacts facts;
+    facts.symbol = "BTC-USD";
+    facts.loading = false; facts.holding = false;
+    facts.coverage = "Viewport history coverage unknown";
+    health.setChartState(facts);
+    HeatmapTelemetryDock dock;
+    dock.setMarketHealth(&health);
+    dock.show();
+    ASSERT_TRUE(QTest::qWaitFor([&] { return dock.refreshCount() > 0; }, 1000));
+    auto* grid = dock.findChild<QWidget*>("telemetry.marketGrid");
+    ASSERT_NE(grid, nullptr);
+    auto* layout = qobject_cast<QGridLayout*>(grid->layout());
+    ASSERT_NE(layout, nullptr);
+    QStringList keys, groups;
+    QHash<QString, QLabel*> values;
+    for (int row = 0; row < layout->rowCount(); ++row) {
+        auto* first = layout->itemAtPosition(row, 0);
+        auto* second = layout->itemAtPosition(row, 1);
+        if (!first) continue;
+        auto* label = qobject_cast<QLabel*>(first->widget());
+        if (first == second) { if (!label->isHidden()) groups << label->text(); continue; }
+        keys << label->text();
+        values.insert(label->text(), qobject_cast<QLabel*>(second->widget()));
+        EXPECT_TRUE(label->styleSheet().contains("#93a1af")) << "keys are dim";
+    }
+    EXPECT_EQ(groups, QStringList({"Transport", "Chart data"}));
+    EXPECT_EQ(keys, QStringList({"Connection", "Subscription", "Book age", "Heatmap age", "History",
+                                 "Loading", "Old picture shown"}));
+    EXPECT_EQ(values["Connection"]->text(), "Connected");
+    EXPECT_EQ(values["Subscription"]->text(), "Active");
+    EXPECT_EQ(values["Loading"]->text(), "No");
+    EXPECT_EQ(values["Old picture shown"]->text(), "No");
+    EXPECT_TRUE(values["Connection"]->styleSheet().contains("#e6edf3"));
+    for (const char* unknown : {"Heatmap age", "History"}) {
+        EXPECT_EQ(values[unknown]->text(), "Unknown");
+        EXPECT_TRUE(values[unknown]->styleSheet().contains("#93a1af")) << unknown << " unknown is dim";
+    }
+    const QString detail = dock.valueText("marketDetail");
+    for (const char* internal : {"Acknowledged", "Holding picture", "receive age"})
+        EXPECT_FALSE(detail.contains(internal)) << internal;
+    facts.holding = true;
+    health.setChartState(facts);
+    health.setTransport(Transport::Disconnected);
+    dock.refresh();
+    EXPECT_EQ(values["Connection"]->text(), QString::fromUtf8("× Disconnected"));
+    EXPECT_TRUE(values["Connection"]->styleSheet().contains("#f07a6a"));
+    EXPECT_EQ(values["Subscription"]->text(), "! Waiting");
+    EXPECT_TRUE(values["Subscription"]->styleSheet().contains("#e6c07b"));
 }
 TEST(MarketHealthWidgets, TelemetryVisualFixtures) {
     const auto output = qEnvironmentVariable("SENTINEL_TELEMETRY_SHOTS");

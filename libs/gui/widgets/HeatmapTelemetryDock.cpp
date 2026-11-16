@@ -1,5 +1,5 @@
 #include "HeatmapTelemetryDock.hpp"
-#include "BookAgeText.hpp"
+#include "../themes/ThemePalette.hpp"
 #include <QCloseEvent>
 #include <QGridLayout>
 #include <QLabel>
@@ -101,12 +101,48 @@ void HeatmapTelemetryDock::buildUi() {
     m_healthSummary->setStyleSheet("color: #ddd; font-weight: bold;");
     m_healthSummary->setTextFormat(Qt::PlainText);
     outer->addWidget(m_healthSummary);
-    m_healthDetail = new QLabel("Market health unavailable", m_contentWidget);
-    m_healthDetail->setObjectName("telemetry.marketDetail");
-    m_healthDetail->setWordWrap(true);
-    m_healthDetail->setTextFormat(Qt::PlainText);
-    m_healthDetail->setStyleSheet("color: #b0b0b0;");
-    outer->addWidget(m_healthDetail);
+    // Collapsed health: two groups of dim keys and plain values; colour only marks a non-normal state.
+    auto* health = new QWidget(m_contentWidget);
+    health->setObjectName("telemetry.marketGrid");
+    m_healthGrid = new QGridLayout(health);
+    m_healthGrid->setContentsMargins(0, 4, 0, 4);
+    m_healthGrid->setHorizontalSpacing(16);
+    m_healthGrid->setVerticalSpacing(2);
+    m_healthGrid->setColumnStretch(1, 1);
+    auto group = [this, health](const QString& title) {
+        auto* label = new QLabel(title, health);
+        label->setStyleSheet(QStringLiteral("color:%1; padding-top:4px;").arg(theme::text2().name()));
+        m_healthGrid->addWidget(label, m_healthGrid->rowCount(), 0, 1, 2);
+    };
+    auto fact = [this, health](HealthFact id, const QString& key) {
+        const int row = m_healthGrid->rowCount();
+        auto* name = new QLabel(key, health);
+        name->setStyleSheet(QStringLiteral("color:%1;").arg(theme::text3().name()));
+        auto* value = new QLabel(health);
+        value->setObjectName(QStringLiteral("telemetry.health.%1").arg(int(id)));
+        value->setTextFormat(Qt::PlainText);
+        m_healthGrid->addWidget(name, row, 0);
+        m_healthGrid->addWidget(value, row, 1);
+        m_healthFacts[size_t(id)] = {name, value};
+        setHealthFact(id, QStringLiteral("Unknown"), Tone::Unknown);
+    };
+    group("Transport");
+    fact(HealthFact::Connection, "Connection");
+    fact(HealthFact::Subscription, "Subscription");
+    fact(HealthFact::BookAge, "Book age");
+    group("Chart data");
+    fact(HealthFact::HeatmapAge, "Heatmap age");
+    fact(HealthFact::History, "History");
+    fact(HealthFact::Loading, "Loading");
+    fact(HealthFact::OldPicture, "Old picture shown");
+    m_healthReason = new QLabel(health);
+    m_healthReason->setObjectName("telemetry.healthReason");
+    m_healthReason->setWordWrap(true);
+    m_healthReason->setTextFormat(Qt::PlainText);
+    m_healthReason->setStyleSheet(QStringLiteral("color:%1;").arg(theme::warn().name()));
+    m_healthReason->hide();
+    m_healthGrid->addWidget(m_healthReason, m_healthGrid->rowCount(), 0, 1, 2);
+    outer->addWidget(health);
     m_engineeringToggle = new QToolButton(m_contentWidget);
     m_engineeringToggle->setText("Engineering details");
     m_engineeringToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
@@ -253,6 +289,31 @@ void HeatmapTelemetryDock::buildUi() {
     m_table->setVisible(false);
 }
 
+void HeatmapTelemetryDock::setHealthFact(HealthFact id, const QString& value, Tone tone) {
+    auto& fact = m_healthFacts[size_t(id)];
+    const QString glyph = tone == Tone::Warn ? QStringLiteral("! ") : tone == Tone::Error ? QStringLiteral("× ") : QString();
+    const QString text = glyph + value;
+    if (fact.value->text() != text) fact.value->setText(text);
+    if (fact.styled && fact.tone == tone) return; // 4 Hz: restyle only on a tone change
+    fact.tone = tone;
+    fact.styled = true;
+    const QColor colour = tone == Tone::Warn ? theme::warn() : tone == Tone::Error ? theme::error()
+                        : tone == Tone::Unknown ? theme::text3() : theme::text();
+    fact.value->setStyleSheet(QStringLiteral("color:%1;").arg(colour.name()));
+}
+
+QString HeatmapTelemetryDock::healthDetailText() const {
+    QStringList lines;
+    for (int row = 0; row < m_healthGrid->rowCount(); ++row) {
+        auto* key = m_healthGrid->itemAtPosition(row, 0);
+        auto* value = m_healthGrid->itemAtPosition(row, 1);
+        if (!key || !value || key == value) continue;
+        lines << static_cast<QLabel*>(key->widget())->text() + ": " + static_cast<QLabel*>(value->widget())->text();
+    }
+    if (!m_healthReason->isHidden()) lines << m_healthReason->text();
+    return lines.join('\n');
+}
+
 void HeatmapTelemetryDock::setProvider(Provider provider) {
     m_provider = std::move(provider);
     if (m_exposed) refresh();
@@ -268,7 +329,7 @@ bool HeatmapTelemetryDock::disabledShown() const { return !m_disabled->isHidden(
 
 QString HeatmapTelemetryDock::valueText(const QString &key) const {
     if (key == QLatin1String("marketHealth")) return m_healthSummary->text();
-    if (key == QLatin1String("marketDetail")) return m_healthDetail->text();
+    if (key == QLatin1String("marketDetail")) return healthDetailText();
     if (key == QLatin1String("indicator")) return m_indicator->text();
     for (const auto &row : m_rows)
         if (row.key == key) return row.value->text();
@@ -284,22 +345,37 @@ void HeatmapTelemetryDock::refresh() {
         m_health->refreshChartState();
         const auto s = m_health->snapshot();
         m_healthSummary->setText(s.symbol + " · " + s.text());
-        QString transport;
-        switch (s.transport) {
-        case MarketHealth::Transport::Initializing: transport = "Initializing"; break;
-        case MarketHealth::Transport::Connected: transport = "Connected"; break;
-        case MarketHealth::Transport::Reconnecting: transport = "Reconnecting"; break;
-        case MarketHealth::Transport::Disconnected: transport = "Disconnected"; break;
-        }
-        const auto fact = [](std::optional<bool> value) { return value ? (*value ? QStringLiteral("Yes") : QStringLiteral("No")) : QStringLiteral("Unknown"); };
-        m_healthDetail->setText(QStringLiteral("Transport: %1 · Subscription: %2\n%3 · Heatmap live receive age: %4\nHistory: %5\nLoading: %6 · Holding picture: %7%8")
-            .arg(transport, s.acknowledged ? "Acknowledged" : "Waiting for subscription",
-                 bookAgeText(s.bookAgeMs), MarketHealth::ageText(s.heatmapAgeMs),
-                 s.coverage.isEmpty() ? "Unknown" : s.coverage, fact(s.loading), fact(s.holding),
-                 s.reason.isEmpty() ? QString{} : "\n" + s.reason));
+        using T = MarketHealth::Transport;
+        const Tone link = s.transport == T::Connected ? Tone::Normal
+                        : s.transport == T::Disconnected ? Tone::Error : Tone::Warn;
+        setHealthFact(HealthFact::Connection, s.transport == T::Connected ? QStringLiteral("Connected")
+                      : s.transport == T::Reconnecting ? QStringLiteral("Reconnecting")
+                      : s.transport == T::Disconnected ? QStringLiteral("Disconnected")
+                      : QStringLiteral("Initializing"), link);
+        setHealthFact(HealthFact::Subscription, s.acknowledged ? QStringLiteral("Active") : QStringLiteral("Waiting"),
+                      s.acknowledged ? Tone::Normal : Tone::Warn);
+        const auto age = [this](HealthFact id, std::optional<qint64> ms) {
+            setHealthFact(id, MarketHealth::ageText(ms), ms ? Tone::Normal : Tone::Unknown);
+        };
+        age(HealthFact::BookAge, s.bookAgeMs);
+        age(HealthFact::HeatmapAge, s.heatmapAgeMs);
+        const bool coverageKnown = !s.coverage.isEmpty() && !s.coverage.contains("unknown", Qt::CaseInsensitive);
+        setHealthFact(HealthFact::History, coverageKnown ? s.coverage : QStringLiteral("Unknown"),
+                      coverageKnown ? Tone::Normal : Tone::Unknown);
+        const auto yesNo = [this](HealthFact id, std::optional<bool> value, Tone whenYes) {
+            if (!value) setHealthFact(id, QStringLiteral("Unknown"), Tone::Unknown);
+            else setHealthFact(id, *value ? QStringLiteral("Yes") : QStringLiteral("No"), *value ? whenYes : Tone::Normal);
+        };
+        yesNo(HealthFact::Loading, s.loading, Tone::Normal);
+        yesNo(HealthFact::OldPicture, s.holding, Tone::Warn);
+        m_healthReason->setText(s.reason.isEmpty() ? QString() : QStringLiteral("! ") + s.reason);
+        m_healthReason->setVisible(!s.reason.isEmpty());
     } else {
         m_healthSummary->setText("Unavailable");
-        m_healthDetail->setText("Market health source unavailable");
+        for (size_t id = 0; id < m_healthFacts.size(); ++id)
+            setHealthFact(HealthFact(id), QStringLiteral("Unknown"), Tone::Unknown);
+        m_healthReason->setText(QStringLiteral("! Market health source unavailable"));
+        m_healthReason->show();
     }
     const auto metrics = m_provider ? m_provider() : std::nullopt;
     m_disabled->setVisible(!metrics);
