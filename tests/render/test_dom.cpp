@@ -1061,8 +1061,8 @@ TEST(DomPulse, FooterSumsEachKindPerSideAndNamesTheBiggestPull) {
     apply(rig.book, {{true, 199.7, 3.6}, {false, 200.2, 4.5}});
     rig.step();
     // Asks pulled 4 + 2.8, bids 0.4; the largest single pull is the 4 at 200.3.
-    EXPECT_EQ(rig.model.pulseSummary(), "Asks pulled 6.8 eaten 1.1 · Bids pulled .4 eaten 2 · biggest pull 4 @ 200.3");
-    EXPECT_EQ(rig.model.pulseSummary(DomModel::PulseText::Compact), "Ask pull 6.8 eat 1.1 · Bid pull .4 eat 2 · max 4 @ 200.3");
+    EXPECT_EQ(rig.model.pulseSummary(), "Asks pulled 6.8 eaten 1.1 · Bids pulled 0.4 eaten 2 · biggest pull 4 @ 200.3");
+    EXPECT_EQ(rig.model.pulseSummary(DomModel::PulseText::Compact), "Ask pull 6.8 eat 1.1 · Bid pull 0.4 eat 2 · max 4 @ 200.3");
     EXPECT_DOUBLE_EQ(rig.model.pulseTotals().side[1].added, 0.5);
     const auto version = rig.model.pulseTotalsVersion();
     rig.step();
