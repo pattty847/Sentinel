@@ -2524,7 +2524,8 @@ TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
     tick();
     EXPECT_EQ(model->group(), 20);
     EXPECT_EQ(button->text(), "Link ▾");
-    EXPECT_TRUE(button->toolTip().startsWith("Row size 2 (20 server ticks)")) << button->toolTip().toStdString();
+    EXPECT_TRUE(dock.findChild<QLabel*>("domAggregation")->text().startsWith("Rows 2 USD"));
+    EXPECT_FALSE(button->toolTip().contains("Row size 2")) << button->toolTip().toStdString(); // said once, by the label
     dock.setHeatmapTick(50, 100, false); // heatmap Auto: the same hold
     tick();
     EXPECT_EQ(model->group(), 20);
@@ -2582,6 +2583,23 @@ TEST_F(DomDock, SizeFormatIsOneSettingInTheDockMenuAndPersists) {
     dock.findChild<QAction*>("domSizeFormat-adaptiveDim")->trigger();
     EXPECT_EQ(model->sizeFormat(), DomModel::SizeFormat::AdaptiveDim);
     dock.setSizeFormat(DomModel::SizeFormat::Adaptive); // later tests read the default
+}
+
+TEST_F(DomDock, RowSizeIsSaidOnceSoATooltipNeverContradictsTheLabel) {
+    // B-13: "Rows 1 USD" beside a tooltip still reading "Row size 2 (20 server ticks)".
+    source.update({{true, 200, 1}, {false, 200.1, 1}});
+    dock.setGrouping(OrderBookDock::Grouping::Fixed, 2.0);
+    show();
+    QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
+    auto* button = dock.findChild<QToolButton*>("domGrouping");
+    auto* label = dock.findChild<QLabel*>("domAggregation");
+    ASSERT_TRUE(label->text().startsWith("Rows 2 USD")) << label->text().toStdString();
+    const QString tip = button->toolTip();
+    dock.setGrouping(OrderBookDock::Grouping::Fixed, 1.0);
+    QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
+    EXPECT_TRUE(label->text().startsWith("Rows 1 USD")) << label->text().toStdString();
+    EXPECT_EQ(button->toolTip(), tip); // a tooltip open across the regroup still agrees with the label
+    dock.setGrouping(OrderBookDock::Grouping::Fixed, 0.1);
 }
 
 TEST_F(DomDock, PageScrollAndScrollbarJumpFillExposedGroupedRowsBeforePaint) {
@@ -2671,8 +2689,7 @@ TEST_F(DomDock, HeadingButtonsKeepTheirWholeTextFrom180To650) {
                 EXPECT_GE(button->width(), button->sizeHint().width()) << name << " at " << width;
                 EXPECT_LE(button->mapTo(&dock, QPoint(button->width(), 0)).x(), width) << name << " at " << width;
             }
-            EXPECT_TRUE(dock.findChild<QToolButton*>("domGrouping")->toolTip().startsWith(
-                mode == OrderBookDock::Grouping::Auto ? "Row size" : tick == 1.0 ? "Row size 1 (10" : "Row size 0.1 (1"))
+            EXPECT_TRUE(dock.findChild<QToolButton*>("domGrouping")->toolTip().startsWith("Row grouping."))
                 << dock.findChild<QToolButton*>("domGrouping")->toolTip().toStdString();
         }
     }

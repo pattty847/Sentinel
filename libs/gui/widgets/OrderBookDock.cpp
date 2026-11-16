@@ -809,7 +809,9 @@ void OrderBookDock::updateGroupButton()
     // The mode names the button; the aggregation text beside it states the row size.
     m_grouping->setText(m_groupMode == Grouping::Auto ? QStringLiteral("Auto ▾")
                         : m_groupMode == Grouping::Link ? QStringLiteral("Link ▾") : QStringLiteral("Fixed ▾"));
-    QString tip = QStringLiteral("Row size %1 (%2 server ticks). ").arg(size).arg(group);
+    // The row size itself is said once, by the aggregation text beside this button: a tooltip
+    // is a snapshot, and a size inside it would contradict the live label after a regroup (B-13).
+    QString tip = QStringLiteral("Row grouping. ");
     if (m_groupMode == Grouping::Auto)
         tip += QStringLiteral("Auto: the smallest size at which %1% of the %2 rows each side of the touch hold size; "
                               "changes after %3 s.").arg(int(dom::AutoGroupRule::TargetFill * 100))
@@ -832,8 +834,8 @@ void OrderBookDock::updateGroupButton()
                       .arg(QString::number(m_linkTick, 'g', 12))
             : QStringLiteral("Linked: no heatmap tick yet; the nearest offered size is used.");
     else tip += QStringLiteral("Fixed.");
-    m_grouping->setToolTip(tip + QStringLiteral("\nClick to choose Auto, Link to heatmap, or a fixed size. "
-                                                "The spread above is the server's, whatever the row size."));
+    m_grouping->setToolTip(tip + QStringLiteral("\nClick to choose Auto, Link to heatmap, or a fixed size; "
+                                                "the row size is shown beside. The spread is the server's, whatever the row size."));
     if (m_groupNative > 0) sLog_App("DOM grouping mode=" << int(m_groupMode) << " group=" << group << " size=" << size);
 }
 
