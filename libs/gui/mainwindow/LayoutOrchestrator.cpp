@@ -108,27 +108,22 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
         m_mainWindow->splitDockWidget(docks.heatmapDock, docks.orderBookDock, Qt::Horizontal);
     }
 
-    // Right column: tabbed stack.
-    // Watchlist is the tab anchor; all others tabify onto it (or secDock if no watchlist).
-    QDockWidget* rightAnchor = nullptr;
+    // Right column: the Watchlist alone on top (its few rows never fill a full-height tab),
+    // the other panels tabbed below it, anchored on secDock. Without a watchlist, secDock
+    // anchors the whole column.
     if (docks.watchlistDock) {
         m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.watchlistDock);
         if (docks.orderBookDock) {
             m_mainWindow->splitDockWidget(docks.orderBookDock, docks.watchlistDock, Qt::Horizontal);
         }
-        rightAnchor = docks.watchlistDock;
     }
-
-    // secDock: anchor if no watchlist, otherwise tab onto watchlist
     m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, docks.secDock);
-    if (!rightAnchor && docks.orderBookDock) {
+    if (docks.watchlistDock) {
+        m_mainWindow->splitDockWidget(docks.watchlistDock, docks.secDock, Qt::Vertical);
+    } else if (docks.orderBookDock) {
         m_mainWindow->splitDockWidget(docks.orderBookDock, docks.secDock, Qt::Horizontal);
     }
-    if (rightAnchor) {
-        m_mainWindow->tabifyDockWidget(rightAnchor, docks.secDock);
-    } else {
-        rightAnchor = docks.secDock;
-    }
+    QDockWidget* rightAnchor = docks.secDock;
 
     // In a compact default workspace, the DOM becomes a side tab so the chart
     // keeps a usable plot width. Saved layouts and later manual splits are left
@@ -136,7 +131,7 @@ void LayoutOrchestrator::addDocksToLayout(const DockWidgets& docks) {
     if (rightAnchor && docks.orderBookDock && m_mainWindow->width() < 1200)
         m_mainWindow->tabifyDockWidget(rightAnchor, docks.orderBookDock);
 
-    // Remaining right-column tabs: Screener, StockChart, PaperTrading
+    // Remaining tabs under the Watchlist: Screener, StockChart, PaperTrading, Telemetry
     auto tabifyRight = [&](QDockWidget* dock) {
         if (!dock) return;
         m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, dock);
@@ -185,13 +180,24 @@ void LayoutOrchestrator::setDockSizes(const DockWidgets& docks) {
 
     // Size the three columns together: independent hints redistribute the remaining
     // space and can stretch the DOM. Saved layouts and manual resizing stay untouched.
+    // The right column is the Watchlist over the secDock tab group (secDock alone without it).
     QDockWidget* rightAnchor = docks.watchlistDock ? static_cast<QDockWidget*>(docks.watchlistDock)
                                                    : docks.secDock;
-    if (docks.heatmapDock && docks.orderBookDock && rightAnchor) {
+    QDockWidget* tabAnchor = docks.secDock;
+    if (docks.watchlistDock && tabAnchor) {
+        // Watchlist rows (seven in the default preset) fill most of two fifths of the column.
+        const int height = m_mainWindow->height();
+        const int top = std::max(docks.watchlistDock->minimumHeight(),
+                                 std::min(height * 2 / 5, height - tabAnchor->minimumHeight()));
+        m_mainWindow->resizeDocks({docks.watchlistDock, tabAnchor}, {top, std::max(1, height - top)}, Qt::Vertical);
+    }
+    if (docks.heatmapDock && docks.orderBookDock && rightAnchor && tabAnchor) {
         int rightWidth = std::max(320, rightAnchor->minimumWidth());
-        for (auto* tab : m_mainWindow->tabifiedDockWidgets(rightAnchor))
-            if (!tab->isHidden()) rightWidth = std::max(rightWidth, tab->minimumWidth());
-        if (m_mainWindow->tabifiedDockWidgets(rightAnchor).contains(docks.orderBookDock)) {
+        QList<QDockWidget*> column = m_mainWindow->tabifiedDockWidgets(tabAnchor);
+        column << tabAnchor;
+        for (auto* dock : column)
+            if (!dock->isHidden()) rightWidth = std::max(rightWidth, dock->minimumWidth());
+        if (m_mainWindow->tabifiedDockWidgets(tabAnchor).contains(docks.orderBookDock)) {
             const int chartWidth = std::max(480, m_mainWindow->width() - rightWidth - 8);
             m_mainWindow->resizeDocks({docks.heatmapDock, rightAnchor},
                                      {chartWidth, rightWidth}, Qt::Horizontal);
