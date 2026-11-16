@@ -21,6 +21,7 @@
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QLabel>
@@ -195,7 +196,10 @@ void PaperTradingDock::buildUi() {
 
     // Tab bar
     auto* tabs = new QTabWidget(root);
+    tabs->setObjectName(QStringLiteral("paperTabs"));
     tabs->setTabPosition(QTabWidget::North);
+    tabs->tabBar()->setExpanding(false);
+    tabs->setStyleSheet("QTabWidget::pane { border: 0; } QTabWidget::tab-bar { left: 0px; }");
 
     auto* manualTab = new QWidget(tabs);
     buildManualTab(manualTab);

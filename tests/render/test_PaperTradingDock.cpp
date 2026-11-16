@@ -19,6 +19,7 @@
 #include <QSettings>
 #include <QComboBox>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QDateTime>
 #include <QDateEdit>
 #include <QPushButton>
@@ -1080,4 +1081,12 @@ TEST(PaperPolish, LastPriceStaysPrimaryColour) {
     auto* last = dock.findChild<QLabel*>("paperLastPrice");
     ASSERT_NE(last, nullptr);
     EXPECT_TRUE(last->styleSheet().contains("#E6EDF3"));
+}
+
+TEST(PaperPolish, InnerTabsAlignWithContent) {
+    PaperTradingDock dock;
+    auto* tabs = dock.findChild<QTabWidget*>("paperTabs");
+    ASSERT_NE(tabs, nullptr);
+    EXPECT_FALSE(tabs->tabBar()->expanding());
+    EXPECT_TRUE(tabs->styleSheet().contains("tab-bar { left: 0px"));
 }
