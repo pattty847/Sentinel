@@ -24,6 +24,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -38,6 +39,10 @@
 namespace {
 constexpr uint64_t MiB = 1ull << 20, KiB = 1ull << 10;
 const QStringList kPalettes{"Electric", "Fire", "Ocean", "Monochrome", "Matrix", "Custom"};
+
+// The dialog remembers its size (window geometry, not a chart setting).
+constexpr auto kSizeKey = "chartSettingsDialog/size";
+QSettings sizeSettings() { return QSettings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal"); }
 
 // The dialog's own stylesheet, written with @token names from ThemePalette.
 QString themed(QString qss) {
@@ -403,9 +408,12 @@ HeatmapSettingsDialog::HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *mode
     setObjectName("heatmapSettingsDialog");
     setWindowTitle("Chart Settings");
     setModal(false);
-    resize(520, 560);
+    setSizeGripEnabled(true);
     setStyleSheet(dialogStyle());
     buildUi();
+    // Resizable; the size the user left it at comes back next time.
+    const QSize saved = sizeSettings().value(kSizeKey).toSize();
+    resize(saved.isValid() ? saved : QSize(600, 720));
     connect(&chart::TradeBubbleStyleChanges::instance(), &chart::TradeBubbleStyleChanges::changed,
             this, [this] { refreshBubbleStyle(); });
     if (m_model) connect(m_model, &heatmap::HeatmapSettingsModel::changed, this, [this] { refreshFromModel(); });
@@ -1217,6 +1225,11 @@ void HeatmapSettingsDialog::showStatus(const QString &text, bool error) {
 }
 
 QString HeatmapSettingsDialog::statusText() const { return m_status->text(); }
+
+void HeatmapSettingsDialog::hideEvent(QHideEvent *event) {
+    sizeSettings().setValue(kSizeKey, size());
+    QDialog::hideEvent(event);
+}
 
 void HeatmapSettingsDialog::logSettings() const {
     if (m_model)

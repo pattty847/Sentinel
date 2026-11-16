@@ -73,6 +73,9 @@ public:
     // The settings keys each tab owns (its Reset button restores them).
     static QStringList tabKeys(const QString &tab);
 
+protected:
+    void hideEvent(QHideEvent *event) override; // remembers the dialog's size
+
 signals:
     // Tick actions go through the chart's controls, as the toolbar's do (a preset
     // locks Manual and is remembered; entering Manual restores the remembered

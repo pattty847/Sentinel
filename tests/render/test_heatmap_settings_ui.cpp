@@ -2217,6 +2217,22 @@ TEST(HeatmapSettingsDialogLook, FieldsShareOneHeightAndThreeWidths) {
     EXPECT_EQ(pixels.pixelColor(spin->width() / 2, 0), theme::line()) << "line border";
 }
 
+// SET-7: the dialog is resizable and opens at the size it was left at.
+TEST(HeatmapSettingsDialogLook, DialogIsResizableAndRemembersItsSize) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    {
+        HeatmapSettingsDialog first(&model, nullptr);
+        EXPECT_TRUE(first.isSizeGripEnabled());
+        first.show();
+        first.resize(701, 653);
+        QCoreApplication::processEvents();
+        first.close();
+    }
+    HeatmapSettingsDialog second(&model, nullptr);
+    EXPECT_EQ(second.size(), QSize(701, 653));
+}
+
 // Qt fixes the scene graph backend at the first QQuickWindow of the process,
 // shown or not. The tests below construct plain windows, so main() selects the
 // rhi backend first; otherwise every OffscreenQuick after them fails with
