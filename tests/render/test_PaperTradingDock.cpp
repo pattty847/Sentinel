@@ -1,6 +1,7 @@
 #include "widgets/PaperTradingDock.hpp"
 #include "themes/ThemePalette.hpp"
 #include "render/PaperTradeOverlayModel.hpp"
+#include "render/PnlCurveItem.hpp"
 #include "render/PaperPositionBandGeometry.hpp"
 #include "render/heatmap/HeatmapSettingsStore.hpp"
 #include "../core/trading/LiveTradingSession.hpp"
@@ -931,4 +932,8 @@ TEST(PaperStopOperation, EpochChangeWhilePromptOpenClosesItUnsent) {
     if (box && box->isVisible()) box->button(QMessageBox::Yes)->click();
     QTest::qWait(10);
     EXPECT_EQ(rig.source.sent, (std::vector<std::string>{"algo:stop"}));
+}
+
+TEST(PaperPolish, CurveLabelsUseMicroSize) {
+    EXPECT_EQ(PnlCurveItem::labelFont().pixelSize(), 10);
 }

@@ -14,6 +14,12 @@ PnlCurveItem::PnlCurveItem(QWidget* parent)
     setAutoFillBackground(false);
 }
 
+QFont PnlCurveItem::labelFont() {
+    QFont font("Roboto Mono");
+    font.setPixelSize(10);
+    return font;
+}
+
 void PnlCurveItem::appendPoint(int64_t timestampMs, double totalPnl, const QString& algoId) {
     m_allPoints.push_back({timestampMs, totalPnl, ""});
     if (!algoId.isEmpty()) {
@@ -100,7 +106,7 @@ void PnlCurveItem::drawSeries(QPainter& painter, const QVector<PnlPoint>& pts, c
     const QPointF last = ptToScreen(pts.last());
     const QString label = QString("%1%2").arg(pts.last().pnl >= 0 ? "+" : "").arg(pts.last().pnl, 0, 'f', 2);
     painter.setPen(color);
-    painter.setFont(QFont("Roboto Mono", 8));
+    painter.setFont(labelFont());
     painter.drawText(static_cast<int>(last.x()) + 4, static_cast<int>(last.y()), label);
 }
 
@@ -124,7 +130,7 @@ void PnlCurveItem::paintEvent(QPaintEvent*) {
         for (auto& p : allPts) { minP = std::min(minP, p.pnl); maxP = std::max(maxP, p.pnl); }
         minP = std::min(minP, 0.0); maxP = std::max(maxP, 0.0);
         painter.setPen(QColor(160, 160, 160));
-        painter.setFont(QFont("Roboto Mono", 7));
+        painter.setFont(labelFont());
         painter.drawText(margin, area.top() + 10, QString("$%1").arg(maxP, 0, 'f', 2));
         painter.drawText(margin, area.bottom(), QString("$%1").arg(minP, 0, 'f', 2));
     }

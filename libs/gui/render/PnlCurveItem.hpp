@@ -9,6 +9,7 @@ Threading: Data appended on GUI thread; painted on GUI thread.
 #include <QVector>
 #include <QPair>
 #include <QString>
+#include <QFont>
 #include <cstdint>
 
 class PnlCurveItem : public QWidget {
@@ -21,6 +22,8 @@ public:
     void appendPoint(int64_t timestampMs, double totalPnl, const QString& algoId);
     void setWindow(Window w);
     void clear();
+    void setEmptyText(const QString& text);
+    static QFont labelFont();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
