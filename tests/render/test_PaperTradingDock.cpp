@@ -1072,3 +1072,12 @@ TEST(PaperPolish, AlgoButtonsUseReadableDirectionAndDisabledColours) {
     for (const char* hex : {"#2EBD85", "#FF8C82", "#84909C"})
         EXPECT_GE((luminance(QColor(hex)) + 0.05) / (background + 0.05), 4.5);
 }
+
+TEST(PaperPolish, LastPriceStaysPrimaryColour) {
+    PaperTradingDock dock;
+    dock.setSymbol("BTC-USD");
+    dock.onTradeReceived(tick("BTC-USD", 74000.0));
+    auto* last = dock.findChild<QLabel*>("paperLastPrice");
+    ASSERT_NE(last, nullptr);
+    EXPECT_TRUE(last->styleSheet().contains("#E6EDF3"));
+}

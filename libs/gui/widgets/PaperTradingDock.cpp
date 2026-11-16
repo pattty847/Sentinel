@@ -994,10 +994,7 @@ void PaperTradingDock::onTradeReceived(const Trade& trade) {
     }
     if (!std::isfinite(trade.price) || trade.price <= 0.0) return;
     if (m_lastPriceLabel) {
-        const QString sideColor = trade.side == AggressorSide::Buy ? "#4caf50"
-                                : trade.side == AggressorSide::Sell ? "#f44336"
-                                : "#e0e0e0";
-        m_lastPriceLabel->setStyleSheet(QString("QLabel { color: %1; }").arg(sideColor));
+        m_lastPriceLabel->setStyleSheet("color: #E6EDF3; font-size: 16px; font-weight: 500;");
         updatePricePrecision(trade.price);
         m_shownLast = trade.price;
         m_lastPriceLabel->setText(shownPrice(m_symbol, trade.price));

@@ -191,7 +191,7 @@ TEST(FontWidgets, PaperTradingRuntimeAndHiddenWidgetsInheritSelectedFont) {
             if (label->text().startsWith(QStringLiteral("$71,023"))) {
                 foundPrice = true;
                 EXPECT_EQ(QFontInfo(label->font()).family(), family);
-                EXPECT_TRUE(label->styleSheet().contains(QStringLiteral("#4caf50")));
+                EXPECT_TRUE(label->styleSheet().contains(QStringLiteral("#E6EDF3")));
             }
         }
         EXPECT_TRUE(foundPrice);
