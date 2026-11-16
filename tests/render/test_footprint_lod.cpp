@@ -103,6 +103,22 @@ TEST(FootprintLod, BudgetBandRowsFitTheWorstCaseVisibleCells) {
             EXPECT_LE(bars * ((rows + k - 1) / k + 1), 65536) << bars << ' ' << rows;
         }
 }
+TEST(FootprintLod, BudgetBandRowsHoldAcrossZoomUntilTheSmallerFactorFitsTheMargin) {
+    using chart::footprintBudgetBandRows;
+    // 2049 bars: 30 bands per bar in 65536 cells, 28 in the 61440 the margin leaves.
+    EXPECT_EQ(footprintBudgetBandRows(2049, 271, 65536, 9), 10) << "growing to fit is immediate";
+    EXPECT_EQ(footprintBudgetBandRows(2049, 270, 65536, 0), 9) << "no history: plain fit";
+    EXPECT_EQ(footprintBudgetBandRows(2049, 270, 65536, 10), 10) << "9 fits, but not with the margin";
+    EXPECT_EQ(footprintBudgetBandRows(2049, 252, 65536, 10), 9) << "9 x 28 = 252 rows: clears the margin";
+    EXPECT_EQ(footprintBudgetBandRows(2049, 252, 65536, 40), 9) << "a held k never exceeds the margin's k";
+    for (int64_t bars : {1, 7, 300, 2049, 8193})
+        for (int64_t rows : {1, 50, 271, 1001, 100000})
+            for (int64_t previous : {0, 1, 9, 34, 481, 100000}) {
+                const auto k = footprintBudgetBandRows(bars, rows, 65536, previous);
+                EXPECT_LE(bars * ((rows + k - 1) / k + 1), 65536) << bars << ' ' << rows << ' ' << previous;
+                EXPECT_GE(k, chart::footprintBudgetFitRows(bars, rows, 65536));
+            }
+}
 TEST(FootprintLod, SpanCountIsConservativeAndIgnoresRoundingNoise) {
     using chart::footprintSpanCount;
     EXPECT_EQ(footprintSpanCount(2048), 2049);

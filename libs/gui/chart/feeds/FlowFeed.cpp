@@ -110,7 +110,7 @@ Budget budget(const chart_raster::RasterCamera& cam, int64_t timeframeMs, double
     const int64_t bars = footprintSpanCount(columns), rows = footprintSpanCount(rowsShown);
     Budget plan;
     plan.band = std::max(footprintBandRows(cam.rowPxF / cam.dpr, stage, previous),
-                         footprintBudgetBandRows(bars, rows, FlowSnapshot::kMaxCells));
+                         footprintBudgetBandRows(bars, rows, FlowSnapshot::kMaxCells, previous));
     const double perBar = double(std::max<int64_t>(1, FlowSnapshot::kMaxCells / bars - 1));
     plan.padPrice = std::clamp((perBar * double(plan.band) - double(rows)) * 0.5, 0.0, height / cam.tick) * cam.tick;
     plan.padMs = std::clamp((FlowSnapshot::kMaxBars - 2 - columns) * 0.5 * double(timeframeMs), 0.0, width);

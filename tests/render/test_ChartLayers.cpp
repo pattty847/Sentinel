@@ -528,6 +528,31 @@ TEST(FootprintBands, BudgetBandFactorIgnoresPanRoundingOnADecimalTick) {
     }
     EXPECT_EQ(factors, std::set<int64_t>{10}) << "2049 bars x 300 rows: k = 10 on every pan";
 }
+TEST(FootprintBands, BudgetBandFactorHoldsAcrossZoomAtItsBoundary) {
+    // 2049 bars leave 30 bands per bar in 65536 cells: 271 rows need k = 10, 270 rows fit
+    // k = 9. A price zoom jittering across that boundary must not flip the band factor.
+    auto frame = footprintFrame();
+    auto& r = frame.raster;
+    r.widthDev = 4096; r.colPx = 2; r.colPxF = 2; r.dpr = 1; r.heightDev = 299; r.rowPx = 1;
+    const FlowSeriesBuffer::Series empty;
+    auto out = std::make_unique<chart::FlowSnapshot>();
+    const auto band = [&](double rows, int64_t previous) {
+        r.rowPxF = 299 / (rows - 1.5); // footprintSpanCount: ceil(299 / row) + 1 == rows
+        EXPECT_TRUE(chart::FlowFeed::bin(*out, empty, frame, chart::FootprintStage::Strip, previous));
+        return out->bandRows;
+    };
+    ASSERT_EQ(band(271, 0), 10);
+    ASSERT_EQ(band(270, 0), 9) << "no history: the plain budget factor";
+    int64_t k = 10, changes = 0;
+    for (double rows : {270., 271., 270., 269., 271., 265., 270.}) {
+        const auto next = band(rows, k);
+        changes += next != k; k = next;
+    }
+    EXPECT_EQ(changes, 0) << "the held factor still fits the budget";
+    EXPECT_EQ(band(240, k), 9) << "a clear zoom in lowers the factor";
+    EXPECT_EQ(band(271, 9), 10) << "growing to fit the budget is immediate";
+    EXPECT_LE(out->cellCount, chart::FlowSnapshot::kMaxCells);
+}
 // 1m history one bar wider than the widest supported view, 200 rows per bar spread
 // over 2880 rows, one unit of delta per bar.
 const FlowSeriesBuffer::Series& widestSeries() {
