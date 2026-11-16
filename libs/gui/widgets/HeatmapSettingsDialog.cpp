@@ -43,7 +43,8 @@ QString themed(QString qss) {
     const std::pair<const char *, QColor> tokens[] = {
         {"@textOff", theme::textOff()}, {"@text3", theme::text3()}, {"@text", theme::text()},
         {"@selLine", theme::selLine()}, {"@sel", theme::sel()},     {"@accent", theme::accent()},
-        {"@bg1", theme::bg1()},         {"@bg2", theme::bg2()},     {"@line", theme::line()}};
+        {"@bg1", theme::bg1()},         {"@bg2", theme::bg2()},     {"@line", theme::line()},
+        {"@primary", theme::primary()}};
     for (const auto &[name, color] : tokens) qss.replace(QLatin1String(name), color.name(QColor::HexRgb).toUpper());
     return qss;
 }
@@ -53,7 +54,15 @@ QString dialogStyle() {
         // Checkboxes: an empty box when off, a white tick on the selection fill when on.
         "QCheckBox::indicator { width: 14px; height: 14px; background: @bg2; border: 1px solid @line; border-radius: 3px; }"
         "QCheckBox::indicator:checked { background: @sel; border-color: @accent; image: url(:/svg/checkbox_tick.svg); }"
-        "QCheckBox::indicator:disabled { border-color: @textOff; }"));
+        "QCheckBox::indicator:disabled { border-color: @textOff; }"
+        // Buttons: action by default; quiet (Reset, Log settings) is text only; Close is the one primary.
+        "QPushButton { background: @bg2; color: @text; border: 1px solid @line; border-radius: 3px; padding: 4px 10px; }"
+        "QPushButton:hover { border-color: @selLine; }"
+        "QPushButton:disabled { color: @textOff; }"
+        "QPushButton[settingsRole=\"quiet\"] { background: transparent; border-color: transparent; color: @text3; padding: 2px 6px; }"
+        "QPushButton[settingsRole=\"quiet\"]:hover { color: @text; border-color: @line; }"
+        "QPushButton#settingsClose { background: @primary; border-color: @primary; color: #FFFFFF; padding: 6px 16px; }"
+        "QPushButton#settingsClose:hover { background: #3472A0; border-color: #3472A0; }"));
 }
 
 struct SliderWithLabel {
@@ -371,22 +380,32 @@ void HeatmapSettingsDialog::buildUi() {
     m_status->setWordWrap(true);
     layout->addWidget(m_status);
 
+    // Footer: the current tab's Reset as a quiet action on the left, Close (the
+    // only primary) on the right.
+    auto *footer = new QHBoxLayout;
+    QList<QPushButton *> resets;
+    for (int i = 0; i < m_tabs->count(); ++i) {
+        resets << resetButton(m_tabs->tabText(i), this);
+        resets.back()->setVisible(i == m_tabs->currentIndex());
+        footer->addWidget(resets.back());
+    }
+    connect(m_tabs, &QTabWidget::currentChanged, this, [resets](int index) {
+        for (int i = 0; i < resets.size(); ++i) resets[i]->setVisible(i == index);
+    });
+    footer->addStretch();
     auto *buttons = new QDialogButtonBox(this);
-    auto *logButton = buttons->addButton("Log Settings", QDialogButtonBox::ActionRole);
     auto *closeButton = buttons->addButton(QDialogButtonBox::Close);
-    logButton->setToolTip("Write this chart's settings and gamma, contrast and floor values to the Sentinel run log. Use it when diagnosing the chart.");
+    closeButton->setObjectName("settingsClose");
     closeButton->setToolTip("Close settings; changes already applied stay in effect. Session-only changes last until the app closes.");
-    buttons->setStyleSheet(
-        "QDialogButtonBox QPushButton { background-color: #2B5A7A; color: #FFFFFF; border: none; padding: 8px 16px; border-radius: 4px; }"
-        "QDialogButtonBox QPushButton:hover { background-color: #3472A0; }");
-    layout->addWidget(buttons);
-    connect(logButton, &QPushButton::clicked, this, &HeatmapSettingsDialog::logSettings);
+    footer->addWidget(buttons);
+    layout->addLayout(footer);
     connect(closeButton, &QPushButton::clicked, this, &QDialog::close);
 }
 
 QPushButton *HeatmapSettingsDialog::resetButton(const QString &tab, QWidget *parent) {
     auto *button = new QPushButton("Reset " + tab + " to defaults", parent);
     button->setObjectName("reset" + tab);
+    button->setProperty("settingsRole", "quiet");
     button->setToolTip("Restore the configured defaults for " + tab + ". Use it to undo changes on this tab."
                       + (tab == "Chart" ? " Candle style is not reset." : ""));
     connect(button, &QPushButton::clicked, this, [this, tab] {
@@ -532,7 +551,6 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_candlePreview = new CandlePreview(m_model, candles);
     candleForm->addRow("Preview", m_candlePreview);
     form->addRow(candles);
-    form->addRow(resetButton("Chart", page));
     describe(form, m_showLabels, "Show liquidity sizes on GPU heatmap cells above the range low when text fits. Turn off to reduce clutter.");
     describe(form, currencyRow, "Show liquidity as USD notional or base-asset size. Use USD to compare value, or Asset to compare quantity.");
     m_labelCurrencySymbol->setToolTip("Show a dollar sign before USD liquidity numbers in heatmap cells.");
@@ -610,7 +628,6 @@ QWidget *HeatmapSettingsDialog::buildTickTab() {
                       "hysteresis limits switching near that height. Picking a preset locks Manual. "
                       "The choice is remembered per symbol and timeframe; entering Manual restores it or locks the drawn tick. "
                       "Loaded data offers the presets. Columns that cannot build a locked tick are veiled.", page));
-    form->addRow(resetButton("Tick", page));
     describe(form, m_tickMode, "Auto adjusts GPU heatmap price rows as you zoom. Manual restores the tick remembered for this symbol and timeframe, or locks the drawn tick.");
     describe(form, m_manualTick, "Presets some loaded data can build. Picking one locks Manual.");
     describe(form, m_minRowPx, "Target minimum GPU heatmap row height in physical pixels (0.5-32) in Auto. Raise it for coarser, taller rows.");
@@ -704,7 +721,6 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     floorRow->addWidget(m_floorLabel);
     toneForm->addRow("Shader floor", floorRow);
     form->addRow(tone);
-    form->addRow(resetButton("Look", page));
     describe(form, m_palette, "Choose the heatmap's bid and ask colour scale. Pick Custom to use the gradient stops below.");
     describe(form, m_paperPositionStyle, "Show a compact position and live PnL tag at the entry line, or shade the full interval between entry and mark.");
     describe(form, m_bubblesOverFootprint, "Keep trade bubbles at full opacity, or dim their fill and ring to 35% while footprint numbers are drawn.");
@@ -781,7 +797,6 @@ QWidget *HeatmapSettingsDialog::buildBudgetsTab() {
     processForm->addRow(note("These apply process-wide, to every chart, at once. The CPU ceiling must be at least "
                              "decoded chunks + span sources; each tier is 1..4096 MiB.", process));
     layout->addWidget(process);
-    layout->addWidget(resetButton("Budgets", page));
     layout->addStretch();
     describe(chartForm, m_gpuCapMiB, "GPU heatmap cache budget for this chart, in MiB. Raise it if panning reloads tiles; tiles on screen or kept as a stand-in while detail loads can keep usage above the cap.");
     describe(chartForm, m_uploadKiB, "GPU heatmap upload budget per frame, in KiB; capped at 128 MiB and the GPU memory cap. Lower it to spread uploads across frames, or raise it to load tiles sooner.");
@@ -805,7 +820,6 @@ QWidget *HeatmapSettingsDialog::buildLiveTab() {
     form->addRow("Live min interval", m_liveMinInterval);
     form->addRow(note("The shortest spacing of live-edge compositions (the server publishes at 1 Hz). Slow "
                       "compositions back off to at least 5 s.", page));
-    form->addRow(resetButton("Live", page));
     describe(form, m_liveMinInterval, "Minimum spacing of GPU refreshes of the newest heatmap columns in milliseconds (100-5000); the server publishes at 1 Hz. Raise it to reduce refresh work; slow refreshes back off to at least 5 seconds.");
     connect(m_liveMinInterval, &QSpinBox::valueChanged, this, [this](int ms) { apply({{"liveMinIntervalMs", ms}}); });
     return page;
@@ -817,9 +831,14 @@ QWidget *HeatmapSettingsDialog::buildDebugTab() {
     m_showTelemetry = new QCheckBox("Show the heatmap telemetry dock", page);
     m_showTelemetry->setObjectName("showTelemetry");
     form->addRow("Telemetry", m_showTelemetry);
-    form->addRow(resetButton("Debug", page));
     describe(form, m_showTelemetry, "Show the heatmap telemetry dock with tick, cache, upload and timing values. Use it to diagnose missing data or slow rendering.");
     connect(m_showTelemetry, &QCheckBox::toggled, this, [this](bool on) { apply({{"showTelemetry", on}}); });
+    auto *logButton = new QPushButton("Log settings", page);
+    logButton->setObjectName("logSettings");
+    logButton->setProperty("settingsRole", "quiet");
+    form->addRow("Run log", logButton);
+    describe(form, logButton, "Write this chart's settings and gamma, contrast and floor values to the Sentinel run log. Use it when diagnosing the chart.");
+    connect(logButton, &QPushButton::clicked, this, &HeatmapSettingsDialog::logSettings);
     return page;
 }
 
@@ -855,7 +874,6 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
     m_tpoStyleEditor->setObjectName("tpoStyleEditor");
     form->addRow(m_tpoStyleEditor);
     form->addRow(note("Theme and style are saved for every chart.", page));
-    form->addRow(resetButton("TPO", page));
     describe(form, m_tpoTimeframeCombo, "Time covered by each TPO letter (15 minutes to 1 day). Use shorter brackets for more detail. A bracket that does not divide the session evenly, or gives too many columns, is changed to the nearest one that does. This session only.");
     describe(form, m_tpoSessionCombo, "Group TPO letters into a regional session, UTC day, week or month. Change it to compare profiles over that trading window; this session only.");
     describe(form, m_tpoLayoutCombo, "Collapsed packs each price row into a profile; Split keeps brackets in separate time columns. Use Split to follow the session's sequence, this session only.");

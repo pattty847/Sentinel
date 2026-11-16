@@ -1722,7 +1722,7 @@ TEST(HeatmapSettingsDialogTest, ShortDialogScrollsToLookControlsWithoutChangingP
     opacity->setValue(0.6);
     EXPECT_DOUBLE_EQ(t.reload().opacity, 0.6);
     auto *reset = child<QPushButton>(dialog, "resetLook");
-    scroll->ensureWidgetVisible(reset);
+    EXPECT_FALSE(scroll->isAncestorOf(reset)); // in the footer: visible without scrolling
     EXPECT_TRUE(reset->isVisible());
     reset->click();
     EXPECT_DOUBLE_EQ(t.reload().opacity, model.defaultSettings().opacity);
@@ -2039,6 +2039,49 @@ TEST(HeatmapSettingsDialogLook, CheckedBoxShowsAWhiteTickOnTheSelectionFill) {
     const QImage off = box->grab().toImage();
     EXPECT_GT(countColor(off, indicator, theme::bg2()), area / 2) << "empty bg2 box";
     EXPECT_EQ(countColor(off, indicator, theme::sel()), 0);
+}
+
+// SET-3: Close is the only primary button; each tab's Reset is a quiet action at
+// the footer's left (one at a time, never inside the scrolled tab); Log settings
+// is a quiet action inside the Debug tab.
+TEST(HeatmapSettingsDialogLook, CloseIsTheOnlyPrimaryAndResetIsAQuietFooterAction) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    dialog.resize(640, 600);
+    dialog.show();
+    QCoreApplication::processEvents();
+    const auto fill = [](QPushButton *button) {
+        return button->grab().toImage().pixelColor(button->width() - 3, button->height() / 2);
+    };
+    auto *close = child<QPushButton>(dialog, "settingsClose");
+    ASSERT_TRUE(close);
+    EXPECT_EQ(fill(close), theme::primary());
+    for (int tab = 0; tab < dialog.tabs()->count(); ++tab) {
+        dialog.tabs()->setCurrentIndex(tab);
+        QCoreApplication::processEvents();
+        const QString name = dialog.tabs()->tabText(tab);
+        SCOPED_TRACE(name.toStdString());
+        int visibleResets = 0;
+        for (auto *button : dialog.findChildren<QPushButton *>())
+            visibleResets += button->objectName().startsWith("reset") && button->isVisible();
+        EXPECT_EQ(visibleResets, 1);
+        auto *reset = child<QPushButton>(dialog, ("reset" + name).toUtf8().constData());
+        ASSERT_TRUE(reset);
+        EXPECT_TRUE(reset->isVisible());
+        EXPECT_FALSE(dialog.tabs()->isAncestorOf(reset));
+        EXPECT_LT(reset->mapTo(&dialog, QPoint()).x(), dialog.width() / 4);
+        EXPECT_LE(reset->height(), close->height());
+        EXPECT_NE(fill(reset), theme::primary());
+        for (auto *button : dialog.tabs()->currentWidget()->findChildren<QPushButton *>())
+            if (button->isVisible()) EXPECT_NE(fill(button), theme::primary()) << button->objectName().toStdString();
+    }
+    auto *log = child<QPushButton>(dialog, "logSettings");
+    ASSERT_TRUE(log);
+    int logTab = -1;
+    for (int tab = 0; tab < dialog.tabs()->count(); ++tab)
+        if (dialog.tabs()->widget(tab)->isAncestorOf(log)) logTab = tab;
+    EXPECT_EQ(dialog.tabs()->tabText(logTab), "Debug");
 }
 
 // Qt fixes the scene graph backend at the first QQuickWindow of the process,
