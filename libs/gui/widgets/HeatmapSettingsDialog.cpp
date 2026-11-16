@@ -29,6 +29,8 @@
 #include <QTabWidget>
 #include <QTabBar>
 #include <QTableWidget>
+#include <QToolButton>
+#include <QToolTip>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
@@ -65,7 +67,11 @@ QString dialogStyle() {
         "QPushButton#settingsClose:hover { background: #3472A0; border-color: #3472A0; }"
         // Sections: a dim title over a hairline, no box, so their rows share the page's grid.
         "QGroupBox { color: @text3; border: none; border-top: 1px solid @line; margin-top: 22px; padding: 0; }"
-        "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 0; top: 4px; padding: 0; }"));
+        "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 0; top: 4px; padding: 0; }"
+        "QToolButton#settingsHelp { color: @text3; background: transparent; border: 1px solid @line; border-radius: 8px;"
+        " min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; padding: 0; }"
+        "QToolButton#settingsHelp:hover { color: @text; border-color: @selLine; }"
+        "QLabel#settingsNote { color: @text3; }"));
 }
 
 // One form grid on every tab: a right-aligned label column, then the fields.
@@ -136,11 +142,18 @@ QSpinBox *intSpin(QWidget *parent, const char *name, int lo, int hi, int step, c
     spin->setKeyboardTracking(false);
     return spin;
 }
-QLabel *note(const QString &text, QWidget *parent) {
-    auto *label = new QLabel(text, parent);
-    label->setWordWrap(true);
-    label->setStyleSheet("QLabel { color: #AABBC6; }");
-    return label;
+// A group's longer explanation sits behind a "?" (hover or click) instead of a
+// permanent paragraph.
+void addHelp(QFormLayout *form, const QString &text, QWidget *parent) {
+    auto *button = new QToolButton(parent);
+    button->setObjectName("settingsHelp");
+    button->setText("?");
+    button->setAccessibleName("Help");
+    button->setToolTip("<p>" + text.toHtmlEscaped() + "</p>"); // rich text wraps
+    QObject::connect(button, &QToolButton::clicked, button, [button] {
+        QToolTip::showText(button->mapToGlobal(QPoint(0, button->height())), button->toolTip(), button);
+    });
+    form->addRow(QString(), button);
 }
 // A setting's name and control explain the same thing on hover.
 void describe(QFormLayout *form, QWidget *field, const QString &text) {
@@ -408,7 +421,9 @@ void HeatmapSettingsDialog::buildUi() {
             : "Open " + m_tabs->tabText(i) + " settings for this chart.");
     for (auto *button : m_tabs->tabBar()->findChildren<QAbstractButton *>())
         button->setToolTip("Scroll the tab strip to reach more settings tabs.");
-    layout->addWidget(note("Changes take effect immediately. Close keeps saved chart settings; session-only controls are labelled.", this));
+    auto *note = new QLabel("Changes take effect immediately.", this);
+    note->setObjectName("settingsNote");
+    layout->addWidget(note);
     layout->addWidget(m_tabs);
 
     m_status = new QLabel(this);
@@ -491,9 +506,8 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_labelMaxPx->setSuffix(" px");
     form->addRow("Label size, smallest", m_labelMinPx);
     form->addRow("Label size, largest", m_labelMaxPx);
-    form->addRow(note("GPU labels appear on coloured cells above the range low when the text fits. "
-                      "Their size grows with the cell, up to the largest size.",
-                      page));
+    addHelp(form, "GPU labels appear on coloured cells above the range low when the text fits. "
+                  "Their size grows with the cell, up to the largest size.", page);
     addFlowControls(form, page);
     auto* bubbleGroup = new QGroupBox("Trade bubbles", page);
     auto* bubbleLayout = new QVBoxLayout(bubbleGroup);
@@ -660,10 +674,10 @@ QWidget *HeatmapSettingsDialog::buildTickTab() {
     form->addRow("Min row height (Auto)", m_minRowPx);
     m_hysteresis = doubleSpin(page, "hysteresis", 0, 0.9, 0.05, 2);
     form->addRow("Hysteresis h (Auto)", m_hysteresis);
-    form->addRow(note("GPU heatmap: Auto chooses a tick that keeps rows at least the minimum height; "
-                      "hysteresis limits switching near that height. Picking a preset locks Manual. "
-                      "The choice is remembered per symbol and timeframe; entering Manual restores it or locks the drawn tick. "
-                      "Loaded data offers the presets. Columns that cannot build a locked tick are veiled.", page));
+    addHelp(form, "GPU heatmap: Auto chooses a tick that keeps rows at least the minimum height; "
+                  "hysteresis limits switching near that height. Picking a preset locks Manual. "
+                  "The choice is remembered per symbol and timeframe; entering Manual restores it or locks the drawn tick. "
+                  "Loaded data offers the presets. Columns that cannot build a locked tick are veiled.", page);
     describe(form, m_tickMode, "Auto adjusts GPU heatmap price rows as you zoom. Manual restores the tick remembered for this symbol and timeframe, or locks the drawn tick.");
     describe(form, m_manualTick, "Presets some loaded data can build. Picking one locks Manual.");
     describe(form, m_minRowPx, "Target minimum GPU heatmap row height in physical pixels (0.5-32) in Auto. Raise it for coarser, taller rows.");
@@ -819,7 +833,7 @@ QWidget *HeatmapSettingsDialog::buildBudgetsTab() {
     chartForm->addRow("GPU memory cap", m_gpuCapMiB);
     m_uploadKiB = intSpin(chart, "uploadBudgetBytes", 1, 128 * 1024, 512, " KiB");
     chartForm->addRow("Upload budget per frame", m_uploadKiB);
-    chartForm->addRow(note("The upload budget is at most 128 MiB and at most the GPU cap.", chart));
+    addHelp(chartForm, "The upload budget is at most 128 MiB and at most the GPU cap.", chart);
     layout->addWidget(chart);
 
     auto *process = new QGroupBox("Process RAM tiers (all charts)", page);
@@ -830,8 +844,8 @@ QWidget *HeatmapSettingsDialog::buildBudgetsTab() {
     processForm->addRow("Decoded chunks", m_decodedMiB);
     processForm->addRow("Span sources", m_spanMiB);
     processForm->addRow("CPU ceiling", m_ceilingMiB);
-    processForm->addRow(note("These apply process-wide, to every chart, at once. The CPU ceiling must be at least "
-                             "decoded chunks + span sources; each tier is 1..4096 MiB.", process));
+    addHelp(processForm, "These apply process-wide, to every chart, at once. The CPU ceiling must be at least "
+                         "decoded chunks + span sources; each tier is 1..4096 MiB.", process);
     layout->addWidget(process);
     layout->addStretch();
     describe(chartForm, m_gpuCapMiB, "GPU heatmap cache budget for this chart, in MiB. Raise it if panning reloads tiles; tiles on screen or kept as a stand-in while detail loads can keep usage above the cap.");
@@ -854,8 +868,8 @@ QWidget *HeatmapSettingsDialog::buildLiveTab() {
     auto *form = new QFormLayout(page);
     m_liveMinInterval = intSpin(page, "liveMinIntervalMs", 100, 5000, 50, " ms");
     form->addRow("Live min interval", m_liveMinInterval);
-    form->addRow(note("The shortest spacing of live-edge compositions (the server publishes at 1 Hz). Slow "
-                      "compositions back off to at least 5 s.", page));
+    addHelp(form, "The shortest spacing of live-edge compositions (the server publishes at 1 Hz). Slow "
+                  "compositions back off to at least 5 s.", page);
     describe(form, m_liveMinInterval, "Minimum spacing of GPU refreshes of the newest heatmap columns in milliseconds (100-5000); the server publishes at 1 Hz. Raise it to reduce refresh work; slow refreshes back off to at least 5 seconds.");
     connect(m_liveMinInterval, &QSpinBox::valueChanged, this, [this](int ms) { apply({{"liveMinIntervalMs", ms}}); });
     return page;
@@ -881,7 +895,6 @@ QWidget *HeatmapSettingsDialog::buildDebugTab() {
 QWidget *HeatmapSettingsDialog::buildTpoTab() {
     auto *page = new QWidget(this);
     auto *form = new QFormLayout(page);
-    form->addRow(note("Bracket, session and layout apply to this session.", page));
     m_tpoTimeframeCombo = new QComboBox(page);
     m_tpoTimeframeCombo->addItem("15m", 900000);
     m_tpoTimeframeCombo->addItem("30m", 1800000);
@@ -909,7 +922,7 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
     m_tpoStyleEditor = new TpoStyleEditor(page);
     m_tpoStyleEditor->setObjectName("tpoStyleEditor");
     form->addRow(m_tpoStyleEditor);
-    form->addRow(note("Theme and style are saved for every chart.", page));
+    addHelp(form, "Bracket, session and layout apply to this session. Theme and style are saved for every chart.", page);
     describe(form, m_tpoTimeframeCombo, "Time covered by each TPO letter (15 minutes to 1 day). Use shorter brackets for more detail. A bracket that does not divide the session evenly, or gives too many columns, is changed to the nearest one that does. This session only.");
     describe(form, m_tpoSessionCombo, "Group TPO letters into a regional session, UTC day, week or month. Change it to compare profiles over that trading window; this session only.");
     describe(form, m_tpoLayoutCombo, "Collapsed packs each price row into a profile; Split keeps brackets in separate time columns. Use Split to follow the session's sequence, this session only.");

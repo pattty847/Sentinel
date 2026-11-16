@@ -52,6 +52,8 @@
 #include <QSpinBox>
 #include <QSlider>
 #include <QStyleOption>
+#include <QLabel>
+#include <QToolButton>
 #include "chart/shell/TradeBubbleStyleStore.hpp"
 #include <QTabWidget>
 #include <QTableWidget>
@@ -2124,6 +2126,28 @@ TEST(HeatmapSettingsDialogLook, EveryTabSharesOneRightAlignedFormGrid) {
         ASSERT_EQ(fieldStarts.size(), 1u) << "fields start at one x";
         EXPECT_EQ(*fieldStarts.begin() - *labelEnds.begin(), 8);
     }
+}
+
+// SET-2: no permanent help paragraphs; the dialog says one sentence, and each
+// group's longer explanation sits behind its "?".
+TEST(HeatmapSettingsDialogLook, LongHelpSitsBehindAQuestionMarkPerGroup) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    EXPECT_EQ(child<QLabel>(dialog, "settingsNote")->text(), "Changes take effect immediately.");
+    for (int tab = 0; tab < dialog.tabs()->count(); ++tab)
+        for (auto *label : dialog.tabs()->widget(tab)->findChildren<QLabel *>())
+            EXPECT_FALSE(label->text().contains(". ")) << "a paragraph on " << dialog.tabs()->tabText(tab).toStdString()
+                                                       << ": " << label->text().toStdString();
+    QStringList help;
+    for (auto *button : dialog.findChildren<QToolButton *>("settingsHelp")) {
+        EXPECT_EQ(button->text(), "?");
+        help << button->toolTip();
+    }
+    for (const char *phrase : {"Their size grows with the cell", "Picking a preset locks Manual",
+                               "at most the GPU cap", "each tier is 1..4096 MiB", "back off to at least 5 s",
+                               "Theme and style are saved for every chart"})
+        EXPECT_TRUE(help.join('\n').contains(phrase)) << phrase;
 }
 
 // Qt fixes the scene graph backend at the first QQuickWindow of the process,
