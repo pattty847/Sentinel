@@ -1855,8 +1855,8 @@ TEST(CvdLayer, OpaqueThemePanelDividerAndLineDefaultsReachGeometry) {
 }
 
 #include "render/ChartTextLayout.hpp"
-TEST(ChartTextLayer, PlotIdUsesMicroLabelAndHidesOnLabelCollision) {
-    EXPECT_EQ(chart::ChartTextLayer::kPlotIdPx, 10);
+TEST(ChartTextLayer, PlotIdUsesCrispLabelAndHidesOnTextOrCandleCollision) {
+    EXPECT_EQ(chart::ChartTextLayer::kPlotIdPx, 13);
     EXPECT_EQ(chart::ChartTextLayer::formatPlotId("BTC-USD", 60'000), QStringLiteral("BTC-USD · 1m"));
     EXPECT_EQ(chart::ChartTextLayer::formatPlotId("ETH-USD", 3'600'000), QStringLiteral("ETH-USD · 1h"));
     const QRectF box(5, 4, 90, 12);
@@ -1864,6 +1864,18 @@ TEST(ChartTextLayer, PlotIdUsesMicroLabelAndHidesOnLabelCollision) {
     EXPECT_FALSE(chart::ChartTextLayer::clearOfLabels(box, glyphs));
     glyphs[0].rect.moveLeft(100);
     EXPECT_TRUE(chart::ChartTextLayer::clearOfLabels(box, glyphs));
+    chart_raster::RasterCamera raster;
+    raster.dpr = 1; raster.tfMs = 1000; raster.tick = 1;
+    raster.colPxF = 10; raster.rowPxF = 10; raster.leftF = 0; raster.topF = 100;
+    chart::CandleBar candle;
+    candle.timeStartMs = 1000; candle.timeEndMs = 2000;
+    candle.high = 9.5; candle.low = 8.5; candle.open = 9; candle.close = 9;
+    EXPECT_TRUE(chart::ChartTextLayer::candleCrosses({candle}, 2000, raster,
+                                                     QRectF(0, 0, 200, 100), box))
+        << "the wick crosses the plot ID although its body is below it";
+    candle.high = 2; candle.low = 1;
+    EXPECT_FALSE(chart::ChartTextLayer::candleCrosses({candle}, 2000, raster,
+                                                      QRectF(0, 0, 200, 100), box));
 }
 namespace {
 class CvdPriceTicks final : public AxisModel {

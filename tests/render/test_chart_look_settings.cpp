@@ -42,7 +42,7 @@ struct Ports final : chart::IChartEnvironment, chart::ITickOracle, chart::IHeatm
     void setView(const heatmap::gpu::ViewWindow&, bool) override {}
 };
 
-TEST(ChartTextLayer, CandleCaptureFollowsFootprintAndVolumeProfileVisibility) {
+TEST(ChartTextLayer, CandleCaptureKeepsPlotIdOcclusionFreshWithoutOverlays) {
     Ports ports;
     chart::PublishedFrame published;
     chart::ChartViewController view(ports, ports, ports, published);
@@ -50,22 +50,24 @@ TEST(ChartTextLayer, CandleCaptureFollowsFootprintAndVolumeProfileVisibility) {
     chart::LayerVisibility visibility;
     chart::ChartLayers layers;
     layers.text.bindCandles(view, candles, visibility);
-    EXPECT_EQ(layers.text.candleRefreshCount(), 0u);
+    EXPECT_EQ(layers.text.candleRefreshCount(), 1u);
     QSignalSpy pans(view.viewPtr(), &GridViewState::panVisualOffsetChanged);
     view.viewPtr()->setViewport(1000, 2000, 95, 105);
     view.viewPtr()->handlePanStart({20, 20});
     view.viewPtr()->handlePanMove({30, 20});
     EXPECT_GT(pans.count(), 0);
-    EXPECT_EQ(layers.text.candleRefreshCount(), 0u);
+    const auto afterPan = layers.text.candleRefreshCount();
+    EXPECT_GT(afterPan, 1u);
     visibility.setFootprintEnabled(true);
-    EXPECT_EQ(layers.text.candleRefreshCount(), 1u);
+    EXPECT_EQ(layers.text.candleRefreshCount(), afterPan);
     visibility.setVolumeProfileEnabled(true);
-    EXPECT_EQ(layers.text.candleRefreshCount(), 1u) << "switching between active overlays is not a new capture";
+    EXPECT_EQ(layers.text.candleRefreshCount(), afterPan) << "overlay toggles do not duplicate captures";
     visibility.setVolumeProfileEnabled(false);
     view.viewPtr()->setViewport(2000, 3000, 95, 105);
-    EXPECT_EQ(layers.text.candleRefreshCount(), 1u);
+    EXPECT_GT(layers.text.candleRefreshCount(), afterPan);
+    const auto afterViewport = layers.text.candleRefreshCount();
     visibility.setVolumeProfileEnabled(true);
-    EXPECT_EQ(layers.text.candleRefreshCount(), 2u);
+    EXPECT_EQ(layers.text.candleRefreshCount(), afterViewport);
 }
 
 TEST(ChartLookSettings, TpoConfigAndStyleKeepNoticeOrder) {
