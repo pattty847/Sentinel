@@ -162,6 +162,8 @@ void WatchlistDock::buildUi() {
 
     m_model->setHorizontalHeaderLabels({"Symbol", "Name"});
     m_tree->setObjectName("watchRows");
+    m_tree->setProperty("toolTipBesideRow", true);
+    m_tree->setMouseTracking(true);
     m_tree->setModel(m_model);
     m_tree->setRootIsDecorated(false);
     m_tree->setUniformRowHeights(true);
@@ -171,6 +173,7 @@ void WatchlistDock::buildUi() {
     m_tree->setAlternatingRowColors(false);
     m_tree->setStyleSheet(
         "QTreeView { background:#1a1a1a; alternate-background-color:#202020; color:#e0e0e0; }"
+        "QTreeView::item:hover { background:#20252B; }"
         "QTreeView::item:selected { background:#3a4652; color:#fff; }"
         "QHeaderView::section { background:#252525; color:#aaa; border:none; padding:3px; }");
     m_tree->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);

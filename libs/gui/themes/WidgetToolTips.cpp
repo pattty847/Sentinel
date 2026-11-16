@@ -8,6 +8,9 @@
 #include <QHeaderView>
 #include <QHelpEvent>
 #include <QMenu>
+#include <QScreen>
+#include <QTextDocument>
+#include <cmath>
 #include <QStringList>
 #include <QTabBar>
 #include <QToolTip>
@@ -62,6 +65,7 @@ bool WidgetToolTips::eventFilter(QObject* watched, QEvent* event) {
     auto* help = static_cast<QHelpEvent*>(event);
     QString tip = widget->toolTip();
     QRect tipRect;
+    bool besideRow = false;
     if (auto* view = qobject_cast<QAbstractItemView*>(widget->parentWidget())) {
         if (view->viewport() == widget) {
             const QModelIndex index = view->indexAt(help->pos());
@@ -69,6 +73,8 @@ bool WidgetToolTips::eventFilter(QObject* watched, QEvent* event) {
             if (!itemTip.isEmpty()) {
                 tip = itemTip;
                 tipRect = view->visualRect(index);
+                besideRow = view->property("toolTipBesideRow").toBool();
+                if (besideRow) tipRect = QRect(0, tipRect.top(), widget->width(), tipRect.height());
             }
         }
     }
@@ -93,6 +99,18 @@ bool WidgetToolTips::eventFilter(QObject* watched, QEvent* event) {
                                                           Qt::ToolTipRole).toString();
     }
     if (tip.isEmpty()) return false;
-    QToolTip::showText(help->globalPos(), wrappedText(tip), widget, tipRect);
+    QPoint position = help->globalPos();
+    const QString wrapped = wrappedText(tip);
+    if (besideRow) {
+        QTextDocument document;
+        document.setDefaultFont(QToolTip::font());
+        document.setHtml(wrapped);
+        const int width = int(std::ceil(document.idealWidth())) + 16;
+        const QRect row(widget->mapToGlobal(tipRect.topLeft()), tipRect.size());
+        const QRect screen = widget->screen()->availableGeometry();
+        position = QPoint(row.right() + 8, row.top());
+        if (position.x() + width > screen.right()) position.setX(row.left() - width - 8);
+    }
+    QToolTip::showText(position, wrapped, widget, tipRect);
     return true;
 }

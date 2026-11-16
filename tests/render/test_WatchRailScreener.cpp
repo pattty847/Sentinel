@@ -3,6 +3,9 @@
 #include "protocol/SentinelStreamClient.hpp"
 #include "themes/FontManager.hpp"
 #include "themes/ThemeManager.hpp"
+#include "themes/WidgetToolTips.hpp"
+#include <QHelpEvent>
+#include <QToolTip>
 
 #include <QApplication>
 #include <QComboBox>
@@ -163,6 +166,31 @@ TEST(WatchRail, ActionsHaveAVisibleSurfaceAndReadableDisabledInk) {
         EXPECT_EQ(pixels.pixelColor(2, button->height() / 2), QColor("#20252B"));
         EXPECT_EQ(pixels.pixelColor(0, button->height() / 2), QColor("#2B3138"));
     }
+}
+
+TEST(WatchRail, HoverHighlightsTheRowAndTooltipStaysBesideIt) {
+    WatchlistDock dock;
+    dock.resize(400, 400);
+    dock.move(0, 0);
+    dock.show();
+    dock.setChartSwitchState("BTC-USD", "");
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    QCoreApplication::processEvents();
+    const auto first = tree->visualRect(tree->model()->index(0, 0));
+    QTest::mouseMove(tree->viewport(), first.center());
+    QCoreApplication::processEvents();
+    const auto pixels = tree->viewport()->grab().toImage();
+    EXPECT_EQ(pixels.pixelColor(first.right() - 6, first.center().y()), QColor("#20252B"));
+    auto* tips = WidgetToolTips::install(qApp);
+    QHelpEvent help(QEvent::ToolTip, first.center(), tree->viewport()->mapToGlobal(first.center()));
+    QApplication::sendEvent(tree->viewport(), &help);
+    EXPECT_TRUE(QToolTip::isVisible());
+    const QRect row(tree->viewport()->mapToGlobal(QPoint(0, first.top())), QSize(tree->viewport()->width(), first.height()));
+    for (auto* widget : QApplication::topLevelWidgets())
+        if (widget->objectName() == "qtooltip_label" && widget->isVisible())
+            EXPECT_FALSE(widget->geometry().intersects(row));
+    QToolTip::hideText();
+    delete tips;
 }
 
 TEST(WatchRail, PinsPersistWithDefaultFormatSettings) {
