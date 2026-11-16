@@ -1126,6 +1126,11 @@ TEST(PaperPolish, EmergencyActionsSurviveReconnectWithoutSnapshot) {
     EXPECT_TRUE(flatten->isEnabled());
     EXPECT_TRUE(cancel->isEnabled());
     EXPECT_FALSE(flatten->toolTip().contains("snapshot"));
+    flatten->click();
+    cancel->click();
+    ASSERT_EQ(source.trades.size(), 2u);
+    EXPECT_EQ(source.trades[0].action, trading::TradeAction::Flatten);
+    EXPECT_EQ(source.trades[1].action, trading::TradeAction::CancelAll);
     dock.setSymbol("ETH-USD");
     EXPECT_TRUE(flatten->isEnabled());
     EXPECT_TRUE(cancel->isEnabled());
