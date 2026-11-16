@@ -313,12 +313,12 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 }
 
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
-    if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelMinPx", "labelMaxPx",
+    if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelCurrencySymbol", "labelMinPx", "labelMaxPx",
                                 "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleBodyFraction", "candleMaxBodyPx", "candleWickWidth", "showVolumeBars", "volumeBandPercent", "volumeOpacity", "footprintIntensity", "footprintCandle", "footprintNumbers",
                                 "footprintDustNotional", "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "cvdFillAnchor"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
-        return {"palettePreset", "bidGradient", "askGradient", "opacity", "labelCurrency", "labelCurrencySymbol",
+        return {"palettePreset", "bidGradient", "askGradient", "opacity",
                 "crossfadeMs", "showBandEdges", "smoothZoomOut", "paperPositionStyle", "bubblesOverFootprint"};
     if (tab == "Budgets") return {"gpuCapBytes", "uploadBudgetBytes", "prefetchTiles"};
     if (tab == "Live") return {"liveMinIntervalMs"};
@@ -400,6 +400,16 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_showLabels = new QCheckBox("Show liquidity labels on heatmap cells", page);
     m_showLabels->setObjectName("showLabels");
     form->addRow("Labels", m_showLabels);
+    auto *currencyRow = new QHBoxLayout;
+    m_labelCurrency = new QComboBox(page);
+    m_labelCurrency->setObjectName("labelCurrency");
+    m_labelCurrency->addItem("USD (1.24M)", "usd");
+    m_labelCurrency->addItem("Asset (12.5)", "asset");
+    currencyRow->addWidget(m_labelCurrency);
+    m_labelCurrencySymbol = new QCheckBox("Show $ on cells", page);
+    m_labelCurrencySymbol->setObjectName("labelCurrencySymbol");
+    currencyRow->addWidget(m_labelCurrencySymbol);
+    form->addRow("Label currency", currencyRow);
     m_labelMinPx = doubleSpin(page, "labelMinPx", 8, 24, 0.5, 1);
     m_labelMinPx->setSuffix(" px");
     m_labelMaxPx = doubleSpin(page, "labelMaxPx", 8, 32, 0.5, 1);
@@ -504,6 +514,8 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     form->addRow(candles);
     form->addRow(resetButton("Chart", page));
     describe(form, m_showLabels, "Show liquidity sizes on GPU heatmap cells above the range low when text fits. Turn off to reduce clutter.");
+    describe(form, m_labelCurrency, "Show liquidity as USD notional or base-asset size. Use USD to compare value, or Asset to compare quantity.");
+    describe(form, m_labelCurrencySymbol, "Show a dollar sign before USD liquidity numbers in heatmap cells.");
     describe(form, m_labelMinPx, "Smallest GPU liquidity text, in pixels (8-24); labels that cannot fit at this size are hidden. Raise it for readability.");
     describe(form, m_labelMaxPx, "Largest GPU liquidity text, in pixels (8-32). Raise it for bigger labels when cells have room.");
     describe(form, m_tradesAboveCandles, m_tradesAboveCandles->toolTip());
@@ -518,6 +530,10 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     describe(candleForm, m_candleMaxBodyPx, "Maximum candle body width in logical pixels (5-120), independent of display scale.");
     describe(candleForm, m_candleWickWidth, "Wick thickness in device pixels (1-3). Raise it when highs and lows are hard to see.");
     connect(m_showLabels, &QCheckBox::toggled, this, [this](bool on) { apply({{"showLabels", on}}); });
+    connect(m_labelCurrency, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (index >= 0) apply({{"labelCurrency", m_labelCurrency->itemData(index).toString()}});
+    });
+    connect(m_labelCurrencySymbol, &QCheckBox::toggled, this, [this](bool on) { apply({{"labelCurrencySymbol", on}}); });
     connect(m_labelMinPx, &QDoubleSpinBox::valueChanged, this, [this](double v) {
         apply({{"labelMinPx", v}, {"labelMaxPx", std::max(v, m_labelMaxPx->value())}});
     });
@@ -599,14 +615,6 @@ QWidget *HeatmapSettingsDialog::buildTickTab() {
 QWidget *HeatmapSettingsDialog::buildLookTab() {
     auto *page = new QWidget(this);
     auto *form = new QFormLayout(page);
-    m_labelCurrency = new QComboBox(page);
-    m_labelCurrency->setObjectName("labelCurrency");
-    m_labelCurrency->addItem("USD (1.24M)", "usd");
-    m_labelCurrency->addItem("Asset (12.5)", "asset");
-    form->addRow("Label currency", m_labelCurrency);
-    m_labelCurrencySymbol = new QCheckBox("Show $ on USD cell labels", page);
-    m_labelCurrencySymbol->setObjectName("labelCurrencySymbol");
-    form->addRow("Label currency symbol", m_labelCurrencySymbol);
     m_palette = new QComboBox(page);
     m_palette->setObjectName("palettePreset");
     m_palette->addItems(kPalettes);
@@ -677,8 +685,6 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     toneForm->addRow("Shader floor", floorRow);
     form->addRow(tone);
     form->addRow(resetButton("Look", page));
-    describe(form, m_labelCurrency, "Show liquidity as USD notional or base-asset size. Use USD to compare value, or Asset to compare quantity.");
-    describe(form, m_labelCurrencySymbol, "Show a dollar sign before USD liquidity numbers in heatmap cells.");
     describe(form, m_palette, "Choose the heatmap's bid and ask colour scale. Pick Custom to use the gradient stops below.");
     describe(form, m_paperPositionStyle, "Show a compact position and live PnL tag at the entry line, or shade the full interval between entry and mark.");
     describe(form, m_bubblesOverFootprint, "Keep trade bubbles at full opacity, or dim their fill and ring to 35% while footprint numbers are drawn.");
@@ -694,10 +700,6 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     describe(toneForm, floorRow, "Minimum intensity before the colour curve (0-0.5; 0 = off). Raise it to boost faint visible cells; cells below range low stay hidden, this session only.");
 
     connect(m_palette, &QComboBox::currentTextChanged, this, [this](const QString &p) { apply({{"palettePreset", p}}); });
-    connect(m_labelCurrency, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
-        if (index >= 0) apply({{"labelCurrency", m_labelCurrency->itemData(index).toString()}});
-    });
-    connect(m_labelCurrencySymbol, &QCheckBox::toggled, this, [this](bool on) { apply({{"labelCurrencySymbol", on}}); });
     connect(m_paperPositionStyle, &QComboBox::currentIndexChanged, this, [this] {
         apply({{"paperPositionStyle", m_paperPositionStyle->currentData().toString()}});
     });

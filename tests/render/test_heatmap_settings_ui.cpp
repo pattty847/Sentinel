@@ -158,10 +158,10 @@ TEST(HeatmapSettingsModelTest, CurrencySymbolDefaultsOffAndCanBePatched) {
     ASSERT_TRUE(model.apply({{"labelCurrencySymbol", true}}).isEmpty());
     EXPECT_TRUE(model.settings().labelCurrencySymbol);
     EXPECT_TRUE(t.reload().labelCurrencySymbol);
-    EXPECT_EQ(HeatmapSettingsDialog::tabKeys("Look").contains("labelCurrencySymbol"), true);
-    EXPECT_TRUE(HeatmapSettingsDialog::tabKeys("Look").contains("labelCurrency"));
-    EXPECT_FALSE(HeatmapSettingsDialog::tabKeys("Chart").contains("labelCurrencySymbol"));
-    EXPECT_FALSE(HeatmapSettingsDialog::tabKeys("Chart").contains("labelCurrency"));
+    EXPECT_FALSE(HeatmapSettingsDialog::tabKeys("Look").contains("labelCurrencySymbol"));
+    EXPECT_FALSE(HeatmapSettingsDialog::tabKeys("Look").contains("labelCurrency"));
+    EXPECT_TRUE(HeatmapSettingsDialog::tabKeys("Chart").contains("labelCurrencySymbol"));
+    EXPECT_TRUE(HeatmapSettingsDialog::tabKeys("Chart").contains("labelCurrency"));
 }
 
 TEST(HeatmapSettingsModelTest, VisibleLiquidityFitsOncePerSymbolAndRemembersUserEdits) {
