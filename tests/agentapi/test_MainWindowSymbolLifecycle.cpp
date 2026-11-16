@@ -631,12 +631,12 @@ TEST(MainWindowHealthIntegration, StatusClusterIsAtTheLeftOfTheWindow) {
     EXPECT_LT(status->x(), 16);
 }
 
-TEST(MainWindowHealthIntegration, DefaultLayoutPreservesNavigationRailCapAtNarrowAndWideWidths) {
+TEST(MainWindowHealthIntegration, DefaultLayoutKeepsNavigationRailUncappedAtNarrowAndWideWidths) {
     MainWindowGPU window;
     auto* rail = window.findChild<WatchlistDock*>();
     ASSERT_TRUE(rail);
     const int cap = rail->maximumWidth();
-    EXPECT_EQ(cap, 280);
+    EXPECT_EQ(cap, QWIDGETSIZE_MAX);
     for (int width : {960, 1920}) {
         window.resize(width, 800);
         MainWindowSymbolLifecyclePeer::arrange(window);
