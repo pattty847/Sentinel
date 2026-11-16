@@ -1,4 +1,5 @@
 #include "OrderBookDock.hpp"
+#include "TableChrome.hpp"
 #include "LeanGaugeWidget.hpp"
 #include "ServiceLocator.hpp"
 #include "SentinelLogging.hpp"
@@ -396,9 +397,7 @@ void OrderBookDock::buildLadder(QVBoxLayout* layout)
     m_table->setTextElideMode(Qt::ElideNone);
     m_table->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_table->verticalHeader()->hide();
-    m_table->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
-    m_table->verticalHeader()->setDefaultSectionSize(22);
-    m_table->verticalHeader()->setMinimumSectionSize(22);
+    tableChrome::apply(m_table);
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     m_table->horizontalHeader()->setDefaultAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_table->horizontalHeader()->setMinimumSectionSize(20);

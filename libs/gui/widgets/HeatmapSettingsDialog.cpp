@@ -1,4 +1,5 @@
 #include "HeatmapSettingsDialog.hpp"
+#include "TableChrome.hpp"
 #include "../UnifiedGridRenderer.h"
 #include "../render/heatmap/HeatmapSettingsModel.hpp"
 #include "SentinelLogging.hpp"
@@ -149,6 +150,8 @@ HeatmapGradientEditor::HeatmapGradientEditor(const QString &objectName, QWidget 
     layout->setContentsMargins(0, 22, 0, 0); // the preview strip is painted above the table
     table_ = new QTableWidget(0, 2, this);
     table_->setHorizontalHeaderLabels({"Position (0–1)", "Colour"});
+    tableChrome::apply(table_);
+    tableChrome::align(table_->model(), 0, true);
     table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     table_->verticalHeader()->setVisible(false);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -177,6 +180,8 @@ void HeatmapGradientEditor::addRow(double position, const QString &color) {
     table_->insertRow(row);
     auto *spin = new QDoubleSpinBox(table_);
     spin->setRange(0, 1);
+    spin->setAlignment(Qt::AlignRight);
+    spin->setStyleSheet("QDoubleSpinBox { padding:0px; }");
     spin->setDecimals(3);
     spin->setSingleStep(0.05);
     spin->setKeyboardTracking(false);

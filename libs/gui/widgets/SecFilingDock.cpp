@@ -1,4 +1,5 @@
 #include "SecFilingDock.hpp"
+#include "TableChrome.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGroupBox>
@@ -69,6 +70,7 @@ void SecFilingDock::buildUi() {
     m_filingsTable->setObjectName("secFilings");
     m_filingsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_filingsTable->setModel(m_filingsModel);
+    tableChrome::apply(m_filingsTable);
     m_filingsTable->horizontalHeader()->setStretchLastSection(true);
     filingsLayout->addWidget(m_filingsTable);
     filingsGroup->setLayout(filingsLayout);
@@ -77,9 +79,12 @@ void SecFilingDock::buildUi() {
     QVBoxLayout* transactionsLayout = new QVBoxLayout();
     m_transactionsTable = new QTableView(transactionsGroup);
     m_transactionsModel->setHorizontalHeaderLabels({"Date", "Insider", "Transaction", "Shares", "Price"});
+    tableChrome::align(m_transactionsModel, 3, true);
+    tableChrome::align(m_transactionsModel, 4, true);
     m_transactionsTable->setObjectName("secTransactions");
     m_transactionsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_transactionsTable->setModel(m_transactionsModel);
+    tableChrome::apply(m_transactionsTable);
     m_transactionsTable->horizontalHeader()->setStretchLastSection(true);
     transactionsLayout->addWidget(m_transactionsTable);
     transactionsGroup->setLayout(transactionsLayout);
@@ -183,6 +188,8 @@ void SecFilingDock::displayFilings(const QList<SecApiClient::Filing>& filings) {
 void SecFilingDock::displayTransactions(const QList<SecApiClient::Transaction>& transactions) {
     m_transactionsModel->clear();
     m_transactionsModel->setHorizontalHeaderLabels({"Date", "Insider", "Transaction", "Shares", "Price"});
+    tableChrome::align(m_transactionsModel, 3, true);
+    tableChrome::align(m_transactionsModel, 4, true);
     
     for (const auto& tx : transactions) {
         QList<QStandardItem*> row;

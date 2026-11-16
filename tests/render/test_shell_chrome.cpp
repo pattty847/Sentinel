@@ -1,4 +1,12 @@
 #include "widgets/DockablePanel.hpp"
+#include "widgets/WatchlistDock.hpp"
+#include "widgets/ScreenerDock.hpp"
+#include "widgets/OrderBookDock.hpp"
+#include "widgets/SecFilingDock.hpp"
+#include "widgets/HeatmapSettingsDialog.hpp"
+#include <QHeaderView>
+#include <QTableWidget>
+#include <QComboBox>
 #include <QApplication>
 #include <QMainWindow>
 #include <QSettings>
@@ -12,6 +20,49 @@ public:
     Panel(const QString& id, QWidget* parent) : DockablePanel(id, id, parent) {}
     void buildUi() override {}
 };
+TEST(ShellChrome, TablesShareRowGeometryAndHeaderTypography) {
+    ScreenerDock screener;
+    SecFilingDock sec;
+    OrderBookDock dom;
+    HeatmapGradientEditor gradient("gradient");
+    gradient.setStops({{0.0, "#000000"}, {1.0, "#ffffff"}});
+    QList<QTableView*> tables = screener.findChildren<QTableView*>();
+    tables.append(sec.findChildren<QTableView*>());
+    tables.append(dom.findChildren<QTableView*>());
+    tables.append(gradient.table());
+    ASSERT_EQ(tables.size(), 5);
+    for (auto* table : tables) {
+        table->ensurePolished();
+        auto* header = table->horizontalHeader();
+        EXPECT_EQ(table->verticalHeader()->defaultSectionSize(), 22);
+        EXPECT_EQ(table->verticalHeader()->minimumSectionSize(), 22);
+        EXPECT_EQ(table->verticalHeader()->maximumSectionSize(), 22);
+        EXPECT_EQ(header->font().pixelSize(), 11);
+        EXPECT_EQ(header->font().weight(), QFont::Normal);
+        EXPECT_FALSE(header->highlightSections());
+        EXPECT_TRUE(header->styleSheet().contains("#93a1af"));
+    }
+    EXPECT_EQ(gradient.table()->rowHeight(0), 22);
+    auto* screen = screener.findChild<QTableView*>("screenerRows");
+    for (int asset : {0, 1}) {
+        screener.findChild<QComboBox*>("screenerAsset")->setCurrentIndex(asset);
+        for (int column = 0; column < screen->model()->columnCount(); ++column) {
+            const bool number = (column >= 2 && column <= 6) || (asset == 1 && (column == 7 || column == 8));
+            EXPECT_EQ(screen->model()->headerData(column, Qt::Horizontal, Qt::TextAlignmentRole).toInt(),
+                      int((number ? Qt::AlignRight : Qt::AlignLeft) | Qt::AlignVCenter));
+        }
+    }
+    auto* tx = sec.findChild<QTableView*>("secTransactions");
+    EXPECT_EQ(tx->model()->headerData(3, Qt::Horizontal, Qt::TextAlignmentRole).toInt(), int(Qt::AlignRight | Qt::AlignVCenter));
+    WatchlistDock watch;
+    watch.show();
+    QCoreApplication::processEvents();
+    auto* tree = watch.findChild<QTreeView*>("watchRows");
+    EXPECT_EQ(tree->visualRect(tree->model()->index(0, 0)).height(), 22);
+    EXPECT_EQ(tree->header()->font().pixelSize(), 11);
+    EXPECT_EQ(tree->header()->defaultAlignment(), Qt::AlignLeft | Qt::AlignVCenter);
+}
+
 TEST(ShellChrome, TitlesFollowTabSplitHideFloatAndRestore) {
     QMainWindow host;
     host.resize(900, 500);

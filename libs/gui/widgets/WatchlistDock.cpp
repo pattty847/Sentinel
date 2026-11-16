@@ -1,4 +1,5 @@
 #include "WatchlistDock.hpp"
+#include "TableChrome.hpp"
 #include "../themes/ThemePalette.hpp"
 #include <QPainter>
 
@@ -173,9 +174,11 @@ void WatchlistDock::buildUi() {
     m_tree->setAlternatingRowColors(false);
     m_tree->setStyleSheet(
         "QTreeView { background:#1a1a1a; alternate-background-color:#202020; color:#e0e0e0; }"
+        "QTreeView::item { height:22px; }"
         "QTreeView::item:hover { background:#20252B; }"
         "QTreeView::item:selected { background:#3a4652; color:#fff; }"
         "QHeaderView::section { background:#252525; color:#aaa; border:none; padding:3px; }");
+    tableChrome::header(m_tree->header());
     m_tree->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_tree->header()->setStretchLastSection(true);
     layout->addWidget(m_tree, 1);
