@@ -62,7 +62,41 @@ QString dialogStyle() {
         "QPushButton[settingsRole=\"quiet\"] { background: transparent; border-color: transparent; color: @text3; padding: 2px 6px; }"
         "QPushButton[settingsRole=\"quiet\"]:hover { color: @text; border-color: @line; }"
         "QPushButton#settingsClose { background: @primary; border-color: @primary; color: #FFFFFF; padding: 6px 16px; }"
-        "QPushButton#settingsClose:hover { background: #3472A0; border-color: #3472A0; }"));
+        "QPushButton#settingsClose:hover { background: #3472A0; border-color: #3472A0; }"
+        // Sections: a dim title over a hairline, no box, so their rows share the page's grid.
+        "QGroupBox { color: @text3; border: none; border-top: 1px solid @line; margin-top: 22px; padding: 0; }"
+        "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 0; top: 4px; padding: 0; }"));
+}
+
+// One form grid on every tab: a right-aligned label column, then the fields.
+constexpr int kLabelColumn = 180, kGridGap = 8, kPageMargin = 12;
+void applyFormGrid(QWidget *page) {
+    if (auto *layout = page->layout()) layout->setContentsMargins(kPageMargin, kPageMargin, kPageMargin, kPageMargin);
+    for (auto *group : page->findChildren<QGroupBox *>())
+        if (auto *layout = group->layout()) layout->setContentsMargins(0, kGridGap, 0, 0);
+    for (auto *form : page->findChildren<QFormLayout *>()) {
+        form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
+        form->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
+        form->setRowWrapPolicy(QFormLayout::DontWrapRows);
+        form->setHorizontalSpacing(kGridGap);
+        form->setVerticalSpacing(kGridGap);
+        for (int row = 0; row < form->rowCount(); ++row) {
+            QLayoutItem *field = form->itemAt(row, QFormLayout::FieldRole);
+            if (!field) continue; // a section spanning both columns
+            QLayoutItem *labelItem = form->itemAt(row, QFormLayout::LabelRole);
+            auto *label = labelItem ? qobject_cast<QLabel *>(labelItem->widget()) : nullptr;
+            if (!labelItem) { // a field without a name keeps the label column
+                label = new QLabel;
+                if (field->widget()) label->setToolTip(field->widget()->toolTip());
+                form->setWidget(row, QFormLayout::LabelRole, label);
+            }
+            if (!label) continue;
+            label->setFixedWidth(kLabelColumn);
+            label->setWordWrap(true);
+            label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        }
+    }
 }
 
 struct SliderWithLabel {
@@ -366,6 +400,8 @@ void HeatmapSettingsDialog::buildUi() {
     m_tabs->addTab(scrollTab(buildLiveTab(), "liveSettingsScroll"), "Live");
     m_tabs->addTab(scrollTab(buildDebugTab(), "debugSettingsScroll"), "Debug");
     m_tabs->addTab(scrollTab(buildTpoTab(), "tpoSettingsScroll"), "TPO");
+    for (int i = 0; i < m_tabs->count(); ++i)
+        applyFormGrid(static_cast<QScrollArea *>(m_tabs->widget(i))->widget());
     for (int i = 0; i < m_tabs->count(); ++i)
         m_tabs->setTabToolTip(i, m_tabs->tabText(i) == "Budgets"
             ? QStringLiteral("Open memory settings. The GPU group is for this chart; the RAM group applies to all charts.")
@@ -679,7 +715,7 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     auto *resetSensitivity = new QPushButton("Reset range to auto", page);
     resetSensitivity->setObjectName("sensitivityResetAuto");
     resetSensitivity->setToolTip("Fit this symbol's visible liquidity again when it is available.");
-    form->addRow(resetSensitivity);
+    form->addRow(QString(), resetSensitivity);
     connect(resetSensitivity, &QPushButton::clicked, this, [this] {
         if (const auto error = m_model->resetSensitivityToAuto(); !error.isEmpty()) showStatus(error, true);
     });
@@ -914,7 +950,7 @@ void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
     combo(rows, footprint, "footprintIntensity", "Volume scale", {"bar", "window"}, "Scale outward bars against the largest single-side cell in this candle or visible window.");
     combo(rows, footprint, "footprintCandle", "Candle", {"spine", "full"}, "Use a narrow candle at the left of each flow card, or the full candle appearance.");
     auto* numbers = new QCheckBox("Show numbers", footprint); numbers->setObjectName("footprintNumbers");
-    rows->addRow(numbers);
+    rows->addRow("Numbers", numbers);
     describe(rows, numbers, "Show 13 px bid and ask amounts when both columns fit. Zero sides stay blank.");
     connect(numbers, &QCheckBox::toggled, this, [this](bool on) { apply({{"footprintNumbers", on}}); });
     auto* dust = new QDoubleSpinBox(footprint); dust->setObjectName("footprintDustNotional");
@@ -925,7 +961,7 @@ void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
     form->addRow(footprint);
     auto* cvd = new QGroupBox("Order flow", page); rows = new QFormLayout(cvd);
     auto* footer = new QCheckBox("Show flow footer", cvd); footer->setObjectName("flowFooter");
-    rows->addRow(footer);
+    rows->addRow("Flow footer", footer);
     describe(rows, footer, "Show per-bar delta, cumulative delta and volume above the CVD strip.");
     connect(footer, &QCheckBox::toggled, this, [this](bool on) { apply({{"flowFooter", on}}); });
     auto* height = new QSpinBox(cvd); height->setObjectName("cvdStripPx"); height->setRange(0, 400);

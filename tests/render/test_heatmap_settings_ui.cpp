@@ -67,6 +67,7 @@
 #include <QQmlComponent>
 #include <QQuickWindow>
 #include <iostream>
+#include <set>
 
 struct TradeBubbleRendererTest {
     static void publish(UnifiedGridRenderer& r, const TimeAxisMapping& m) { r.m_bubbles.publish(m); }
@@ -2082,6 +2083,47 @@ TEST(HeatmapSettingsDialogLook, CloseIsTheOnlyPrimaryAndResetIsAQuietFooterActio
     for (int tab = 0; tab < dialog.tabs()->count(); ++tab)
         if (dialog.tabs()->widget(tab)->isAncestorOf(log)) logTab = tab;
     EXPECT_EQ(dialog.tabs()->tabText(logTab), "Debug");
+}
+
+// SET-4: one form grid on every tab, sections included: a 180 px right-aligned
+// label column, 8 px to the fields, 8 px between rows.
+TEST(HeatmapSettingsDialogLook, EveryTabSharesOneRightAlignedFormGrid) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    UnifiedGridRenderer renderer;
+    HeatmapSettingsDialog dialog(&model, &renderer);
+    dialog.resize(720, 760);
+    dialog.show();
+    for (int tab = 0; tab < dialog.tabs()->count(); ++tab) {
+        dialog.tabs()->setCurrentIndex(tab);
+        QCoreApplication::processEvents();
+        SCOPED_TRACE(dialog.tabs()->tabText(tab).toStdString());
+        QWidget *page = qobject_cast<QScrollArea *>(dialog.tabs()->widget(tab))->widget();
+        std::set<int> labelEnds, fieldStarts;
+        int rows = 0;
+        for (auto *form : page->findChildren<QFormLayout *>()) {
+            EXPECT_EQ(form->horizontalSpacing(), 8);
+            EXPECT_EQ(form->verticalSpacing(), 8);
+            for (int row = 0; row < form->rowCount(); ++row) {
+                auto *labelItem = form->itemAt(row, QFormLayout::LabelRole);
+                auto *fieldItem = form->itemAt(row, QFormLayout::FieldRole);
+                if (!fieldItem) continue;
+                ASSERT_TRUE(labelItem) << "a field without the label column, row " << row;
+                auto *label = qobject_cast<QLabel *>(labelItem->widget());
+                ASSERT_TRUE(label);
+                if (!label->isVisible()) continue;
+                ++rows;
+                EXPECT_EQ(label->width(), 180) << label->text().toStdString();
+                EXPECT_TRUE(label->alignment() & Qt::AlignRight) << label->text().toStdString();
+                labelEnds.insert(label->mapTo(page, QPoint(label->width(), 0)).x());
+                fieldStarts.insert(form->parentWidget()->mapTo(page, fieldItem->geometry().topLeft()).x());
+            }
+        }
+        EXPECT_GT(rows, 0);
+        ASSERT_EQ(labelEnds.size(), 1u) << "labels end at one x";
+        ASSERT_EQ(fieldStarts.size(), 1u) << "fields start at one x";
+        EXPECT_EQ(*fieldStarts.begin() - *labelEnds.begin(), 8);
+    }
 }
 
 // Qt fixes the scene graph backend at the first QQuickWindow of the process,
