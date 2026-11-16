@@ -196,15 +196,12 @@ TopToolbar::TopToolbar(QWidget* parent)
     });
 
     // Heatmap tick: Auto/Manual and the preset (S6c). Driven by setTickSelectorState.
-    auto *tickLabel = new QLabel("Tick", this);
-    tickLabel->setObjectName("chartTickLabel");
-    m_tickLabelAction = addWidget(tickLabel);
     m_tickModeCombo = new QComboBox(this);
     m_tickModeCombo->setObjectName("tickModeCombo");
     m_tickModeCombo->addItems({"Auto", "Manual"});
     m_tickModeCombo->setFixedWidth(84);
     m_tickModeCombo->setAccessibleName("Heatmap tick mode");
-    m_tickModeAction = addWidget(m_tickModeCombo);
+    m_tickModeAction = addCaptioned("Tick", "chartTickLabel", m_tickModeCombo);
     connect(m_tickModeCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
         sLog_App("ui: toolbar tick mode=" << (index == 1 ? "manual" : "auto"));
         emit tickModeRequested(index == 1);
@@ -252,7 +249,7 @@ TopToolbar::TopToolbar(QWidget* parent)
         m_tpoSessionCombo->addItem(name, id);
     m_tpoSessionCombo->setFixedWidth(96);
     m_tpoSessionCombo->setToolTip("TPO session (the volume profile follows it)");
-    m_tpoSessionAction = addWidget(m_tpoSessionCombo);
+    m_tpoSessionAction = addCaptioned("Session", "chartTpoSessionLabel", m_tpoSessionCombo);
     connect(m_tpoSessionCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
         sLog_App("ui: toolbar tpo session=" << m_tpoSessionCombo->itemData(index).toInt());
         emit tpoSessionSelected(m_tpoSessionCombo->itemData(index).toInt());
@@ -264,17 +261,13 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_tpoLayoutCombo->addItem("Split", "split");
     m_tpoLayoutCombo->setFixedWidth(96);
     m_tpoLayoutCombo->setToolTip("TPO layout");
-    m_tpoLayoutAction = addWidget(m_tpoLayoutCombo);
+    m_tpoLayoutAction = addCaptioned("Layout", "chartTpoLayoutLabel", m_tpoLayoutCombo);
     connect(m_tpoLayoutCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
         sLog_App("ui: toolbar tpo layout=" << m_tpoLayoutCombo->itemData(index).toString());
         emit tpoLayoutSelected(m_tpoLayoutCombo->itemData(index).toString());
     });
 
     addSeparator();
-
-    QLabel* liqLabel = new QLabel("Liq", this);
-    liqLabel->setStyleSheet("QLabel { color: #B6C2CF; padding-left: 4px; }");
-    m_liqLabelAction = addWidget(liqLabel);
 
     // Liquidity labels on/off (S7b) and their currency.
     m_labelsButton = new QToolButton(this);
@@ -311,7 +304,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     // GPU renderer: the two-handle range filter (replaces threshold/sensitivity).
     m_rangeSlider = new LiquidityRangeSlider(this);
     m_rangeSlider->setFixedSize(170, 22);
-    m_rangeAction = addWidget(m_rangeSlider);
+    m_rangeAction = addCaptioned("Liq", "chartLiquidityLabel", m_rangeSlider);
     connect(m_rangeSlider, &LiquidityRangeSlider::rangeEdited, this, [this](double low, double high, bool final) {
         refreshRangeLabel();
         emit liquidityRangeEdited(low, high, final);
@@ -353,8 +346,8 @@ TopToolbar::TopToolbar(QWidget* parent)
     // Collapse labels together with their inputs, and preserve the original order.
     for (int i = 0; i < m_inlineActions.size(); ++i) {
         QList<QAction*> group{m_inlineActions[i]};
-        QAction *last = m_inlineActions[i] == m_tickLabelAction ? m_tickVeilAction
-                      : m_inlineActions[i] == m_liqLabelAction ? m_rangeLabelAction : nullptr;
+        QAction *last = m_inlineActions[i] == m_tickModeAction ? m_tickVeilAction
+                      : m_inlineActions[i] == m_rangeAction ? m_rangeLabelAction : nullptr;
         if (last) while (group.back() != last && i + 1 < m_inlineActions.size()) group << m_inlineActions[++i];
         m_inlineGroups << group;
         for (auto *action : group) m_modeVisibility.insert(action, true);
@@ -632,7 +625,7 @@ void TopToolbar::refreshOverflowMenu() {
             continue;
         }
         if (!m_modeVisibility.value(inlineAction, true) || inlineAction->isVisible()) continue;
-        auto *widget = widgetForAction(inlineAction);
+        auto *widget = m_fieldEditors.value(widgetForAction(inlineAction), widgetForAction(inlineAction));
         // Labels and status annotations travel with their editor, not as commands.
         if (qobject_cast<QLabel *>(widget)) continue;
         auto separate = [&] {
@@ -924,11 +917,9 @@ void TopToolbar::applyVisibility() {
         }
     };
     show(m_tickModeAction, v.tickSelector);
-    show(m_tickLabelAction, v.tickSelector);
     show(m_tickPresetAction, v.tickSelector);
     show(m_tickVeilAction, v.tickSelector && m_tickState.enabled && !m_tickState.indicator.isEmpty());
     show(m_paletteAction, v.palette);
-    show(m_liqLabelAction, v.rangeSlider);
     for (auto *a : {m_modeLabelAction, m_modeComboAction}) show(a, v.liquidity);
     show(m_labelsAction, v.labelsToggle);
     show(m_rangeAction, v.rangeSlider);
@@ -1002,6 +993,26 @@ QAction* TopToolbar::addIconAction(const QString& iconPath, const QString& text,
     button->setToolButtonStyle(toolButtonStyle());
     addWidget(button);
     return action;
+}
+
+QAction *TopToolbar::addCaptioned(const QString &caption, const char *name, QWidget *editor) {
+    // One slot for the caption and its editor (TB-6): they hide, overflow and
+    // disable together, and the caption sits closer to its editor than toolbar
+    // spacing. Micro size, dim text.
+    auto *field = new QWidget(this);
+    field->setObjectName(QStringLiteral("%1Field").arg(QLatin1String(name)));
+    auto *row = new QHBoxLayout(field);
+    row->setContentsMargins(0, 0, 0, 0);
+    row->setSpacing(kCaptionGap);
+    auto *label = new QLabel(caption, field);
+    label->setObjectName(name);
+    label->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 10px; }").arg(theme::text3().name()));
+    label->setBuddy(editor);
+    row->addWidget(label);
+    editor->setParent(field);
+    row->addWidget(editor);
+    m_fieldEditors.insert(field, editor);
+    return addWidget(field);
 }
 
 QToolButton* TopToolbar::addIconButton(const QString& iconPath, const QString& tooltip) {

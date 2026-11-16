@@ -436,6 +436,39 @@ TEST(ChartToolbar, LiquiditySliderPaintsThemeColours) {
     EXPECT_EQ(toolbar.rangeLabel()->palette().color(toolbar.rangeLabel()->foregroundRole()), theme::text3());
 }
 
+// TB-6: a combo whose value does not explain itself carries a dim micro-size
+// caption, bound to it (buddy, closer than toolbar spacing, hidden with it).
+TEST(ChartToolbar, CaptionsAreDimMicroLabelsBoundToTheirEditors) {
+    TopToolbar toolbar;
+    toolbar.setModeState({true, false, true, false, true});
+    toolbar.resize(3200, 44);
+    toolbar.show();
+    QTest::qWait(20);
+    const std::vector<std::pair<const char *, QWidget *>> captions{
+        {"chartTickLabel", toolbar.tickModeCombo()}, {"chartTpoSessionLabel", toolbar.tpoSessionCombo()},
+        {"chartTpoLayoutLabel", toolbar.tpoLayoutCombo()}, {"chartLiquidityLabel", toolbar.rangeSlider()}};
+    for (const auto &[name, editor] : captions) {
+        SCOPED_TRACE(name);
+        auto *label = toolbar.findChild<QLabel *>(name);
+        ASSERT_TRUE(label);
+        EXPECT_TRUE(label->isVisible());
+        EXPECT_EQ(label->buddy(), editor);
+        EXPECT_EQ(label->font().pixelSize(), 10);
+        EXPECT_EQ(label->palette().color(label->foregroundRole()), theme::text3());
+        const int gap = editor->mapTo(&toolbar, QPoint(0, 0)).x() - label->mapTo(&toolbar, QPoint(label->width(), 0)).x();
+        EXPECT_GE(gap, 0);
+        EXPECT_LE(gap, 4);
+    }
+    QList<QWidget *> buddies;
+    for (auto *label : toolbar.findChildren<QLabel *>()) if (label->buddy()) buddies << label->buddy();
+    EXPECT_FALSE(buddies.contains(toolbar.findChild<QComboBox *>("chartTimeframeCombo"))) << "1m explains itself";
+    EXPECT_FALSE(buddies.contains(toolbar.chartTypeCombo())) << "Candle explains itself";
+    toolbar.setModeState({true, false, false, false, true});
+    QTest::qWait(20);
+    EXPECT_FALSE(toolbar.findChild<QLabel *>("chartTpoSessionLabel")->isVisible());
+    EXPECT_FALSE(toolbar.findChild<QLabel *>("chartTpoLayoutLabel")->isVisible());
+}
+
 TEST(ChartToolbar, WideChartNamesTickAndSeparatesAppearance) {
     TopToolbar toolbar;
     toolbar.resize(1920, 42);

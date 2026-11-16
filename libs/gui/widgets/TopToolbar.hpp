@@ -150,6 +150,9 @@ private:
     void setInlineVisible(QAction *action, bool visible);
     QAction* addIconAction(const QString& iconPath, const QString& text, const QString& tooltip);
     QToolButton* addIconButton(const QString& iconPath, const QString& tooltip);
+    // A dim micro-size caption bound to its editor; returns the slot's action.
+    QAction *addCaptioned(const QString &caption, const char *name, QWidget *editor);
+    static constexpr int kCaptionGap = 3;
     void applyVisibility();
     void buildControlsMenu();
     void refreshRangeLabel();
@@ -195,6 +198,7 @@ private:
     QList<QAction*> m_inlineActions;
     QVector<QList<QAction*>> m_inlineGroups;
     QHash<QAction*, bool> m_modeVisibility;
+    QHash<QWidget*, QWidget*> m_fieldEditors; // captioned slot -> its editor
     QVector<int> m_fitInputs;
     bool m_fitPending = false;
     bool m_fitting = false;
@@ -206,9 +210,9 @@ private:
     QString m_baseAssetSymbol = "BTC";
     ModeState m_mode;
     // Toolbar actions of the widgets above (a toolbar widget hides with its action).
-    QAction *m_tickLabelAction = nullptr, *m_tickModeAction = nullptr, *m_tickPresetAction = nullptr, *m_tickVeilAction = nullptr;
+    QAction *m_tickModeAction = nullptr, *m_tickPresetAction = nullptr, *m_tickVeilAction = nullptr;
     QAction *m_chartTypeAction = nullptr, *m_paletteAction = nullptr;
-    QAction *m_liqLabelAction = nullptr, *m_modeLabelAction = nullptr, *m_modeComboAction = nullptr;
+    QAction *m_modeLabelAction = nullptr, *m_modeComboAction = nullptr;
     QAction *m_labelsAction = nullptr, *m_rangeAction = nullptr, *m_rangeLabelAction = nullptr;
     QAction *m_tpoSessionAction = nullptr, *m_tpoLayoutAction = nullptr;
 };
