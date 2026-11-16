@@ -680,6 +680,16 @@ TEST(Screener, RequestErrorDispatchAndUncorrelatedRecovery) {
     EXPECT_TRUE(received.contains("vendor as-of unavailable"));
 }
 
+bool inkBetween(const QImage& image, int x0, int x1, int y0, int y1, const QColor& background) {
+    for (int x = std::max(0, x0); x <= std::min(image.width() - 1, x1); ++x)
+        for (int y = std::max(0, y0); y <= std::min(image.height() - 1, y1); ++y) {
+            const QColor c = image.pixelColor(x, y);
+            if (std::abs(c.red() - background.red()) + std::abs(c.green() - background.green()) +
+                std::abs(c.blue() - background.blue()) > 48) return true;
+        }
+    return false;
+}
+
 TEST(Screener, EmptyTableSaysNoDataYetWithALabelledRefreshInTheTable) {
     ScreenerDock dock;
     SentinelStreamClient client("127.0.0.1", "1");
@@ -767,6 +777,27 @@ TEST(Screener, EmptyTableFitsItsHeadersWithoutAHorizontalScrollbar) {
             {"Price", 1.0 + i}, {"Sector", "A long sector name"}, {"Exchange", "NASDAQ"}});
     updateScreener(dock, "stock", rows);
     EXPECT_EQ(table->horizontalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
+}
+
+TEST(Screener, SortArrowSitsRightAfterTheSortedHeaderText) {
+    ScreenerDock dock;
+    dock.resize(640, 360);
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* table = dock.findChild<QTableView*>("screenerRows");
+    auto* header = table->horizontalHeader();
+    ASSERT_EQ(header->sortIndicatorSection(), 0);
+    table->setColumnWidth(0, 200);
+    QCoreApplication::processEvents();
+    const QImage image = header->viewport()->grab().toImage();
+    const int left = header->sectionViewportPosition(0);
+    const int right = left + header->sectionSize(0) - 1;
+    const int textEnd = left + 4 + header->fontMetrics().horizontalAdvance("Symbol");
+    const int mid = header->height() / 2;
+    const QColor background = image.pixelColor(left + 140, mid);
+    EXPECT_TRUE(inkBetween(image, textEnd + 1, textEnd + 16, mid - 4, mid + 4, background));
+    EXPECT_FALSE(inkBetween(image, textEnd + 20, right - 3, mid - 4, mid + 4, background))
+        << "no indicator at the section's far edge";
 }
 
 TEST(WatchRailScreener, NativeVisualFixtures) {

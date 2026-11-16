@@ -18,6 +18,8 @@
 #include <QLabel>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QPainter>
+#include <QStyleOptionHeader>
 #include <QToolButton>
 #include <QIcon>
 #include <QTableView>
@@ -66,6 +68,36 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override {
         QHeaderView::mouseReleaseEvent(event);
         m_mousePressed = false;
+    }
+    // The sort arrow follows the header text instead of floating at the section's far edge.
+    void paintSection(QPainter* painter, const QRect& rect, int logicalIndex) const override {
+        if (!rect.isValid()) return;
+        QStyleOptionHeader option;
+        initStyleOptionForIndex(&option, logicalIndex);
+        option.rect = rect;
+        const auto indicator = option.sortIndicator;
+        option.sortIndicator = QStyleOptionHeader::None;
+        painter->save();
+        style()->drawControl(QStyle::CE_Header, &option, painter, this);
+        painter->restore();
+        if (indicator == QStyleOptionHeader::None) return;
+        const QRect label = style()->subElementRect(QStyle::SE_HeaderLabel, &option, this);
+        const int textWidth = fontMetrics().horizontalAdvance(option.text);
+        // Right-aligned (numeric) headers take the arrow on the text's left, still touching it.
+        const int x = option.textAlignment & Qt::AlignRight ? label.right() - textWidth - 12
+                                                            : label.left() + textWidth + 5;
+        if (x < rect.left() + 2 || x + 7 > rect.right() - 2) return; // too narrow for the arrow
+        const int y = rect.center().y();
+        const bool up = sortIndicatorOrder() == Qt::AscendingOrder; // up = A→Z, low→high
+        QPolygon arrow;
+        arrow << QPoint(x, up ? y + 2 : y - 2) << QPoint(x + 7, up ? y + 2 : y - 2)
+              << QPoint(x + 3, up ? y - 2 : y + 2);
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(theme::text3());
+        painter->drawPolygon(arrow);
+        painter->restore();
     }
     bool event(QEvent* event) override {
         if (event->type() == QEvent::UngrabMouse || event->type() == QEvent::Hide)
