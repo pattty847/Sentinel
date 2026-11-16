@@ -2274,6 +2274,36 @@ TEST_F(ChartControls, GearHasOneSettingsDialogEntry) {
     EXPECT_EQ(opened, QStringList{"Chart"});
 }
 
+// MENU-4: each overlay switch sits in one group with its parameters, set apart
+// by a separator on both sides.
+TEST_F(ChartControls, GearGroupsEachOverlaySwitchWithItsParameters) {
+    controls->setMenuHooks({});
+    emit toolbar->chartMenu()->aboutToShow();
+    QList<QAction *> shown;
+    for (auto *action : toolbar->chartMenu()->actions()) if (action->isVisible()) shown << action;
+    auto at = [&](const QString &name) {
+        for (int i = 0; i < shown.size(); ++i)
+            if (shown[i]->objectName() == name || (shown[i]->menu() && shown[i]->menu()->objectName() == name)) return i;
+        ADD_FAILURE() << "no gear entry " << name.toStdString();
+        return -1;
+    };
+    const std::vector<std::pair<const char *, QStringList>> groups{
+        {"chartMenuTrades", {"chartMenuTradeSize"}},
+        {"chartMenuLadder", {"chartMenuLadderWidth"}},
+        {"chartMenuWallRadar", {"chartMenuWallMultiple"}},
+        {"chartMenuLabels", {"chartMenuCurrency", "chartMenuLabelSize"}}};
+    for (const auto &[toggle, parameters] : groups) {
+        SCOPED_TRACE(toggle);
+        const int i = at(toggle);
+        ASSERT_GT(i, 0);
+        EXPECT_TRUE(shown[i - 1]->isSeparator()) << "a group starts at its switch";
+        for (int k = 0; k < parameters.size(); ++k) EXPECT_EQ(at(parameters[k]), i + 1 + k);
+        const int end = i + 1 + int(parameters.size());
+        ASSERT_LT(end, shown.size());
+        EXPECT_TRUE(shown[end]->isSeparator()) << "the group ends after its parameters";
+    }
+}
+
 // One renderer, so the Labels toggle is always in the gear menu (it was
 // hidden in other chart modes), and the currency stays an appearance entry.
 TEST_F(ChartControls, LabelsToggleAndCurrencyAreAlwaysInTheAppearanceMenu) {

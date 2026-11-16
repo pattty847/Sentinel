@@ -300,6 +300,7 @@ void HeatmapChartControls::buildChartMenu() {
         a->setData(preset);
         paletteGroup->addAction(a);
     }
+    // Each overlay switch heads one group with its parameters (MENU-4).
     menu->addSeparator();
     QAction *trades = add(menu, "Trades", "chartMenuTrades", [this] {
         const auto error = m_model->apply({{"showTrades", !m_model->settings().showTrades}});
@@ -320,6 +321,7 @@ void HeatmapChartControls::buildChartMenu() {
         a->setData(value);
         tradeGroup->addAction(a);
     }
+    menu->addSeparator();
     QAction *ladder = add(menu, "Order book ladder", "chartMenuLadder", [this] {
         requestLadder(!(m_renderer && m_renderer->layers()->ladderEnabled()));
     });
@@ -334,6 +336,7 @@ void HeatmapChartControls::buildChartMenu() {
         a->setData(px);
         ladderGroup->addAction(a);
     }
+    menu->addSeparator();
     QAction *radar = add(menu, "Wall radar", "chartMenuWallRadar", [this] {
         requestWallRadar(!(m_renderer && m_renderer->layers()->wallRadarEnabled()));
     });
@@ -349,6 +352,7 @@ void HeatmapChartControls::buildChartMenu() {
         a->setData(multiple);
         wallGroup->addAction(a);
     }
+    menu->addSeparator();
     QAction *labels = add(menu, "Liquidity labels", "chartMenuLabels", [this] {
         requestLabels(!m_model->settings().showLabels);
     });
@@ -373,6 +377,7 @@ void HeatmapChartControls::buildChartMenu() {
         a->setData(int(i));
         sizeGroup->addAction(a);
     }
+    menu->addSeparator();
     QMenu *candles = menu->addMenu("Candle style");
     candles->setObjectName("chartMenuCandleStyle");
     auto *candleGroup = new QActionGroup(candles);
