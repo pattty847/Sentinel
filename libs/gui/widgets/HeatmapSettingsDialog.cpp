@@ -88,7 +88,11 @@ QString dialogStyle() {
         "QAbstractSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 20px; border: none; background: transparent; }"
         "QAbstractSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 20px; border: none; background: transparent; }"
         "QAbstractSpinBox::up-arrow { image: url(:/svg/chevron_up.svg); width: 8px; height: 8px; }"
-        "QAbstractSpinBox::down-arrow { image: url(:/svg/chevron_down.svg); width: 8px; height: 8px; }"));
+        "QAbstractSpinBox::down-arrow { image: url(:/svg/chevron_down.svg); width: 8px; height: 8px; }"
+        // Tabs: one fixed width, so selecting a tab never moves the others.
+        "QTabBar::tab { width: 64px; padding: 6px 6px; background: @bg2; color: @text3; border: 1px solid @line; border-bottom: none; }"
+        "QTabBar::tab:selected { background: @bg1; color: @text; }"
+        "QTabBar::tab:hover { color: @text; }"));
 }
 
 // Fields: one height and three widths (the smallest that fits the longest
@@ -464,6 +468,7 @@ void HeatmapSettingsDialog::buildUi() {
     auto *layout = new QVBoxLayout(this);
     m_tabs = new QTabWidget(this);
     m_tabs->setObjectName("heatmapSettingsTabs");
+    m_tabs->setUsesScrollButtons(true); // a narrow dialog scrolls the fixed-width tabs
     m_tabs->addTab(scrollTab(buildChartTab(), "chartSettingsScroll"), "Chart");
     m_tabs->addTab(scrollTab(buildTickTab(), "tickSettingsScroll"), "Tick");
     m_tabs->addTab(scrollTab(buildLookTab(), "lookSettingsScroll"), "Look");

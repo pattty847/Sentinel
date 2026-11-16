@@ -55,6 +55,7 @@
 #include <QLabel>
 #include <QToolButton>
 #include "chart/shell/TradeBubbleStyleStore.hpp"
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTemporaryDir>
@@ -2253,6 +2254,23 @@ TEST(HeatmapSettingsDialogLook, SwatchHexIsUpperCaseRegularWeight) {
     }
     for (auto *colour : dialog.findChildren<QToolButton *>())
         if (colour->objectName().endsWith(".color")) EXPECT_EQ(colour->text(), colour->text().toUpper());
+}
+
+// SET-9: every tab has one fixed width, whichever tab is selected.
+TEST(HeatmapSettingsDialogLook, TabsKeepOneFixedWidth) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    dialog.resize(720, 600);
+    dialog.show();
+    QTabBar *bar = dialog.tabs()->tabBar();
+    std::set<int> widths;
+    for (int selected = 0; selected < bar->count(); ++selected) {
+        dialog.tabs()->setCurrentIndex(selected);
+        QCoreApplication::processEvents();
+        for (int tab = 0; tab < bar->count(); ++tab) widths.insert(bar->tabRect(tab).width());
+    }
+    EXPECT_EQ(widths.size(), 1u) << "tab widths differ";
 }
 
 // Qt fixes the scene graph backend at the first QQuickWindow of the process,
