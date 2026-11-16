@@ -80,7 +80,7 @@ TEST(WatchRail, PendingAckRefusalKeyboardAndCatalogTruth) {
     auto* model = qobject_cast<QStandardItemModel*>(tree->model());
     ASSERT_NE(model, nullptr);
     EXPECT_EQ(model->rowCount(), 7);
-    EXPECT_TRUE(status->text().contains("Availability unknown"));
+    EXPECT_TRUE(status->isHidden());
     QSignalSpy selected(&dock, &WatchlistDock::symbolSelected);
     const int eth = rowFor(model, "ETH-USD");
     ASSERT_GE(eth, 0);
@@ -88,7 +88,7 @@ TEST(WatchRail, PendingAckRefusalKeyboardAndCatalogTruth) {
     QTest::keyClick(tree, Qt::Key_Return);
     ASSERT_EQ(selected.count(), 1);
     EXPECT_EQ(selected.at(0).at(0).toString(), "ETH-USD");
-    EXPECT_TRUE(status->text().contains("Switching to ETH-USD"));
+    EXPECT_TRUE(status->isHidden()) << "the status bar says the switch; the rail marks the row";
     EXPECT_FALSE(model->item(eth, 0)->text().startsWith("●"));
 
     dock.setChartSwitchState("ETH-USD", "");
@@ -98,6 +98,7 @@ TEST(WatchRail, PendingAckRefusalKeyboardAndCatalogTruth) {
     EXPECT_EQ(model->item(eth, 0)->foreground().color(), QColor("#E6EDF3"));
     dock.setChartSwitchState("BTC-USD", "", "ETH-USD", "Connection cap reached");
     EXPECT_TRUE(model->item(eth, 0)->text().startsWith("!"));
+    EXPECT_FALSE(status->isHidden());
     EXPECT_TRUE(status->text().contains("Connection cap"));
     dock.setCryptoAvailability({"BTC-USD"}, true, "server catalog");
     QTest::keyClick(tree, Qt::Key_Return);
@@ -213,6 +214,33 @@ TEST(WatchRail, HoverHighlightsTheRowAndTooltipStaysBesideIt) {
             EXPECT_FALSE(widget->geometry().intersects(row));
     QToolTip::hideText();
     delete tips;
+}
+
+TEST(WatchRail, FooterSpeaksOnlyForAProblemOnOneWarningLine) {
+    WatchlistDock dock;
+    dock.findChild<QComboBox*>("watchPreset")->setCurrentIndex(0);
+    dock.resize(280, 620);
+    dock.show();
+    auto* status = dock.findChild<QLabel*>("watchStatus");
+    ASSERT_NE(status, nullptr);
+    dock.setCryptoAvailability({}, false, "No authoritative runtime market catalog");
+    dock.setChartSwitchState("ETH-USD", "");
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(status->isHidden()) << "a live chart needs no footer: nothing unknown or contradicting";
+    dock.setChartSwitchState("ETH-USD", "SOL-USD");
+    EXPECT_TRUE(status->isHidden());
+    const QString reason = QStringLiteral("SOL-USD subscription refused; the connection cap is reached and ETH-USD stays");
+    dock.setChartSwitchState("ETH-USD", "", "SOL-USD", reason);
+    QCoreApplication::processEvents();
+    ASSERT_FALSE(status->isHidden());
+    EXPECT_EQ(status->text(), "! " + reason);
+    EXPECT_EQ(status->toolTip(), reason);
+    EXPECT_FALSE(status->wordWrap());
+    EXPECT_LE(status->height(), status->fontMetrics().height() + 4) << "one line";
+    EXPECT_LE(status->width(), dock.width());
+    EXPECT_TRUE(status->styleSheet().contains("#e6c07b"));
+    dock.setChartSwitchState("ETH-USD", "");
+    EXPECT_TRUE(status->isHidden());
 }
 
 TEST(WatchRail, PinsPersistWithDefaultFormatSettings) {

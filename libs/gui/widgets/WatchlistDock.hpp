@@ -49,6 +49,8 @@ private:
     void refreshRowState();
     void updatePinButton();
     void savePreferences();
+    void showProblem(const QString& message);
+    void clearProblem();
     QString selectedSymbol() const;
 
     QComboBox* m_presetCombo = nullptr;
@@ -65,7 +67,6 @@ private:
     QString m_pendingSymbol;
     QString m_refusedSymbol;
     QString m_refusalReason;
-    QString m_catalogSource;
     bool m_catalogAuthoritative = false;
     bool m_fontRefreshPending = false;
 };
