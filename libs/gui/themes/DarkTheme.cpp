@@ -174,6 +174,20 @@ QString DarkTheme::stylesheet() const {
             color: #FFFFFF;
         }
         
+        QMenu::indicator {
+            width: 12px;
+            height: 12px;
+            border: 1px solid #93A1AF;
+            border-radius: 2px;
+            background: transparent;
+        }
+        QMenu::indicator:checked {
+            background: #2A4A6A;
+            border-color: #3A6A9A;
+            image: url(:/svg/menu_check.svg);
+        }
+        QMenu::indicator:disabled { border-color: #6E7580; }
+
         QMenu::separator {
             height: 1px;
             background-color: #444;

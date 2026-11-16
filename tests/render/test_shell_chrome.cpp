@@ -6,6 +6,7 @@
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "themes/DarkTheme.hpp"
 #include <QSplitter>
+#include <QMenu>
 #include <QPainter>
 #include <QStyleOption>
 #include <QHeaderView>
@@ -162,6 +163,28 @@ TEST(ShellChrome, BookAgeHasOneSpellingAndDomOnlyRepeatsAbnormalState) {
     EXPECT_EQ(state->text(), "Stale");
 }
 
+TEST(ShellChrome, MenuTogglesHaveAnEmptyIndicatorAndADistinctCheckedState) {
+    QMenu menu;
+    menu.setStyleSheet(DarkTheme().stylesheet());
+    auto* toggle = menu.addAction("Trades");
+    toggle->setCheckable(true);
+    menu.addAction("Plain command");
+    menu.show();
+    menu.setActiveAction(nullptr);
+    QCoreApplication::processEvents();
+    const QRect row = menu.actionGeometry(toggle);
+    auto off = menu.grab().toImage();
+    int border = 0;
+    for (int y = row.top(); y <= row.bottom(); ++y)
+        for (int x = row.left(); x < row.left() + 24; ++x)
+            border += off.pixelColor(x, y) == QColor("#93A1AF");
+    EXPECT_GE(border, 24);
+    toggle->setChecked(true);
+    auto on = menu.grab().toImage();
+    EXPECT_NE(on.copy(QRect(row.left(), row.top(), 24, row.height())),
+              off.copy(QRect(row.left(), row.top(), 24, row.height())));
+}
+
 TEST(ShellChrome, TitlesFollowTabSplitHideFloatAndRestore) {
     QMainWindow host;
     host.resize(900, 500);
@@ -194,6 +217,7 @@ TEST(ShellChrome, TitlesFollowTabSplitHideFloatAndRestore) {
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
+    Q_INIT_RESOURCE(sentinel_svg_resources);
     QTemporaryDir settings;
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
