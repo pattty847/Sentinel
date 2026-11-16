@@ -18,4 +18,7 @@ inline QColor selLine() { return QColor("#3A6A9A"); }
 inline QColor primary() { return QColor("#2B5A7A"); } // the one primary button per surface
 inline QColor line() { return QColor::fromRgb(0xff2b3138); }
 inline QColor text2() { return QColor::fromRgb(0xffb6c2cf); }
+// Chrome-only state text; pair each with a glyph ("!" warning, "×" error), never on the plot.
+inline QColor warn() { return QColor("#E6C07B"); }
+inline QColor error() { return QColor("#F07A6A"); }
 } // namespace theme
