@@ -174,6 +174,13 @@ QString DarkTheme::stylesheet() const {
             color: #FFFFFF;
         }
         
+        QMenu::indicator, QMenu::icon {
+            subcontrol-origin: padding;
+            subcontrol-position: center left;
+            left: 6px;
+        }
+        QMenu::icon { width: 14px; height: 14px; }
+
         QMenu::indicator {
             width: 12px;
             height: 12px;

@@ -185,6 +185,33 @@ TEST(ShellChrome, MenuTogglesHaveAnEmptyIndicatorAndADistinctCheckedState) {
               off.copy(QRect(row.left(), row.top(), 24, row.height())));
 }
 
+TEST(ShellChrome, MenuChecksAndIconsUseTheSameLeftColumn) {
+    QMenu menu;
+    menu.setStyleSheet(DarkTheme().stylesheet());
+    auto* toggle = menu.addAction("Toggle");
+    toggle->setCheckable(true);
+    QPixmap icon(14, 14);
+    icon.fill(Qt::red);
+    auto* command = menu.addAction(QIcon(icon), "Command");
+    command->setIconVisibleInMenu(true);
+    menu.show();
+    menu.setActiveAction(nullptr);
+    QCoreApplication::processEvents();
+    const auto pixels = menu.grab().toImage();
+    const auto leftEdge = [&](QAction* action, QColor color) {
+        const QRect row = menu.actionGeometry(action);
+        int left = pixels.width();
+        for (int y = row.top(); y <= row.bottom(); ++y)
+            for (int x = row.left(); x < row.left() + 24; ++x)
+                if (pixels.pixelColor(x, y) == color) left = std::min(left, x);
+        return left;
+    };
+    const int checkLeft = leftEdge(toggle, QColor("#93A1AF"));
+    const int iconLeft = leftEdge(command, Qt::red);
+    EXPECT_LT(checkLeft, 24);
+    EXPECT_EQ(checkLeft, iconLeft);
+}
+
 TEST(ShellChrome, TitlesFollowTabSplitHideFloatAndRestore) {
     QMainWindow host;
     host.resize(900, 500);
