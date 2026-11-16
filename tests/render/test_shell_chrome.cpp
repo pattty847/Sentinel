@@ -4,6 +4,10 @@
 #include "widgets/OrderBookDock.hpp"
 #include "widgets/SecFilingDock.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
+#include "themes/DarkTheme.hpp"
+#include <QSplitter>
+#include <QPainter>
+#include <QStyleOption>
 #include <QHeaderView>
 #include <QTableWidget>
 #include <QComboBox>
@@ -61,6 +65,38 @@ TEST(ShellChrome, TablesShareRowGeometryAndHeaderTypography) {
     EXPECT_EQ(tree->visualRect(tree->model()->index(0, 0)).height(), 22);
     EXPECT_EQ(tree->header()->font().pixelSize(), 11);
     EXPECT_EQ(tree->header()->defaultAlignment(), Qt::AlignLeft | Qt::AlignVCenter);
+}
+
+TEST(ShellChrome, SplittersKeepAOnePixelLineInsideAFivePixelHandle) {
+    const QString previous = qApp->styleSheet();
+    qApp->setStyleSheet(DarkTheme().stylesheet());
+    for (auto orientation : {Qt::Horizontal, Qt::Vertical}) {
+        QSplitter splitter(orientation);
+        splitter.addWidget(new QWidget);
+        splitter.addWidget(new QWidget);
+        splitter.resize(300, 300);
+        splitter.show();
+        QCoreApplication::processEvents();
+        auto* handle = splitter.handle(1);
+        EXPECT_EQ(orientation == Qt::Horizontal ? handle->width() : handle->height(), 5);
+        const auto pixels = handle->grab().toImage();
+        int lines = 0;
+        for (int p = 0; p < 5; ++p) {
+            const QColor pixel = orientation == Qt::Horizontal ? pixels.pixelColor(p, 20) : pixels.pixelColor(20, p);
+            if (pixel == QColor("#2B3138")) ++lines;
+        }
+        EXPECT_EQ(lines, 1);
+        QTest::mouseMove(handle, handle->rect().center());
+        QCoreApplication::processEvents();
+        EXPECT_NE(handle->grab().toImage(), pixels);
+        QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, handle->rect().center());
+        EXPECT_NE(handle->grab().toImage(), pixels);
+        QTest::mouseRelease(handle, Qt::LeftButton, Qt::NoModifier, handle->rect().center());
+    }
+    QMainWindow host;
+    host.ensurePolished();
+    EXPECT_EQ(host.style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, nullptr, &host), 5);
+    qApp->setStyleSheet(previous);
 }
 
 TEST(ShellChrome, TitlesFollowTabSplitHideFloatAndRestore) {

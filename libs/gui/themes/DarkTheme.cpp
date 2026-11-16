@@ -279,16 +279,25 @@ QString DarkTheme::stylesheet() const {
             background-color: #1E1E1E;
         }
 
-        QMainWindow::separator {
-            background-color: #2E2E2E;
-            width: 6px;
-            height: 6px;
+        QMainWindow::separator, QSplitter::handle {
+            width: 5px;
+            height: 5px;
+        }
+        QMainWindow::separator:horizontal, QSplitter::handle:horizontal {
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #1B1F24, stop:0.399 #1B1F24, stop:0.4 #2B3138,
+                stop:0.6 #2B3138, stop:0.601 #1B1F24, stop:1 #1B1F24);
+        }
+        QMainWindow::separator:vertical, QSplitter::handle:vertical {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #1B1F24, stop:0.399 #1B1F24, stop:0.4 #2B3138,
+                stop:0.6 #2B3138, stop:0.601 #1B1F24, stop:1 #1B1F24);
+        }
+        QMainWindow::separator:hover, QMainWindow::separator:pressed,
+        QSplitter::handle:hover, QSplitter::handle:pressed {
+            background: rgba(0, 170, 255, 102);
         }
 
-        QMainWindow::separator:hover {
-            background-color: #3A4450;
-        }
-        
         QDockWidget::title {
             background-color: #252525;
             padding: 4px;
