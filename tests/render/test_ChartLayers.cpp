@@ -812,12 +812,12 @@ TEST(FootprintAggressorColours, RenderedHalvesFollowAggressorColourFullWidthAndV
     EXPECT_NEAR(buy[0].r, up.red() * buy[0].a / 255., 1.5) << "buy is the up colour";
     EXPECT_NEAR(buy[0].g, up.green() * buy[0].a / 255., 1.5);
 }
-TEST(FootprintAggressorColours, DustDrawsItsFillAndDimsItsNumber) {
+TEST(FootprintAggressorColours, DustDrawsItsFillWithoutANumber) {
     CellsRig rig({{0, 1, 0}});  // 0.01 contracts at ~100 is far under the 2500 notional
     ASSERT_EQ(rig.layer.vertexCount(), 12 + 6) << "a dust cell still draws its fill";
     EXPECT_GT(rig.vertices()[12].a, 0);
     EXPECT_EQ(chart::flowTier(.01, 100, 1, 2500), chart::FlowTier::Dust);
-    EXPECT_DOUBLE_EQ(chart::flowTextAlpha(chart::FlowTier::Dust), .45);
+    EXPECT_DOUBLE_EQ(chart::flowTextAlpha(chart::FlowTier::Dust), 0);
 }
 TEST(FootprintBands, StripBuyDominantBandIsGreen) {
     chart::FootprintCellsLayer layer;
@@ -1133,6 +1133,9 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     std::unique_ptr<QSGNode> root(layer.createContainer());
     ChartTextRenderer text;
     chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
+    layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+    EXPECT_EQ(layer.glyphCount(), 0u) << "default dust threshold hides every fixture number";
+    layer.presentation().dustNotional = 0;
     layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
     ASSERT_GT(layer.glyphCount(), 0u);
     EXPECT_TRUE(layer.drawingNumbers());
