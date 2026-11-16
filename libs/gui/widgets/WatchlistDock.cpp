@@ -320,7 +320,7 @@ void WatchlistDock::refreshRowState() {
         item->setToolTip(pending ? QStringLiteral("Waiting for chart confirmation")
                           : refused ? m_refusalReason
                           : unavailable ? QStringLiteral("Not in the current market catalog")
-                          : active ? QStringLiteral("Active chart")
+                          : active ? QString()
                           : isCrypto ? QStringLiteral("Availability unverified until selected") : QString());
     }
     if (m_pendingSymbol.isEmpty() && m_refusedSymbol.isEmpty()) {

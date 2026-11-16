@@ -191,11 +191,15 @@ TEST(WatchRail, HoverHighlightsTheRowAndTooltipStaysBesideIt) {
     QCoreApplication::processEvents();
     const auto pixels = tree->viewport()->grab().toImage();
     EXPECT_EQ(pixels.pixelColor(first.right() - 6, first.center().y()), QColor("#20252B"));
+    EXPECT_TRUE(tree->model()->index(0, 0).data(Qt::ToolTipRole).toString().isEmpty());
+    dock.setChartSwitchState("BTC-USD", "ETH-USD");
+    const QRect tipRow = tree->visualRect(tree->model()->index(1, 0));
+    QTest::mouseMove(tree->viewport(), tipRow.center());
     auto* tips = WidgetToolTips::install(qApp);
-    QHelpEvent help(QEvent::ToolTip, first.center(), tree->viewport()->mapToGlobal(first.center()));
+    QHelpEvent help(QEvent::ToolTip, tipRow.center(), tree->viewport()->mapToGlobal(tipRow.center()));
     QApplication::sendEvent(tree->viewport(), &help);
     EXPECT_TRUE(QToolTip::isVisible());
-    const QRect row(tree->viewport()->mapToGlobal(QPoint(0, first.top())), QSize(tree->viewport()->width(), first.height()));
+    const QRect row(tree->viewport()->mapToGlobal(QPoint(0, tipRow.top())), QSize(tree->viewport()->width(), tipRow.height()));
     for (auto* widget : QApplication::topLevelWidgets())
         if (widget->objectName() == "qtooltip_label" && widget->isVisible())
             EXPECT_FALSE(widget->geometry().intersects(row));
