@@ -31,6 +31,7 @@ public:
     };
 
     explicit AxisTextService(const ChartTextAtlas& atlas, QObject* parent = nullptr);
+    static QColor textColor();
 
     void setPriceAxisSource(QObject* source);
     void setTimeAxisSource(QObject* source);

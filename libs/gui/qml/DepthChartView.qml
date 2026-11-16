@@ -617,13 +617,20 @@ Rectangle {
     
     Rectangle {
         id: priceAxisChrome
+        objectName: "priceAxisChrome"
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: axisCorner.top
         width: root.priceAxisColumnPx
-        color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
-        border.color: Qt.rgba(1, 1, 1, 0.3)
-        border.width: 1
+        color: "#1B1F24"
+        Rectangle {
+            objectName: "priceAxisDivider"
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: 1
+            color: "#2B3138"
+        }
         clip: true
         z: 0
     }
@@ -736,13 +743,20 @@ Rectangle {
     
     Rectangle {
         id: timeAxisChrome
+        objectName: "timeAxisChrome"
         anchors.left: parent.left
         anchors.right: axisCorner.left
         anchors.bottom: parent.bottom  
         height: unifiedGridRenderer.timeAxisHeightPx
-        color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
-        border.color: Qt.rgba(1, 1, 1, 0.3)
-        border.width: 1
+        color: "#1B1F24"
+        Rectangle {
+            objectName: "timeAxisDivider"
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: 1
+            color: "#2B3138"
+        }
         clip: true
         z: 0
     }
@@ -834,9 +848,7 @@ Rectangle {
         anchors.bottom: parent.bottom
         width: root.priceAxisColumnPx
         height: unifiedGridRenderer.timeAxisHeightPx
-        color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
-        border.color: Qt.rgba(1, 1, 1, 0.3)
-        border.width: 1
+        color: "#1B1F24"
         z: 0
     }
 

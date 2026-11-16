@@ -3,6 +3,7 @@
 #include "models/AxisModel.hpp"
 #include "SentinelLogging.hpp"
 #include "ChartTextLayout.hpp"
+#include "themes/ThemePalette.hpp"
 
 #include <QQuickWindow>
 #include <QScreen>
@@ -30,6 +31,8 @@ AxisTextService::AxisTextService(const ChartTextAtlas& atlas, QObject* parent)
     , m_atlas(atlas)
 {
 }
+
+QColor AxisTextService::textColor() { return theme::text2(); }
 
 void AxisTextService::setPriceAxisSource(QObject *source) {
     syncAxisTicks(m_priceAxisSource, m_priceAxisConnections, m_priceAxisTicks,
@@ -326,7 +329,7 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
                                  atlas.glyphBottomPx()) *
         static_cast<qreal>(axisLayout.axisScale);
     const qreal timeAnchorY = timeSafeRect.center().y();
-    const QColor axisColor(255, 255, 255, 255);
+    const QColor axisColor = textColor();
     for (const auto &tick : priceTicks) {
         ChartTextRun run;
         run.text = tick.label;

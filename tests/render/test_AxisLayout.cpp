@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "render/AxisLayout.hpp"
+#include "render/AxisTextService.hpp"
 #include "render/ChartTextLayout.hpp"
 
 namespace {
@@ -24,6 +25,10 @@ TEST(AxisLayout, ResolveEffectiveAxisLabelPx_PrefersEnvThenConfigThenAuto) {
     EXPECT_EQ(AxisLayout::resolveEffectiveAxisLabelPx(96.0, 14, 0), 14);
     EXPECT_EQ(AxisLayout::resolveEffectiveAxisLabelPx(96.0, 12, 15), 15);
     EXPECT_EQ(AxisLayout::resolveEffectiveAxisLabelPx(96.0, 30, 0), 15);
+}
+
+TEST(AxisLayout, AxisInkUsesSecondaryTextColour) {
+    EXPECT_EQ(AxisTextService::textColor(), QColor("#B6C2CF"));
 }
 
 TEST(AxisLayout, MeasurePriceAxisWidthPx_TracksLabelMagnitudeWithHysteresis) {
