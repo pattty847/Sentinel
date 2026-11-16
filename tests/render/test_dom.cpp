@@ -1725,6 +1725,8 @@ TEST_F(DomPulseDock, SizeTextWinsOverPulseMarks) {
         QStyleOptionViewItem o(opt); o.rect = table->visualRect(model->index(rowAt(*model, 2001), DomModel::Ask)); return o; }()),
         model->index(rowAt(*model, 2001), DomModel::Ask).data().toString());
     EXPECT_NE(image.pixelColor(plain.center().x(), plain.top()), DomBarDelegate::textBacking());
+    const QString directory = qEnvironmentVariable("DOM_LEAN_SHOT_DIR"); // optional diagnostic artifact
+    if (!directory.isEmpty()) EXPECT_TRUE(dock.grab().save(directory + "/dom-pulse-synthetic.png"));
 }
 
 TEST(DomPulse, InPlaceTagDigitsMatchTheLadderSizeText) {
@@ -1922,6 +1924,9 @@ TEST_F(DomDock, ControlsBeforeTheFirstPriceAreOneMetaRowAndA44PxLean) {
     EXPECT_TRUE(dock.findChild<QLabel*>("domFreshness")->isHidden()) << dock.findChild<QLabel*>("domFreshness")->text().toStdString();
     const int firstPrice = table->mapTo(dock.widget(), QPoint(0, 0)).y() + table->horizontalHeader()->height();
     EXPECT_LE(firstPrice, 125) << "was ~195 px (brief DOM-7)";
+    // Optional diagnostic artifact (same variable as the Lean snapshots), outside the checkout.
+    const QString directory = qEnvironmentVariable("DOM_LEAN_SHOT_DIR");
+    if (!directory.isEmpty()) EXPECT_TRUE(dock.grab().save(directory + "/dom-320-synthetic.png"));
     qApp->setStyleSheet(previousStyle);
 }
 
