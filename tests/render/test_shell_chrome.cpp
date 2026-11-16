@@ -212,6 +212,26 @@ TEST(ShellChrome, MenuChecksAndIconsUseTheSameLeftColumn) {
     EXPECT_EQ(checkLeft, iconLeft);
 }
 
+TEST(ShellChrome, MenuChevronsUseTheDimSixByEightAsset) {
+    QMenu menu;
+    menu.setStyleSheet(DarkTheme().stylesheet());
+    menu.addMenu("Submenu");
+    menu.show();
+    menu.setActiveAction(nullptr);
+    QCoreApplication::processEvents();
+    const auto pixels = menu.grab().toImage();
+    QRect mark;
+    for (int y = 2; y < pixels.height() - 2; ++y)
+        for (int x = pixels.width() - 22; x < pixels.width() - 2; ++x) {
+            const QColor color = pixels.pixelColor(x, y);
+            if (color.blue() > 120 && color.red() < 180 && color.blue() > color.red())
+                mark = mark.united(QRect(x, y, 1, 1));
+        }
+    EXPECT_FALSE(mark.isEmpty());
+    EXPECT_LE(mark.width(), 6);
+    EXPECT_LE(mark.height(), 8);
+}
+
 TEST(ShellChrome, TitlesFollowTabSplitHideFloatAndRestore) {
     QMainWindow host;
     host.resize(900, 500);

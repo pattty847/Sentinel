@@ -195,6 +195,12 @@ QString DarkTheme::stylesheet() const {
         }
         QMenu::indicator:disabled { border-color: #6E7580; }
 
+        QMenu::right-arrow {
+            image: url(:/svg/menu_chevron.svg);
+            width: 6px;
+            height: 8px;
+        }
+
         QMenu::separator {
             height: 1px;
             background-color: #444;
