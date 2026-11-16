@@ -311,7 +311,7 @@ TEST(PaperTicket, LowPriceAndLogFollow) {
     EXPECT_EQ(log->rowCount(), 0);
     bool awaitingPosition = false;
     for (auto* label : dock.findChildren<QLabel*>())
-        awaitingPosition |= label->text() == QStringLiteral("Awaiting position update");
+        awaitingPosition |= label->objectName() == QStringLiteral("paperWaiting") && label->isVisible();
     EXPECT_TRUE(awaitingPosition);
     auto buttons = dock.findChildren<QToolButton*>();
     QToolButton* one = nullptr;
@@ -965,4 +965,17 @@ TEST(PaperPolish, PaperTagIsNeutralAndOutlined) {
     EXPECT_EQ(tag->text(), QStringLiteral("PAPER"));
     EXPECT_TRUE(tag->styleSheet().contains("border: 1px solid #2B3138"));
     EXPECT_TRUE(tag->styleSheet().contains("font-size: 10px"));
+}
+
+TEST(PaperPolish, PositionUsesOneWaitingLineAndNoFrame) {
+    PaperTradingDock dock;
+    dock.setSymbol("BTC-USD");
+    auto* frame = dock.findChild<QFrame*>("paperPositionFrame");
+    auto* waiting = dock.findChild<QLabel*>("paperWaiting");
+    ASSERT_NE(frame, nullptr);
+    ASSERT_NE(waiting, nullptr);
+    EXPECT_EQ(frame->frameShape(), QFrame::NoFrame);
+    EXPECT_EQ(waiting->text(), QStringLiteral("No data source"));
+    EXPECT_EQ(dock.findChild<QLabel*>("paperLastPrice")->text(), QStringLiteral("—"));
+    EXPECT_EQ(dock.findChild<QLabel*>("paperAvgPrice")->text(), QStringLiteral("—"));
 }

@@ -99,6 +99,11 @@ void PaperTradingDock::setDataSource(IGridDataSource* source) {
     else m_healthTimer->stop();
     m_dataSource = source;
     m_streamAvailable = source && source->isConnectionActive();
+    if (m_waitingLabel) {
+        m_waitingLabel->setText(m_streamAvailable ? QStringLiteral("Awaiting update")
+            : source ? QStringLiteral("Trading stream disconnected") : QStringLiteral("No data source"));
+        m_waitingLabel->show();
+    }
     m_algoActivityEligible = false;
     if (source) {
         connect(source, &IGridDataSource::connectionStatusChanged, this,
@@ -112,6 +117,13 @@ void PaperTradingDock::setDataSource(IGridDataSource* source) {
                     m_pendingAlgoCommandId.clear();
                     m_algoRunningConfirmed = false;
                     m_account.invalidate();
+                    if (m_waitingLabel) {
+                        m_waitingLabel->setText(connected ? QStringLiteral("Awaiting update")
+                            : QStringLiteral("Trading stream disconnected"));
+                        m_waitingLabel->show();
+                    }
+                    for (auto* value : {m_posLabel, m_avgPriceLabel, m_uPnlLabel, m_rPnlLabel, m_totalPnlLabel})
+                        if (value) value->setText(QStringLiteral("—"));
                     setAlgoState(connected ? QStringLiteral("UNCONFIRMED")
                                            : QStringLiteral("UNAVAILABLE"),
                                  connected ? QStringLiteral("Awaiting the server's trading snapshot")
@@ -197,15 +209,17 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     symbolRow->addStretch();
     layout->addLayout(symbolRow);
     auto* posFrame = new QFrame(parent);
-    posFrame->setFrameStyle(QFrame::Box);
-    posFrame->setStyleSheet("QFrame { border: 1px solid #333; background: #161820; }");
+    posFrame->setObjectName(QStringLiteral("paperPositionFrame"));
+    posFrame->setFrameStyle(QFrame::NoFrame);
     auto* posGrid = new QGridLayout(posFrame);
     posGrid->setSpacing(4);
 
     auto addRow = [&](int row, const QString& label, QLabel*& valueLabel) {
-        posGrid->addWidget(new QLabel(label, posFrame), row, 0);
-        valueLabel = new QLabel(QStringLiteral("---"), posFrame);
-        valueLabel->setStyleSheet("QLabel { color: #e0e0e0; }");
+        auto* name = new QLabel(label, posFrame);
+        name->setStyleSheet("color: #93A1AF;"); // text3
+        posGrid->addWidget(name, row, 0);
+        valueLabel = new QLabel(QStringLiteral("—"), posFrame);
+        valueLabel->setStyleSheet("color: #93A1AF;");
         posGrid->addWidget(valueLabel, row, 1);
     };
 
@@ -217,12 +231,17 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     addRow(3, QStringLiteral("uPnL:"), m_uPnlLabel);
     addRow(4, QStringLiteral("rPnL:"), m_rPnlLabel);
     addRow(5, QStringLiteral("Total PnL:"), m_totalPnlLabel);
+    m_lastPriceLabel->setStyleSheet("color: #E6EDF3; font-size: 16px; font-weight: 500;");
+    m_totalPnlLabel->setStyleSheet("color: #E6EDF3; font-size: 16px; font-weight: 500;");
 
     layout->addWidget(posFrame);
+    m_waitingLabel = new QLabel(QStringLiteral("Awaiting update"), parent);
+    m_waitingLabel->setObjectName(QStringLiteral("paperWaiting"));
+    m_waitingLabel->setStyleSheet("color: #93A1AF;");
+    layout->addWidget(m_waitingLabel);
 
     auto* ticketFrame = new QFrame(parent);
-    ticketFrame->setFrameStyle(QFrame::Box);
-    ticketFrame->setStyleSheet("QFrame { border: 1px solid #333; background: #161820; }");
+    ticketFrame->setFrameStyle(QFrame::NoFrame);
     auto* ticketGrid = new QGridLayout(ticketFrame);
     ticketGrid->setSpacing(4);
 
@@ -740,27 +759,32 @@ void PaperTradingDock::resetForSymbolChange() {
     if (m_symbolLabel) m_symbolLabel->setText(m_symbol.isEmpty() ? QStringLiteral("No symbol") : m_symbol);
     updateNotional();
     m_shownLast = m_shownAvg = 0.0;
+    if (m_waitingLabel) {
+        m_waitingLabel->setText(m_streamAvailable ? QStringLiteral("Awaiting update")
+            : m_dataSource ? QStringLiteral("Trading stream disconnected") : QStringLiteral("No data source"));
+        m_waitingLabel->show();
+    }
     if (m_lastPriceLabel) {
-        m_lastPriceLabel->setStyleSheet("QLabel { color: #e0e0e0; }");
-        m_lastPriceLabel->setText(QStringLiteral("---"));
+        m_lastPriceLabel->setStyleSheet("color: #93A1AF; font-size: 16px; font-weight: 500;");
+        m_lastPriceLabel->setText(QStringLiteral("—"));
     }
     if (m_posLabel) {
-        m_posLabel->setText(QStringLiteral("Awaiting position update"));
+        m_posLabel->setText(QStringLiteral("—"));
     }
     if (m_avgPriceLabel) {
-        m_avgPriceLabel->setText(QStringLiteral("---"));
+        m_avgPriceLabel->setText(QStringLiteral("—"));
     }
     if (m_uPnlLabel) {
-        m_uPnlLabel->setStyleSheet("color: #e0e0e0;");
-        m_uPnlLabel->setText(QStringLiteral("Awaiting update"));
+        m_uPnlLabel->setStyleSheet("color: #93A1AF;");
+        m_uPnlLabel->setText(QStringLiteral("—"));
     }
     if (m_rPnlLabel) {
-        m_rPnlLabel->setStyleSheet("color: #e0e0e0;");
-        m_rPnlLabel->setText(QStringLiteral("Awaiting update"));
+        m_rPnlLabel->setStyleSheet("color: #93A1AF;");
+        m_rPnlLabel->setText(QStringLiteral("—"));
     }
     if (m_totalPnlLabel) {
-        m_totalPnlLabel->setStyleSheet("color: #e0e0e0; font-weight: bold;");
-        m_totalPnlLabel->setText(QStringLiteral("Awaiting update"));
+        m_totalPnlLabel->setStyleSheet("color: #93A1AF; font-size: 16px; font-weight: 500;");
+        m_totalPnlLabel->setText(QStringLiteral("—"));
     }
     if (m_orderLog) {
         m_orderLog->setRowCount(0);
@@ -779,6 +803,7 @@ void PaperTradingDock::resetForSymbolChange() {
         const std::string symbol = m_symbol.toStdString();
         for (const auto& order : m_account.openOrdersFor(symbol)) onOrderUpdated(order);
         if (const auto position = m_account.positionFor(symbol)) onPositionUpdated(*position);
+        else if (m_account.known()) showFlatPosition();
     }
     refreshAlgoView();
 }
@@ -849,6 +874,15 @@ void PaperTradingDock::updateNotional() {
               QString::number(notional, 'f', priceDecimals(notional)),
               quote.isEmpty() ? QStringLiteral("quote") : quote)
         : QStringLiteral("Est. quote notional: —"));
+}
+
+void PaperTradingDock::showFlatPosition() {
+    if (m_posLabel) m_posLabel->setText(QStringLiteral("0.00000000"));
+    if (m_avgPriceLabel) m_avgPriceLabel->setText(QStringLiteral("—"));
+    if (m_uPnlLabel) { m_uPnlLabel->setText(QStringLiteral("$0.00")); m_uPnlLabel->setStyleSheet("color: #E6EDF3;"); }
+    if (m_rPnlLabel) { m_rPnlLabel->setText(QStringLiteral("$0.00")); m_rPnlLabel->setStyleSheet("color: #E6EDF3;"); }
+    if (m_totalPnlLabel) { m_totalPnlLabel->setText(QStringLiteral("$0.00")); m_totalPnlLabel->setStyleSheet("color: #E6EDF3; font-size: 16px; font-weight: 500;"); }
+    if (m_waitingLabel) m_waitingLabel->hide();
 }
 
 void PaperTradingDock::updatePricePrecision(double price) {
@@ -976,6 +1010,7 @@ void PaperTradingDock::onPositionUpdated(const trading::PositionUpdate& update) 
 
     if (m_posLabel)
         m_posLabel->setText(QString::number(update.positionQty, 'f', 8));
+    if (m_waitingLabel) m_waitingLabel->hide();
     if (m_avgPriceLabel) {
         m_shownAvg = update.avgPrice;
         m_avgPriceLabel->setText(shownPrice(m_symbol, update.avgPrice));
@@ -991,7 +1026,7 @@ void PaperTradingDock::onPositionUpdated(const trading::PositionUpdate& update) 
     }
     const double total = update.unrealizedPnl + update.realizedPnl;
     if (m_totalPnlLabel) {
-        m_totalPnlLabel->setStyleSheet(pnlStyle(total, true));
+        m_totalPnlLabel->setStyleSheet(pnlStyle(total) + QStringLiteral("font-size: 16px; font-weight: 500;"));
         m_totalPnlLabel->setText(formatDollars(total));
     }
 }
@@ -1188,6 +1223,7 @@ void PaperTradingDock::onTradingSnapshot(const trading::TradingSnapshot& snapsho
     for (const auto& order : snapshot.openOrders) onOrderUpdated(order);
     if (!m_symbol.isEmpty()) {
         if (const auto position = m_account.positionFor(m_symbol.toStdString())) onPositionUpdated(*position);
+        else if (m_account.known()) showFlatPosition();
     }
     applyAlgoSnapshot(snapshot);
     if (stopAcknowledged) onStopAcknowledged(snapshot);

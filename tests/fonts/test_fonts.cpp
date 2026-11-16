@@ -197,7 +197,7 @@ TEST(FontWidgets, PaperTradingRuntimeAndHiddenWidgetsInheritSelectedFont) {
         EXPECT_TRUE(foundPrice);
         paper.setSymbol(QStringLiteral("ETH-USD"));
         for (auto* label : paper.findChildren<QLabel*>()) {
-            if (label->text() == QStringLiteral("---"))
+            if (label->text() == QStringLiteral("—"))
                 EXPECT_EQ(QFontInfo(label->font()).family(), family);
         }
         paper.setSymbol(QStringLiteral("BTC-USD"));
