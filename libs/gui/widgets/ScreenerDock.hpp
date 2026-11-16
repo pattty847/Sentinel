@@ -18,6 +18,7 @@
 #include <QFont>
 
 class SentinelStreamClient;
+class EmptyState;
 class QShowEvent;
 class QHideEvent;
 
@@ -69,6 +70,7 @@ private:
     void remeasureFontColumns();
     void updateColumns();
     void setStatus(const QString& text, bool error = false);
+    void updateEmptyText();
 
     // Stream client — not owned
     SentinelStreamClient* m_client = nullptr;
@@ -85,6 +87,7 @@ private:
     QToolButton* m_runBtn         = nullptr;
     QTableView*  m_table          = nullptr;
     QLabel*      m_statusLabel    = nullptr;
+    EmptyState*  m_empty          = nullptr;
 
     QStandardItemModel* m_model = nullptr;
     QPointer<QWidget> m_hostWindow;

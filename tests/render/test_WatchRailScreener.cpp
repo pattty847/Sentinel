@@ -679,6 +679,36 @@ TEST(Screener, RequestErrorDispatchAndUncorrelatedRecovery) {
     EXPECT_TRUE(received.contains("vendor as-of unavailable"));
 }
 
+TEST(Screener, EmptyTableSaysNoDataYetWithALabelledRefreshInTheTable) {
+    ScreenerDock dock;
+    SentinelStreamClient client("127.0.0.1", "1");
+    dock.setStreamClient(&client);
+    dock.resize(480, 360);
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* table = dock.findChild<QTableView*>("screenerRows");
+    auto* empty = table->viewport()->findChild<QWidget*>("screenerRowsEmpty");
+    ASSERT_NE(empty, nullptr);
+    auto* note = empty->findChild<QLabel*>("screenerRowsEmptyText");
+    auto* refresh = empty->findChild<QToolButton*>("screenerEmptyRefresh");
+    ASSERT_TRUE(note && refresh);
+    EXPECT_TRUE(empty->isVisible());
+    EXPECT_EQ(note->text(), "No data yet");
+    EXPECT_EQ(refresh->text(), "Refresh");
+    EXPECT_TRUE(refresh->isVisible());
+    const QPoint centre = refresh->mapTo(table->viewport(), refresh->rect().center());
+    EXPECT_NEAR(centre.x(), table->viewport()->width() / 2, 2);
+    EXPECT_NEAR(centre.y(), table->viewport()->height() / 2, 24);
+    refresh->click();
+    EXPECT_TRUE(dock.findChild<QTimer*>("screenerFetchTimeout")->isActive());
+    EXPECT_EQ(note->text(), QString::fromUtf8("Fetching crypto…"));
+    updateScreener(dock, "crypto", QJsonArray{QJsonObject{{"symbol", "BTC-USD"}}});
+    EXPECT_FALSE(empty->isVisible());
+    dock.findChild<QComboBox*>("screenerAsset")->setCurrentIndex(1);
+    EXPECT_TRUE(empty->isVisible());
+    EXPECT_EQ(note->text(), "No data yet");
+}
+
 TEST(WatchRailScreener, NativeVisualFixtures) {
     const QString output = qEnvironmentVariable("SENTINEL_WATCH_RAIL_SHOTS");
     if (output.isEmpty())

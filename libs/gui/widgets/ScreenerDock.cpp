@@ -1,6 +1,7 @@
 // Sentinel — ScreenerDock
 #include "ScreenerDock.hpp"
 #include "TableChrome.hpp"
+#include "EmptyState.hpp"
 
 #include "../../core/protocol/SentinelStreamClient.hpp"
 
@@ -226,6 +227,20 @@ void ScreenerDock::buildUi() {
         "QHeaderView::section { background:#252525; color:#aaa; border:none; padding:3px; }"
     );
     tableChrome::apply(m_table);
+    auto* emptyRefresh = new QToolButton;
+    emptyRefresh->setObjectName("screenerEmptyRefresh");
+    emptyRefresh->setText("Refresh");
+    emptyRefresh->setIcon(QIcon(":/svg/refresh.svg"));
+    emptyRefresh->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    emptyRefresh->setToolTip("Fetch screener data once");
+    emptyRefresh->setStyleSheet(QStringLiteral(
+        "QToolButton { background:%1; color:%2; border:1px solid %3; border-radius:3px; padding:3px 10px; }"
+        "QToolButton:hover { border-color:%4; }"
+        "QToolButton:pressed { background:%5; }")
+        .arg(theme::bg2().name(), theme::text().name(), theme::line().name(),
+             theme::accent().name(), theme::sel().name()));
+    connect(emptyRefresh, &QToolButton::clicked, this, &ScreenerDock::onRunClicked);
+    m_empty = new EmptyState(m_table, QStringLiteral("No data yet"), emptyRefresh);
     layout->addWidget(m_table, 1);
 
     // ── Status bar ───────────────────────────────────────────────────────────
@@ -551,6 +566,13 @@ void ScreenerDock::updateColumns() {
     m_adjustingColumnWidths = false;
 }
 
+void ScreenerDock::updateEmptyText() {
+    if (!m_empty) return;
+    m_empty->setText(m_fetchPending
+        ? QStringLiteral("Fetching %1…").arg(m_currentAsset == "crypto" ? QStringLiteral("crypto") : QStringLiteral("stocks"))
+        : QStringLiteral("No data yet"));
+}
+
 // ── UI slots ──────────────────────────────────────────────────────────────────
 
 void ScreenerDock::onRunClicked() {
@@ -660,6 +682,7 @@ void ScreenerDock::onSymbolChanged(const QString& /*symbol*/) {
 }
 
 void ScreenerDock::setStatus(const QString& text, bool error) {
+    updateEmptyText(); // every fetch-state change reports a status
     if (!m_statusLabel) return;
     m_statusLabel->setText(text);
     m_statusLabel->setStyleSheet(error
