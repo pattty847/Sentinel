@@ -159,7 +159,7 @@ void WatchlistDock::buildUi() {
     m_tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_tree->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_tree->setAlternatingRowColors(true);
+    m_tree->setAlternatingRowColors(false);
     m_tree->setStyleSheet(
         "QTreeView { background:#1a1a1a; alternate-background-color:#202020; color:#e0e0e0; }"
         "QTreeView::item:selected { background:#3a4652; color:#fff; }"
@@ -219,6 +219,10 @@ void WatchlistDock::loadPreset(int index) {
         ticker->setData(asset, AssetTypeRole);
         auto* name = new QStandardItem(entry.second);
         name->setForeground(QBrush(QColor("#aaa")));
+        if (m_model->rowCount() % 2) {
+            ticker->setBackground(theme::bg2());
+            name->setBackground(theme::bg2());
+        }
         m_model->appendRow({ticker, name});
         if (entry.first == selected) m_tree->setCurrentIndex(m_model->index(m_model->rowCount() - 1, 0));
     }

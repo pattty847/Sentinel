@@ -133,6 +133,22 @@ TEST(WatchRail, ActiveRowPaintsOnlyTwoAccentPixelsAtTheLeft) {
     EXPECT_EQ(tree->model()->index(0, 0).data(Qt::FontRole).value<QFont>().weight(), QFont::Normal);
 }
 
+TEST(WatchRail, StripesStopAfterTheLastFilledRow) {
+    WatchlistDock dock;
+    dock.resize(500, 600);
+    dock.show();
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(tree->alternatingRowColors());
+    const auto image = tree->viewport()->grab().toImage();
+    const auto odd = tree->visualRect(tree->model()->index(1, 1));
+    EXPECT_EQ(image.pixelColor(odd.right() - 6, odd.center().y()), QColor("#20252B"));
+    const auto last = tree->visualRect(tree->model()->index(tree->model()->rowCount() - 1, 0));
+    const int y = last.bottom() + 10;
+    ASSERT_LT(y + last.height(), image.height());
+    EXPECT_EQ(image.pixelColor(10, y), image.pixelColor(10, y + last.height()));
+}
+
 TEST(WatchRail, PinsPersistWithDefaultFormatSettings) {
     QTemporaryDir settingsDir;
     ASSERT_TRUE(settingsDir.isValid());
