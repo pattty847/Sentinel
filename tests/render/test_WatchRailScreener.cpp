@@ -178,6 +178,8 @@ TEST(WatchRail, HoverHighlightsTheRowAndTooltipStaysBesideIt) {
     auto* tree = dock.findChild<QTreeView*>("watchRows");
     QCoreApplication::processEvents();
     const auto first = tree->visualRect(tree->model()->index(0, 0));
+    tree->clearSelection();
+    tree->setCurrentIndex({});
     QTest::mouseMove(tree->viewport(), first.center());
     QCoreApplication::processEvents();
     const auto pixels = tree->viewport()->grab().toImage();
