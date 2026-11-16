@@ -60,6 +60,15 @@ struct DomPulseCell {
     double grow = 1; // share of an added segment drawn so far, in (0, 1]
 };
 
+// How a DOM size reads: significant digits, the leading zero, and the dust floor below which a
+// positive size shows "<floor" (never zero, never dropped). Outside DomModel: clang needs its
+// default member initializers before DomModel's default arguments use them.
+struct DomSizeStyle {
+    int digits = 3;
+    bool leadingZero = false;
+    double dust = 1e-4;
+};
+
 // GUI-thread only. Retained, contiguous integer buckets (including empty rows).
 // A bounded 2,001-tick inspection window avoids memory/work proportional to the
 // replica's potentially huge band. Manual mode pins this price window.
@@ -126,13 +135,7 @@ public:
     QString shownPrice(double price, double tick) const;
     // The quote currency, with the display unit's tag when scaled: "USD x1M".
     QString quoteUnit() const;
-    // How a size reads: significant digits, the leading zero, and the dust floor below which a
-    // positive size shows "<floor" (never zero, never dropped).
-    struct SizeStyle {
-        int digits = 3;
-        bool leadingZero = false;
-        double dust = 1e-4;
-    };
+    using SizeStyle = DomSizeStyle;
     // The owner's size-format lab (brief DOM-3 / L-15), one setting (OrderBookDock domSizeFormat):
     // Compact: 3 significant digits, no leading zero, "<.0001" floor (.0642, 1.11).
     // Adaptive: 3 significant digits, raised up to 5 while neighbouring sizes would read alike,

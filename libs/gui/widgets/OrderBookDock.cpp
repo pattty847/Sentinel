@@ -789,7 +789,8 @@ void OrderBookDock::buildSizeMenu()
         action->setData(int(format));
         action->setCheckable(true);
         formats->addAction(action);
-        connect(action, &QAction::triggered, this, [this, format] { setSizeFormat(format); });
+        const DomModel::SizeFormat chosen = format;
+        connect(action, &QAction::triggered, this, [this, chosen] { setSizeFormat(chosen); });
     }
 }
 
