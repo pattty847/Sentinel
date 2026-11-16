@@ -6,7 +6,7 @@
 
 namespace tableChrome {
 inline void header(QHeaderView* view) {
-    QFont font = view->font();
+    QFont font; // Keep the family inherited from the application font preference.
     font.setPixelSize(11);
     font.setWeight(QFont::Normal);
     view->setFont(font);
