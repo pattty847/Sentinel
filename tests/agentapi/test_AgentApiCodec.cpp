@@ -4,6 +4,7 @@
 #include "CandleSeriesBuffer.hpp"
 #include "marketdata/model/TradeData.h"
 #include "config/ConfigTypes.hpp"
+#include "../render/heatmap/HeatmapSettingsStore.hpp"
 #include <gtest/gtest.h>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -604,4 +605,132 @@ TEST(AgentApiControls, CvdKnobsValidateBothRoutesAtomically) {
                                 R"({"cvdFillAnchor":"outside"})", R"({"cvdFillAnchor":false})"})
             EXPECT_EQ(validateControl({"POST", path, {}, body}, std::nullopt).status, 422);
     }
+}
+
+namespace {
+ControlValidation postControl(const char* path, const QJsonObject& body) {
+    return validateControl({"POST", path, {}, QJsonDocument(body).toJson(QJsonDocument::Compact)}, std::nullopt);
+}
+// The settings POST path: validateControl, then the store's patch (what the settings model applies).
+// Returns the stored value, or nothing when the request is rejected.
+std::optional<QJsonValue> postSetting(const QString& key, const QJsonValue& value) {
+    const auto valid = postControl("/api/v1/heatmap/settings", {{key, value}});
+    if (valid.status != 200) return std::nullopt;
+    heatmap::HeatmapChartSettings settings;
+    if (!heatmap::applySettingsPatch(settings, valid.body.heatmapSettings).isEmpty()) return std::nullopt;
+    return heatmap::settingsJson(settings).value(key);
+}
+bool layerAccepted(const QString& key, const QJsonValue& value) {
+    return postControl("/api/v1/layers", {{key, value}}).status == 200;
+}
+} // namespace
+
+TEST(AgentApiSchema, RouteIsAReadOnlyGetWithoutParameters) {
+    RequestParser get;
+    const auto parsed = get.feed("GET /api/v1/schema HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    ASSERT_EQ(parsed.kind, ParseResult::Kind::Complete);
+    EXPECT_EQ(validateQuery(parsed.request, "BTC-USD").status, 200);
+    RequestParser post;
+    EXPECT_EQ(post.feed("POST /api/v1/schema HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}").status, 405);
+    RequestParser body;
+    EXPECT_EQ(body.feed("GET /api/v1/schema HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}").status, 400);
+    // The schema does not depend on the symbol, so the symbol guard does not apply: any parameter is refused.
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/schema", "symbol=BTC-USD"}, "BTC-USD").status, 400);
+    EXPECT_EQ(validateQuery({"GET", "/api/v1/schema", "symbol=ETH-USD"}, "BTC-USD").status, 400);
+}
+
+TEST(AgentApiSchema, SettingsSchemaListsExactlyTheAcceptedKeysAndRoundTripsThem) {
+    const auto settings = schemaJson()["heatmapSettings"].toObject();
+    EXPECT_EQ(settings.keys(), heatmap::settingsJson({}).keys());
+    for (const char* key : {"tickMode", "manualTick", "minRowPx", "hysteresis", "crossfadeMs", "showBandEdges", "palettePreset",
+             "bidGradient", "askGradient", "sensitivityMin", "sensitivityMax", "opacity", "smoothZoomOut", "gpuCapBytes",
+             "uploadBudgetBytes", "prefetchTiles", "liveMinIntervalMs", "showTelemetry", "showTrades", "tradesAboveCandles",
+             "tradeMinNotional", "bubblePlacement", "bubblesOverFootprint", "paperPositionStyle", "showLabels", "labelCurrency",
+             "labelMinPx", "labelMaxPx", "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity",
+             "candleWickWidth", "candleBodyFraction", "candleMaxBodyPx", "showVolumeBars", "volumeBandPercent", "volumeOpacity",
+             "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "cvdFillAnchor", "footprintIntensity", "footprintCandle",
+             "footprintDustNotional", "footprintNumbers", "showLadder", "ladderWidthPx", "showWallRadar", "wallMultiple"})
+        EXPECT_TRUE(settings.contains(key)) << key;
+    // Raised by another key's value at the defaults (labelMinPx 12, sensitivityMin 0.05), as their descriptions say.
+    const QStringList dependentMin{"labelMaxPx", "sensitivityMax"};
+    for (auto it = settings.begin(); it != settings.end(); ++it) {
+        const QString key = it.key();
+        const auto e = it->toObject();
+        const auto type = e["type"].toString();
+        SCOPED_TRACE(key.toStdString());
+        EXPECT_FALSE(e["description"].toString().isEmpty());
+        EXPECT_TRUE(e["persists"].toBool());
+        EXPECT_EQ(postSetting(key, e["default"]), e["default"]);
+        EXPECT_FALSE(postSetting(key, QJsonValue::Null).has_value()); // wrong type
+        if (type == "boolean") {
+            EXPECT_EQ(postSetting(key, !e["default"].toBool()), QJsonValue(!e["default"].toBool()));
+            EXPECT_FALSE(postSetting(key, 1).has_value());
+        } else if (type == "integer" || type == "number") {
+            EXPECT_FALSE(postSetting(key, "1").has_value());
+            const bool rejected = e["outOfRange"] == "rejected";
+            ASSERT_TRUE(rejected || e["outOfRange"] == "clamped");
+            for (const char* end : {"min", "max"}) {
+                if (e[end].isNull()) continue;
+                const double bound = e[end].toDouble();
+                const double outside = QLatin1String(end) == QLatin1String("min") ? bound - 1 : bound + 1;
+                const auto atBound = postSetting(key, bound);
+                const auto beyond = postSetting(key, outside);
+                ASSERT_TRUE(atBound.has_value()) << end;
+                if (QLatin1String(end) == QLatin1String("min") && dependentMin.contains(key)) continue;
+                EXPECT_EQ(atBound->toDouble(), bound) << end;
+                if (rejected) EXPECT_FALSE(beyond.has_value()) << end;
+                else EXPECT_EQ(beyond.value_or(QJsonValue()).toDouble(), bound) << end;
+            }
+            if (type == "integer") EXPECT_FALSE(postSetting(key, e["default"].toDouble() + 0.5).has_value());
+        } else if (type == "enum" || type == "color") {
+            for (const QJsonValue v : e["values"].toArray()) EXPECT_EQ(postSetting(key, v), v) << v.toString().toStdString();
+            EXPECT_FALSE(postSetting(key, "__unlisted__").has_value());
+            if (type == "enum") EXPECT_FALSE(e["values"].toArray().isEmpty());
+            if (type == "color") {
+                EXPECT_EQ(postSetting(key, "#123456"), QJsonValue("#123456"));
+                EXPECT_FALSE(postSetting(key, "#12345").has_value());
+            }
+        } else {
+            ASSERT_EQ(type, "gradient");
+            EXPECT_FALSE(postSetting(key, QJsonArray{}).has_value());
+        }
+    }
+    for (const auto* path : {"/api/v1/heatmap/settings", "/api/v1/layers"})
+        EXPECT_EQ(postControl(path, {{"notASetting", true}}).status, 422) << path;
+}
+
+TEST(AgentApiSchema, LayersSchemaListsExactlyTheAcceptedKeys) {
+    const auto schema = schemaJson();
+    const auto layers = schema["layers"].toObject();
+    const auto settings = schema["heatmapSettings"].toObject();
+    QStringList expected{"heatmap", "candles", "footprint", "tpo", "volumeProfile", "ladder", "wallRadar", "tpoLayout",
+                         "tpoTheme", "tpoPreset", "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "cvdFillAnchor",
+                         "footprintIntensity", "footprintCandle", "footprintDustNotional", "footprintNumbers"};
+    expected.sort();
+    EXPECT_EQ(layers.keys(), expected);
+    for (auto it = layers.begin(); it != layers.end(); ++it) {
+        const QString key = it.key();
+        const auto e = it->toObject();
+        SCOPED_TRACE(key.toStdString());
+        EXPECT_FALSE(e["description"].toString().isEmpty());
+        EXPECT_TRUE(e["persists"].isBool());
+        EXPECT_TRUE(layerAccepted(key, e["default"]));
+        // A layers key that is a chart setting reports that setting's own definition.
+        if (settings.contains(key)) EXPECT_EQ(e, settings[key].toObject());
+        const auto type = e["type"].toString();
+        if (type == "boolean") {
+            EXPECT_TRUE(layerAccepted(key, true));
+            EXPECT_TRUE(layerAccepted(key, false));
+            EXPECT_FALSE(layerAccepted(key, 1));
+        } else if (type == "enum") {
+            for (const QJsonValue v : e["values"].toArray()) EXPECT_TRUE(layerAccepted(key, v)) << v.toString().toStdString();
+            EXPECT_FALSE(layerAccepted(key, "__unlisted__"));
+            EXPECT_FALSE(layerAccepted(key, true));
+        } else {
+            ASSERT_TRUE(type == "integer" || type == "number");
+            if (!e["min"].isNull()) EXPECT_TRUE(layerAccepted(key, e["min"]));
+            if (!e["max"].isNull()) EXPECT_TRUE(layerAccepted(key, e["max"]));
+        }
+    }
+    EXPECT_EQ(postControl("/api/v1/layers", {{"notALayer", true}}).code, "invalid_field");
 }

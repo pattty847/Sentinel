@@ -5,6 +5,8 @@
 #include <QRegularExpression>
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <variant>
 
 namespace heatmap {
 namespace {
@@ -50,50 +52,179 @@ QString segment(const QString &value) {
 QString symbolFromSegment(QString value) {
     return value.replace("%5C", "\\").replace("%2F", "/").replace("%25", "%");
 }
+
+// One definition per accepted settings key. applySettingsPatch (validation),
+// clampSettings, settingsJson and settingsSchema (GET /api/v1/schema) all read this
+// table, so the API reference cannot drift from what the store accepts.
+using S = HeatmapChartSettings;
+using Field = std::variant<bool S::*, int S::*, int64_t S::*, uint64_t S::*, double S::*, std::string S::*,
+                           std::vector<GradientStop> S::*, TickMode S::*>;
+enum class Kind { Boolean, Integer, Number, Choice, Color, Gradient };
+constexpr double kInf = std::numeric_limits<double>::infinity();
+struct Def {
+    const char *key;
+    Field field;
+    Kind kind;
+    double min = -kInf, max = kInf; // Integer/Number: clamp range, inclusive
+    bool reject = false;             // a patch outside [min, max] is rejected instead of clamped
+    QStringList values;              // Choice: allowed values; Color: accepted words besides #RRGGBB
+    const char *description = "";
+    const char *error = nullptr;     // rejection message when the generated one does not fit
+};
+Def flag(const char *k, bool S::*f, const char *d) { return {k, f, Kind::Boolean, -kInf, kInf, false, {}, d}; }
+template <typename T> Def integer(const char *k, T S::*f, double lo, double hi, const char *d, const char *rejectError = nullptr) {
+    return {k, f, Kind::Integer, lo, hi, rejectError != nullptr, {}, d, rejectError};
+}
+Def number(const char *k, double S::*f, double lo, double hi, const char *d, const char *rejectError = nullptr) {
+    return {k, f, Kind::Number, lo, hi, rejectError != nullptr, {}, d, rejectError};
+}
+template <typename T> Def choice(const char *k, T S::*f, QStringList v, const char *d, const char *error = nullptr) {
+    return {k, f, Kind::Choice, -kInf, kInf, false, std::move(v), d, error};
+}
+Def color(const char *k, std::string S::*f, const char *d, QStringList words = {}) {
+    return {k, f, Kind::Color, -kInf, kInf, false, std::move(words), d, "Candle colors must be #RRGGBB (wick also accepts auto)"};
+}
+Def stops(const char *k, std::vector<GradientStop> S::*f, const char *d) {
+    return {k, f, Kind::Gradient, -kInf, kInf, false, {}, d, "Invalid gradient (2..16 ordered stops, endpoints 0 and 1, hex colors)"};
+}
+const std::vector<Def> &defs() {
+    static const std::vector<Def> table{
+        choice("tickMode", &S::tickMode, {"auto", "manual"}, "Auto picks the heatmap tick from zoom; manual locks manualTick."),
+        integer("manualTick", &S::manualTick, 1, 1e12, "Manual heatmap tick in integer price units (price x priceScale), raised to a 1/2/2.5/5 x 10^k preset."),
+        number("minRowPx", &S::minRowPx, 0.5, 32, "Auto tick: target minimum heatmap row height in physical pixels."),
+        number("hysteresis", &S::hysteresis, 0, 0.9, "Auto tick: margin around the row-height threshold that reduces tick switching."),
+        integer("crossfadeMs", &S::crossfadeMs, 0, 2000, "Blend old and new heatmap rows over this many milliseconds on a tick change; 0 switches at once."),
+        flag("showBandEdges", &S::showBandEdges, "Draw the recorded book band edges on the heatmap."),
+        choice("palettePreset", &S::palettePreset, palettes, "Heatmap colour scale; Custom uses bidGradient and askGradient.", "Unknown palettePreset"),
+        stops("bidGradient", &S::bidGradient, "Bid colours from low to high liquidity: 2..16 {position, color} stops, positions 0..1 increasing, #RRGGBB[AA]."),
+        stops("askGradient", &S::askGradient, "Ask colours from low to high liquidity: 2..16 {position, color} stops, positions 0..1 increasing, #RRGGBB[AA]."),
+        number("sensitivityMin", &S::sensitivityMin, 1e-9, 1e12, "Liquidity range low in base units; cells below it stay hidden. Saved per symbol, not per chart."),
+        number("sensitivityMax", &S::sensitivityMax, 1e-9, 1e15, "Liquidity range high in base units (raised to 2 x sensitivityMin when not above it). Saved per symbol."),
+        number("opacity", &S::opacity, 0, 1, "Heatmap opacity: 0 transparent, 1 solid."),
+        flag("smoothZoomOut", &S::smoothZoomOut, "Average covered heatmap cells when a cell is smaller than a screen pixel."),
+        integer("gpuCapBytes", &S::gpuCapBytes, double(MiB), double(4096 * MiB), "GPU heatmap cache budget for this chart, in bytes."),
+        integer("uploadBudgetBytes", &S::uploadBudgetBytes, 1, double(128 * MiB), "GPU heatmap upload budget per frame, in bytes; also capped at gpuCapBytes."),
+        integer("prefetchTiles", &S::prefetchTiles, 0, 16, "Heatmap tiles prefetched beyond each side of the view."),
+        integer("liveMinIntervalMs", &S::liveMinIntervalMs, 100, 5000, "Minimum spacing of GPU refreshes of the newest heatmap columns, in milliseconds."),
+        flag("showTelemetry", &S::showTelemetry, "Show the heatmap telemetry dock."),
+        flag("showTrades", &S::showTrades, "Draw trade bubbles."),
+        flag("tradesAboveCandles", &S::tradesAboveCandles, "Draw trade bubbles above candles; false draws them below."),
+        number("tradeMinNotional", &S::tradeMinNotional, -1, 1e12, "Trade bubble minimum in quote currency: 0 all trades, -1 the visible median, >0 a fixed minimum."),
+        choice("bubblePlacement", &S::bubblePlacement, {"individual", "auto", "slot"}, "Trade bubbles at exchange time, per bar side at VWAP (slot), or chosen by column width (auto)."),
+        choice("bubblesOverFootprint", &S::bubblesOverFootprint, {"over", "dim"}, "Keep trade bubbles at full opacity over footprint numbers, or dim them to 35%."),
+        choice("paperPositionStyle", &S::paperPositionStyle, {"tag", "band"}, "Paper position as a compact PnL tag at the entry line, or a full-width entry-to-mark band."),
+        flag("showLabels", &S::showLabels, "Show liquidity sizes on heatmap cells where the text fits."),
+        choice("labelCurrency", &S::labelCurrency, {"usd", "asset"}, "Liquidity labels as USD notional or base-asset size."),
+        flag("labelCurrencySymbol", &S::labelCurrencySymbol, "Prefix USD liquidity labels with '$'."),
+        number("labelMinPx", &S::labelMinPx, 8, 24, "Smallest liquidity label text in pixels; labels that cannot fit are hidden."),
+        number("labelMaxPx", &S::labelMaxPx, 8, 32, "Largest liquidity label text in pixels; never below labelMinPx."),
+        color("candleUpColor", &S::candleUpColor, "Colour of candles that close at or above their open."),
+        color("candleDownColor", &S::candleDownColor, "Colour of candles that close below their open."),
+        color("candleWickColor", &S::candleWickColor, "Wick colour; auto follows each candle's body colour.", {"auto"}),
+        number("candleBodyOpacity", &S::candleBodyOpacity, 0, 1, "Candle body opacity: 0 transparent, 1 solid."),
+        integer("candleWickWidth", &S::candleWickWidth, 1, 3, "Wick thickness in device pixels.", "candleWickWidth must be 1..3 device pixels"),
+        number("candleBodyFraction", &S::candleBodyFraction, 0.3, 1.0, "Candle body width as a fraction of its time column."),
+        integer("candleMaxBodyPx", &S::candleMaxBodyPx, 5, 120, "Maximum candle body width in logical pixels."),
+        flag("showVolumeBars", &S::showVolumeBars, "Show candle volume at the bottom of the price pane."),
+        number("volumeBandPercent", &S::volumeBandPercent, 10, 40, "Share of the price pane used by volume bars, in percent."),
+        number("volumeOpacity", &S::volumeOpacity, 0.1, 1, "Volume bar opacity."),
+        flag("flowFooter", &S::flowFooter, "Show the per-bar DELTA / CUM / VOL footer."),
+        integer("cvdStripPx", &S::cvdStripPx, 0, 400, "Cumulative volume delta strip height in logical pixels; 0 hides it."),
+        choice("cvdReset", &S::cvdReset, {"visible", "utcDay", "tpoSession"}, "Where CVD starts from zero: the view's left edge, the UTC day, or the TPO session open."),
+        choice("cvdStyle", &S::cvdStyle, {"line", "area"}, "CVD drawn as a line or a filled area."),
+        choice("cvdFillAnchor", &S::cvdFillAnchor, {"auto", "zero", "edge", "none"}, "What the CVD area fills to: auto, zero, the plot-band edge, or nothing (line only)."),
+        choice("footprintIntensity", &S::footprintIntensity, {"bar", "window"}, "Footprint fill length scaled to the bar's or the visible window's largest cell."),
+        choice("footprintCandle", &S::footprintCandle, {"spine", "full"}, "Footprint bars draw a thin spine candle or the full candle style."),
+        number("footprintDustNotional", &S::footprintDustNotional, 0, kInf, "Footprint sides below this quote amount get faint text and no fill.", "footprintDustNotional must be nonnegative"),
+        flag("footprintNumbers", &S::footprintNumbers, "Show footprint bid and ask amounts when they fit."),
+        flag("showLadder", &S::showLadder, "Show the chart-edge book ladder strip."),
+        integer("ladderWidthPx", &S::ladderWidthPx, 60, 240, "Book ladder strip width in logical pixels."),
+        flag("showWallRadar", &S::showWallRadar, "Mark walls on the book ladder (needs showLadder)."),
+        number("wallMultiple", &S::wallMultiple, 1.5, 20, "Wall threshold as a multiple of the side's median nonempty bin near the touch."),
+    };
+    return table;
+}
+const Def *findDef(const QString &key) {
+    for (const auto &def : defs()) if (key == QLatin1String(def.key)) return &def;
+    return nullptr;
+}
+QJsonValue::Type jsonType(Kind kind) {
+    switch (kind) {
+    case Kind::Boolean: return QJsonValue::Bool;
+    case Kind::Integer: case Kind::Number: return QJsonValue::Double;
+    case Kind::Gradient: return QJsonValue::Array;
+    default: return QJsonValue::String;
+    }
+}
+template <typename... F> struct Visit : F... { using F::operator()...; };
+template <typename... F> Visit(F...) -> Visit<F...>;
+QJsonValue read(const Def &def, const S &s) {
+    return std::visit(Visit{
+        [&](bool S::*f) { return QJsonValue(s.*f); },
+        [&](int S::*f) { return QJsonValue(s.*f); },
+        [&](int64_t S::*f) { return QJsonValue(qint64(s.*f)); },
+        [&](uint64_t S::*f) { return QJsonValue(qint64(s.*f)); },
+        [&](double S::*f) { return QJsonValue(s.*f); },
+        [&](std::string S::*f) { return QJsonValue(QString::fromStdString(s.*f)); },
+        [&](std::vector<GradientStop> S::*f) { return QJsonValue(gradientJson(s.*f)); },
+        [&](TickMode S::*f) { return QJsonValue(s.*f == TickMode::Auto ? "auto" : "manual"); },
+    }, def.field);
+}
+// v has passed checkValue for def; numeric limits are applied afterwards by clampSettings.
+void write(const Def &def, S &s, const QJsonValue &v) {
+    std::visit(Visit{
+        [&](bool S::*f) { s.*f = v.toBool(); },
+        [&](int S::*f) { s.*f = int(std::clamp(v.toDouble(), -2147483647.0, 2147483647.0)); },
+        [&](int64_t S::*f) { s.*f = int64_t(v.toDouble()); },
+        [&](uint64_t S::*f) { s.*f = uint64_t(std::max(0.0, v.toDouble())); },
+        [&](double S::*f) { s.*f = v.toDouble(); },
+        [&](std::string S::*f) { s.*f = v.toString().toStdString(); },
+        [&](std::vector<GradientStop> S::*f) { s.*f = gradient(v); },
+        [&](TickMode S::*f) { s.*f = v == "manual" ? TickMode::Manual : TickMode::Auto; },
+    }, def.field);
+}
+bool colorOk(const Def &def, const QString &v) { return def.values.contains(v) || candleColor.match(v).hasMatch(); }
+template <typename T> void clampInteger(const Def &def, T &v) { v = std::clamp<T>(v, T(def.min), T(def.max)); }
+void clampField(const Def &def, S &s, const S &d) {
+    std::visit(Visit{
+        [&](bool S::*) {},
+        [&](int S::*f) { clampInteger(def, s.*f); },
+        [&](int64_t S::*f) { clampInteger(def, s.*f); },
+        [&](uint64_t S::*f) { clampInteger(def, s.*f); },
+        [&](double S::*f) { s.*f = finiteClamp(s.*f, def.min, def.max, d.*f); },
+        [&](std::string S::*f) {
+            const auto v = QString::fromStdString(s.*f);
+            if (def.kind == Kind::Choice ? !def.values.contains(v) : !colorOk(def, v)) s.*f = d.*f;
+        },
+        [&](std::vector<GradientStop> S::*f) { if (!validGradient(gradientJson(s.*f))) s.*f = d.*f; },
+        [&](TickMode S::*f) { if (s.*f != TickMode::Auto && s.*f != TickMode::Manual) s.*f = d.*f; },
+    }, def.field);
+}
+QString joinOr(const QStringList &values) {
+    return values.size() < 2 ? values.join("") : values.mid(0, values.size() - 1).join(", ") + " or " + values.last();
+}
+QString checkValue(const Def &def, const QString &key, const QJsonValue &v) {
+    if (v.type() != jsonType(def.kind)) return "Invalid type for heatmap setting: " + key;
+    if (v.isDouble() && (!std::isfinite(v.toDouble()) || std::abs(v.toDouble()) > 9007199254740991.0))
+        return "Expected a finite safe number: " + key;
+    if (def.kind == Kind::Integer && std::floor(v.toDouble()) != v.toDouble()) return "Expected an integer: " + key;
+    if (def.reject && (v.toDouble() < def.min || v.toDouble() > def.max)) return def.error;
+    if (def.kind == Kind::Choice && !def.values.contains(v.toString()))
+        return def.error ? QString(def.error) : key + " must be " + joinOr(def.values);
+    if (def.kind == Kind::Color && !colorOk(def, v.toString())) return def.error;
+    if (def.kind == Kind::Gradient && !validGradient(v)) return def.error;
+    return {};
+}
 }
 
 void clampSettings(HeatmapChartSettings &s) {
     const HeatmapChartSettings d;
-    s.cvdStripPx = std::clamp(s.cvdStripPx, 0, 400);
-    if (s.cvdFillAnchor != "auto" && s.cvdFillAnchor != "zero" && s.cvdFillAnchor != "edge" && s.cvdFillAnchor != "none")
-        s.cvdFillAnchor = d.cvdFillAnchor;
-    if (s.tickMode != TickMode::Auto && s.tickMode != TickMode::Manual) s.tickMode = TickMode::Auto;
-    s.manualTick = presetAtLeast(double(std::clamp<int64_t>(s.manualTick, 1, 1'000'000'000'000LL)), 1);
-    s.minRowPx = finiteClamp(s.minRowPx, 0.5, 32, d.minRowPx);
-    s.hysteresis = finiteClamp(s.hysteresis, 0, 0.9, d.hysteresis);
-    s.crossfadeMs = std::clamp(s.crossfadeMs, 0, 2000);
-    if (!palettes.contains(QString::fromStdString(s.palettePreset))) s.palettePreset = d.palettePreset;
-    if (!validGradient(gradientJson(s.bidGradient))) s.bidGradient = d.bidGradient;
-    if (!validGradient(gradientJson(s.askGradient))) s.askGradient = d.askGradient;
-    s.sensitivityMin = finiteClamp(s.sensitivityMin, 1e-9, 1e12, d.sensitivityMin);
-    s.sensitivityMax = finiteClamp(s.sensitivityMax, 1e-9, 1e15, d.sensitivityMax);
+    for (const auto &def : defs()) clampField(def, s, d);
+    // Limits that depend on another key, applied after both are clamped.
+    s.manualTick = presetAtLeast(double(s.manualTick), 1);
     if (s.sensitivityMax <= s.sensitivityMin) s.sensitivityMax = s.sensitivityMin * 2;
-    if (s.bubblePlacement != "individual" && s.bubblePlacement != "auto" && s.bubblePlacement != "slot")
-        s.bubblePlacement = d.bubblePlacement;
-    if (s.bubblesOverFootprint != "over" && s.bubblesOverFootprint != "dim")
-        s.bubblesOverFootprint = d.bubblesOverFootprint;
-    if (s.paperPositionStyle != "tag" && s.paperPositionStyle != "band")
-        s.paperPositionStyle = d.paperPositionStyle;
-    s.tradeMinNotional = finiteClamp(s.tradeMinNotional, -1, 1e12, d.tradeMinNotional);
-    s.opacity = finiteClamp(s.opacity, 0, 1, d.opacity);
-    s.gpuCapBytes = std::clamp<uint64_t>(s.gpuCapBytes, MiB, 4096 * MiB);
-    s.uploadBudgetBytes = std::clamp<uint64_t>(s.uploadBudgetBytes, 1, std::min<uint64_t>(128 * MiB, s.gpuCapBytes));
-    s.prefetchTiles = std::clamp(s.prefetchTiles, 0, 16);
-    s.liveMinIntervalMs = std::clamp(s.liveMinIntervalMs, 100, 5000);
-    if (s.labelCurrency != "usd" && s.labelCurrency != "asset") s.labelCurrency = d.labelCurrency;
-    s.labelMinPx = finiteClamp(s.labelMinPx, 8, 24, d.labelMinPx);
-    s.labelMaxPx = finiteClamp(s.labelMaxPx, s.labelMinPx, 32, std::max(d.labelMaxPx, s.labelMinPx));
-    if (!candleColor.match(QString::fromStdString(s.candleUpColor)).hasMatch()) s.candleUpColor = d.candleUpColor;
-    if (!candleColor.match(QString::fromStdString(s.candleDownColor)).hasMatch()) s.candleDownColor = d.candleDownColor;
-    if (s.candleWickColor != "auto" && !candleColor.match(QString::fromStdString(s.candleWickColor)).hasMatch()) s.candleWickColor = d.candleWickColor;
-    s.candleBodyOpacity = finiteClamp(s.candleBodyOpacity, 0, 1, d.candleBodyOpacity);
-    s.candleWickWidth = std::clamp(s.candleWickWidth, 1, 3);
-    s.candleBodyFraction = finiteClamp(s.candleBodyFraction, 0.3, 1.0, d.candleBodyFraction);
-    s.candleMaxBodyPx = std::clamp(s.candleMaxBodyPx, 5, 120);
-    s.volumeBandPercent = finiteClamp(s.volumeBandPercent, 10, 40, d.volumeBandPercent);
-    s.volumeOpacity = finiteClamp(s.volumeOpacity, 0.1, 1, d.volumeOpacity);
-    s.ladderWidthPx = std::clamp(s.ladderWidthPx, 60, 240);
-    s.wallMultiple = finiteClamp(s.wallMultiple, 1.5, 20, d.wallMultiple);
+    s.uploadBudgetBytes = std::min(s.uploadBudgetBytes, s.gpuCapBytes);
+    s.labelMaxPx = std::max(s.labelMaxPx, s.labelMinPx);
 }
 HeatmapChartSettings chartDefaults(const ClientHeatmapConfig &c) {
     HeatmapChartSettings s;
@@ -124,148 +255,40 @@ HeatmapChartSettings chartDefaults(const ClientHeatmapConfig &c) {
     return s;
 }
 QJsonObject settingsJson(const HeatmapChartSettings &s) {
-    return {
-        {"manualTick", qint64(s.manualTick)},
-        {"minRowPx", s.minRowPx},
-        {"hysteresis", s.hysteresis},
-        {"crossfadeMs", s.crossfadeMs},
-        {"showBandEdges", s.showBandEdges},
-        {"palettePreset", QString::fromStdString(s.palettePreset)},
-        {"sensitivityMin", s.sensitivityMin},
-        {"sensitivityMax", s.sensitivityMax},
-        {"opacity", s.opacity},
-        {"smoothZoomOut", s.smoothZoomOut},
-        {"gpuCapBytes", qint64(s.gpuCapBytes)},
-        {"uploadBudgetBytes", qint64(s.uploadBudgetBytes)},
-        {"prefetchTiles", s.prefetchTiles},
-        {"liveMinIntervalMs", s.liveMinIntervalMs},
-        {"showTelemetry", s.showTelemetry},
-        {"showTrades", s.showTrades},
-        {"tradesAboveCandles", s.tradesAboveCandles},
-        {"tradeMinNotional", s.tradeMinNotional},
-        {"bubblePlacement", QString::fromStdString(s.bubblePlacement)},
-        {"bubblesOverFootprint", QString::fromStdString(s.bubblesOverFootprint)},
-        {"paperPositionStyle", QString::fromStdString(s.paperPositionStyle)},
-        {"showLabels", s.showLabels},
-        {"labelCurrency", QString::fromStdString(s.labelCurrency)},
-        {"labelCurrencySymbol", s.labelCurrencySymbol},
-        {"labelMinPx", s.labelMinPx},
-        {"labelMaxPx", s.labelMaxPx},
-        {"candleUpColor", QString::fromStdString(s.candleUpColor)},
-        {"candleDownColor", QString::fromStdString(s.candleDownColor)},
-        {"candleWickColor", QString::fromStdString(s.candleWickColor)},
-        {"candleBodyOpacity", s.candleBodyOpacity},
-        {"candleWickWidth", s.candleWickWidth},
-        {"candleBodyFraction", s.candleBodyFraction},
-        {"candleMaxBodyPx", s.candleMaxBodyPx},
-        {"showVolumeBars", s.showVolumeBars},
-        {"volumeBandPercent", s.volumeBandPercent},
-        {"volumeOpacity", s.volumeOpacity},
-        {"flowFooter", s.flowFooter}, {"cvdStripPx", s.cvdStripPx}, {"cvdReset", QString::fromStdString(s.cvdReset)},
-        {"cvdStyle", QString::fromStdString(s.cvdStyle)}, {"cvdFillAnchor", QString::fromStdString(s.cvdFillAnchor)},
-        {"footprintIntensity", QString::fromStdString(s.footprintIntensity)},
-        {"footprintCandle", QString::fromStdString(s.footprintCandle)}, {"footprintDustNotional", s.footprintDustNotional}, {"footprintNumbers", s.footprintNumbers},
-        {"showLadder", s.showLadder},
-        {"ladderWidthPx", s.ladderWidthPx},
-        {"showWallRadar", s.showWallRadar},
-        {"wallMultiple", s.wallMultiple},
-        {"tickMode", s.tickMode == TickMode::Auto ? "auto" : "manual"},
-        {"bidGradient", gradientJson(s.bidGradient)}, {"askGradient", gradientJson(s.askGradient)}
-    };
+    QJsonObject out;
+    for (const auto &def : defs()) out.insert(QLatin1String(def.key), read(def, s));
+    return out;
 }
 QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
-    const auto schema = settingsJson(HeatmapChartSettings{});
-    auto merged = settingsJson(s);
-    const QStringList integers{"manualTick", "crossfadeMs", "gpuCapBytes", "uploadBudgetBytes", "prefetchTiles", "liveMinIntervalMs", "candleWickWidth", "candleMaxBodyPx", "ladderWidthPx"};
-    for (auto it = patch.begin(); it != patch.end(); ++it) {
-        const auto &key = it.key();
-        const auto v = it.value();
-        if (!schema.contains(key)) return "Unknown heatmap setting: " + key;
-        if (v.type() != schema[key].type()) return "Invalid type for heatmap setting: " + key;
-        if (v.isDouble() && (!std::isfinite(v.toDouble()) || std::abs(v.toDouble()) > 9007199254740991.0))
-            return "Expected a finite safe number: " + key;
-        if (integers.contains(key) && std::floor(v.toDouble()) != v.toDouble()) return "Expected an integer: " + key;
-        if (key == "bubblePlacement" && v != "individual" && v != "auto" && v != "slot")
-            return "bubblePlacement must be individual, auto or slot";
-        if (key == "bubblesOverFootprint" && v != "over" && v != "dim")
-            return "bubblesOverFootprint must be over or dim";
-        if (key == "paperPositionStyle" && v != "tag" && v != "band")
-            return "paperPositionStyle must be tag or band";
-        if (key == "cvdStripPx" && std::floor(v.toDouble()) != v.toDouble())
-            return "cvdStripPx must be an integer";
-        if (key == "cvdReset" && v != "visible" && v != "utcDay" && v != "tpoSession") return "cvdReset must be visible, utcDay or tpoSession";
-        if (key == "cvdStyle" && v != "line" && v != "area") return "cvdStyle must be line or area";
-        if (key == "cvdFillAnchor" && v != "auto" && v != "zero" && v != "edge" && v != "none")
-            return "cvdFillAnchor must be auto, zero, edge or none";
-        if (key == "footprintCandle" && v != "spine" && v != "full") return "footprintCandle must be spine or full";
-        if (key == "footprintDustNotional" && v.toDouble() < 0) return "footprintDustNotional must be nonnegative";
-        if (key == "footprintIntensity" && v != "bar" && v != "window") return "footprintIntensity must be bar or window";
-        if (key == "tickMode" && v != "auto" && v != "manual") return "tickMode must be auto or manual";
-        if (key == "palettePreset" && !palettes.contains(v.toString())) return "Unknown palettePreset";
-        if (key == "labelCurrency" && v != "usd" && v != "asset") return "labelCurrency must be usd or asset";
-        if ((key == "candleUpColor" || key == "candleDownColor" || key == "candleWickColor") &&
-            !(key == "candleWickColor" && v == "auto") && !candleColor.match(v.toString()).hasMatch())
-            return "Candle colors must be #RRGGBB (wick also accepts auto)";
-        if (key == "candleWickWidth" && (v.toInt() < 1 || v.toInt() > 3)) return "candleWickWidth must be 1..3 device pixels";
-        if ((key == "bidGradient" || key == "askGradient") && !validGradient(v)) return "Invalid gradient (2..16 ordered stops, endpoints 0 and 1, hex colors)";
-        merged[key] = v;
-    }
     HeatmapChartSettings out = s;
-    out.manualTick = int64_t(merged["manualTick"].toDouble());
-    out.minRowPx = merged["minRowPx"].toDouble();
-    out.hysteresis = merged["hysteresis"].toDouble();
-    out.crossfadeMs = int(std::clamp(merged["crossfadeMs"].toDouble(), -2147483647.0, 2147483647.0));
-    out.showBandEdges = merged["showBandEdges"].toBool();
-    out.palettePreset = merged["palettePreset"].toString().toStdString();
-    out.sensitivityMin = merged["sensitivityMin"].toDouble();
-    out.sensitivityMax = merged["sensitivityMax"].toDouble();
-    out.opacity = merged["opacity"].toDouble();
-    out.smoothZoomOut = merged["smoothZoomOut"].toBool();
-    out.gpuCapBytes = uint64_t(std::max(0.0, merged["gpuCapBytes"].toDouble()));
-    out.uploadBudgetBytes = uint64_t(std::max(0.0, merged["uploadBudgetBytes"].toDouble()));
-    out.prefetchTiles = int(std::clamp(merged["prefetchTiles"].toDouble(), -2147483647.0, 2147483647.0));
-    out.liveMinIntervalMs = int(std::clamp(merged["liveMinIntervalMs"].toDouble(), -2147483647.0, 2147483647.0));
-    out.showTelemetry = merged["showTelemetry"].toBool();
-    out.showTrades = merged["showTrades"].toBool();
-    out.tradesAboveCandles = merged["tradesAboveCandles"].toBool();
-    out.bubblePlacement = merged["bubblePlacement"].toString().toStdString();
-    out.bubblesOverFootprint = merged["bubblesOverFootprint"].toString().toStdString();
-    out.paperPositionStyle = merged["paperPositionStyle"].toString().toStdString();
-    out.tradeMinNotional = merged["tradeMinNotional"].toDouble();
-    out.showLabels = merged["showLabels"].toBool();
-    out.labelCurrency = merged["labelCurrency"].toString().toStdString();
-    out.labelCurrencySymbol = merged["labelCurrencySymbol"].toBool();
-    out.labelMinPx = merged["labelMinPx"].toDouble();
-    out.labelMaxPx = merged["labelMaxPx"].toDouble();
-    out.candleUpColor = merged["candleUpColor"].toString().toStdString();
-    out.candleDownColor = merged["candleDownColor"].toString().toStdString();
-    out.candleWickColor = merged["candleWickColor"].toString().toStdString();
-    out.candleBodyOpacity = merged["candleBodyOpacity"].toDouble();
-    out.candleWickWidth = merged["candleWickWidth"].toInt();
-    out.candleBodyFraction = merged["candleBodyFraction"].toDouble();
-    out.candleMaxBodyPx = int(std::clamp(merged["candleMaxBodyPx"].toDouble(), -2147483647.0, 2147483647.0));
-    out.showVolumeBars = merged["showVolumeBars"].toBool();
-    out.volumeBandPercent = merged["volumeBandPercent"].toDouble();
-    out.volumeOpacity = merged["volumeOpacity"].toDouble();
-    out.flowFooter = merged["flowFooter"].toBool();
-    out.cvdStripPx = int(std::clamp(merged["cvdStripPx"].toDouble(), 0.0, 400.0));
-    out.cvdReset = merged["cvdReset"].toString().toStdString();
-    out.cvdStyle = merged["cvdStyle"].toString().toStdString();
-    out.cvdFillAnchor = merged["cvdFillAnchor"].toString().toStdString();
-    out.footprintIntensity = merged["footprintIntensity"].toString().toStdString();
-    out.footprintCandle = merged["footprintCandle"].toString().toStdString();
-    out.footprintDustNotional = merged["footprintDustNotional"].toDouble();
-    out.footprintNumbers = merged["footprintNumbers"].toBool();
-    out.showLadder = merged["showLadder"].toBool();
-    out.ladderWidthPx = int(std::clamp(merged["ladderWidthPx"].toDouble(), -2147483647.0, 2147483647.0));
-    out.showWallRadar = merged["showWallRadar"].toBool();
-    out.wallMultiple = merged["wallMultiple"].toDouble();
-    out.tickMode = merged["tickMode"] == "manual" ? TickMode::Manual : TickMode::Auto;
-    out.bidGradient = gradient(merged["bidGradient"]);
-    out.askGradient = gradient(merged["askGradient"]);
+    for (auto it = patch.begin(); it != patch.end(); ++it) {
+        const Def *def = findDef(it.key());
+        if (!def) return "Unknown heatmap setting: " + it.key();
+        if (const auto error = checkValue(*def, it.key(), it.value()); !error.isEmpty()) return error;
+        write(*def, out, it.value());
+    }
     clampSettings(out);
     s = std::move(out);
     return {};
+}
+QJsonObject settingsSchema() {
+    static const char *const kinds[] = {"boolean", "integer", "number", "enum", "color", "gradient"};
+    const HeatmapChartSettings defaults;
+    const auto bound = [](double v) { return std::isfinite(v) ? QJsonValue(v) : QJsonValue(QJsonValue::Null); };
+    QJsonObject out;
+    for (const auto &def : defs()) {
+        QJsonObject entry{{"type", kinds[int(def.kind)]}, {"default", read(def, defaults)}, {"persists", true},
+                          {"description", def.description}};
+        if (def.kind == Kind::Integer || def.kind == Kind::Number) {
+            entry["min"] = bound(def.min);
+            entry["max"] = bound(def.max);
+            entry["outOfRange"] = def.reject ? "rejected" : "clamped";
+        }
+        if (def.kind == Kind::Color) entry["format"] = "#RRGGBB";
+        if (!def.values.isEmpty()) entry["values"] = QJsonArray::fromStringList(def.values);
+        out.insert(QLatin1String(def.key), entry);
+    }
+    return out;
 }
 HeatmapSettingsStore::HeatmapSettingsStore() = default;
 HeatmapSettingsStore::HeatmapSettingsStore(QSettings &settings) : settings_(&settings) {}

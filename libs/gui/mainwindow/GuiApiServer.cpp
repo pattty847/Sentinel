@@ -220,6 +220,16 @@ void GuiApiServer::handleRequest(QTcpSocket* socket) {
         }
         return;
     }
+    if (path == "/api/v1/schema") {
+        const auto check = AgentApi::validateQuery(parsed.request);
+        if (check.status != 200) {
+            respond(socket, check.status, AgentApi::jsonBytes(AgentApi::error(check.code, check.message)), "application/json");
+        } else {
+            respond(socket, 200, AgentApi::jsonBytes(AgentApi::envelope(m_stateSnapshot().meta, AgentApi::schemaJson())),
+                    "application/json");
+        }
+        return;
+    }
     if (path == "/api/v1/heatmap/state") {
         const auto state = m_stateSnapshot();
         const auto check = AgentApi::validateQuery(parsed.request, state.meta.symbol);

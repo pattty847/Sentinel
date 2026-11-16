@@ -104,7 +104,7 @@ void ChartAgentPort::applyFootprintSettings(const QJsonObject& patch) const {
 }
 
 bool ChartAgentPort::isTpoLookKey(const QString& key) {
-    return key == "tpoLayout" || key == "tpoTheme" || key == "tpoPreset";
+    return AgentApi::isLayerKey(key, AgentApi::LayerKeyKind::TpoLook);
 }
 void ChartAgentPort::applyTpoLook(const QJsonObject& patch) const {
     if (!tpo_) return;
@@ -119,7 +119,7 @@ QJsonObject ChartAgentPort::tpoLook() const {
 
 QJsonObject ChartAgentPort::footprintPatch(const QJsonObject& patch) {
     QJsonObject out;
-    for (const auto& key : {"flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "cvdFillAnchor", "footprintIntensity", "footprintCandle", "footprintDustNotional", "footprintNumbers"})
-        if (patch.contains(key)) out[key] = patch[key];
+    for (auto it = patch.begin(); it != patch.end(); ++it)
+        if (AgentApi::isLayerKey(it.key(), AgentApi::LayerKeyKind::Setting)) out[it.key()] = it.value();
     return out;
 }

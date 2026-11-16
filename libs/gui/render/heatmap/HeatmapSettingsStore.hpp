@@ -13,6 +13,9 @@ QJsonObject settingsJson(const HeatmapChartSettings &settings);
 // Strict types and keys; finite numeric values are clamped to documented limits.
 // A bad patch changes nothing. Error is empty on success.
 QString applySettingsPatch(HeatmapChartSettings &settings, const QJsonObject &patch);
+// Every key applySettingsPatch accepts, read from the same definition table:
+// {key: {type, default, persists, description, min/max/outOfRange | values | format}}.
+QJsonObject settingsSchema();
 
 class HeatmapSettingsStore {
 public:

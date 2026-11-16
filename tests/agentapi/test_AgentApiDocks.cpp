@@ -111,6 +111,35 @@ TEST(AgentApiDocks, RouteListsAndFocusesARealDockWindow) {
     QSettings::setDefaultFormat(previousFormat);
 }
 
+TEST(AgentApiSchema, ServedInTheEnvelopeWithoutTouchingTheChart) {
+    AgentApi::StateSnapshot state;
+    state.meta.symbol = "BTC-USD";
+    state.meta.sessionId = "schema-test";
+    int controls = 0;
+    GuiApiServer server(nullptr, nullptr, [&] { return state; }, [] { return AgentApi::ViewportSnapshot{}; },
+        [](const auto&) { return std::optional<AgentApi::CandleSnapshot>{}; },
+        [](int) { return AgentApi::BookSnapshot{}; }, [](qint64, int) { return AgentApi::TradesSnapshot{}; },
+        [](const auto&, auto complete) { complete(heatmap::WallsSnapshot{}); },
+        [&](const QString&, const AgentApi::ControlBody&) { ++controls; return AgentApi::ControlApply{}; },
+        [] { return std::pair<quint64, quint64>{0, 0}; }, [](quint64) {});
+    ASSERT_TRUE(server.start(0, "."));
+    const auto reply = requestPath(server.port(), "GET", "/api/v1/schema");
+    ASSERT_TRUE(reply.startsWith("HTTP/1.1 200")) << reply.toStdString();
+    const auto body = QJsonDocument::fromJson(reply.mid(reply.indexOf("\r\n\r\n") + 4)).object();
+    EXPECT_TRUE(body.value("ok").toBool());
+    EXPECT_EQ(body.value("meta").toObject().value("symbol").toString(), "BTC-USD");
+    EXPECT_EQ(body.value("meta").toObject().value("sessionId").toString(), "schema-test");
+    EXPECT_EQ(body.value("data").toObject(), AgentApi::schemaJson());
+    EXPECT_TRUE(body.value("data").toObject().value("heatmapSettings").toObject().contains("opacity"));
+    EXPECT_TRUE(body.value("data").toObject().value("layers").toObject().contains("tpoTheme"));
+    const auto withSymbol = requestPath(server.port(), "GET", "/api/v1/schema?symbol=BTC-USD");
+    EXPECT_TRUE(withSymbol.startsWith("HTTP/1.1 400")) << withSymbol.toStdString();
+    EXPECT_EQ(responseError(withSymbol).value("code").toString(), "invalid_parameter");
+    const auto post = requestPath(server.port(), "POST", "/api/v1/schema", "{}");
+    EXPECT_TRUE(post.startsWith("HTTP/1.1 405")) << post.toStdString();
+    EXPECT_EQ(controls, 0);
+}
+
 TEST(AgentApiDocks, HostedDockProfileRestoresWithoutSharingOtherSettings) {
     QTemporaryDir dir;
     ASSERT_TRUE(dir.isValid());

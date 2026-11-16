@@ -40,6 +40,12 @@ struct ControlValidation {
 ControlValidation validateControl(const Request& request, const std::optional<QList<qint64>>& servedTimeframes,
                                   const QJsonObject& currentDocks = {});
 void applyAdvertisedServerConfig(StateSnapshot& snapshot, const ServerConfig& config);
+// POST /api/v1/layers keys that are heatmap chart settings, or TPO look strings.
+enum class LayerKeyKind { Setting, TpoLook };
+bool isLayerKey(const QString& key, LayerKeyKind kind);
+// GET /api/v1/schema data: {heatmapSettings: {key: entry}, layers: {key: entry}}, generated from
+// the tables that validate POST /api/v1/heatmap/settings and POST /api/v1/layers.
+QJsonObject schemaJson();
 
 QJsonObject envelope(const Metadata& meta, const QJsonObject& data);
 QJsonObject error(const QString& code, const QString& message);
