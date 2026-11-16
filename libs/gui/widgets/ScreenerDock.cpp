@@ -557,6 +557,12 @@ void ScreenerDock::updateColumns() {
                                 col == kColExtra1 || col == kColExtra2 || col == kColSector));
     for (auto it = m_userColumnWidths.cbegin(); it != m_userColumnWidths.cend(); ++it)
         if (!m_table->isColumnHidden(it.key())) m_table->setColumnWidth(it.key(), it.value());
+    if (m_model->rowCount() == 0) {
+        // Empty columns take their header width, so the headers fit and the last one stretches.
+        for (int col = 0; col < kColCount; ++col)
+            if (!m_table->isColumnHidden(col) && !m_userColumnWidths.contains(col))
+                m_table->setColumnWidth(col, m_table->horizontalHeader()->sectionSizeHint(col));
+    }
     m_adjustingColumnWidths = false;
 }
 

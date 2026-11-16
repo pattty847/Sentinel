@@ -744,6 +744,31 @@ TEST(Screener, AutoRefreshIsOneCheckboxWithItsIntervalAndOneLabelledRefresh) {
     EXPECT_EQ(autoTimer->interval(), 300000);
 }
 
+TEST(Screener, EmptyTableFitsItsHeadersWithoutAHorizontalScrollbar) {
+    ScreenerDock dock;
+    dock.resize(480, 360);
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* table = dock.findChild<QTableView*>("screenerRows");
+    auto* header = table->horizontalHeader();
+    EXPECT_TRUE(header->stretchLastSection());
+    for (int asset : {0, 1}) {
+        dock.findChild<QComboBox*>("screenerAsset")->setCurrentIndex(asset);
+        QCoreApplication::processEvents();
+        EXPECT_FALSE(table->horizontalScrollBar()->isVisible());
+        if (asset == 1) continue; // eleven stock headers cannot all fit at 480 px; the bar still stays off
+        const int last = header->logicalIndex(header->count() - 1);
+        EXPECT_LE(header->sectionViewportPosition(last) + header->sectionSize(last), table->viewport()->width());
+    }
+    QJsonArray rows;
+    for (int i = 0; i < 3; ++i)
+        rows.append(QJsonObject{{"symbol", QStringLiteral("S%1").arg(i)},
+            {"Name", QStringLiteral("A long company name that needs the horizontal scrollbar %1").arg(i)},
+            {"Price", 1.0 + i}, {"Sector", "A long sector name"}, {"Exchange", "NASDAQ"}});
+    updateScreener(dock, "stock", rows);
+    EXPECT_EQ(table->horizontalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
+}
+
 TEST(WatchRailScreener, NativeVisualFixtures) {
     const QString output = qEnvironmentVariable("SENTINEL_WATCH_RAIL_SHOTS");
     if (output.isEmpty())
