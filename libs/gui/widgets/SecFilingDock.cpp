@@ -109,6 +109,7 @@ void SecFilingDock::buildUi() {
     m_statusLabel->setObjectName("secStatus");
     m_statusLabel->setWordWrap(true);
     m_statusLabel->setTextFormat(Qt::PlainText);
+    m_statusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(theme::text3().name()));
     layout->addWidget(m_statusLabel);
     
     m_contentWidget->setLayout(layout);
@@ -117,7 +118,7 @@ void SecFilingDock::buildUi() {
 void SecFilingDock::fetchFilings() {
     QString ticker = m_tickerInput->text().trimmed().toUpper();
     if (ticker.isEmpty()) {
-        updateStatus("Please enter a ticker symbol", true);
+        updateStatus("Enter a ticker", true);
         return;
     }
     
@@ -131,7 +132,7 @@ void SecFilingDock::fetchFilings() {
 void SecFilingDock::fetchInsiderTransactions() {
     QString ticker = m_tickerInput->text().trimmed().toUpper();
     if (ticker.isEmpty()) {
-        updateStatus("Please enter a ticker symbol", true);
+        updateStatus("Enter a ticker", true);
         return;
     }
     
@@ -142,7 +143,7 @@ void SecFilingDock::fetchInsiderTransactions() {
 void SecFilingDock::fetchFinancialSummary() {
     QString ticker = m_tickerInput->text().trimmed().toUpper();
     if (ticker.isEmpty()) {
-        updateStatus("Please enter a ticker symbol", true);
+        updateStatus("Enter a ticker", true);
         return;
     }
     
@@ -163,7 +164,7 @@ void SecFilingDock::onFinancialsReady(const QList<SecApiClient::FinancialMetric>
 }
 
 void SecFilingDock::onApiError(const QString& error) {
-    updateStatus(provenance() + " · Unavailable: " + error, true);
+    updateStatus(QStringLiteral("%1: %2").arg(m_tickerInput->text().trimmed().toUpper(), error), true);
 }
 
 void SecFilingDock::onStatusUpdate(const QString& message) {
@@ -224,9 +225,12 @@ void SecFilingDock::displayFinancials(const QList<SecApiClient::FinancialMetric>
 }
 
 void SecFilingDock::updateStatus(const QString& message, bool isError) {
-    m_statusLabel->setText(message);
-    m_statusLabel->setToolTip(message);
-    Q_UNUSED(isError);
+    // An error is one clause in the error role with its glyph; normal status stays dim.
+    const QString text = isError ? QString::fromUtf8("× ") + message : message;
+    m_statusLabel->setText(text);
+    m_statusLabel->setToolTip(text);
+    m_statusLabel->setStyleSheet(QStringLiteral("color:%1;")
+        .arg((isError ? theme::error() : theme::text3()).name()));
 }
 
 void SecFilingDock::clearResults() {

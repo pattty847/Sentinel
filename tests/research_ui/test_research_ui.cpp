@@ -20,7 +20,16 @@
 #include <QPainter>
 #include <QDir>
 #include <QSplitter>
+#include <QGroupBox>
+#include <QHeaderView>
+#include <QPushButton>
+#include <QScrollBar>
+#include <QTableView>
+#include <QTextEdit>
+#include <QLineEdit>
 #include <memory>
+#include <cmath>
+#include <QToolButton>
 #ifdef Q_OS_UNIX
 #include <signal.h>
 #endif
@@ -219,6 +228,23 @@ TEST(SecResearch, SwitchClearsResultsAndNumericCellsAreReadOnlyWithUnknownMissin
     EXPECT_EQ(table->model()->rowCount(), 0);
     dock.resize(340, 380); dock.show(); QCoreApplication::processEvents();
     EXPECT_LE(status->width(), dock.width());
+}
+TEST(SecResearch, ErrorsUseTheErrorRoleInOneClause) {
+    FixtureProvider provider;
+    SecFilingDock dock(nullptr, &provider);
+    auto* status = dock.findChild<QLabel*>("secStatus");
+    dock.onSymbolChanged("MSFT");
+    EXPECT_FALSE(status->styleSheet().contains("#f07a6a"));
+    QMetaObject::invokeMethod(&dock, "fetchFilings");
+    provider.reply(0, {}, "fixture offline");
+    EXPECT_EQ(status->text(), QString::fromUtf8("× MSFT: fixture offline"));
+    EXPECT_TRUE(status->styleSheet().contains("#f07a6a"));
+    dock.onSymbolChanged("AAPL");
+    EXPECT_FALSE(status->styleSheet().contains("#f07a6a")) << "a new ticker clears the error look";
+    dock.findChild<QLineEdit*>("secTicker")->setText(" ");
+    QMetaObject::invokeMethod(&dock, "fetchFilings");
+    EXPECT_EQ(status->text(), QString::fromUtf8("× Enter a ticker"));
+    EXPECT_TRUE(status->styleSheet().contains("#f07a6a"));
 }
 TEST(ResearchProcess, CancellationDoesNotWaitAndDestructionDoesNotCallBack) {
 #ifdef Q_OS_UNIX
