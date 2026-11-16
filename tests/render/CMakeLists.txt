@@ -474,3 +474,9 @@ set_target_properties(test_flow_footer_policy PROPERTIES AUTOMOC OFF AUTOUIC OFF
 target_include_directories(test_flow_footer_policy PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_flow_footer_policy PRIVATE GTest::gtest_main)
 add_test(NAME FlowFooterPolicyTests COMMAND test_flow_footer_policy)
+
+add_executable(test_shell_chrome test_shell_chrome.cpp)
+target_include_directories(test_shell_chrome PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_shell_chrome PRIVATE sentinel_gui_lib GTest::gtest Qt6::Widgets Qt6::Test)
+add_test(NAME ShellChromeTests COMMAND test_shell_chrome)
+set_tests_properties(ShellChromeTests PROPERTIES LABELS "ui" TIMEOUT 60)
