@@ -312,7 +312,7 @@ TEST(MainWindowHealthIntegration, AckRefusalSupersedeTimeoutAndReconnectAgreeAcr
     ASSERT_TRUE(chart && rail && telemetry && status);
     EXPECT_TRUE(health->activeSymbol().isEmpty());
     ASSERT_TRUE(watchItem(rail, "BTC-USD"));
-    EXPECT_FALSE(watchItem(rail, "BTC-USD")->text().startsWith("●"));
+    EXPECT_FALSE(watchItem(rail, "BTC-USD")->data(WatchlistDock::ActiveRole).toBool());
     EXPECT_TRUE(watchItem(rail, "ETH-USD")->toolTip().contains("unverified"));
 
     // Expose only the QWidget consumer in an offscreen test surface; never show
@@ -337,7 +337,7 @@ TEST(MainWindowHealthIntegration, AckRefusalSupersedeTimeoutAndReconnectAgreeAcr
     agreement("BTC-USD", MarketHealth::State::WaitingForBook);
     book(source, "BTC-USD");
     agreement("BTC-USD", MarketHealth::State::Live);
-    EXPECT_TRUE(watchItem(rail, "BTC-USD")->text().startsWith("●"));
+    EXPECT_TRUE(watchItem(rail, "BTC-USD")->data(WatchlistDock::ActiveRole).toBool());
     const qint64 observed = QDateTime::currentMSecsSinceEpoch() - 500;
     window.heatmapDataService()->onData([fetcher = window.heatmapDataService()->fetcher(), observed] {
         emit fetcher->liveAccepted("BTC-USD", observed);
@@ -385,7 +385,7 @@ TEST(MainWindowHealthIntegration, AckRefusalSupersedeTimeoutAndReconnectAgreeAcr
     select(window, chart->symbolInput(), "SOL-USD");
     acknowledge(source, "SOL-USD");
     agreement("SOL-USD", MarketHealth::State::WaitingForBook);
-    EXPECT_TRUE(watchItem(rail, "SOL-USD")->text().startsWith("●"));
+    EXPECT_TRUE(watchItem(rail, "SOL-USD")->data(WatchlistDock::ActiveRole).toBool());
     EXPECT_FALSE(health->snapshot().heatmapAgeMs);
     EXPECT_FALSE(health->snapshot().bookAgeMs);
     emit telemetry->visibilityChanged(false);
@@ -609,7 +609,7 @@ TEST(MainWindowHealthIntegration, LocalHostPolicyRefusalClearsOptimisticRailPend
         EXPECT_TRUE(row->text().startsWith("!"));
         EXPECT_TRUE(row->toolTip().contains("host session's symbol policy"));
         EXPECT_TRUE(rail->findChild<QLabel*>("watchStatus")->text().contains("excluded"));
-        EXPECT_TRUE(watchItem(rail, "BTC-USD")->text().startsWith("●"));
+        EXPECT_TRUE(watchItem(rail, "BTC-USD")->data(WatchlistDock::ActiveRole).toBool());
         EXPECT_EQ(source->marketHealth()->activeSymbol(), "BTC-USD");
         EXPECT_EQ(source->marketHealth()->snapshot().state, MarketHealth::State::Live);
         EXPECT_FALSE(MainWindowSymbolLifecyclePeer::switchTimeoutActive(window));
