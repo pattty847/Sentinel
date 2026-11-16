@@ -1,4 +1,5 @@
 #include "PnlCurveItem.hpp"
+#include "../themes/ThemePalette.hpp"
 
 #include <QPainter>
 #include <QPaintEvent>
@@ -122,7 +123,7 @@ void PnlCurveItem::paintEvent(QPaintEvent*) {
     painter.setRenderHint(QPainter::Antialiasing);
     painter.fillRect(rect(), QColor(18, 20, 24));
     if (m_allPoints.isEmpty()) {
-        painter.setPen(QColor("#93A1AF")); // text3
+        painter.setPen(theme::text3());
         painter.setFont(QFont("Roboto Mono", 11));
         painter.drawText(rect(), Qt::AlignCenter, m_emptyText);
         return;

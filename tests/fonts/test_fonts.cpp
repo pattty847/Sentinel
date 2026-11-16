@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "themes/FontManager.hpp"
 #include "themes/ThemeManager.hpp"
+#include "themes/ThemePalette.hpp"
 #include "widgets/FontSettingsDialog.hpp"
 #include "widgets/HeatmapTelemetryDock.hpp"
 #include "widgets/PaperTradingDock.hpp"
@@ -198,7 +199,7 @@ TEST(FontWidgets, PaperTradingRuntimeAndHiddenWidgetsInheritSelectedFont) {
             if (label->text().startsWith(QStringLiteral("$71,023"))) {
                 foundPrice = true;
                 EXPECT_EQ(QFontInfo(label->font()).family(), family);
-                EXPECT_TRUE(label->styleSheet().contains(QStringLiteral("#E6EDF3")));
+                EXPECT_TRUE(label->styleSheet().contains(theme::text().name()));
             }
         }
         EXPECT_TRUE(foundPrice);
