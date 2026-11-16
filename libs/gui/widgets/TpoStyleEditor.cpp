@@ -137,7 +137,7 @@ void TpoStyleEditor::buildRow(int index, QGridLayout* grid) {
 
 void TpoStyleEditor::showColor(QToolButton* button, const tpo::Rgba& color) {
     const QString hex = QString::fromStdString(tpo::hexColor(color));
-    button->setText(hex);
+    button->setText(hex.toUpper());
     button->setStyleSheet(QStringLiteral("QToolButton { border-left: 12px solid %1; padding-left: 4px; }").arg(hex));
 }
 

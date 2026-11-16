@@ -235,11 +235,13 @@ QJsonArray gradientJson(const std::vector<heatmap::GradientStop> &stops) {
     for (const auto &s : stops) out.append(QJsonObject{{"position", s.position}, {"color", QString::fromStdString(s.color)}});
     return out;
 }
-// Black text on light swatches, white on dark (perceived luminance).
+// Black text on light swatches, white on dark (perceived luminance); the hex
+// is regular weight and upper case so it reads at 1x (no bold "f").
 QString swatchStyle(const QString &color) {
     const QColor c(color.left(7));
     const double luma = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue();
-    return QStringLiteral("QPushButton { background: %1; color: %2; }").arg(color.left(7), luma > 140 ? "#000000" : "#FFFFFF");
+    return QStringLiteral("QPushButton { background: %1; color: %2; font-weight: normal; }")
+        .arg(color.left(7), luma > 140 ? "#000000" : "#FFFFFF");
 }
 
 class CandlePreview final : public QWidget {
@@ -317,7 +319,7 @@ void HeatmapGradientEditor::addRow(double position, const QString &color) {
     spin->setValue(position);
     spin->setToolTip(table_->horizontalHeaderItem(0)->toolTip());
     table_->setCellWidget(row, 0, spin);
-    auto *button = new QPushButton(color, table_);
+    auto *button = new QPushButton(color.toUpper(), table_);
     button->setProperty("color", color);
     button->setToolTip(table_->horizontalHeaderItem(1)->toolTip());
     button->setStyleSheet(swatchStyle(color));
@@ -341,7 +343,7 @@ void HeatmapGradientEditor::addRow(double position, const QString &color) {
 void HeatmapGradientEditor::setStopColor(int row, const QString &color) {
     auto *button = qobject_cast<QPushButton *>(table_->cellWidget(row, 1));
     if (!button) return;
-    button->setText(color);
+    button->setText(color.toUpper());
     button->setProperty("color", color);
     button->setStyleSheet(swatchStyle(color));
     update();
@@ -1141,7 +1143,7 @@ void HeatmapSettingsDialog::refreshFromModel() {
     set(m_labelMaxPx, s.labelMaxPx);
     auto swatch = [](QPushButton *button, const std::string &value) {
         const QString color = QString::fromStdString(value);
-        button->setText(color == "auto" ? "Body colour" : color);
+        button->setText(color == "auto" ? "Body colour" : color.toUpper());
         button->setStyleSheet(color == "auto" ? QString{} : swatchStyle(color));
     };
     swatch(m_candleUpColor, s.candleUpColor);

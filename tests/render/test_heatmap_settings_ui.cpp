@@ -2233,6 +2233,28 @@ TEST(HeatmapSettingsDialogLook, DialogIsResizableAndRemembersItsSize) {
     EXPECT_EQ(second.size(), QSize(701, 653));
 }
 
+// SET-8: hex text on colour swatches is upper case at regular weight.
+TEST(HeatmapSettingsDialogLook, SwatchHexIsUpperCaseRegularWeight) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    auto *bid = child<HeatmapGradientEditor>(dialog, "bidGradient");
+    bid->setStopColor(1, "#00ffff");
+    auto *swatch = qobject_cast<QPushButton *>(bid->table()->cellWidget(1, 1));
+    ASSERT_TRUE(swatch);
+    EXPECT_EQ(swatch->text(), "#00FFFF");
+    EXPECT_EQ(model.settings().bidGradient.back().color, "#00ffff"); // the value keeps its spelling
+    ASSERT_TRUE(model.apply({{"candleWickColor", "#abcdef"}}).isEmpty());
+    auto *wick = child<QPushButton>(dialog, "candleWickColor");
+    EXPECT_EQ(wick->text(), wick->text().toUpper());
+    for (QPushButton *button : {swatch, wick}) {
+        button->ensurePolished();
+        EXPECT_EQ(button->font().weight(), QFont::Normal);
+    }
+    for (auto *colour : dialog.findChildren<QToolButton *>())
+        if (colour->objectName().endsWith(".color")) EXPECT_EQ(colour->text(), colour->text().toUpper());
+}
+
 // Qt fixes the scene graph backend at the first QQuickWindow of the process,
 // shown or not. The tests below construct plain windows, so main() selects the
 // rhi backend first; otherwise every OffscreenQuick after them fails with
