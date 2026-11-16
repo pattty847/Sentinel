@@ -2103,6 +2103,7 @@ TEST(HeatmapSettingsDialogLook, EveryTabSharesOneRightAlignedFormGrid) {
         SCOPED_TRACE(dialog.tabs()->tabText(tab).toStdString());
         QWidget *page = qobject_cast<QScrollArea *>(dialog.tabs()->widget(tab))->widget();
         std::set<int> labelEnds, fieldStarts;
+        QStringList where; // label text @ label end / field start, for a failure message
         int rows = 0;
         for (auto *form : page->findChildren<QFormLayout *>()) {
             EXPECT_EQ(form->horizontalSpacing(), 8);
@@ -2110,7 +2111,7 @@ TEST(HeatmapSettingsDialogLook, EveryTabSharesOneRightAlignedFormGrid) {
             for (int row = 0; row < form->rowCount(); ++row) {
                 auto *labelItem = form->itemAt(row, QFormLayout::LabelRole);
                 auto *fieldItem = form->itemAt(row, QFormLayout::FieldRole);
-                if (!fieldItem) continue;
+                if (!fieldItem || form->itemAt(row, QFormLayout::SpanningRole)) continue; // a section
                 ASSERT_TRUE(labelItem) << "a field without the label column, row " << row;
                 auto *label = qobject_cast<QLabel *>(labelItem->widget());
                 ASSERT_TRUE(label);
@@ -2118,14 +2119,17 @@ TEST(HeatmapSettingsDialogLook, EveryTabSharesOneRightAlignedFormGrid) {
                 ++rows;
                 EXPECT_EQ(label->width(), 180) << label->text().toStdString();
                 EXPECT_TRUE(label->alignment() & Qt::AlignRight) << label->text().toStdString();
-                labelEnds.insert(label->mapTo(page, QPoint(label->width(), 0)).x());
-                fieldStarts.insert(form->parentWidget()->mapTo(page, fieldItem->geometry().topLeft()).x());
+                const int labelEnd = label->mapTo(page, QPoint(label->width(), 0)).x();
+                const int fieldStart = form->parentWidget()->mapTo(page, fieldItem->geometry().topLeft()).x();
+                labelEnds.insert(labelEnd);
+                fieldStarts.insert(fieldStart);
+                where << QStringLiteral("%1@%2/%3").arg(label->text()).arg(labelEnd).arg(fieldStart);
             }
         }
         EXPECT_GT(rows, 0);
-        ASSERT_EQ(labelEnds.size(), 1u) << "labels end at one x";
-        ASSERT_EQ(fieldStarts.size(), 1u) << "fields start at one x";
-        EXPECT_EQ(*fieldStarts.begin() - *labelEnds.begin(), 8);
+        EXPECT_EQ(labelEnds.size(), 1u) << "labels end at one x: " << where.join(", ").toStdString();
+        EXPECT_EQ(fieldStarts.size(), 1u) << "fields start at one x: " << where.join(", ").toStdString();
+        if (labelEnds.size() == 1 && fieldStarts.size() == 1) EXPECT_EQ(*fieldStarts.begin() - *labelEnds.begin(), 8);
     }
 }
 

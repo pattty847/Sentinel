@@ -145,8 +145,10 @@ void applyFormGrid(QWidget *page) {
         form->setHorizontalSpacing(kGridGap);
         form->setVerticalSpacing(kGridGap);
         for (int row = 0; row < form->rowCount(); ++row) {
+            // itemAt(FieldRole) also returns a spanning row's item: check that first.
+            if (form->itemAt(row, QFormLayout::SpanningRole)) continue; // a section spanning both columns
             QLayoutItem *field = form->itemAt(row, QFormLayout::FieldRole);
-            if (!field) continue; // a section spanning both columns
+            if (!field) continue;
             QLayoutItem *labelItem = form->itemAt(row, QFormLayout::LabelRole);
             auto *label = labelItem ? qobject_cast<QLabel *>(labelItem->widget()) : nullptr;
             if (!labelItem) { // a field without a name keeps the label column
