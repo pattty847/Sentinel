@@ -990,9 +990,12 @@ void OrderBookDock::updateSummary()
     QString fullStatus;
     if (m_health) {
         const auto health = m_health->snapshot(m_symbol);
-        fullStatus = health.compact();
-        m_status->setToolTip(health.reason + "\nBook age is time since an accepted book message; quiet is not stale.");
+        // Normal feed state and receive age are already in the window status bar.
+        fullStatus = health.text();
+        m_status->setVisible(health.state != MarketHealth::State::Live);
+        m_status->setToolTip(health.reason);
     } else {
+        m_status->setVisible(true);
         // Non-remote sources retain their readiness facts with the shared words.
         const auto state = m_freshness.connected == false ? MarketHealth::State::Disconnected
             : m_freshness.snapshotStale ? MarketHealth::State::Stale

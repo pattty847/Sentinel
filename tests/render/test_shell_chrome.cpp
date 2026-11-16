@@ -14,6 +14,10 @@
 #include <QApplication>
 #include <QMainWindow>
 #include "widgets/StatusBar.hpp"
+#include "widgets/BookAgeText.hpp"
+#include "widgets/HeatmapTelemetryDock.hpp"
+#include "datasources/RemoteGridDataSource.hpp"
+#include <QDateTime>
 #include <QLabel>
 #include <QFrame>
 #include <QStatusBar>
@@ -118,6 +122,44 @@ TEST(ShellChrome, StatusFieldsRemainOneLeftClusterAtWideSizes) {
     const auto dividers = bar.findChildren<QFrame*>("statusSeparator");
     ASSERT_EQ(dividers.size(), 2);
     for (auto* divider : dividers) EXPECT_EQ(divider->width(), 1);
+}
+
+TEST(ShellChrome, BookAgeHasOneSpellingAndDomOnlyRepeatsAbnormalState) {
+    EXPECT_EQ(bookAgeText(std::nullopt), "Book age: Unknown");
+    EXPECT_EQ(bookAgeText(100), "Book age: 0.1s");
+    EXPECT_EQ(bookAgeText(60000), "Book age: 1m");
+    StatusBar bar;
+    bar.show();
+    EXPECT_EQ(bar.findChild<QLabel*>("marketBookAge")->text(), "Book age: Unknown");
+    RemoteGridDataSource source("127.0.0.1", "1");
+    auto* health = source.marketHealth();
+    health->setActiveSymbol("BTC-USD");
+    health->setTransport(MarketHealth::Transport::Connected);
+    health->subscriptionAcknowledged("BTC-USD");
+    health->bookReceived("BTC-USD", QDateTime::currentMSecsSinceEpoch());
+    bar.setMarketHealth(health);
+    EXPECT_TRUE(bar.findChild<QLabel*>("marketBookAge")->text().startsWith("Book age: "));
+    HeatmapTelemetryDock telemetry;
+    telemetry.setMarketHealth(health);
+    telemetry.show();
+    telemetry.refresh();
+    EXPECT_TRUE(telemetry.valueText("marketDetail").contains("Book age: "));
+    EXPECT_FALSE(telemetry.valueText("marketDetail").contains("Book receive age"));
+    OrderBookDock dom(nullptr, &source);
+    dom.onSymbolChanged("BTC-USD");
+    dom.show();
+    auto refresh = [&] {
+        QCoreApplication::processEvents();
+        QMetaObject::invokeMethod(&dom, "refreshDisplay", Qt::DirectConnection);
+    };
+    refresh();
+    auto* state = dom.findChild<QLabel*>("domFreshness");
+    ASSERT_TRUE(state);
+    EXPECT_TRUE(state->isHidden());
+    health->bookStale("BTC-USD");
+    refresh();
+    EXPECT_FALSE(state->isHidden());
+    EXPECT_EQ(state->text(), "Stale");
 }
 
 TEST(ShellChrome, TitlesFollowTabSplitHideFloatAndRestore) {

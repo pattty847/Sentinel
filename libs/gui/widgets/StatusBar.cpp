@@ -1,4 +1,5 @@
 #include "StatusBar.hpp"
+#include "BookAgeText.hpp"
 #include "Version.hpp"
 #include "../themes/ThemePalette.hpp"
 #include <QFrame>
@@ -15,7 +16,7 @@ StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
     m_symbolLabel->setObjectName("marketSymbol");
     m_stateLabel = new QLabel("Initializing", this);
     m_stateLabel->setObjectName("marketState");
-    m_ageLabel = new QLabel("Book age unknown", this);
+    m_ageLabel = new QLabel(bookAgeText(std::nullopt), this);
     m_ageLabel->setObjectName("marketBookAge");
     m_ageLabel->setToolTip("Time since the last accepted book message. A quiet market is not necessarily stale.");
     m_versionLabel = new QLabel(QString::fromStdString(Sentinel::getVersionString()), this);
@@ -56,7 +57,7 @@ void StatusBar::refresh() {
     if (!m_health) {
         m_symbolLabel->setText("No symbol");
         m_stateLabel->setText("Unavailable");
-        m_ageLabel->setText("Book age unknown");
+        m_ageLabel->setText(bookAgeText(std::nullopt));
         return;
     }
     m_health->refreshChartState();
@@ -67,7 +68,7 @@ void StatusBar::refresh() {
     const bool degraded = s.state == MarketHealth::State::Stale || s.state == MarketHealth::State::HistoryPartial || s.state == MarketHealth::State::Unavailable;
     const bool disconnected = s.state == MarketHealth::State::Disconnected || s.state == MarketHealth::State::Reconnecting;
     m_stateLabel->setStyleSheet(QString("color: %1;").arg(disconnected ? "#e57373" : degraded ? "#ffcc80" : "#b0b0b0"));
-    m_ageLabel->setText(s.bookAgeMs ? "Book " + MarketHealth::ageText(s.bookAgeMs) : "Book age unknown");
+    m_ageLabel->setText(bookAgeText(s.bookAgeMs));
 }
 void StatusBar::showEvent(QShowEvent* event) { QWidget::showEvent(event); refresh(); if (m_health) m_ageTimer.start(); }
 void StatusBar::hideEvent(QHideEvent* event) { m_ageTimer.stop(); QWidget::hideEvent(event); }
