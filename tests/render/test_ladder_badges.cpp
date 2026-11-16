@@ -722,6 +722,30 @@ TEST(LadderBadges, EdgePillsStackAskNearestTheEdgeAndFollowTheCurrentWindow) {
     EXPECT_EQ(rig.layer.badgeVertexCount(), 0);
 }
 
+// OVL-9: the notional reads first; the distance after it is dimmed, not a second value
+// in the same weight.
+TEST(LadderBadges, AnEdgePillDimsItsDistance) {
+    BadgeRig rig(camera(90, 110));
+    rig.snapshot();
+    rig.candidate(S::kAsk, S::kAbove, 120, 50);
+    rig.candidate(S::kBid, S::kBelow, 85, 20);
+    rig.wall(100, S::kBid, 10);
+    rig.post();
+    ASSERT_EQ(rig.pills().size(), 3u);
+    ASSERT_EQ(text(rig.pills()[0]), "$6.00k  +$10.0");
+    ASSERT_EQ(text(rig.pills()[1]), "$1.70k  -$5.00");
+    const auto& glyphs = rig.layer.badges().glyphs();
+    std::string colours;
+    for (const auto& glyph : glyphs) {
+        const QRgb c = glyph.color.rgba();
+        colours += c == chart::kDistanceText ? 'd' : c == chart::kAskText ? 'a' : c == chart::kBidText ? 'b' : '?';
+    }
+    EXPECT_EQ(colours, "aaaaaadddddd" "bbbbbbdddddd" "bbbbbb") << "row badges are never dimmed";
+    const auto luma = [](QRgb c) { return 0.2126 * qRed(c) + 0.7152 * qGreen(c) + 0.0722 * qBlue(c); };
+    EXPECT_LT(luma(chart::kDistanceText), luma(chart::kAskText));
+    EXPECT_LT(luma(chart::kDistanceText), luma(chart::kBidText));
+}
+
 TEST(LadderBadges, ABidAboveTheWindowPointsUpAndAnEdgeKeepsTheNearerOfASide) {
     BadgeRig rig(camera(90, 110));
     rig.snapshot();
@@ -913,7 +937,7 @@ TEST(LadderBadgesGpu, WarmedFramesAllocateNothingThroughEndFrame) {
     fillFrame(rig, 1);
     rig.post();
     ASSERT_TRUE(rig.layer.drawing());
-    EXPECT_EQ(rig.text.textureCount(), 4) << "every badge colour reserved with its texture";
+    EXPECT_EQ(rig.text.textureCount(), 5) << "every badge colour reserved with its texture";
     const size_t bytes = rig.text.capacityBytes();
     const int capacity = rig.text.nodeCapacityGlyphs();
     EXPECT_GE(capacity, 4 * chart::kMaxBadgeGlyphs);
@@ -942,7 +966,7 @@ TEST(LadderBadgesGpu, WarmedFramesAllocateNothingThroughEndFrame) {
         EXPECT_EQ(rig.layer.badges().stats().edgePills, f >= 60 ? 4 : 0);
     }
     EXPECT_EQ(allocations, 0u);
-    EXPECT_EQ(rig.text.textureCount(), 4);
+    EXPECT_EQ(rig.text.textureCount(), 5);
     EXPECT_EQ(rig.text.capacityBytes(), bytes);
     EXPECT_EQ(rig.text.nodeCapacityGlyphs(), capacity);
     EXPECT_EQ(rig.layer.badges().capacityBytes(), layoutBytes);
@@ -988,7 +1012,7 @@ TEST(LadderBadgesGpu, WarmedFramesAllocateNothingThroughEndFrame) {
     drawOn(root2);
     gCounting = false;
     EXPECT_GT(gAllocations.load(), 0u) << "the new root's nodes and textures";
-    EXPECT_EQ(rig.text.textureCount(), 4);
+    EXPECT_EQ(rig.text.textureCount(), 5);
     const auto fresh = colourNodes(root2);
     ASSERT_TRUE(fresh.bid && fresh.ask && fresh.hot);
     for (auto* node : {fresh.bid, fresh.ask, fresh.hot}) {

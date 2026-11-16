@@ -242,7 +242,7 @@ void LadderLayer::rebuildBadges(const ChartFrame& frame) {
 bool LadderLayer::reserveText(ChartTextRenderer& text) const {
     for (const QRgb colour : {kBidText, kAskText, kBidHotText, kAskHotText})
         if (!text.reserve(QColor::fromRgba(colour), kMaxBadgeGlyphs)) return false;
-    return true;
+    return text.reserve(QColor::fromRgba(kDistanceText), kEdgePills * kBadgeChars);
 }
 
 void LadderLayer::submitLabels(const ChartFrame& frame, LayerNodeContext& context) {
