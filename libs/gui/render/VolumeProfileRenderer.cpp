@@ -66,7 +66,7 @@ void fillRect(QSGGeometry* geo, const QRectF& r, const QColor& c) {
     geo->markIndexDataDirty();
 }
 
-// Clip filled VP rectangles before submission, including the POC thickness.
+// Clip filled VP rectangles and bars before submission, including the POC thickness.
 // Retain geometry storage when a rectangle is completely outside the surface.
 void fillClippedRect(QSGGeometry* geo, const QRectF& rect,
                      const QRectF& surface, const QColor& color) {
@@ -370,8 +370,10 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
             // Bars extend leftward from vpRight.
             const float x0 = vpRight - barWidth;
             const float x1 = vpRight;
-            const float y0 = priceEdge(binTop);
-            const float y1 = priceEdge(binBottom);
+            // Clipped to the plot like the VA band and POC: with no docked pane there is
+            // no clip node, and a partly visible edge bin would draw outside the plot.
+            const float y0 = static_cast<float>(std::max(priceEdge(binTop), drawRect.top()));
+            const float y1 = static_cast<float>(std::min(priceEdge(binBottom), drawRect.bottom()));
             // Intensity: brighter for higher volume (keep hue, scale alpha).
             const quint8 ca = static_cast<quint8>(
                 std::clamp(static_cast<int>(80 + 175 * barFrac), 80, 255));
