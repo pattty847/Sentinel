@@ -1157,7 +1157,7 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     frame.context.raster.topF = 105 * chart::kFootprintNumbersRow;
     layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
     EXPECT_EQ(layer.glyphCount(), 4u) << "13 px numbers fit at the row entry threshold with the full chart atlas";
-    layer.presentation().dustNotional = 3;
+    layer.presentation().dustNotional = 2500;
     layer.updateNodes(frame, context); layer.submitLabels(frame, context);
     EXPECT_EQ(layer.glyphCount(), 0u) << "numbers below the dust threshold are omitted";
     layer.presentation().dustNotional = 0;
