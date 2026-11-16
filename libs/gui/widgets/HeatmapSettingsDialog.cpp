@@ -6,6 +6,7 @@
 #include "TopToolbar.hpp"
 #include "TpoStyleEditor.hpp"
 #include "TradeBubbleStyleEditor.hpp"
+#include "../themes/ThemePalette.hpp"
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -35,6 +36,25 @@
 namespace {
 constexpr uint64_t MiB = 1ull << 20, KiB = 1ull << 10;
 const QStringList kPalettes{"Electric", "Fire", "Ocean", "Monochrome", "Matrix", "Custom"};
+
+// The dialog's own stylesheet, written with @token names from ThemePalette.
+QString themed(QString qss) {
+    // Longer names first: @text3 before @text, @selLine before @sel.
+    const std::pair<const char *, QColor> tokens[] = {
+        {"@textOff", theme::textOff()}, {"@text3", theme::text3()}, {"@text", theme::text()},
+        {"@selLine", theme::selLine()}, {"@sel", theme::sel()},     {"@accent", theme::accent()},
+        {"@bg1", theme::bg1()},         {"@bg2", theme::bg2()},     {"@line", theme::line()}};
+    for (const auto &[name, color] : tokens) qss.replace(QLatin1String(name), color.name(QColor::HexRgb).toUpper());
+    return qss;
+}
+QString dialogStyle() {
+    return themed(QStringLiteral(
+        "QDialog { background-color: @bg1; } QLabel, QCheckBox { color: #C9D4DD; }"
+        // Checkboxes: an empty box when off, a white tick on the selection fill when on.
+        "QCheckBox::indicator { width: 14px; height: 14px; background: @bg2; border: 1px solid @line; border-radius: 3px; }"
+        "QCheckBox::indicator:checked { background: @sel; border-color: @accent; image: url(:/svg/checkbox_tick.svg); }"
+        "QCheckBox::indicator:disabled { border-color: @textOff; }"));
+}
 
 struct SliderWithLabel {
     QSlider *slider;
@@ -280,7 +300,7 @@ HeatmapSettingsDialog::HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *mode
     setWindowTitle("Chart Settings");
     setModal(false);
     resize(520, 560);
-    setStyleSheet("QDialog { background-color: #1B1F24; } QLabel, QCheckBox { color: #C9D4DD; }");
+    setStyleSheet(dialogStyle());
     buildUi();
     connect(&chart::TradeBubbleStyleChanges::instance(), &chart::TradeBubbleStyleChanges::changed,
             this, [this] { refreshBubbleStyle(); });

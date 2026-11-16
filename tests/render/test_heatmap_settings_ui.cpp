@@ -22,6 +22,7 @@
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/HeatmapTelemetryDock.hpp"
 #include "widgets/TopToolbar.hpp"
+#include "themes/ThemePalette.hpp"
 #include "SyntheticHmc2Fixture.hpp"
 #include <QAction>
 #include <QAbstractButton>
@@ -50,6 +51,7 @@
 #include <QScrollBar>
 #include <QSpinBox>
 #include <QSlider>
+#include <QStyleOption>
 #include "chart/shell/TradeBubbleStyleStore.hpp"
 #include <QTabWidget>
 #include <QTableWidget>
@@ -1999,6 +2001,46 @@ TEST(HeatmapSettingsDialogTest, ApiChangesReachTheDialogAndToolbar) {
     EXPECT_EQ(t.reload().palettePreset, "Electric"); // persist:false
 }
 
+// ------------------------------------------- dialog look (UI brief, SET items)
+int countColor(const QImage &image, const QRect &area, const QColor &color) {
+    int n = 0;
+    for (int y = area.top(); y <= area.bottom(); ++y)
+        for (int x = area.left(); x <= area.right(); ++x) n += image.pixelColor(x, y) == color;
+    return n;
+}
+
+// SET-1: off is an empty box; on is a white tick on the selection fill with an
+// accent border, not a solid accent square.
+TEST(HeatmapSettingsDialogLook, CheckedBoxShowsAWhiteTickOnTheSelectionFill) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    dialog.show();
+    QCoreApplication::processEvents();
+    auto *box = child<QCheckBox>(dialog, "showLabels");
+    ASSERT_TRUE(box->isChecked());
+    QStyleOptionButton option;
+    option.initFrom(box);
+    const QRect indicator = box->style()->subElementRect(QStyle::SE_CheckBoxIndicator, &option, box);
+    ASSERT_GE(indicator.width(), 12);
+    const int area = indicator.width() * indicator.height();
+    const QImage on = box->grab().toImage();
+    int white = 0;
+    for (int y = indicator.top(); y <= indicator.bottom(); ++y)
+        for (int x = indicator.left(); x <= indicator.right(); ++x) {
+            const QColor c = on.pixelColor(x, y);
+            white += c.red() > 220 && c.green() > 220 && c.blue() > 220;
+        }
+    EXPECT_GT(countColor(on, indicator, theme::sel()), area / 4) << "selection fill";
+    EXPECT_GT(countColor(on, indicator, theme::accent()), 0) << "accent border";
+    EXPECT_LT(countColor(on, indicator, theme::accent()), area / 2) << "not a solid accent square";
+    EXPECT_GT(white, 4) << "white tick";
+    box->setChecked(false);
+    const QImage off = box->grab().toImage();
+    EXPECT_GT(countColor(off, indicator, theme::bg2()), area / 2) << "empty bg2 box";
+    EXPECT_EQ(countColor(off, indicator, theme::sel()), 0);
+}
+
 // Qt fixes the scene graph backend at the first QQuickWindow of the process,
 // shown or not. The tests below construct plain windows, so main() selects the
 // rhi backend first; otherwise every OffscreenQuick after them fails with
@@ -2723,6 +2765,7 @@ int main(int argc, char **argv) {
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, styleSettings.path());
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
+    Q_INIT_RESOURCE(sentinel_svg_resources); // the dialog's checkbox tick and field chevrons
     lab::selectQuickSceneGraph(); // before any QQuickWindow: Qt fixes the backend at the first one
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;
