@@ -1053,3 +1053,22 @@ TEST(PaperPolish, RangeButtonsShowSelectedState) {
     EXPECT_TRUE(all->styleSheet().contains("QToolButton:checked"));
     EXPECT_TRUE(all->styleSheet().contains("#2A4A6A"));
 }
+
+TEST(PaperPolish, AlgoButtonsUseReadableDirectionAndDisabledColours) {
+    PaperTradingDock dock;
+    auto* start = dock.findChild<QPushButton*>("paperAlgoStart");
+    auto* stop = dock.findChild<QPushButton*>("paperAlgoStop");
+    ASSERT_NE(start, nullptr);
+    ASSERT_NE(stop, nullptr);
+    EXPECT_TRUE(start->styleSheet().contains("color: #2EBD85"));
+    EXPECT_TRUE(stop->styleSheet().contains("color: #FF8C82"));
+    EXPECT_TRUE(start->styleSheet().contains(":disabled { color: #84909C"));
+    EXPECT_TRUE(stop->styleSheet().contains(":disabled { color: #84909C"));
+    const auto luminance = [](QColor color) {
+        const auto linear = [](double x) { return x <= 0.04045 ? x / 12.92 : std::pow((x + 0.055) / 1.055, 2.4); };
+        return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
+    };
+    const double background = luminance(QColor("#20252B"));
+    for (const char* hex : {"#2EBD85", "#FF8C82", "#84909C"})
+        EXPECT_GE((luminance(QColor(hex)) + 0.05) / (background + 0.05), 4.5);
+}

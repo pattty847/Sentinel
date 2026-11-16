@@ -491,10 +491,12 @@ void PaperTradingDock::buildAlgoTab(QWidget* parent) {
     auto* btnRow = new QHBoxLayout();
     m_startBtn = new QPushButton(QStringLiteral("▶ Start"), algoGroup);
     m_startBtn->setObjectName(QStringLiteral("paperAlgoStart"));
-    m_startBtn->setStyleSheet("QPushButton { background: #1a472a; color: #4caf50; border: 1px solid #4caf50; padding: 3px 8px; }");
+    // Local bg2/direction tokens until the shared dock palette lands; #84909C is
+    // the disabled textOff variant that keeps 4.5:1 against bg2.
+    m_startBtn->setStyleSheet("QPushButton { background: #20252B; color: #2EBD85; border: 1px solid #2B3138; padding: 3px 8px; } QPushButton:disabled { color: #84909C; border-color: #2B3138; }");
     m_stopBtn = new QPushButton(QStringLiteral("■ Stop"), algoGroup);
     m_stopBtn->setObjectName(QStringLiteral("paperAlgoStop"));
-    m_stopBtn->setStyleSheet("QPushButton { background: #4a1a1a; color: #f44336; border: 1px solid #f44336; padding: 3px 8px; }");
+    m_stopBtn->setStyleSheet("QPushButton { background: #20252B; color: #FF8C82; border: 1px solid #2B3138; padding: 3px 8px; } QPushButton:disabled { color: #84909C; border-color: #2B3138; }");
     m_stopBtn->setEnabled(false);
     btnRow->addWidget(m_startBtn);
     btnRow->addWidget(m_stopBtn);
