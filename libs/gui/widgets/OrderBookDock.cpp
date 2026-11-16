@@ -469,7 +469,8 @@ QHBoxLayout* OrderBookDock::buildHeading()
     font.setBold(true);
     m_symbolLabel->setFont(font);
     m_symbolLabel->setMinimumWidth(0);
-    // The symbol yields width so the symbol, Σ and Recenter fit the 180 px minimum dock.
+    // The symbol yields width so the heading fits the 180 px minimum dock (Σ and Follow move
+    // to the meta menu below 300 px).
     m_symbolLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_recenter = new QPushButton("Follow", m_contentWidget);
     m_recenter->setObjectName("domRecenter");
@@ -550,7 +551,8 @@ void OrderBookDock::buildUi()
         "QToolButton, QPushButton { background: transparent; border: 1px solid %1; border-radius: 3px; "
         "padding: 2px 6px; color: %2; }"
         "QToolButton:hover, QPushButton:hover { border-color: %3; }"
-        "QToolButton:checked, QPushButton:checked { background: %4; border-color: %3; color: %2; }")
+        "QToolButton:checked, QPushButton:checked { background: %4; border-color: %3; color: %2; }"
+        "QToolButton[hiddenByWidth=\"true\"]:checked { background: transparent; border: 1px dashed %3; }")
         .arg(theme::line().name(), theme::text().name(), theme::selLine().name(), theme::sel().name()));
     heading->setContentsMargins(0, 0, 0, 0);
     heading->setSizeConstraint(QLayout::SetNoConstraint);
@@ -607,7 +609,7 @@ void OrderBookDock::buildLean(QHBoxLayout* heading, QVBoxLayout* layout)
     m_lean->setText("Lean");
     m_lean->setAccessibleName("Lean Gauge");
     m_lean->setCheckable(true);
-    m_lean->setToolTip("Book imbalance, depth and two minute history; expands at 280 px dock width.");
+    m_lean->setToolTip(QStringLiteral("Book imbalance, depth and two minute history; shows from %1 px dock width.").arg(LeanWidth));
     heading->insertWidget(2, m_lean);
     m_heading = heading;
     m_leanStrip = new LeanGaugeWidget(m_leanGauge, m_contentWidget);
@@ -635,18 +637,22 @@ void OrderBookDock::fitHeading()
 {
     // Restyling repolishes every button, so it happens only when compact mode flips. The
     // unmodified width is measured again only after a font, style or button-text change.
+    // Below MenuWidth, Σ and Follow move into the meta row's menu (brief DOM-4) so the symbol
+    // keeps its room; docking stays free at any width.
+    const bool narrow = width() < MenuWidth;
+    if (narrow != m_headingNarrow) {
+        m_headingNarrow = narrow;
+        m_cumulative->setVisible(!narrow);
+        m_recenter->setVisible(!narrow);
+    }
     if (m_headingNatural < 0) {
         if (m_headingCompact) applyHeadingStyle(false);
         m_headingCompact = false;
-        int needed = 4 * m_heading->spacing();
-        for (QWidget* button : {static_cast<QWidget*>(m_pulse), static_cast<QWidget*>(m_lean),
-                                static_cast<QWidget*>(m_cumulative), static_cast<QWidget*>(m_recenter)}) {
-            button->ensurePolished();
-            needed += button->sizeHint().width();
-        }
-        m_headingNatural = needed;
+        const auto natural = [](QWidget* button) { button->ensurePolished(); return button->sizeHint().width(); };
+        m_headingNarrowNatural = 2 * m_heading->spacing() + natural(m_pulse) + natural(m_lean);
+        m_headingNatural = m_headingNarrowNatural + 2 * m_heading->spacing() + natural(m_cumulative) + natural(m_recenter);
     }
-    const bool compact = m_headingNatural > width() - 8;
+    const bool compact = (narrow ? m_headingNarrowNatural : m_headingNatural) > width() - 8;
     if (compact == m_headingCompact) return;
     m_headingCompact = compact;
     applyHeadingStyle(compact);
@@ -744,6 +750,23 @@ void OrderBookDock::fillGroupMenu()
     }
     m_groupMenu->addSeparator();
     m_groupMenu->addMenu(m_sizeMenu);
+    if (m_headingNarrow) {
+        // Σ and Follow live here while the dock is too narrow for them in the heading.
+        m_groupMenu->addSeparator();
+        QAction* cumulative = m_groupMenu->addAction(QStringLiteral("Σ Cumulative size"));
+        cumulative->setObjectName("domMenuCumulative");
+        cumulative->setCheckable(true);
+        cumulative->setChecked(m_cumulative->isChecked());
+        connect(cumulative, &QAction::toggled, m_cumulative, &QToolButton::setChecked);
+        QAction* follow = m_groupMenu->addAction(QStringLiteral("Follow the market"));
+        follow->setObjectName("domMenuFollow");
+        follow->setCheckable(true);
+        follow->setChecked(m_follow);
+        connect(follow, &QAction::toggled, this, [this](bool on) {
+            if (on) recenter();
+            else stopFollowing();
+        });
+    }
     for (QAction* action : m_sizeMenu->actions())
         action->setChecked(action->data().toInt() == int(m_model->sizeFormat()));
 }
@@ -866,9 +889,19 @@ void OrderBookDock::updateGroupButton()
 void OrderBookDock::updateLeanVisibility()
 {
     fitHeading();
-    const bool visible = m_lean->isChecked() && width() >= 280;
+    const bool visible = m_lean->isChecked() && width() >= LeanWidth;
     m_leanStrip->setVisible(visible);
     if (!visible) m_leanGauge.reset();
+    // On but hidden by the width reads differently from on and shown (B-20).
+    const bool hiddenByWidth = m_lean->isChecked() && !visible;
+    if (m_lean->property("hiddenByWidth").toBool() == hiddenByWidth) return;
+    m_lean->setProperty("hiddenByWidth", hiddenByWidth);
+    m_lean->setToolTip(hiddenByWidth
+        ? QStringLiteral("Lean Gauge: on, hidden at this width; it shows from %1 px dock width.").arg(LeanWidth)
+        : QStringLiteral("Book imbalance, depth and two minute history; shows from %1 px dock width.").arg(LeanWidth));
+    m_lean->style()->unpolish(m_lean);
+    m_lean->style()->polish(m_lean);
+    m_lean->update();
 }
 
 void OrderBookDock::refreshLean()

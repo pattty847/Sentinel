@@ -96,6 +96,8 @@ public:
     const sentinel::book::LeanGauge& leanGauge() const { return m_leanGauge; }
     uint64_t leanSteps() const { return m_leanSteps; }
     static constexpr int PulseTradeCapacity = 4096;
+    // Below MenuWidth Σ and Follow move into the meta row's menu; the Lean strip needs LeanWidth.
+    static constexpr int MenuWidth = 300, LeanWidth = 280;
     // Row grouping (heading menu): Auto (DomGrouping AutoGroupRule with a hold), a fixed
     // row size in quote units (nearest offered choice), or Link (the heatmap's tick).
     enum class Grouping { Auto, Fixed, Link };
@@ -181,8 +183,8 @@ private:
     LeanGaugeWidget* m_leanStrip = nullptr;
     QToolButton* m_lean = nullptr;
     QHBoxLayout* m_heading = nullptr;
-    int m_headingNatural = -1; // unmodified heading width; -1: measure again
-    bool m_headingCompact = false;
+    int m_headingNatural = -1, m_headingNarrowNatural = -1; // unmodified heading widths; -1: measure again
+    bool m_headingCompact = false, m_headingNarrow = false;
     QToolButton* m_grouping = nullptr;
     QMenu* m_groupMenu = nullptr;
     QMenu* m_sizeMenu = nullptr;

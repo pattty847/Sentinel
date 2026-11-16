@@ -1925,6 +1925,60 @@ TEST_F(DomDock, ControlsBeforeTheFirstPriceAreOneMetaRowAndA44PxLean) {
     qApp->setStyleSheet(previousStyle);
 }
 
+TEST_F(DomDock, NarrowDockMovesSigmaAndFollowIntoTheMetaMenuAndMarksLeanHidden) {
+    const QString previousStyle = qApp->styleSheet();
+    qApp->setStyleSheet(DarkTheme{}.stylesheet());
+    source.update({{true, 200, 1}, {true, 199.9, 2}, {false, 200.1, 1}});
+    show();
+    auto* lean = dock.findChild<QToolButton*>("domLean");
+    auto* cumulative = dock.findChild<QToolButton*>("domCumulative");
+    auto* follow = dock.findChild<QPushButton*>("domRecenter");
+    ASSERT_TRUE(lean->isChecked());
+    const QImage wideOn = lean->grab().toImage();
+    EXPECT_FALSE(lean->property("hiddenByWidth").toBool());
+    dock.resize(260, 600); // the default layout's width today (brief DOM-4)
+    QCoreApplication::processEvents();
+    QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(cumulative->isHidden());
+    EXPECT_TRUE(follow->isHidden());
+    // The symbol keeps its whole name.
+    auto* symbol = dock.findChild<QLabel*>("domSymbol");
+    EXPECT_TRUE(symbol->isVisible());
+    EXPECT_GE(symbol->width(), symbol->fontMetrics().horizontalAdvance(symbol->text()));
+    // B-20: Lean on but hidden by the width says so and looks different from on-and-shown.
+    EXPECT_TRUE(dock.findChild<QWidget*>("domLeanStrip")->isHidden());
+    EXPECT_TRUE(lean->property("hiddenByWidth").toBool());
+    EXPECT_TRUE(lean->toolTip().contains("on, hidden at this width")) << lean->toolTip().toStdString();
+    EXPECT_NE(lean->grab().toImage().pixelColor(3, lean->height() / 2), wideOn.pixelColor(3, wideOn.height() / 2));
+    // Σ and Follow are in the meta row's menu while narrow.
+    auto* menu = dock.findChild<QMenu*>("domGroupingMenu");
+    emit menu->aboutToShow();
+    auto* menuCumulative = dock.findChild<QAction*>("domMenuCumulative");
+    auto* menuFollow = dock.findChild<QAction*>("domMenuFollow");
+    ASSERT_NE(menuCumulative, nullptr);
+    ASSERT_NE(menuFollow, nullptr);
+    EXPECT_TRUE(menuFollow->isChecked());
+    menuCumulative->trigger();
+    EXPECT_TRUE(model->cumulative());
+    EXPECT_TRUE(cumulative->isChecked()); // one state, persisted as before
+    menuCumulative->trigger();
+    EXPECT_FALSE(model->cumulative());
+    menuFollow->trigger();
+    EXPECT_FALSE(follow->isChecked());
+    emit menu->aboutToShow();
+    dock.findChild<QAction*>("domMenuFollow")->trigger();
+    EXPECT_TRUE(follow->isChecked());
+    dock.resize(320, 600);
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(cumulative->isHidden());
+    EXPECT_FALSE(follow->isHidden());
+    EXPECT_FALSE(lean->property("hiddenByWidth").toBool());
+    emit menu->aboutToShow();
+    EXPECT_EQ(dock.findChild<QAction*>("domMenuCumulative"), nullptr);
+    qApp->setStyleSheet(previousStyle);
+}
+
 TEST_F(DomDock, LeanTogglePersistsAndCollapsesAt180) {
     auto* toggle = dock.findChild<QToolButton*>("domLean");
     auto* strip = dock.findChild<QWidget*>("domLeanStrip");
@@ -1940,6 +1994,7 @@ TEST_F(DomDock, LeanTogglePersistsAndCollapsesAt180) {
     EXPECT_EQ(table->horizontalScrollBar()->maximum(), 0);
     for (const char* name : {"domLean", "domPulse", "domCumulative", "domRecenter"}) {
         auto* button = dock.findChild<QWidget*>(name);
+        if (button->isHidden()) continue; // Σ and Follow are in the meta menu below 300 px
         EXPECT_GE(button->mapTo(&dock, QPoint()).x(), 0);
         EXPECT_LE(button->mapTo(&dock, QPoint(button->width(), 0)).x(), 180);
     }
@@ -2779,6 +2834,11 @@ TEST_F(DomDock, HeadingRestylesOnlyWhenCompactModeFlips) {
     pulse->installEventFilter(&counter);
     for (int width : {640, 600, 520, 450}) { dock.resize(width, 600); QCoreApplication::processEvents(); }
     EXPECT_EQ(counter.styles, 0) << "wide resizes keep the styles";
+    // A large font forces the compact heading: it restyles once on the flip, then not again.
+    QFont large = dock.font();
+    large.setPixelSize(24);
+    dock.setFont(large);
+    QCoreApplication::processEvents();
     dock.resize(180, 600); QCoreApplication::processEvents();
     EXPECT_GT(counter.styles, 0);
     EXPECT_FALSE(pulse->styleSheet().isEmpty());
@@ -2804,6 +2864,7 @@ TEST_F(DomDock, HeadingButtonsKeepTheirWholeTextFrom180To650) {
             for (const char* name : {"domGrouping", "domPulse", "domLean", "domCumulative", "domRecenter", "domSymbol"}) {
                 if (QString(name) == "domSymbol") continue; // the symbol yields its width
                 auto* button = dock.findChild<QWidget*>(name);
+                if (button->isHidden()) continue; // in the meta menu at this width
                 EXPECT_GE(button->width(), button->sizeHint().width()) << name << " at " << width;
                 EXPECT_LE(button->mapTo(&dock, QPoint(button->width(), 0)).x(), width) << name << " at " << width;
             }
