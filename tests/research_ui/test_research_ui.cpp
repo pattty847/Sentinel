@@ -258,6 +258,25 @@ TEST(SecResearch, FetchReasonSitsUnderTheTickerAndDisabledFetchesUseTheDisabledT
         EXPECT_EQ(button->palette().color(QPalette::Active, QPalette::ButtonText), QColor("#E6EDF3"));
     }
 }
+TEST(SecResearch, SectionsAreTitlesOverOneTableBorderAndEmptyTablesFitTheirHeaders) {
+    FixtureProvider provider;
+    SecFilingDock dock(nullptr, &provider);
+    dock.resize(340, 480); dock.show(); QCoreApplication::processEvents();
+    EXPECT_TRUE(dock.findChildren<QGroupBox*>().isEmpty());
+    for (const char* name : {"secFilings", "secTransactions"}) {
+        auto* table = dock.findChild<QTableView*>(name);
+        ASSERT_NE(table, nullptr);
+        auto* header = table->horizontalHeader();
+        EXPECT_TRUE(header->stretchLastSection());
+        EXPECT_FALSE(table->horizontalScrollBar()->isVisible()) << name;
+        const int last = header->logicalIndex(header->count() - 1);
+        EXPECT_LE(header->sectionViewportPosition(last) + header->sectionSize(last), table->viewport()->width()) << name;
+    }
+    dock.onSymbolChanged("AAPL");
+    QMetaObject::invokeMethod(&dock, "fetchInsiderTransactions");
+    provider.reply(0, "TRANSACTIONS_DATA:[{\"date\":\"2026-09-30\",\"filer\":\"Fixture\",\"type\":\"P\",\"shares\":1,\"price\":2}]\n");
+    EXPECT_EQ(dock.findChild<QTableView*>("secTransactions")->horizontalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
+}
 TEST(SecResearch, ErrorsUseTheErrorRoleInOneClause) {
     FixtureProvider provider;
     SecFilingDock dock(nullptr, &provider);
@@ -274,6 +293,24 @@ TEST(SecResearch, ErrorsUseTheErrorRoleInOneClause) {
     QMetaObject::invokeMethod(&dock, "fetchFilings");
     EXPECT_EQ(status->text(), QString::fromUtf8("× Enter a ticker"));
     EXPECT_TRUE(status->styleSheet().contains("#f07a6a"));
+}
+TEST(SecResearch, EmptyResultsSayWhatToFetch) {
+    FixtureProvider provider;
+    SecFilingDock dock(nullptr, &provider);
+    dock.resize(500, 620); dock.show();
+    dock.onSymbolChanged("AAPL"); QCoreApplication::processEvents();
+    auto* filings = dock.findChild<QTableView*>("secFilings");
+    auto* empty = filings->viewport()->findChild<QWidget*>("secFilingsEmpty");
+    ASSERT_NE(empty, nullptr);
+    EXPECT_TRUE(empty->isVisible());
+    EXPECT_TRUE(empty->findChild<QLabel*>()->text().contains("Fetch Filings"));
+    EXPECT_TRUE(dock.findChild<QTextEdit*>("secFinancials")->placeholderText().contains("Fetch Financials"));
+    QMetaObject::invokeMethod(&dock, "fetchFilings");
+    provider.reply(0, "FILINGS_DATA:[{\"filingDate\":\"2026-09-30\",\"form\":\"10-K\",\"description\":\"Annual\"}]\n");
+    ASSERT_EQ(filings->model()->rowCount(), 1);
+    EXPECT_FALSE(empty->isVisible());
+    dock.onSymbolChanged("BTC-USD");
+    EXPECT_TRUE(empty->findChild<QLabel*>()->text().isEmpty()) << "no fetch hint where nothing can be fetched";
 }
 TEST(ResearchProcess, CancellationDoesNotWaitAndDestructionDoesNotCallBack) {
 #ifdef Q_OS_UNIX

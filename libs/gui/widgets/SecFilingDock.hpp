@@ -14,6 +14,8 @@
 #include <QJsonDocument>
 #include <QHash>
 
+class EmptyState;
+
 /**
  * SEC Filing Viewer dock widget.
  * Displays SEC filings, insider transactions, and financial summaries.
@@ -43,6 +45,8 @@ private:
     void beginRequest();
     QString provenance() const;
     void updateStatus(const QString& message, bool isError = false);
+    void fitEmptyColumns(QTableView* table);
+    void updateEmptyHints();
     void displayFilings(const QList<SecApiClient::Filing>& filings);
     void displayTransactions(const QList<SecApiClient::Transaction>& transactions);
     void displayFinancials(const QList<SecApiClient::FinancialMetric>& metrics);
@@ -64,5 +68,7 @@ private:
     QTextEdit* m_financialsDisplay;
     QLabel* m_statusLabel;
     QLabel* m_tickerHint = nullptr;
+    EmptyState* m_filingsEmpty = nullptr;
+    EmptyState* m_transactionsEmpty = nullptr;
 };
 

@@ -1,8 +1,8 @@
 #include "SecFilingDock.hpp"
 #include "TableChrome.hpp"
+#include "EmptyState.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QGroupBox>
 #include <QSplitter>
 #include <QHeaderView>
 #include <QJsonObject>
@@ -78,21 +78,27 @@ void SecFilingDock::buildUi() {
     // Tables and display
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_contentWidget);
     
-    QGroupBox* filingsGroup = new QGroupBox("Filings", m_contentWidget);
-    QVBoxLayout* filingsLayout = new QVBoxLayout();
-    m_filingsTable = new QTableView(filingsGroup);
+    auto section = [splitter](const QString& title, QWidget* body) {
+        auto* box = new QWidget(splitter);
+        auto* column = new QVBoxLayout(box);
+        column->setContentsMargins(0, 4, 0, 0);
+        column->setSpacing(4);
+        auto* label = new QLabel(title, box);
+        label->setStyleSheet(QStringLiteral("color:%1;").arg(theme::text2().name()));
+        column->addWidget(label);
+        body->setParent(box);
+        column->addWidget(body, 1);
+        splitter->addWidget(box);
+    };
+    m_filingsTable = new QTableView;
     m_filingsModel->setHorizontalHeaderLabels({"Date", "Form Type", "Description"});
     m_filingsTable->setObjectName("secFilings");
     m_filingsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_filingsTable->setModel(m_filingsModel);
     tableChrome::apply(m_filingsTable);
     m_filingsTable->horizontalHeader()->setStretchLastSection(true);
-    filingsLayout->addWidget(m_filingsTable);
-    filingsGroup->setLayout(filingsLayout);
-    splitter->addWidget(filingsGroup);
-    QGroupBox* transactionsGroup = new QGroupBox("Insider Transactions", m_contentWidget);
-    QVBoxLayout* transactionsLayout = new QVBoxLayout();
-    m_transactionsTable = new QTableView(transactionsGroup);
+    section("Filings", m_filingsTable);
+    m_transactionsTable = new QTableView;
     m_transactionsModel->setHorizontalHeaderLabels({"Date", "Insider", "Transaction", "Shares", "Price"});
     tableChrome::align(m_transactionsModel, 3, true);
     tableChrome::align(m_transactionsModel, 4, true);
@@ -101,17 +107,15 @@ void SecFilingDock::buildUi() {
     m_transactionsTable->setModel(m_transactionsModel);
     tableChrome::apply(m_transactionsTable);
     m_transactionsTable->horizontalHeader()->setStretchLastSection(true);
-    transactionsLayout->addWidget(m_transactionsTable);
-    transactionsGroup->setLayout(transactionsLayout);
-    splitter->addWidget(transactionsGroup);
-    QGroupBox* financialsGroup = new QGroupBox("Financial Summary", m_contentWidget);
-    QVBoxLayout* financialsLayout = new QVBoxLayout();
-    m_financialsDisplay = new QTextEdit(financialsGroup);
+    section("Insider transactions", m_transactionsTable);
+    m_financialsDisplay = new QTextEdit;
     m_financialsDisplay->setObjectName("secFinancials");
     m_financialsDisplay->setReadOnly(true);
-    financialsLayout->addWidget(m_financialsDisplay);
-    financialsGroup->setLayout(financialsLayout);
-    splitter->addWidget(financialsGroup);
+    section("Financial summary", m_financialsDisplay);
+    for (auto* table : {m_filingsTable, m_transactionsTable}) fitEmptyColumns(table);
+    m_filingsEmpty = new EmptyState(m_filingsTable, QString());
+    m_transactionsEmpty = new EmptyState(m_transactionsTable, QString());
+    updateEmptyHints();
     
     splitter->setStretchFactor(0, 1);
     splitter->setStretchFactor(1, 1);
@@ -199,6 +203,7 @@ void SecFilingDock::displayFilings(const QList<SecApiClient::Filing>& filings) {
         m_filingsModel->appendRow(row);
     }
     m_filingsTable->resizeColumnsToContents();
+    fitEmptyColumns(m_filingsTable);
 }
 
 void SecFilingDock::displayTransactions(const QList<SecApiClient::Transaction>& transactions) {
@@ -220,6 +225,7 @@ void SecFilingDock::displayTransactions(const QList<SecApiClient::Transaction>& 
         m_transactionsModel->appendRow(row);
     }
     m_transactionsTable->resizeColumnsToContents();
+    fitEmptyColumns(m_transactionsTable);
 }
 
 void SecFilingDock::displayFinancials(const QList<SecApiClient::FinancialMetric>& metrics) {
@@ -252,6 +258,23 @@ void SecFilingDock::clearResults() {
     m_filingsModel->removeRows(0, m_filingsModel->rowCount());
     m_transactionsModel->removeRows(0, m_transactionsModel->rowCount());
     m_financialsDisplay->clear();
+    for (auto* table : {m_filingsTable, m_transactionsTable}) fitEmptyColumns(table);
+}
+
+void SecFilingDock::fitEmptyColumns(QTableView* table) {
+    if (table->model()->rowCount() != 0) return;
+    // Empty columns take their header width, so every header fits and the last one stretches.
+    for (int column = 0; column < table->model()->columnCount(); ++column)
+        table->setColumnWidth(column, table->horizontalHeader()->sectionSizeHint(column));
+}
+
+void SecFilingDock::updateEmptyHints() {
+    const bool supported = ResearchProcess::isEquityTicker(m_tickerInput->text());
+    m_filingsEmpty->setText(supported ? QStringLiteral("No filings loaded · Fetch Filings") : QString());
+    m_transactionsEmpty->setText(supported ? QStringLiteral("No insider transactions loaded · Fetch Insider Tx")
+                                           : QString());
+    m_financialsDisplay->setPlaceholderText(supported ? QStringLiteral("No financial summary loaded · Fetch Financials")
+                                                      : QString());
 }
 void SecFilingDock::beginRequest() { clearResults(); }
 QString SecFilingDock::provenance() const {
@@ -269,6 +292,7 @@ void SecFilingDock::tickerEdited() {
     m_tickerHint->setText(supported ? QStringLiteral("Equity tickers only")
                                     : QStringLiteral("! Equity tickers only"));
     m_tickerHint->setStyleSheet(QStringLiteral("color:%1;").arg((supported ? theme::text3() : theme::warn()).name()));
+    updateEmptyHints();
     updateStatus(provenance() + (supported ? " · Choose a report" : QString()));
 }
 void SecFilingDock::onSymbolChanged(const QString& symbol) {
