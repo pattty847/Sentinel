@@ -1303,7 +1303,8 @@ TEST_F(DomDock, ScrollPinsPriceAndPositionThenButtonRestoresFollow) {
     dock.findChild<QPushButton*>("domRecenter")->click();
     EXPECT_NE(model->index(0, 0).data(DomModel::BucketRole), top);
     EXPECT_NEAR(table->visualRect(model->index(model->centerRow(), 0)).center().y(), table->viewport()->height() / 2, 22);
-    EXPECT_TRUE(dock.findChild<QPushButton*>("domRecenter")->text().contains("Following"));
+    EXPECT_TRUE(dock.findChild<QPushButton*>("domRecenter")->isChecked());
+    EXPECT_EQ(dock.findChild<QPushButton*>("domRecenter")->text(), "Follow");
     const auto recenteredTop = model->index(0, 0).data(DomModel::BucketRole);
     source.update({{true, 210, 0}, {false, 210.1, 0}, {true, 220, 1}, {false, 220.1, 1}});
     QTest::qWait(90);
@@ -2667,8 +2668,12 @@ TEST_F(DomDock, CheckedTogglesLookDifferentInTheDarkTheme) {
     const QString previousStyle = qApp->styleSheet();
     qApp->setStyleSheet(DarkTheme{}.stylesheet());
     show();
-    for (const char* name : {"domPulse", "domLean", "domCumulative"}) {
-        auto* button = dock.findChild<QToolButton*>(name);
+    // All four heading buttons in the one toggle style (brief DOM-10, WIN-3).
+    std::vector<QColor> offBorders, onFills;
+    for (const char* name : {"domPulse", "domLean", "domCumulative", "domRecenter"}) {
+        auto* button = dock.findChild<QAbstractButton*>(name);
+        ASSERT_NE(button, nullptr) << name;
+        ASSERT_TRUE(button->isCheckable()) << name;
         const bool was = button->isChecked(); // persisted: restore it for later tests
         button->setChecked(false);
         const QImage off = button->grab().toImage();
@@ -2676,8 +2681,16 @@ TEST_F(DomDock, CheckedTogglesLookDifferentInTheDarkTheme) {
         const QImage on = button->grab().toImage();
         const QPoint corner(3, button->height() / 2); // background beside the text
         EXPECT_NE(off.pixelColor(corner), on.pixelColor(corner)) << name;
+        EXPECT_EQ(on.pixelColor(corner), theme::sel()) << name;
+        offBorders.push_back(off.pixelColor(button->width() / 2, 0));
+        onFills.push_back(on.pixelColor(corner));
         button->setChecked(was);
     }
+    for (size_t i = 1; i < offBorders.size(); ++i) {
+        EXPECT_EQ(offBorders[i], offBorders[0]) << i;
+        EXPECT_EQ(onFills[i], onFills[0]) << i;
+    }
+    EXPECT_EQ(dock.findChild<QPushButton*>("domRecenter")->text(), "Follow");
     qApp->setStyleSheet(previousStyle);
 }
 

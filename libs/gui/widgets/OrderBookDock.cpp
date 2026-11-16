@@ -471,11 +471,12 @@ QHBoxLayout* OrderBookDock::buildHeading()
     m_symbolLabel->setMinimumWidth(0);
     // The symbol yields width so the symbol, Σ and Recenter fit the 180 px minimum dock.
     m_symbolLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    m_recenter = new QPushButton("Recenter", m_contentWidget);
+    m_recenter = new QPushButton("Follow", m_contentWidget);
     m_recenter->setObjectName("domRecenter");
     m_recenter->setAccessibleName("Recenter and follow the market");
     m_recenter->setCheckable(true);
-    m_recenter->setToolTip("Follow the market. Scrolling pauses follow and pins the price ladder.");
+    m_recenter->setToolTip("Follow the market: on keeps the market centred. Scrolling turns it off and pins the price "
+                           "ladder; click to recenter and follow again.");
     connect(m_recenter, &QPushButton::clicked, this, &OrderBookDock::recenter);
     m_cumulative = new QToolButton(m_contentWidget);
     m_cumulative->setText("Σ");
@@ -541,7 +542,16 @@ void OrderBookDock::buildUi()
     layout->setSpacing(2);
     auto* heading = buildHeading();
     auto* headingWidget = new QWidget(m_contentWidget);
+    headingWidget->setObjectName("domHeading");
     headingWidget->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    // Pulse, Lean, Σ and Follow share the one toggle look (brief WIN-3, DOM-10): off is
+    // transparent with a line border, on is the selection fill and border.
+    headingWidget->setStyleSheet(QStringLiteral(
+        "QToolButton, QPushButton { background: transparent; border: 1px solid %1; border-radius: 3px; "
+        "padding: 2px 6px; color: %2; }"
+        "QToolButton:hover, QPushButton:hover { border-color: %3; }"
+        "QToolButton:checked, QPushButton:checked { background: %4; border-color: %3; color: %2; }")
+        .arg(theme::line().name(), theme::text().name(), theme::selLine().name(), theme::sel().name()));
     heading->setContentsMargins(0, 0, 0, 0);
     heading->setSizeConstraint(QLayout::SetNoConstraint);
     headingWidget->setLayout(heading);
@@ -1019,7 +1029,6 @@ void OrderBookDock::stopFollowing()
 {
     if (m_programmaticScroll || !m_follow) return;
     m_follow = false;
-    m_recenter->setText("Recenter");
     m_recenter->setChecked(false);
 }
 
@@ -1105,7 +1114,6 @@ void OrderBookDock::refreshDisplay()
     }
     refreshBook();
     if (m_dirty) {
-        m_recenter->setText(m_follow ? "Following" : "Recenter");
         m_recenter->setChecked(m_follow);
         m_table->horizontalHeader()->setToolTip(m_model->executionSummary());
         fitColumns();
