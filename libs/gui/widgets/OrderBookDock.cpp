@@ -32,6 +32,14 @@
 #include <limits>
 
 namespace {
+// The ladder header measures each section's own content (text, style padding, header font):
+// the 11 px header can be wider than the 10 px cells it labels (W-0155: "Sell vol" was clipped).
+class DomHeader : public QHeaderView {
+public:
+    using QHeaderView::QHeaderView;
+    int contentWidth(int section) const { return sectionSizeFromContents(section).width(); }
+};
+
 // Bars use the upper part of each side's palette ramp: its low end is black,
 // which would vanish on the dark ladder.
 constexpr double RampStart = 0.55;
@@ -509,6 +517,7 @@ void OrderBookDock::buildLadder(QVBoxLayout* layout)
     m_table->setShowGrid(false); // the delegate draws the row hairline
     m_table->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_table->verticalHeader()->hide();
+    m_table->setHorizontalHeader(new DomHeader(Qt::Horizontal, m_table));
     tableChrome::apply(m_table);
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     m_table->horizontalHeader()->setDefaultAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -1117,9 +1126,14 @@ void OrderBookDock::fitColumns()
 {
     const int width = m_table->viewport()->width();
     const QFontMetrics fm(m_table->font());
-    const int priceWidth = std::max(54, fm.horizontalAdvance(m_model->index(0, DomModel::Price).data().toString()) + 8);
-    const int sizeWidth = fm.horizontalAdvance("0.0353") + 8;
-    const int countWidth = std::max(fm.horizontalAdvance("Sell vol"), fm.horizontalAdvance("+88.8k")) + 10;
+    const auto* header = static_cast<const DomHeader*>(m_table->horizontalHeader());
+    // Every column fits its header text as the header draws it, and its widest usual value.
+    const int priceWidth = std::max({54, fm.horizontalAdvance(m_model->index(0, DomModel::Price).data().toString()) + 8,
+                                     header->contentWidth(DomModel::Price)});
+    const int sizeWidth = std::max({fm.horizontalAdvance("0.0353") + 8, header->contentWidth(DomModel::Bid),
+                                    header->contentWidth(DomModel::Ask)});
+    const int countWidth = std::max({fm.horizontalAdvance("+88.8k") + 10, header->contentWidth(DomModel::Buys),
+                                     header->contentWidth(DomModel::Sells), header->contentWidth(DomModel::Delta)});
     const bool counts = width >= priceWidth + sizeWidth * 2 + countWidth * 3;
     const bool delta = width >= priceWidth + sizeWidth * 2 + countWidth;
     for (int col = DomModel::Buys; col < DomModel::Columns; ++col) {

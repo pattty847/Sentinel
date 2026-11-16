@@ -1205,6 +1205,36 @@ TEST_F(DomDock, NarrowLadderFitsWithoutScrollingAndRestoresExecutionColumns) {
     }
 }
 
+TEST_F(DomDock, EveryHeaderTextFitsItsSectionAtTheDefaultFontAndWidths) {
+    // W-0155: the 11 px header over 10 px cells clipped "Sell vol" at its left edge.
+    const QString previousStyle = qApp->styleSheet();
+    qApp->setStyleSheet(DarkTheme{}.stylesheet());
+    QFont app = dock.font();
+    app.setPixelSize(10); // the GUI's 10 pt application font (FontManager)
+    dock.setFont(app);
+    source.update({{true, 200, 1}, {false, 200.1, 1}});
+    show();
+    auto* header = table->horizontalHeader();
+    ASSERT_EQ(header->font().pixelSize(), 11);
+    const QFontMetrics fm(header->font());
+    int volumeColumnsSeen = 0;
+    for (int width : {260, 280, 320, 400, 500, 650}) {
+        dock.resize(width, 600);
+        QCoreApplication::processEvents();
+        ASSERT_TRUE(QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection));
+        for (int col = 0; col < DomModel::Columns; ++col) {
+            if (table->isColumnHidden(col)) continue;
+            volumeColumnsSeen += col == DomModel::Sells;
+            const QString text = model->headerData(col, Qt::Horizontal, Qt::DisplayRole).toString();
+            // QSS padding 0 4px on each side of the text (TableChrome.hpp).
+            EXPECT_LE(fm.horizontalAdvance(text) + 8, header->sectionSize(col)) << text.toStdString() << " at " << width;
+        }
+    }
+    EXPECT_GT(volumeColumnsSeen, 0);
+    dock.setFont(QFont());
+    qApp->setStyleSheet(previousStyle);
+}
+
 TEST(DomDelegate, HeatmapRampPriceDigitsAndSizeTextTint) {
     // Samples of the heatmap's own default palette image (Electric): no invented colours.
     const auto texels = heatmap::gpu::paletteTexels(heatmap::gpu::gradientsFor(heatmap::HeatmapChartSettings{}));
