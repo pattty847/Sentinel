@@ -1177,15 +1177,18 @@ void OrderBookDock::updatePulseFooter()
     m_footerVersion = m_model->pulseTotalsVersion();
     m_footerWidth = width;
     const QString full = m_model->pulseSummary();
-    // The longest form that fits; below that, whole " · " segments drop: never a cut number.
-    const auto fits = [&](const QString& text) { return m_pulseFooter->fontMetrics().horizontalAdvance(text) <= width; };
+    // The longest form whose every line fits: one line, one line without the biggest pull, then
+    // two lines (one per side). Never a cut number and never an unlabelled pair.
+    const auto fits = [&](const QString& text) {
+        for (const auto& line : QStringView(text).split(QLatin1Char('\n')))
+            if (m_pulseFooter->fontMetrics().horizontalAdvance(line.toString()) > width) return false;
+        return true;
+    };
     QString text = full;
-    for (const auto form : {DomModel::PulseText::Compact, DomModel::PulseText::NoMax, DomModel::PulseText::Tiny}) {
+    for (const auto form : {DomModel::PulseText::NoMax, DomModel::PulseText::TwoLines}) {
         if (fits(text)) break;
         text = m_model->pulseSummary(form);
     }
-    while (!fits(text) && text.contains(QStringLiteral(" · ")))
-        text = text.left(text.lastIndexOf(QStringLiteral(" · "))) + QStringLiteral(" …");
     m_pulseFooter->setText(text);
     const auto& totals = m_model->pulseTotals();
     m_pulseFooter->setToolTip(QStringLiteral("Book changes over the last %1 s in the rows on screen (plus %2 rows each way), all sizes:\n%3\n"

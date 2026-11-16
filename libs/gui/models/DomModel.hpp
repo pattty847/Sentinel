@@ -188,9 +188,10 @@ public:
     const sentinel::book::RollingTotals& pulseTotals() const { return m_classifier.totals(); }
     // Changes whenever the footer's numbers change.
     uint64_t pulseTotalsVersion() const { return m_pulseVersion; }
-    // Footer text, longest first: Full, Compact, NoMax (the biggest pull only in the
-    // tooltip), Tiny ("Ask 6.8/1.1 · Bid .4/2", pulled/eaten).
-    enum class PulseText { Full, Compact, NoMax, Tiny };
+    // Footer text in one labelled grammar, longest first: Full ("Ask pull 6.8 eat 1.1 ·
+    // Bid pull 0.4 eat 2 · max pull 4 @ 200.3"), NoMax (the biggest pull only in the tooltip),
+    // TwoLines (the Ask and Bid parts on their own lines).
+    enum class PulseText { Full, NoMax, TwoLines };
     QString pulseSummary(PulseText form = PulseText::Full) const;
     uint64_t pulseOutOfIntervalTotal() const { return m_classifier.outOfIntervalTradesTotal(); }
     // Test hooks: steps classified and the events the last step produced (before the threshold).

@@ -1054,15 +1054,17 @@ TEST(DomPulse, ScrollFollowShiftSymbolSwitchAndWithdrawalProduceNoEvents) {
 TEST(DomPulse, FooterSumsEachKindPerSideAndNamesTheBiggestPull) {
     PulseRig rig;
     rig.step();
-    EXPECT_EQ(rig.model.pulseSummary(), "Asks pulled 0 eaten 0 · Bids pulled 0 eaten 0");
+    EXPECT_EQ(rig.model.pulseSummary(), "Ask pull 0 eat 0 · Bid pull 0 eat 0");
     const std::array first{rig.received(200.1, 1.1, sb::Aggressor::Buy), rig.received(200, 2, sb::Aggressor::Sell)};
     apply(rig.book, {{false, 200.1, 8.9}, {true, 200, 8}, {false, 200.3, 0}, {false, 200.4, 1.2}});
     rig.step(first);
     apply(rig.book, {{true, 199.7, 3.6}, {false, 200.2, 4.5}});
     rig.step();
     // Asks pulled 4 + 2.8, bids 0.4; the largest single pull is the 4 at 200.3.
-    EXPECT_EQ(rig.model.pulseSummary(), "Asks pulled 6.8 eaten 1.1 · Bids pulled 0.4 eaten 2 · biggest pull 4 @ 200.3");
-    EXPECT_EQ(rig.model.pulseSummary(DomModel::PulseText::Compact), "Ask pull 6.8 eat 1.1 · Bid pull 0.4 eat 2 · max 4 @ 200.3");
+    // One labelled grammar in every form (brief DOM-5).
+    EXPECT_EQ(rig.model.pulseSummary(), "Ask pull 6.8 eat 1.1 · Bid pull 0.4 eat 2 · max pull 4 @ 200.3");
+    EXPECT_EQ(rig.model.pulseSummary(DomModel::PulseText::NoMax), "Ask pull 6.8 eat 1.1 · Bid pull 0.4 eat 2");
+    EXPECT_EQ(rig.model.pulseSummary(DomModel::PulseText::TwoLines), "Ask pull 6.8 eat 1.1\nBid pull 0.4 eat 2");
     EXPECT_DOUBLE_EQ(rig.model.pulseTotals().side[1].added, 0.5);
     const auto version = rig.model.pulseTotalsVersion();
     rig.step();
@@ -1543,17 +1545,17 @@ TEST_F(DomPulseDock, QuietBookTotalsExpireOnScheduleFedEveryTick) {
     tick();
     const auto footer = dock.findChild<QLabel*>("domPulseFooter");
     ASSERT_TRUE(footer->isVisible());
-    EXPECT_EQ(footer->text(), "Asks pulled 0 eaten 0 · Bids pulled 5 eaten 0 · biggest pull 5 @ 199.9");
+    EXPECT_EQ(footer->text(), "Ask pull 0 eat 0 · Bid pull 5 eat 0 · max pull 5 @ 199.9");
     EXPECT_TRUE(footer->toolTip().contains("last 10 s"));
     // The bar scale decays in wall time: let it settle so only the pulse clock moves.
     QTest::qWait(700);
     // No book change for ten seconds: the totals still move, from the timer alone.
     for (int i = 1; i < 149; ++i) tick();
-    EXPECT_EQ(footer->text(), "Asks pulled 0 eaten 0 · Bids pulled 5 eaten 0 · biggest pull 5 @ 199.9");
+    EXPECT_EQ(footer->text(), "Ask pull 0 eat 0 · Bid pull 5 eat 0 · max pull 5 @ 199.9");
     tick(); // 9,983 ms after the pull
-    EXPECT_TRUE(footer->text().contains("Bids pulled 5"));
+    EXPECT_TRUE(footer->text().contains("Bid pull 5"));
     tick(); // 10,050 ms
-    EXPECT_EQ(footer->text(), "Asks pulled 0 eaten 0 · Bids pulled 0 eaten 0");
+    EXPECT_EQ(footer->text(), "Ask pull 0 eat 0 · Bid pull 0 eat 0");
 }
 
 TEST_F(DomPulseDock, TradesAreStampedOnReceiptAndEatTheNextSnapshot) {
@@ -2702,14 +2704,25 @@ TEST_F(DomPulseDock, FooterNeverCutsANumberAt180To400) {
     source.update({{false, 200.2, 0}});
     tick();
     auto* footer = dock.findChild<QLabel*>("domPulseFooter");
+    bool twoLines = false;
     for (int width = 180; width <= 400; width += 20) {
         dock.resize(width, 600);
         QCoreApplication::processEvents();
         tick();
         const QString text = footer->text();
-        EXPECT_LE(footer->fontMetrics().horizontalAdvance(text), footer->width()) << width << " " << text.toStdString();
-        EXPECT_FALSE(text.isEmpty());
+        ASSERT_FALSE(text.isEmpty());
+        // Every line fits whole and keeps the labelled grammar: no "/" pairs, no "…".
+        const QStringList lines = text.split('\n');
+        for (const QString& line : lines)
+            EXPECT_LE(footer->fontMetrics().horizontalAdvance(line), footer->width()) << width << " " << line.toStdString();
+        EXPECT_TRUE(text.contains("Ask pull ") && text.contains(" eat ") && text.contains("Bid pull ")) << text.toStdString();
+        EXPECT_FALSE(text.contains('/') || text.contains(QString::fromUtf8("…"))) << text.toStdString();
+        if (lines.size() == 2) {
+            twoLines = true;
+            EXPECT_GE(footer->height(), 2 * footer->fontMetrics().lineSpacing() - 1) << width;
+        }
     }
+    EXPECT_TRUE(twoLines) << "narrow docks break the footer into one line per side";
 }
 
 } // namespace

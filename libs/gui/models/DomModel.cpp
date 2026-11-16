@@ -976,18 +976,16 @@ const QString& DomModel::pulseTag(int row, bool bid, bool eaten) const
 
 QString DomModel::pulseSummary(PulseText form) const
 {
+    // One labelled grammar (brief DOM-5): "Ask pull 10.4 eat 0.079 · Bid pull 6.87 eat 0.127",
+    // then the biggest pull; two lines when narrow. No unlabelled pairs.
     const auto& t = m_classifier.totals();
     const auto& bid = t.side[sentinel::book::sideIndex(sentinel::book::Side::Bid)];
     const auto& ask = t.side[sentinel::book::sideIndex(sentinel::book::Side::Ask)];
-    if (form == PulseText::Tiny)
-        return QStringLiteral("Ask %1/%2 · Bid %3/%4")
-            .arg(shownSize(ask.pulled), shownSize(ask.eaten), shownSize(bid.pulled), shownSize(bid.eaten));
-    QString text = form == PulseText::Full
-        ? QStringLiteral("Asks pulled %1 eaten %2 · Bids pulled %3 eaten %4")
-        : QStringLiteral("Ask pull %1 eat %2 · Bid pull %3 eat %4");
-    text = text.arg(shownSize(ask.pulled), shownSize(ask.eaten), shownSize(bid.pulled), shownSize(bid.eaten));
+    const QString askText = QStringLiteral("Ask pull %1 eat %2").arg(shownSize(ask.pulled), shownSize(ask.eaten));
+    const QString bidText = QStringLiteral("Bid pull %1 eat %2").arg(shownSize(bid.pulled), shownSize(bid.eaten));
+    if (form == PulseText::TwoLines) return askText + QLatin1Char('\n') + bidText;
+    QString text = askText + QStringLiteral(" · ") + bidText;
     if (t.largestPull && m_tick > 0 && form != PulseText::NoMax)
-        text += (form == PulseText::Compact ? QStringLiteral(" · max %1 @ %2") : QStringLiteral(" · biggest pull %1 @ %2"))
-            .arg(shownSize(t.largestPull->size), shownPrice(t.largestPull->price, m_tick));
+        text += QStringLiteral(" · max pull %1 @ %2").arg(shownSize(t.largestPull->size), shownPrice(t.largestPull->price, m_tick));
     return text;
 }
