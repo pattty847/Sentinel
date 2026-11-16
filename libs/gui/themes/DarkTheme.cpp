@@ -310,12 +310,12 @@ QString DarkTheme::stylesheet() const {
             width: 5px;
             height: 5px;
         }
-        QMainWindow::separator:horizontal, QSplitter::handle:horizontal {
+        QMainWindow::separator:vertical, QSplitter::handle:horizontal {
             background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                 stop:0 #1B1F24, stop:0.399 #1B1F24, stop:0.4 #2B3138,
                 stop:0.6 #2B3138, stop:0.601 #1B1F24, stop:1 #1B1F24);
         }
-        QMainWindow::separator:vertical, QSplitter::handle:vertical {
+        QMainWindow::separator:horizontal, QSplitter::handle:vertical {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                 stop:0 #1B1F24, stop:0.399 #1B1F24, stop:0.4 #2B3138,
                 stop:0.6 #2B3138, stop:0.601 #1B1F24, stop:1 #1B1F24);

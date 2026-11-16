@@ -10,6 +10,7 @@
 #include <QMenu>
 #include <QPainter>
 #include <QStyleOption>
+#include <QHoverEvent>
 #include <QHeaderView>
 #include <QTableWidget>
 #include <QComboBox>
@@ -91,6 +92,9 @@ TEST(ShellChrome, SplittersKeepAOnePixelLineInsideAFivePixelHandle) {
         QTest::mouseMove(splitter.widget(0), QPoint(10, 10));
         QCoreApplication::processEvents();
         auto* handle = splitter.handle(1);
+        // Offscreen cursor state can survive destruction of the preceding handle.
+        QHoverEvent leave(QEvent::HoverLeave, QPointF(-1, -1), QPointF(-1, -1), QPointF(2, 2));
+        QApplication::sendEvent(handle, &leave);
         EXPECT_EQ(orientation == Qt::Horizontal ? handle->width() : handle->height(), 5);
         const auto pixels = handle->grab().toImage();
         int lines = 0;
@@ -98,17 +102,47 @@ TEST(ShellChrome, SplittersKeepAOnePixelLineInsideAFivePixelHandle) {
             const QColor pixel = orientation == Qt::Horizontal ? pixels.pixelColor(p, 20) : pixels.pixelColor(20, p);
             if (pixel == QColor("#2B3138")) ++lines;
         }
-        EXPECT_EQ(lines, 1);
-        QTest::mouseMove(handle, handle->rect().center());
-        QCoreApplication::processEvents();
-        EXPECT_NE(handle->grab().toImage(), pixels);
+        QStringList samples;
+        for (int p = 0; p < 5; ++p)
+            samples << (orientation == Qt::Horizontal ? pixels.pixelColor(p, 20) : pixels.pixelColor(20, p)).name();
+        EXPECT_EQ(lines, 1) << samples.join(",").toStdString() << " size=" << handle->width() << "x" << handle->height();
+        QHoverEvent enter(QEvent::HoverEnter, QPointF(2, 2), QPointF(2, 2), QPointF(-1, -1));
+        QApplication::sendEvent(handle, &enter);
+        const auto hovered = handle->grab().toImage();
+        EXPECT_NE(hovered, pixels);
+        QImage overlay(handle->size(), QImage::Format_ARGB32_Premultiplied);
+        overlay.fill(Qt::transparent);
+        QStyleOption option;
+        option.rect = overlay.rect();
+        option.state = QStyle::State_Enabled | QStyle::State_MouseOver;
+        if (orientation == Qt::Horizontal) option.state |= QStyle::State_Horizontal;
+        { QPainter painter(&overlay); splitter.style()->drawControl(QStyle::CE_Splitter, &option, &painter, &splitter); }
+        EXPECT_EQ(overlay.pixelColor(overlay.rect().center()), QColor(0, 170, 255, 102));
         QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, handle->rect().center());
-        EXPECT_NE(handle->grab().toImage(), pixels);
+        QApplication::sendEvent(handle, &leave); // Drag highlight remains even outside the hover area.
+        EXPECT_EQ(handle->grab().toImage(), hovered);
         QTest::mouseRelease(handle, Qt::LeftButton, Qt::NoModifier, handle->rect().center());
     }
     QMainWindow host;
     host.ensurePolished();
     EXPECT_EQ(host.style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, nullptr, &host), 5);
+    for (bool horizontal : {false, true}) {
+        QImage pixels(horizontal ? QSize(30, 5) : QSize(5, 30), QImage::Format_ARGB32_Premultiplied);
+        pixels.fill(Qt::transparent);
+        QStyleOption option;
+        option.rect = pixels.rect();
+        option.state = QStyle::State_Enabled;
+        if (horizontal) option.state |= QStyle::State_Horizontal;
+        { QPainter painter(&pixels); host.style()->drawPrimitive(QStyle::PE_IndicatorDockWidgetResizeHandle, &option, &painter, &host); }
+        int linePixels = 0;
+        for (int p = 0; p < 5; ++p)
+            linePixels += (horizontal ? pixels.pixelColor(15, p) : pixels.pixelColor(p, 15)) == QColor("#2B3138");
+        EXPECT_EQ(linePixels, 1);
+        pixels.fill(Qt::transparent);
+        option.state |= QStyle::State_MouseOver;
+        { QPainter painter(&pixels); host.style()->drawPrimitive(QStyle::PE_IndicatorDockWidgetResizeHandle, &option, &painter, &host); }
+        EXPECT_EQ(pixels.pixelColor(pixels.rect().center()), QColor(0, 170, 255, 102));
+    }
     qApp->setStyleSheet(previous);
 }
 
