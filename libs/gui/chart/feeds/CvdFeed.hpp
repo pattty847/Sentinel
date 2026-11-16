@@ -41,6 +41,7 @@ struct CvdSnapshot {
     int64_t timeframeMs = 0;
     CvdReset reset = CvdReset::Visible;
     std::array<char, 80> label{};
+    std::array<char, 8> unit{}; // the base asset the footer's values are in ("BTC" for BTC-USD)
 };
 class CvdMailbox {
 public:
@@ -80,5 +81,6 @@ private:
     QTimer timer_;
     QMetaObject::Connection sourceConnection_;
     QString symbol_;
+    std::array<char, 8> unit_{};
 };
 } // namespace chart

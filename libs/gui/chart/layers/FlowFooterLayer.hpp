@@ -29,15 +29,15 @@ private:
     };
     Key key_;
     bool built_ = false;
-    static constexpr int kColumns = 1024, kGlyphs = kColumns * 18 + 16;
+    static constexpr int kColumns = 1024, kGlyphs = kColumns * 18 + 24;
     using Vertex = QSGGeometry::ColoredPoint2D;
     double measure(const char*, const ChartTextAtlas&) const;
-    void text(const char*, const QRectF&, const ChartTextAtlas&, const QColor&);
+    void text(const char*, const QRectF&, const ChartTextAtlas&, const QColor&, bool right);
     void drawColumns(const ChartFrame&, const ChartTextAtlas&, Vertex*&);
     void measureAtlas(const ChartTextAtlas&);
     qint64 measuredAtlas_ = 0;
     int measuredFontPx_ = 0;
-    double labelWidth_ = 0, rowLabelWidth_ = 0;
+    double labelWidth_ = 0, deltaLabelWidth_ = 0, spaceWidth_ = 0;
     int64_t stride_ = 1;
     void column(int index, double x, double width, const ChartTextAtlas&, Vertex*&);
     const CvdLayer& cvd_;

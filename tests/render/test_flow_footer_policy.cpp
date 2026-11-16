@@ -11,6 +11,16 @@ TEST(FlowFooterPolicy, SignedAndUnsignedUseTheSharedMagnitudeFormat) {
     footerNumber(0, value, false); EXPECT_STREQ(value, "0");
     footerNumber(std::numeric_limits<double>::infinity(), value, true); EXPECT_STREQ(value, "");
 }
+TEST(FlowFooterPolicy, OneLeadingZeroRuleForEveryRow) {
+    char value[24];
+    footerNumber(.09, value, true); EXPECT_STREQ(value, "+0.09");
+    footerNumber(-.72, value, true); EXPECT_STREQ(value, "-0.72");
+    footerNumber(.5, value, false); EXPECT_STREQ(value, "0.50");
+    footerNumber(.004, value, false); EXPECT_STREQ(value, "<0.01");
+    footerNumber(-.004, value, false); EXPECT_STREQ(value, "-<0.01");
+    footerNumber(3.6, value, false); EXPECT_STREQ(value, "3.60");
+    footerNumber(-11.3, value, true); EXPECT_STREQ(value, "-11.3");
+}
 TEST(FlowFooterPolicy, ThinningIsNonOverlappingAndAnchoredAcrossOneBarPan) {
     for (double barWidth : {1., 7., 30., 80.}) {
         const auto k = FlowFooterLayout::stride(barWidth, 48);

@@ -29,6 +29,7 @@ void rectangle(Vertex*& out, const QRectF& r, QColor color) {
 // value in full colour. Down text is the small-text down token (#FF8C82): #F6465D on
 // its own 25% pill is below 4.5:1.
 constexpr double kPillAlpha = .25;
+constexpr double kGutterPad = 4; // the row labels' inset and their gap to the first column
 QColor deltaText(double delta) {
     return !footerPill(delta) ? ChartLookSettings::footprintText() : delta > 0 ? theme::positive() : QColor(0xFF, 0x8C, 0x82);
 }
@@ -81,9 +82,12 @@ double FlowFooterLayer::measure(const char* value, const ChartTextAtlas& atlas) 
     for (const char* c = value; *c; ++c) width += atlas.glyph(QChar(*c)).advance;
     return width * FlowFooterLayout::textPx / atlas.fontPx();
 }
-void FlowFooterLayer::text(const char* value, const QRectF& box, const ChartTextAtlas& atlas, const QColor& color) {
+// Values end at their column's right edge, so the three rows share one column grid;
+// row labels start at the gutter's left edge.
+void FlowFooterLayer::text(const char* value, const QRectF& box, const ChartTextAtlas& atlas, const QColor& color,
+                           bool right) {
     const double scale = FlowFooterLayout::textPx / atlas.fontPx();
-    double pen = box.center().x() - measure(value, atlas) * .5;
+    double pen = right ? box.right() - measure(value, atlas) : box.left();
     for (const char* c = value; *c && glyphs_.size() < kGlyphs; ++c) {
         const auto& g = atlas.glyph(QChar(*c));
         ChartGlyphInstance glyph;
@@ -100,7 +104,7 @@ void FlowFooterLayer::measureAtlas(const ChartTextAtlas& atlas) {
     labelWidth_ = footerLabelWidth([&](char c) {
         return atlas.glyph(QChar(c)).advance * FlowFooterLayout::textPx / atlas.fontPx();
     });
-    rowLabelWidth_ = measure("DELTA", atlas) + 8;
+    deltaLabelWidth_ = measure("DELTA", atlas); spaceWidth_ = measure(" ", atlas);
 }
 void FlowFooterLayer::column(int index, double x, double width, const ChartTextAtlas& atlas, Vertex*& out) {
     const auto& snapshot = cvd_.current();
@@ -114,7 +118,7 @@ void FlowFooterLayer::column(int index, double x, double width, const ChartTextA
     for (int row = 0; row < 3; ++row) {
         char value[24]; footerNumber(values[row], value, row < 2);
         text(value, {x - width * .5, layout_.rowTop(row), width, FlowFooterLayout::textPx}, atlas,
-             row == 0 ? deltaText(totals.delta) : ChartLookSettings::footprintText());
+             row == 0 ? deltaText(totals.delta) : ChartLookSettings::footprintText(), true);
     }
     ++columns_;
 }
@@ -123,7 +127,10 @@ void FlowFooterLayer::drawColumns(const ChartFrame& frame, const ChartTextAtlas&
     const auto& cam = frame.context.raster;
     measureAtlas(atlas);
     const double width = labelWidth_;
-    const double labels = rowLabelWidth_;
+    // The gutter: DELTA / CUM / VOL and, once, the unit after DELTA.
+    const char* unit = snapshot.unit[0] ? snapshot.unit.data() : nullptr;
+    const double unitX = deltaLabelWidth_ + spaceWidth_;
+    const double labels = (unit ? unitX + measure(unit, atlas) : deltaLabelWidth_) + 2 * kGutterPad;
     const double left = bounds_.left() + labels;
     const double barWidth = cam.colPxF / cam.dpr * snapshot.timeframeMs / cam.tfMs;
     stride_ = FlowFooterLayout::stride(barWidth, width + 4);
@@ -136,9 +143,11 @@ void FlowFooterLayer::drawColumns(const ChartFrame& frame, const ChartTextAtlas&
     }
     if (bounds_.width() < labels) return;
     const char* names[] = {"DELTA", "CUM", "VOL"};
+    const QColor color = ChartLookSettings::footprintText();
     for (int row = 0; row < 3; ++row)
-        text(names[row], {bounds_.left() + 2, layout_.rowTop(row), labels - 4, FlowFooterLayout::textPx}, atlas,
-             ChartLookSettings::footprintText());
+        text(names[row], {bounds_.left() + kGutterPad, layout_.rowTop(row), labels, FlowFooterLayout::textPx}, atlas, color, false);
+    if (unit)
+        text(unit, {bounds_.left() + kGutterPad + unitX, layout_.rowTop(0), labels, FlowFooterLayout::textPx}, atlas, color, false);
 }
 void FlowFooterLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& context) {
     if (!gate_) return;
