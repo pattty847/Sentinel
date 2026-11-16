@@ -183,9 +183,19 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     layout->setContentsMargins(4, 4, 4, 4);
 
     // Position info grid
-    m_symbolLabel = new QLabel(QStringLiteral("PAPER  |  No symbol"), parent);
-    m_symbolLabel->setStyleSheet("QLabel { color: #ffcc80; font-weight: bold; }");
-    layout->addWidget(m_symbolLabel);
+    auto* symbolRow = new QHBoxLayout;
+    symbolRow->setContentsMargins(0, 0, 0, 0);
+    auto* paperTag = new QLabel(QStringLiteral("PAPER"), parent);
+    paperTag->setObjectName(QStringLiteral("paperTag"));
+    // Local text3/line values until the shared dock tokens land.
+    paperTag->setStyleSheet("QLabel { color: #93A1AF; border: 1px solid #2B3138; border-radius: 2px; padding: 1px 4px; font-size: 10px; }");
+    m_symbolLabel = new QLabel(QStringLiteral("No symbol"), parent);
+    m_symbolLabel->setObjectName(QStringLiteral("paperSymbol"));
+    m_symbolLabel->setStyleSheet("QLabel { color: #B6C2CF; }");
+    symbolRow->addWidget(paperTag);
+    symbolRow->addWidget(m_symbolLabel);
+    symbolRow->addStretch();
+    layout->addLayout(symbolRow);
     auto* posFrame = new QFrame(parent);
     posFrame->setFrameStyle(QFrame::Box);
     posFrame->setStyleSheet("QFrame { border: 1px solid #333; background: #161820; }");
@@ -727,7 +737,7 @@ void PaperTradingDock::resetForSymbolChange() {
     }
     m_limitUserOwned = false;
     m_algoActivityEligible = false;
-    if (m_symbolLabel) m_symbolLabel->setText(QStringLiteral("PAPER  |  %1").arg(m_symbol.isEmpty() ? QStringLiteral("No symbol") : m_symbol));
+    if (m_symbolLabel) m_symbolLabel->setText(m_symbol.isEmpty() ? QStringLiteral("No symbol") : m_symbol);
     updateNotional();
     m_shownLast = m_shownAvg = 0.0;
     if (m_lastPriceLabel) {

@@ -957,3 +957,12 @@ TEST(PaperPolish, ActionsHaveDividerGapAndRightAlignment) {
     EXPECT_GE(flatten->geometry().left(), buy->geometry().left());
     EXPECT_TRUE(flatten->styleSheet().contains("background: transparent"));
 }
+
+TEST(PaperPolish, PaperTagIsNeutralAndOutlined) {
+    PaperTradingDock dock;
+    auto* tag = dock.findChild<QLabel*>("paperTag");
+    ASSERT_NE(tag, nullptr);
+    EXPECT_EQ(tag->text(), QStringLiteral("PAPER"));
+    EXPECT_TRUE(tag->styleSheet().contains("border: 1px solid #2B3138"));
+    EXPECT_TRUE(tag->styleSheet().contains("font-size: 10px"));
+}
