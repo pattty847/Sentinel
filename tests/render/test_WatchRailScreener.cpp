@@ -156,6 +156,7 @@ TEST(WatchRail, ActionsHaveAVisibleSurfaceAndReadableDisabledInk) {
     WatchlistDock dock;
     dock.show();
     QCoreApplication::processEvents();
+    dock.findChild<QComboBox*>("watchPreset")->setCurrentIndex(2);
     auto* pin = dock.findChild<QToolButton*>("watchPin");
     auto* add = dock.findChild<QToolButton*>("watchAdd");
     ASSERT_FALSE(pin->isEnabled());
