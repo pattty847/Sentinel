@@ -189,6 +189,7 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | `show_telemetry` | false | Boolean; shows the Heatmap Telemetry dock (View menu, its close button and Settings > Debug write it) |
 | (settings only) `showLabels` | true | Boolean; GPU liquidity labels on the heatmap cells |
 | (settings only) `labelCurrency` | `usd` | `usd` (price x size, `$1.24M`) or `asset` (the size as a plain number, `12.5`) |
+| (settings only) `labelCurrencySymbol` | false | Boolean; show `$` before USD heatmap cell labels. Wall labels and edge badges are unaffected. |
 | (settings only) `labelMinPx`, `labelMaxPx` | 12, 15 | Label font size in logical px: min 8..24, max min..32 |
 | (settings only) `candleUpColor`, `candleDownColor` | `#2EBD85`, `#F6465D` | Opaque candle body colours (`#RRGGBB`). Teal-green and warm red remain distinct from the heatmap's cyan bid and orange/blue liquidity. |
 | (settings only) `candleWickColor` | `auto` | `auto` follows each body colour; `#RRGGBB` overrides both wicks. |

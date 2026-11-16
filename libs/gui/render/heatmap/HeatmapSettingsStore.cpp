@@ -148,6 +148,7 @@ QJsonObject settingsJson(const HeatmapChartSettings &s) {
         {"paperPositionStyle", QString::fromStdString(s.paperPositionStyle)},
         {"showLabels", s.showLabels},
         {"labelCurrency", QString::fromStdString(s.labelCurrency)},
+        {"labelCurrencySymbol", s.labelCurrencySymbol},
         {"labelMinPx", s.labelMinPx},
         {"labelMaxPx", s.labelMaxPx},
         {"candleUpColor", QString::fromStdString(s.candleUpColor)},
@@ -233,6 +234,7 @@ QString applySettingsPatch(HeatmapChartSettings &s, const QJsonObject &patch) {
     out.tradeMinNotional = merged["tradeMinNotional"].toDouble();
     out.showLabels = merged["showLabels"].toBool();
     out.labelCurrency = merged["labelCurrency"].toString().toStdString();
+    out.labelCurrencySymbol = merged["labelCurrencySymbol"].toBool();
     out.labelMinPx = merged["labelMinPx"].toDouble();
     out.labelMaxPx = merged["labelMaxPx"].toDouble();
     out.candleUpColor = merged["candleUpColor"].toString().toStdString();

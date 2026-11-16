@@ -257,6 +257,28 @@ protected:
     std::vector<ChartGlyphInstance> glyphs;
 };
 
+TEST_F(LabelLayout, CurrencySymbolToggleChangesOnlyUsdCellGlyphs) {
+    auto cells = window(1, 1);
+    const auto camera = fit({0, 0, 180, 36}, 1, 1);
+    auto appearance = style();
+    EXPECT_FALSE(appearance.currencySymbol);
+    layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
+    ASSERT_EQ(layout.stats().labels, 1u);
+    const auto plainCount = glyphs.size();
+    ASSERT_GT(plainCount, 0u);
+    const auto plainFirst = glyphs.front().uv;
+    appearance.currencySymbol = true;
+    layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
+    EXPECT_EQ(glyphs.size(), plainCount + 1);
+    EXPECT_NE(glyphs.front().uv, plainFirst);
+    appearance.usd = false;
+    layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
+    const auto assetCount = glyphs.size();
+    appearance.currencySymbol = false;
+    layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
+    EXPECT_EQ(glyphs.size(), assetCount);
+}
+
 TEST_F(LabelLayout, FootprintCardsSuppressWholeIntersectingLabelsWithoutCapacityGrowth) {
     auto cells = window(2, 1);
     const auto camera = fit({0, 0, 240, 30}, 2, 1);

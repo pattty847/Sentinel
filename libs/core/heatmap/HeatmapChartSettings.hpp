@@ -38,6 +38,7 @@ struct HeatmapChartSettings {
     // (price x size) or the asset amount ("usd" or "asset").
     bool showLabels = true;
     std::string labelCurrency = "usd";
+    bool labelCurrencySymbol = false; // USD cell labels omit '$' by default
     double labelMinPx = 12, labelMaxPx = 15;
     std::string candleUpColor = "#2EBD85", candleDownColor = "#F6465D";
     std::string candleWickColor = "auto"; // auto follows each candle's body color

@@ -318,7 +318,7 @@ QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
                                 "footprintDustNotional", "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "cvdFillAnchor"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
     if (tab == "Look")
-        return {"palettePreset", "bidGradient", "askGradient", "opacity",
+        return {"palettePreset", "bidGradient", "askGradient", "opacity", "labelCurrencySymbol",
                 "crossfadeMs", "showBandEdges", "smoothZoomOut", "paperPositionStyle", "bubblesOverFootprint"};
     if (tab == "Budgets") return {"gpuCapBytes", "uploadBudgetBytes", "prefetchTiles"};
     if (tab == "Live") return {"liveMinIntervalMs"};
@@ -608,6 +608,9 @@ QWidget *HeatmapSettingsDialog::buildTickTab() {
 QWidget *HeatmapSettingsDialog::buildLookTab() {
     auto *page = new QWidget(this);
     auto *form = new QFormLayout(page);
+    m_labelCurrencySymbol = new QCheckBox("Show $ on USD cell labels", page);
+    m_labelCurrencySymbol->setObjectName("labelCurrencySymbol");
+    form->addRow("Label currency symbol", m_labelCurrencySymbol);
     m_palette = new QComboBox(page);
     m_palette->setObjectName("palettePreset");
     m_palette->addItems(kPalettes);
@@ -678,6 +681,7 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     toneForm->addRow("Shader floor", floorRow);
     form->addRow(tone);
     form->addRow(resetButton("Look", page));
+    describe(form, m_labelCurrencySymbol, "Show a dollar sign before USD liquidity numbers in heatmap cells.");
     describe(form, m_palette, "Choose the heatmap's bid and ask colour scale. Pick Custom to use the gradient stops below.");
     describe(form, m_paperPositionStyle, "Show a compact position and live PnL tag at the entry line, or shade the full interval between entry and mark.");
     describe(form, m_bubblesOverFootprint, "Keep trade bubbles at full opacity, or dim their fill and ring to 35% while footprint numbers are drawn.");
@@ -693,6 +697,7 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     describe(toneForm, floorRow, "Minimum intensity before the colour curve (0-0.5; 0 = off). Raise it to boost faint visible cells; cells below range low stay hidden, this session only.");
 
     connect(m_palette, &QComboBox::currentTextChanged, this, [this](const QString &p) { apply({{"palettePreset", p}}); });
+    connect(m_labelCurrencySymbol, &QCheckBox::toggled, this, [this](bool on) { apply({{"labelCurrencySymbol", on}}); });
     connect(m_paperPositionStyle, &QComboBox::currentIndexChanged, this, [this] {
         apply({{"paperPositionStyle", m_paperPositionStyle->currentData().toString()}});
     });
@@ -1004,6 +1009,7 @@ void HeatmapSettingsDialog::refreshFromModel() {
         const QSignalBlocker block(m_palette);
         m_palette->setCurrentIndex(std::max<qsizetype>(0, kPalettes.indexOf(QString::fromStdString(s.palettePreset))));
     }
+    { const QSignalBlocker block(m_labelCurrencySymbol); m_labelCurrencySymbol->setChecked(s.labelCurrencySymbol); }
     {
         const QSignalBlocker block(m_paperPositionStyle);
         m_paperPositionStyle->setCurrentIndex(std::max(0, m_paperPositionStyle->findData(QString::fromStdString(s.paperPositionStyle))));
