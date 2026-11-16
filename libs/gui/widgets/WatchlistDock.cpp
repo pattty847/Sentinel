@@ -316,7 +316,7 @@ void WatchlistDock::refreshRowState() {
             if (column > 0) cell->setForeground(active ? theme::text() : theme::text3());
         }
         item->setForeground(QBrush(QColor(pending ? "#e6c07b" : refused ? "#ef8178"
-                                         : active ? "#E6EDF3" : unavailable ? "#777" : "#e0e0e0")));
+                                         : active ? theme::text().name() : unavailable ? "#777" : "#e0e0e0")));
         item->setToolTip(pending ? QStringLiteral("Waiting for chart confirmation")
                           : refused ? m_refusalReason
                           : unavailable ? QStringLiteral("Not in the current market catalog")
