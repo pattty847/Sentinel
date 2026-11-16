@@ -622,7 +622,7 @@ Rectangle {
         anchors.top: parent.top
         anchors.bottom: axisCorner.top
         width: root.priceAxisColumnPx
-        color: "#1B1F24"
+        color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
         Rectangle {
             objectName: "priceAxisDivider"
             anchors.left: parent.left
@@ -748,7 +748,7 @@ Rectangle {
         anchors.right: axisCorner.left
         anchors.bottom: parent.bottom  
         height: unifiedGridRenderer.timeAxisHeightPx
-        color: "#1B1F24"
+        color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
         Rectangle {
             objectName: "timeAxisDivider"
             anchors.left: parent.left
@@ -844,11 +844,14 @@ Rectangle {
     
     Rectangle {
         id: axisCorner
+        objectName: "axisCorner"
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         width: root.priceAxisColumnPx
         height: unifiedGridRenderer.timeAxisHeightPx
-        color: "#1B1F24"
+        color: Qt.rgba(0.05, 0.05, 0.1, 0.85)
+        border.color: Qt.rgba(1, 1, 1, 0.3)
+        border.width: 1
         z: 0
     }
 

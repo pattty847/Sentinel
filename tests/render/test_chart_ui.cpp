@@ -39,6 +39,7 @@
 #include <QDir>
 #include <QLabel>
 #include <QLineEdit>
+#include <QQmlProperty>
 #include <QVBoxLayout>
 #include <QToolButton>
 #include <QPainter>
@@ -1059,8 +1060,12 @@ TEST(ChartShell, AxisGuttersHaveSinglePixelSolidDividers) {
     for (const auto name : {"priceAxisChrome", "timeAxisChrome"}) {
         auto* gutter = shell->findChild<QQuickItem*>(name);
         ASSERT_TRUE(gutter);
-        EXPECT_EQ(gutter->property("color").value<QColor>(), QColor("#1B1F24"));
+        EXPECT_EQ(gutter->property("color").value<QColor>(), QColor::fromRgbF(.05, .05, .1, .85));
     }
+    auto* corner = shell->findChild<QQuickItem*>("axisCorner");
+    ASSERT_TRUE(corner);
+    EXPECT_EQ(QQmlProperty::read(corner, "border.width").toInt(), 1);
+    EXPECT_EQ(QQmlProperty::read(corner, "border.color").value<QColor>(), QColor::fromRgbF(1, 1, 1, .3));
 }
 
 TEST(ChartShell, PaperPositionTagFormatsSizeAndHidesOffscreenControls) {
@@ -2888,7 +2893,6 @@ TEST(FootprintFlowFeed, EarlyNewSymbolHistorySurvivesSelectionAndHiddenLod) {
     feed.publishRows(); ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
 }
 
-#include <QQmlProperty>
 TEST(FootprintKnobs, QmlWritesPersistAndProcessOnlyModelApplicationDoesNot) {
     TempStore store;
     HeatmapSettingsModel model(store.store, "main", store.config);
