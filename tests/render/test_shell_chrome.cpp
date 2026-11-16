@@ -81,11 +81,14 @@ TEST(ShellChrome, SplittersKeepAOnePixelLineInsideAFivePixelHandle) {
     const QString previous = qApp->styleSheet();
     qApp->setStyleSheet(DarkTheme().stylesheet());
     for (auto orientation : {Qt::Horizontal, Qt::Vertical}) {
+        SCOPED_TRACE(int(orientation));
         QSplitter splitter(orientation);
         splitter.addWidget(new QWidget);
         splitter.addWidget(new QWidget);
         splitter.resize(300, 300);
         splitter.show();
+        QCoreApplication::processEvents();
+        QTest::mouseMove(splitter.widget(0), QPoint(10, 10));
         QCoreApplication::processEvents();
         auto* handle = splitter.handle(1);
         EXPECT_EQ(orientation == Qt::Horizontal ? handle->width() : handle->height(), 5);
