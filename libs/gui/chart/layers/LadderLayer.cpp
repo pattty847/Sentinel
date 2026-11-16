@@ -18,24 +18,31 @@ namespace {
 constexpr int kVerticesPerBar = 6;
 constexpr int kMaxVertices = LadderSnapshot::kMaxRows * 2 * kVerticesPerBar;
 struct Rgba { uchar r, g, b, a; };
-// Premultiplied (QSGVertexColorMaterial): plain bid and ask colours.
-constexpr Rgba kBid{34, 150, 139, 230};
-constexpr Rgba kAsk{215, 75, 72, 230};
-// Wall radar bars (the owner tunes these straight colours and alphas live): the Electric
-// palette's top stops and the warn colour for a recent flicker, stored premultiplied.
+// Wall bars (the radar) take their side's colour, the Electric palette's top stops (bid
+// cyan, ask amber); a hot wall (a recent flicker) is brighter: its side's colour lifted
+// toward white at full alpha. Straight values here (the owner tunes them live), stored
+// premultiplied (QSGVertexColorMaterial).
 constexpr Rgba premultiply(Rgba c) {
     return {uchar((c.r * c.a + 127) / 255), uchar((c.g * c.a + 127) / 255), uchar((c.b * c.a + 127) / 255), c.a};
 }
 constexpr Rgba kBidWallSrgb{0, 255, 255, 220};
 constexpr Rgba kAskWallSrgb{255, 200, 0, 220};
-constexpr Rgba kHotWallSrgb{255, 208, 77, 230};
+constexpr Rgba kBidHotSrgb{170, 255, 255, 255};
+constexpr Rgba kAskHotSrgb{255, 228, 128, 255};
+constexpr Rgba kBid{34, 150, 139, 230};
+constexpr Rgba kAsk{215, 75, 72, 230};
 constexpr Rgba kBidWall = premultiply(kBidWallSrgb);
 constexpr Rgba kAskWall = premultiply(kAskWallSrgb);
-constexpr Rgba kHotWall = premultiply(kHotWallSrgb);
+constexpr Rgba kBidHot = premultiply(kBidHotSrgb);
+constexpr Rgba kAskHot = premultiply(kAskHotSrgb);
 
-Rgba barColour(const LadderSnapshot& s, uint8_t flags, uint8_t large, uint8_t hot, Rgba plain, Rgba wall) {
-    if (!s.radar || !(flags & large)) return plain;
-    return (flags & hot) ? kHotWall : wall;
+struct SideColours { uint8_t large, hot; Rgba plain, wall, hotWall; };
+constexpr SideColours kBidColours{LadderRow::kBidLarge, LadderRow::kBidHot, kBid, kBidWall, kBidHot};
+constexpr SideColours kAskColours{LadderRow::kAskLarge, LadderRow::kAskHot, kAsk, kAskWall, kAskHot};
+
+Rgba barColour(const LadderSnapshot& s, uint8_t flags, const SideColours& side) {
+    if (!s.radar || !(flags & side.large)) return side.plain;
+    return (flags & side.hot) ? side.hotWall : side.wall;
 }
 
 double cvdInset(const CvdPresentation* cvd, const ChartFrame& frame) {
@@ -204,10 +211,10 @@ void LadderLayer::rebuild(const ChartFrame& frame) {
         const float yBottom = float(f.surfaceBounds.top() + cam.yDev(k * bin) / cam.dpr);
         if (row.bid > 0)
             writeBar(v + (count++) * kVerticesPerBar, mid - half * row.bid / peak, mid, yTop, yBottom,
-                     barColour(s, row.flags, LadderRow::kBidLarge, LadderRow::kBidHot, kBid, kBidWall));
+                     barColour(s, row.flags, kBidColours));
         if (row.ask > 0)
             writeBar(v + (count++) * kVerticesPerBar, mid, mid + half * row.ask / peak, yTop, yBottom,
-                     barColour(s, row.flags, LadderRow::kAskLarge, LadderRow::kAskHot, kAsk, kAskWall));
+                     barColour(s, row.flags, kAskColours));
     }
     commitVertices(bars_, count * kVerticesPerBar, vertices_);
     ++dirtyMarks_;
@@ -230,9 +237,9 @@ void LadderLayer::rebuildBadges(const ChartFrame& frame) {
 }
 
 bool LadderLayer::reserveText(ChartTextRenderer& text) const {
-    return text.reserve(QColor::fromRgba(kBidText), kMaxBadgeGlyphs) &&
-           text.reserve(QColor::fromRgba(kAskText), kMaxBadgeGlyphs) &&
-           text.reserve(QColor::fromRgba(kHotText), kMaxBadgeGlyphs);
+    for (const QRgb colour : {kBidText, kAskText, kBidHotText, kAskHotText})
+        if (!text.reserve(QColor::fromRgba(colour), kMaxBadgeGlyphs)) return false;
+    return true;
 }
 
 void LadderLayer::submitLabels(const ChartFrame& frame, LayerNodeContext& context) {

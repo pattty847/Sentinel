@@ -76,7 +76,10 @@ int arrow(QSGGeometry::ColoredPoint2D* v, const BadgePill& p) {
 
 using EdgeSlots = std::array<std::array<const WallCandidate*, 2>, 2>;
 
-QRgb textColour(BadgePill::Colour c) { return c == BadgePill::Hot ? kHotText : c == BadgePill::Ask ? kAskText : kBidText; }
+QRgb textColour(BadgePill::Colour c) {
+    static constexpr QRgb kText[] = {kBidText, kAskText, kBidHotText, kAskHotText};
+    return kText[c];
+}
 } // namespace
 
 int formatMoney(double usd, char* out) {
@@ -306,7 +309,7 @@ bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int 
     const bool ask = askUsd >= bidUsd;
     const bool hot = row.flags & (ask ? LadderRow::kAskHot : LadderRow::kBidHot);
     BadgePill p;
-    p.colour = hot ? BadgePill::Hot : ask ? BadgePill::Ask : BadgePill::Bid;
+    p.colour = ask ? (hot ? BadgePill::AskHot : BadgePill::Ask) : (hot ? BadgePill::BidHot : BadgePill::Bid);
     p.length = formatMoney(ask ? askUsd : bidUsd, p.text);
     const double right = snap(f.itemBounds.right() - kBadgeInsetPx, cam.dpr);
     finishPill(p, right, top, cam.dpr);

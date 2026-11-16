@@ -40,9 +40,11 @@ constexpr double kArrowPx = 8, kArrowGapPx = 4, kArrowStrokePx = 1.5;
 
 // Colours. Text is straight ARGB (the text material); geometry is premultiplied
 // (QSGVertexColorMaterial) from the straight values here.
+// A hot wall (a recent flicker) keeps its side's hue, lifted toward white.
 constexpr QRgb kBidText = qRgba(191, 246, 255, 255);
 constexpr QRgb kAskText = qRgba(255, 224, 160, 255);
-constexpr QRgb kHotText = qRgba(255, 208, 77, 255);
+constexpr QRgb kBidHotText = qRgba(235, 253, 255, 255);
+constexpr QRgb kAskHotText = qRgba(255, 243, 214, 255);
 struct BadgeRgba { uchar r, g, b, a; };
 constexpr BadgeRgba kPillBackSrgb{12, 16, 22, 235};
 constexpr BadgeRgba kBidArrowSrgb{0, 255, 255, 255};
@@ -53,7 +55,7 @@ constexpr BadgeRgba kAskArrowSrgb{255, 200, 0, 255};
 int formatMoney(double usd, char* out);
 
 struct BadgePill {
-    enum Colour : uint8_t { Bid, Ask, Hot };
+    enum Colour : uint8_t { Bid, Ask, BidHot, AskHot };
     QRectF rect; // the background, logical px, on device pixels
     double textLeft = 0, textTop = 0;
     char text[kBadgeChars] = {};

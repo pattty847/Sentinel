@@ -1220,7 +1220,8 @@ TEST(WallRadar, TheOffScreenWallIsTheNearestThatPassesTheMultiple) {
 TEST(WallRadar, WallBarsUseThePremultipliedWallColours) {
     using Rgba = std::array<uchar, 4>;
     const Rgba bid{34, 150, 139, 230}, ask{215, 75, 72, 230};
-    const Rgba bidWall{0, 220, 220, 220}, askWall{220, 173, 0, 220}, hotWall{230, 188, 69, 230};
+    const Rgba bidWall{0, 220, 220, 220}, askWall{220, 173, 0, 220};
+    const Rgba bidHot{170, 255, 255, 255}, askHot{255, 228, 128, 255}; // brighter, same side
     for (const bool radar : {true, false}) {
         SCOPED_TRACE(radar);
         Rig rig;
@@ -1250,17 +1251,19 @@ TEST(WallRadar, WallBarsUseThePremultipliedWallColours) {
         set(98, 0, 0, R::kBidHot); // hot without size: no bar
         set(101, 0, 5, R::kAskLarge);
         set(102, 0, 1, R::kAskHot); // hot but not large: plain
+        set(103, 0, 5, R::kAskLarge | R::kAskHot);
         rig.layer.mailbox().post();
         rig.sync();
         rig.layer.updateNodes(rig.chartFrame(), context);
         ASSERT_TRUE(rig.layer.drawing());
         auto* bars = static_cast<QSGGeometryNode*>(root.firstChild()->firstChild()->firstChild());
-        ASSERT_EQ(rig.layer.vertexCount(), 5 * 6);
+        ASSERT_EQ(rig.layer.vertexCount(), 6 * 6);
         EXPECT_EQ(barColour(bars, 0), bid);
         EXPECT_EQ(barColour(bars, 1), radar ? bidWall : bid);
-        EXPECT_EQ(barColour(bars, 2), radar ? hotWall : bid);
+        EXPECT_EQ(barColour(bars, 2), radar ? bidHot : bid) << "a hot bid wall stays cyan";
         EXPECT_EQ(barColour(bars, 3), radar ? askWall : ask);
         EXPECT_EQ(barColour(bars, 4), ask);
+        EXPECT_EQ(barColour(bars, 5), radar ? askHot : ask);
     }
 }
 
