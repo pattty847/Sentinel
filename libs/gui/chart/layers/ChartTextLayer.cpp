@@ -13,6 +13,7 @@
 #include "render/FrameProfiler.hpp"
 #include "config/GuiConfigStore.hpp"
 #include "SentinelLogging.hpp"
+#include <algorithm>
 
 namespace {
 bool envFloatValue(const char *name, float &out) {
@@ -75,7 +76,7 @@ namespace chart {
 void ChartTextLayer::bindCandles(ChartViewController& view, CandleBufferSource& source, LayerVisibility& visibility) {
     candleView_ = &view;
     candleSource_ = &source;
-    auto refresh = [this] { if (candleCaptureEnabled_) refreshCandles(); };
+    auto refresh = [this] { refreshCandles(); };
     QObject::connect(view.viewPtr(), &GridViewState::viewportChanged, &view, refresh);
     QObject::connect(view.viewPtr(), &GridViewState::panVisualOffsetChanged, &view, refresh);
     QObject::connect(&view, &ChartViewController::timeframeChanged, &view, refresh);
@@ -87,10 +88,20 @@ void ChartTextLayer::bindCandles(ChartViewController& view, CandleBufferSource& 
     };
     QObject::connect(&visibility, &LayerVisibility::layerVisibilityChanged, &view, onVisibility);
     onVisibility();
+    refreshCandles();
 }
 
 void ChartTextLayer::refreshCandles() {
-    if (!candleCaptureEnabled_ || !candleView_ || !candleSource_) return;
+    if (!candleView_) return;
+    const auto& session = candleView_->session();
+    if (session.symbol != plotSymbol_ || session.timeframeMs != plotTimeframeMs_) {
+        plotSymbol_ = session.symbol;
+        plotTimeframeMs_ = session.timeframeMs;
+        std::lock_guard lock(candleMutex_);
+        pendingPlotId_ = formatPlotId(plotSymbol_, plotTimeframeMs_);
+        plotIdPending_ = true;
+    }
+    if (!candleCaptureEnabled_ || !candleSource_) return;
     ++candleRefreshCount_;
     auto* view = candleView_->viewPtr();
     const auto [start, end] = view->displayedTimeWindow();
@@ -120,6 +131,7 @@ void ChartTextLayer::setCandleEnvelope(std::vector<CandleBar> bars, int64_t end)
 
 void ChartTextLayer::sync(const ChartFrame&) {
     std::lock_guard lock(candleMutex_);
+    if (plotIdPending_) { plotId_.swap(pendingPlotId_); plotIdPending_ = false; }
     if (!candlePending_) return;
     candles_.swap(pendingCandles_);
     candleEnd_ = pendingEnd_;
@@ -136,11 +148,46 @@ void ChartTextLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& cont
             cvd_.submitLabels(frame, context);
             footer_.submitLabels(frame, context);
             ladder_.submitLabels(frame, context);
+            submitPlotId(frame, context);
         },
         [&](int stage) {
             if (context.profiler && stage < 2)
                 context.profiler->mark(stage == 0 ? FrameProfiler::AxisText : FrameProfiler::Labels);
         });
+}
+
+QString ChartTextLayer::formatPlotId(const QString& symbol, int64_t timeframeMs) {
+    if (symbol.isEmpty() || timeframeMs <= 0) return {};
+    const auto unit = timeframeMs % 86'400'000 == 0 ? 86'400'000 :
+                      timeframeMs % 3'600'000 == 0 ? 3'600'000 :
+                      timeframeMs % 60'000 == 0 ? 60'000 : timeframeMs % 1000 == 0 ? 1000 : 1;
+    const QChar suffix = unit == 86'400'000 ? 'd' : unit == 3'600'000 ? 'h' :
+                         unit == 60'000 ? 'm' : 's';
+    return symbol + QStringLiteral(" · ") + QString::number(timeframeMs / unit) +
+        (unit == 1 ? QStringLiteral("ms") : QString(suffix));
+}
+
+bool ChartTextLayer::clearOfLabels(const QRectF& box, std::span<const ChartGlyphInstance> glyphs) {
+    return std::none_of(glyphs.begin(), glyphs.end(), [&](const auto& glyph) { return glyph.rect.intersects(box); });
+}
+
+void ChartTextLayer::submitPlotId(const ChartFrame& frame, LayerNodeContext& context) {
+    if (plotId_.isEmpty() || !context.atlasReady || frame.context.overlays.tpo || frame.context.overlays.volumeProfile)
+        return;
+    ChartTextRun run;
+    run.text = plotId_;
+    run.anchor = frame.context.surfaceBounds.topLeft() + QPointF(5, 7);
+    run.color = QColor(147, 161, 175);
+    run.scale = float(kPlotIdPx / context.atlas.fontPx());
+    run.hAlign = ChartTextRun::HorizontalAlign::Left;
+    run.vAlign = ChartTextRun::VerticalAlign::Center;
+    run.pixelSnap = true;
+    QRectF box;
+    if (!ChartTextLayout::measureRunRect(context.atlas, run, box) ||
+        !frame.context.surfaceBounds.contains(box) ||
+        !clearOfLabels(box, heatmap_.labelGlyphs()) || !clearOfLabels(box, footprint_.glyphs()) ||
+        !clearOfLabels(box, emptyGlyphs_)) return;
+    context.text.submitRun(run, ChartTextRenderer::Priority::High);
 }
 
 void ChartTextLayer::submitOverlayLabels(const ChartFrame& frame, LayerNodeContext& context) {
@@ -202,7 +249,7 @@ void ChartTextLayer::buildMsdfAtlas() {
   params.fontPx = 64;
   params.pxRange = 4.0f;
   params.charset = QStringLiteral(
-      " 0123456789.+-,:/<>"
+      " 0123456789.+-,:/<>·"
       "$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
   params.resourceFont =
       QStringLiteral(":/fonts/RobotoMono/RobotoMono-Regular.ttf");

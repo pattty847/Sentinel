@@ -1850,6 +1850,16 @@ TEST(CvdLayer, OpaqueThemePanelDividerAndLineDefaultsReachGeometry) {
 }
 
 #include "render/ChartTextLayout.hpp"
+TEST(ChartTextLayer, PlotIdUsesMicroLabelAndHidesOnLabelCollision) {
+    EXPECT_EQ(chart::ChartTextLayer::kPlotIdPx, 10);
+    EXPECT_EQ(chart::ChartTextLayer::formatPlotId("BTC-USD", 60'000), QStringLiteral("BTC-USD · 1m"));
+    EXPECT_EQ(chart::ChartTextLayer::formatPlotId("ETH-USD", 3'600'000), QStringLiteral("ETH-USD · 1h"));
+    const QRectF box(5, 4, 90, 12);
+    std::array<ChartGlyphInstance, 1> glyphs{{ChartGlyphInstance{QRectF(90, 8, 10, 10)}}};
+    EXPECT_FALSE(chart::ChartTextLayer::clearOfLabels(box, glyphs));
+    glyphs[0].rect.moveLeft(100);
+    EXPECT_TRUE(chart::ChartTextLayer::clearOfLabels(box, glyphs));
+}
 namespace {
 class CvdPriceTicks final : public AxisModel {
 public:
