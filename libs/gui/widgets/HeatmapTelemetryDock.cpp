@@ -1,5 +1,7 @@
 #include "HeatmapTelemetryDock.hpp"
 #include "../themes/ThemePalette.hpp"
+#include <QIcon>
+#include <QTransform>
 #include <QCloseEvent>
 #include <QGridLayout>
 #include <QLabel>
@@ -146,7 +148,14 @@ void HeatmapTelemetryDock::buildUi() {
     m_engineeringToggle = new QToolButton(m_contentWidget);
     m_engineeringToggle->setText("Engineering details");
     m_engineeringToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    m_engineeringToggle->setArrowType(Qt::RightArrow);
+    // An 8 px dim chevron, smaller than its label (the arrow type drew a full-size glyph).
+    m_chevronClosed = QIcon(QStringLiteral(":/svg/menu_chevron.svg"));
+    QPixmap open = m_chevronClosed.pixmap(QSize(8, 8), 2.0).transformed(QTransform().rotate(90));
+    open.setDevicePixelRatio(2.0); // drawn at 2x so the turned chevron stays crisp on Retina
+    m_chevronOpen = QIcon(open);
+    m_engineeringToggle->setIcon(m_chevronClosed);
+    m_engineeringToggle->setIconSize(QSize(8, 8));
+    m_engineeringToggle->setStyleSheet(QStringLiteral("QToolButton { color:%1; }").arg(theme::text3().name()));
     m_engineeringToggle->setCheckable(true);
     m_engineeringToggle->setAccessibleName("Show engineering telemetry");
     outer->addWidget(m_engineeringToggle);
@@ -177,7 +186,7 @@ void HeatmapTelemetryDock::buildUi() {
     connect(m_engineeringToggle, &QToolButton::toggled, this, [this, scroll, outer, collapsedSpace](bool on) {
         outer->setStretch(collapsedSpace, on ? 0 : 1);
         scroll->setVisible(on);
-        m_engineeringToggle->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
+        m_engineeringToggle->setIcon(on ? m_chevronOpen : m_chevronClosed);
     });
 
     auto *title = new QLabel("RENDER TELEMETRY", m_table);

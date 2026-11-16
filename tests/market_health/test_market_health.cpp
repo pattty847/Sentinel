@@ -390,6 +390,23 @@ TEST(MarketHealthWidgets, TelemetryHealthIsAKeyValueGridInPlainWords) {
     EXPECT_EQ(values["Subscription"]->text(), "! Waiting");
     EXPECT_TRUE(values["Subscription"]->styleSheet().contains("#e6c07b"));
 }
+TEST(MarketHealthWidgets, EngineeringChevronIsSmallAndDim) {
+    HeatmapTelemetryDock dock;
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* toggle = dock.findChild<QToolButton*>();
+    ASSERT_NE(toggle, nullptr);
+    EXPECT_EQ(toggle->arrowType(), Qt::NoArrow);
+    EXPECT_EQ(toggle->iconSize(), QSize(8, 8));
+    ASSERT_FALSE(toggle->icon().isNull());
+    EXPECT_LT(toggle->iconSize().height(), toggle->fontMetrics().height());
+    EXPECT_EQ(toggle->palette().color(QPalette::ButtonText), QColor("#93A1AF"));
+    const auto closed = toggle->icon().cacheKey();
+    toggle->setChecked(true);
+    EXPECT_NE(toggle->icon().cacheKey(), closed);
+    toggle->setChecked(false);
+    EXPECT_EQ(toggle->icon().cacheKey(), closed);
+}
 TEST(MarketHealthWidgets, TelemetryVisualFixtures) {
     const auto output = qEnvironmentVariable("SENTINEL_TELEMETRY_SHOTS");
     if (output.isEmpty()) GTEST_SKIP() << "Opt-in native widget screenshots require an authorized GUI slot";
@@ -438,6 +455,7 @@ int main(int argc, char** argv) {
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
     Q_INIT_RESOURCE(sentinel_ui_fonts);
+    Q_INIT_RESOURCE(sentinel_svg_resources);
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

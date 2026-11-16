@@ -10,6 +10,7 @@
 #include <QHash>
 #include <QPointer>
 #include "../models/MarketHealth.hpp"
+#include <QIcon>
 #include <QVariantMap>
 #include <array>
 #include <functional>
@@ -77,6 +78,7 @@ private:
     std::array<HealthRow, size_t(HealthFact::Count)> m_healthFacts{};
     QLabel* m_healthReason = nullptr;
     class QToolButton* m_engineeringToggle = nullptr;
+    QIcon m_chevronClosed, m_chevronOpen;
     QTimer *m_timer = nullptr;
     QWidget *m_table = nullptr;
     QLabel *m_disabled = nullptr;
