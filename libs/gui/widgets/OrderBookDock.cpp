@@ -1,5 +1,6 @@
 #include "OrderBookDock.hpp"
 #include "TableChrome.hpp"
+#include "BookAgeText.hpp"
 #include "LeanGaugeWidget.hpp"
 #include "ServiceLocator.hpp"
 #include "SentinelLogging.hpp"
@@ -990,8 +991,8 @@ void OrderBookDock::updateSummary()
     QString fullStatus;
     if (m_health) {
         const auto health = m_health->snapshot(m_symbol);
-        // Normal feed state and receive age are already in the window status bar.
-        fullStatus = health.text();
+        // Repeat age locally during abnormal feed states, when it explains the problem.
+        fullStatus = health.text() + QStringLiteral(" · ") + bookAgeText(health.bookAgeMs);
         m_status->setVisible(health.state != MarketHealth::State::Live);
         m_status->setToolTip(health.reason);
     } else {

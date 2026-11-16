@@ -629,6 +629,29 @@ TEST(MainWindowHealthIntegration, StatusClusterIsAtTheLeftOfTheWindow) {
     host->show();
     QCoreApplication::processEvents();
     EXPECT_LT(status->x(), 16);
+    auto* state = status->findChild<QLabel*>("marketState");
+    auto* age = status->findChild<QLabel*>("marketBookAge");
+    auto* message = status->findChild<QLabel*>("marketMessage");
+    ASSERT_TRUE(state && age && message);
+    for (const auto& text : {QString("Switching to ETH-USD..."), QString("Reconnecting..."),
+                             QString("Order book stale: BTC-USD")}) {
+        host->showMessage(text);
+        QCoreApplication::processEvents();
+        EXPECT_TRUE(status->isVisible());
+        EXPECT_TRUE(state->isVisible());
+        EXPECT_TRUE(age->isVisible());
+        EXPECT_TRUE(message->isVisible());
+        EXPECT_EQ(message->text(), text);
+        EXPECT_GT(message->x(), age->geometry().right());
+        EXPECT_GE(message->width(), message->fontMetrics().horizontalAdvance(text));
+        EXPECT_LT(status->x(), 16);
+    }
+    host->clearMessage();
+    EXPECT_TRUE(message->text().isEmpty());
+    EXPECT_TRUE(state->isVisible());
+    host->showMessage("Brief notice", 20);
+    ASSERT_TRUE(QTest::qWaitFor([&] { return message->text().isEmpty(); }));
+    EXPECT_TRUE(state->isVisible());
 }
 
 TEST(MainWindowHealthIntegration, DefaultLayoutKeepsNavigationRailUncappedAtNarrowAndWideWidths) {

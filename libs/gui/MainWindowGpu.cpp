@@ -354,7 +354,10 @@ void MainWindowGPU::setupUI() {
     m_subscribeButton = symbolControls.subscribeButton;
     
     // Add status bar to main window
-    statusBar()->addWidget(m_statusBar, 1);
+    // Temporary messages must not hide the market context.
+    statusBar()->addPermanentWidget(m_statusBar, 1);
+    connect(statusBar(), &QStatusBar::messageChanged, m_statusBar, &StatusBar::setMessage);
+    m_statusBar->setMessage(statusBar()->currentMessage());
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
     connect(this, &MainWindowGPU::symbolChanged, m_heatmapDock, &ChartDock::onSymbolChanged);

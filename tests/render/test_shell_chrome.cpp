@@ -199,7 +199,8 @@ TEST(ShellChrome, BookAgeHasOneSpellingAndDomOnlyRepeatsAbnormalState) {
     health->bookStale("BTC-USD");
     refresh();
     EXPECT_FALSE(state->isHidden());
-    EXPECT_EQ(state->text(), "Stale");
+    EXPECT_TRUE(state->text().startsWith("Stale · Book age: "));
+    EXPECT_FALSE(state->text().endsWith("Unknown"));
 }
 
 TEST(ShellChrome, MenuTogglesHaveAnEmptyIndicatorAndADistinctCheckedState) {

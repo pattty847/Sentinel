@@ -19,6 +19,10 @@ StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
     m_ageLabel = new QLabel(bookAgeText(std::nullopt), this);
     m_ageLabel->setObjectName("marketBookAge");
     m_ageLabel->setToolTip("Time since the last accepted book message. A quiet market is not necessarily stale.");
+    m_messageLabel = new QLabel(this);
+    m_messageLabel->setObjectName("marketMessage");
+    m_messageLabel->setTextFormat(Qt::PlainText);
+    m_messageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_versionLabel = new QLabel(QString::fromStdString(Sentinel::getVersionString()), this);
     m_versionLabel->hide();
     setStyleSheet(QStringLiteral("StatusBar QLabel { color:%1; font-size:11px; font-weight:400; }"
@@ -36,10 +40,14 @@ StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
     layout->addWidget(m_stateLabel);
     separator();
     layout->addWidget(m_ageLabel);
-    layout->addStretch();
+    layout->addWidget(m_messageLabel, 1);
     layout->addWidget(m_versionLabel);
     m_ageTimer.setInterval(1000);
     connect(&m_ageTimer, &QTimer::timeout, this, &StatusBar::refresh);
+}
+void StatusBar::setMessage(const QString& message) {
+    m_messageLabel->setText(message);
+    m_messageLabel->setToolTip(message);
 }
 void StatusBar::setMarketHealth(MarketHealth* health) {
     if (m_health) disconnect(m_health, nullptr, this, nullptr);
