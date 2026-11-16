@@ -109,4 +109,10 @@ TEST(PriceAxisModel, DecimalPlacesFollowStepAndPricesUseGrouping) {
     ASSERT_FALSE(fractional.empty());
     EXPECT_TRUE(fractional.front().label.startsWith("1,234."));
     EXPECT_EQ(fractional.front().label.size() - fractional.front().label.indexOf('.') - 1, 2);
+    const auto halves = axisTicks(74'002.5, 35, 2.5);
+    expectGrid(halves, 2.5);
+    EXPECT_EQ(halves.front().label, QStringLiteral("74,002.5"));
+    const auto quarters = axisTicks(.25, 3.5, .25);
+    expectGrid(quarters, .25);
+    EXPECT_EQ(quarters.front().label, QStringLiteral("0.25"));
 }

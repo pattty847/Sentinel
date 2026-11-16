@@ -159,8 +159,7 @@ QString PriceAxisModel::formatLabel(double value) const {
     const auto unit = PriceUnits::instance().unitFor(m_symbol);
     value = unit.toDisplay(value);
     const double step = unit.toDisplay(m_lastNiceSpacing > 0 ? m_lastNiceSpacing : m_tickSize);
-    const int decimals = step > 0 && std::isfinite(step)
-        ? std::clamp(-int(std::floor(std::log10(step))), 0, 15) : 0;
+    const int decimals = sentinel::displayDecimals(step);
     QString label = QString::number(value, 'f', decimals);
     const qsizetype dot = label.indexOf('.');
     const qsizetype end = dot < 0 ? label.size() : dot;

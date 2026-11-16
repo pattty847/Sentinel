@@ -275,7 +275,7 @@ Rectangle {
         const maxCount    = Math.max(2, Math.floor(candleAreaH / minGapPx))
         const step        = root.niceStep((_max - _min) / (maxCount - 1))
 
-        // Decimal places inferred from the visible range (mirrors PriceAxisModel::formatLabel)
+        // This stock-chart axis still derives decimals from the visible range.
         const range    = _max - _min
         const decimals = range > 1000 ? 0 : range > 100 ? 1 : 2
 
