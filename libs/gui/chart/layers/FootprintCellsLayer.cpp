@@ -244,7 +244,7 @@ void FootprintCellsLayer::submitLabels(const ChartFrame& frame, LayerNodeContext
     }
     if (!reserved_) {
         reserved_ = true;
-        for (auto tier : {FlowTier::Dust, FlowTier::Normal, FlowTier::Heavy}) {
+        for (auto tier : {FlowTier::Normal, FlowTier::Heavy}) {
             for (bool light : {true, false}) reserved_ = context.text.reserve(inkColour(light, tier), kMaxGlyphs) && reserved_;
         }
     }
