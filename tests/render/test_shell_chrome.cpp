@@ -285,7 +285,9 @@ TEST(ShellChrome, TitlesFollowTabSplitHideFloatAndRestore) {
     QMainWindow host;
     host.resize(900, 500);
     auto* a = new Panel("a", &host);
-    auto* b = new Panel("b", &host);
+    auto* b = new QDockWidget("b", &host);
+    b->setObjectName("b");
+    b->setWidget(new QWidget);
     host.addDockWidget(Qt::LeftDockWidgetArea, a);
     host.addDockWidget(Qt::RightDockWidgetArea, b);
     host.show();
@@ -294,6 +296,10 @@ TEST(ShellChrome, TitlesFollowTabSplitHideFloatAndRestore) {
     host.tabifyDockWidget(a, b);
     ASSERT_TRUE(QTest::qWaitFor([&] { return a->titleBarWidget() && b->titleBarWidget(); }));
     EXPECT_EQ(a->titleBarWidget()->height(), 0);
+    b->raise();
+    QCoreApplication::processEvents();
+    ASSERT_TRUE(b->titleBarWidget());
+    EXPECT_EQ(b->titleBarWidget()->height(), 0);
     const auto saved = host.saveState();
     b->hide();
     ASSERT_TRUE(QTest::qWaitFor([&] { return !a->titleBarWidget(); }));

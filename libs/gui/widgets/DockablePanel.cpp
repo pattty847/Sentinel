@@ -17,7 +17,10 @@ public:
         pending_ = true;
         QTimer::singleShot(0, this, [this] {
             pending_ = false;
-            for (auto* dock : window_->findChildren<DockablePanel*>(QString(), Qt::FindDirectChildrenOnly)) {
+            for (auto* dock : window_->findChildren<QDockWidget*>(QString(), Qt::FindDirectChildrenOnly)) {
+                connect(dock, &QDockWidget::dockLocationChanged, this, &DockTitles::schedule, Qt::UniqueConnection);
+                connect(dock, &QDockWidget::topLevelChanged, this, &DockTitles::schedule, Qt::UniqueConnection);
+                connect(dock, &QDockWidget::visibilityChanged, this, &DockTitles::schedule, Qt::UniqueConnection);
                 bool tabbed = false;
                 for (auto* peer : window_->tabifiedDockWidgets(dock))
                     tabbed |= !peer->isHidden() && !peer->isFloating();
@@ -37,7 +40,8 @@ public:
     }
 protected:
     bool eventFilter(QObject*, QEvent* event) override {
-        if (event->type() == QEvent::LayoutRequest || event->type() == QEvent::ChildRemoved) schedule();
+        if (event->type() == QEvent::LayoutRequest || event->type() == QEvent::ChildRemoved ||
+            event->type() == QEvent::ChildAdded) schedule();
         return false;
     }
 private:
@@ -53,9 +57,6 @@ DockablePanel::DockablePanel(const QString& id, const QString& title, QWidget* p
     if (auto* window = qobject_cast<QMainWindow*>(parent)) {
         auto* titles = static_cast<DockTitles*>(window->findChild<QObject*>("dockTitles", Qt::FindDirectChildrenOnly));
         if (!titles) titles = new DockTitles(window);
-        connect(this, &QDockWidget::dockLocationChanged, titles, [titles] { titles->schedule(); });
-        connect(this, &QDockWidget::topLevelChanged, titles, [titles] { titles->schedule(); });
-        connect(this, &QDockWidget::visibilityChanged, titles, [titles] { titles->schedule(); });
         titles->schedule();
     }
     setObjectName(id);  // Persistent identifier for layout restoration
