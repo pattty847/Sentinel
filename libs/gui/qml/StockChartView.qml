@@ -29,7 +29,9 @@ Rectangle {
     property string ticker:    ""
     property string company:   ""
     property string period:    "5y"
-    property string statusMsg: "Select a stock from the Screener"
+    property string statusMsg: "Type a ticker above or pick one in the Screener"
+    // Header and footer describe loaded data; until candles arrive the centred hint stands alone.
+    readonly property bool hasData: root.candleData.length > 0
     property bool   loading:   false
     property bool   secSignalsLoading: false
 
@@ -347,8 +349,10 @@ Rectangle {
         // ── Header bar ────────────────────────────────────────────────────────
         Rectangle {
             id:     header
+            objectName: "stockHeader"
             width:  parent.width
-            height: Math.max(38, 30 * root.fontScale)
+            visible: root.hasData
+            height: root.hasData ? Math.max(38, 30 * root.fontScale) : 0
             color:  theme.panel
 
             Text {
@@ -739,11 +743,13 @@ Rectangle {
             }
         }
 
-        // Provider and observation times remain visible for loading and errors.
+        // Provider and observation times for the loaded candles.
         Rectangle {
             id: footer
+            objectName: "stockFooter"
             width: parent.width
-            height: 52 * root.fontScale
+            visible: root.hasData
+            height: root.hasData ? 52 * root.fontScale : 0
             color: theme.panel
             Column {
                 anchors.fill: parent

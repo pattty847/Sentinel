@@ -276,7 +276,7 @@ void StockChartDock::clearData() {
 }
 void StockChartDock::startFetch() {
     clearData();
-    if (m_currentTicker.isEmpty()) { setStatus("Enter a ticker to fetch daily candles"); return; }
+    if (m_currentTicker.isEmpty()) { setStatus("Type a ticker above or pick one in the Screener"); return; }
     if (!ResearchProcess::isEquityTicker(m_currentTicker)) {
         setStatus("Stock charts require an equity ticker; crypto pairs are unsupported", true);
         return;

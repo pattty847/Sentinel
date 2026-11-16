@@ -162,6 +162,27 @@ TEST(StockResearch, HoverUsesDailyDateFromMatchingCandleAndSwitchClearsIt) {
     EXPECT_EQ(date->property("text").toString(), "");
     EXPECT_EQ(renderer->candleCount(), 0);
 }
+TEST(StockResearch, EmptyHintNamesTheTickerFieldAndHeaderAndFooterWaitForData) {
+    FixtureProvider provider, sec;
+    StockChartDock dock(nullptr, &provider, &sec);
+    auto* root = dock.qquickView()->rootObject(); ASSERT_NE(root, nullptr);
+    auto* header = root->findChild<QQuickItem*>("stockHeader");
+    auto* footer = root->findChild<QQuickItem*>("stockFooter");
+    ASSERT_TRUE(header && footer);
+    EXPECT_EQ(root->property("statusMsg").toString(), "Type a ticker above or pick one in the Screener");
+    EXPECT_FALSE(header->isVisible());
+    EXPECT_FALSE(footer->isVisible());
+    EXPECT_EQ(header->height(), 0);
+    dock.loadSymbol("AAPL");
+    EXPECT_FALSE(header->isVisible()) << "loading shows the centred status only";
+    provider.reply(0, candles("AAPL"));
+    EXPECT_TRUE(header->isVisible());
+    EXPECT_TRUE(footer->isVisible());
+    EXPECT_GT(header->height(), 0);
+    dock.loadSymbol("MSFT");
+    EXPECT_FALSE(header->isVisible());
+    EXPECT_FALSE(footer->isVisible());
+}
 TEST(SecResearch, FinancialHistoriesDisplayActualObservationWithoutInventingUnits) {
     FixtureProvider provider;
     SecFilingDock dock(nullptr, &provider);
