@@ -243,6 +243,28 @@ TEST(WatchRail, FooterSpeaksOnlyForAProblemOnOneWarningLine) {
     EXPECT_TRUE(status->isHidden());
 }
 
+TEST(WatchRail, EmptyPinnedListSaysHowToAddAPair) {
+    QTemporaryDir settingsDir;
+    ASSERT_TRUE(settingsDir.isValid());
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
+    WatchlistDock dock;
+    dock.resize(320, 400);
+    dock.show();
+    dock.findChild<QComboBox*>("watchPreset")->setCurrentText("Pinned");
+    QCoreApplication::processEvents();
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    auto* empty = tree->viewport()->findChild<QWidget*>("watchRowsEmpty");
+    ASSERT_NE(empty, nullptr);
+    ASSERT_EQ(tree->model()->rowCount(), 0);
+    EXPECT_TRUE(empty->isVisible());
+    EXPECT_EQ(empty->findChild<QLabel*>()->text(), QString::fromUtf8("No pinned pairs · add one above"));
+    dock.findChild<QLineEdit*>("watchSymbolEntry")->setText("XRP-USD");
+    dock.findChild<QToolButton*>("watchAdd")->click();
+    EXPECT_FALSE(empty->isVisible());
+    dock.findChild<QComboBox*>("watchPreset")->setCurrentText("Crypto");
+    EXPECT_FALSE(empty->isVisible());
+}
+
 TEST(WatchRail, PinsPersistWithDefaultFormatSettings) {
     QTemporaryDir settingsDir;
     ASSERT_TRUE(settingsDir.isValid());

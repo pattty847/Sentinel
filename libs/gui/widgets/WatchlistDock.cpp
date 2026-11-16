@@ -1,5 +1,6 @@
 #include "WatchlistDock.hpp"
 #include "TableChrome.hpp"
+#include "EmptyState.hpp"
 #include "../themes/ThemePalette.hpp"
 #include <QPainter>
 
@@ -199,7 +200,11 @@ void WatchlistDock::buildUi() {
     m_tree->header()->setStretchLastSection(true);
     layout->addWidget(m_tree, 1);
 
-    m_status = new QLabel(m_contentWidget);
+    m_empty = new EmptyState(m_tree, QStringLiteral("No pinned pairs · add one above"));
+
+    // The footer speaks only for a problem (refusal, unavailable pair, bad entry): chart state
+    // and switching live in the status bar, so a healthy rail has no footer at all.
+    m_status = new ElidedLabel(m_contentWidget);
     m_status->setObjectName("watchStatus");
     m_status->setWordWrap(false);
     m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);

@@ -10,6 +10,7 @@
 #include <QVector>
 
 class QLabel;
+class EmptyState;
 
 class WatchlistDock : public DockablePanel {
     Q_OBJECT
@@ -59,6 +60,7 @@ private:
     QToolButton* m_pinButton = nullptr;
     QTreeView* m_tree = nullptr;
     QLabel* m_status = nullptr;
+    EmptyState* m_empty = nullptr;
     QStandardItemModel* m_model = nullptr;
     QVector<WatchlistPreset> m_presets;
     QStringList m_pinned;
