@@ -140,6 +140,7 @@ TEST(ShellChrome, BookAgeHasOneSpellingAndDomOnlyRepeatsAbnormalState) {
     auto* health = source.marketHealth();
     health->setActiveSymbol("BTC-USD");
     health->setTransport(MarketHealth::Transport::Connected);
+    health->subscriptionRequested("BTC-USD");
     health->subscriptionAcknowledged("BTC-USD");
     health->bookReceived("BTC-USD", QDateTime::currentMSecsSinceEpoch());
     bar.setMarketHealth(health);
