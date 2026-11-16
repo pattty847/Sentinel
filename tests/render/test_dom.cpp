@@ -128,7 +128,8 @@ TEST(DomModel, SameBucketUniqueBestAskStableEmptyRowsAndAlignment) {
     model.publish(book, trades, false);
     EXPECT_EQ(rowAt(model, 2000), row);
     EXPECT_EQ(reset.count(), 0);
-    EXPECT_TRUE(model.summary().contains("Bucketed spread 0.0 USD"));
+    EXPECT_TRUE(model.summary().contains("Bucketed spread <0.1 USD")) << model.summary().toStdString();
+    EXPECT_EQ(model.summary(true), "Spr <0.1"); // one bucket: under a tick, never "0.0"
     EXPECT_TRUE(model.aggregation().contains("0.1 USD"));
     EXPECT_TRUE(model.headerData(DomModel::Bid, Qt::Horizontal, Qt::ToolTipRole).toString().contains("BTC"));
 }
@@ -904,7 +905,7 @@ TEST(DomModel, LockedAndCrossedBooksRetainUniqueSideRows) {
             bids += side.contains("Bid"); asks += side.contains("Ask");
         }
         EXPECT_EQ(bids, 1); EXPECT_EQ(asks, 1);
-        EXPECT_TRUE(model.summary().contains(ask == 200 ? "spread 0.0" : "spread -1.0"));
+        EXPECT_TRUE(model.summary().contains(ask == 200 ? "spread <0.1" : "spread -1.0")) << model.summary().toStdString();
     }
 }
 

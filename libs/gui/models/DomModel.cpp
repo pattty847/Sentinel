@@ -756,7 +756,14 @@ QString DomModel::summary(bool compact) const
     // The native top, whatever the row grouping.
     const QString bid = m_bestBid > 0 ? shownPrice(m_bestBid, m_nativeTick) : "—";
     const QString ask = m_bestAsk > 0 ? shownPrice(m_bestAsk, m_nativeTick) : "—";
-    const QString spread = m_bestBid > 0 && m_bestAsk > 0 ? shownPrice(m_bestAsk - m_bestBid, m_nativeTick) : "—";
+    QString spread = QStringLiteral("—");
+    if (m_bestBid > 0 && m_bestAsk > 0) {
+        // Shown to the server tick. Bid and ask in one bucket is a spread under one tick, not
+        // zero: never round a real spread away (brief DOM-9, B-14).
+        const qint64 ticks = std::llround((m_bestAsk - m_bestBid) / m_nativeTick);
+        spread = ticks == 0 ? QLatin1Char('<') + shownPrice(m_nativeTick, m_nativeTick)
+                            : shownPrice(double(ticks) * m_nativeTick, m_nativeTick);
+    }
     if (compact) return QString("Spr %1").arg(spread);
     return QStringLiteral("Bid %1 · Ask %2 · Bucketed spread %3 %4").arg(bid, ask, spread, quoteUnit());
 }
