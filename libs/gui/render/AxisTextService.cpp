@@ -102,7 +102,7 @@ void AxisTextService::refreshAxisTickSnapshot(
             model->copyTicks(ticks);
             storage.reserve(ticks.size());
             for (const auto &tick : ticks) {
-                storage.push_back({tick.position, tick.label, tick.isMajorTick});
+                storage.push_back({tick.position, tick.label, tick.isMajorTick, tick.widthLabel});
             }
         }
         if (&storage == &m_timeAxisTicks) {
@@ -175,10 +175,15 @@ void AxisTextService::refreshAxisLayout() {
     std::vector<QString> priceLabels;
     {
         std::lock_guard<std::mutex> lock(m_axisSnapshotMutex);
-        priceLabels.reserve(m_priceAxisTicks.size());
+        priceLabels.reserve(2 * m_priceAxisTicks.size());
         for (const auto &tick : m_priceAxisTicks) {
             if (!tick.label.isEmpty()) {
                 priceLabels.push_back(tick.label);
+            }
+            // The column keeps the width of the pre-grouping text; the drawn label
+            // still counts, so a wider one (7+ integer digits) never clips.
+            if (!tick.widthLabel.isEmpty()) {
+                priceLabels.push_back(tick.widthLabel);
             }
         }
     }

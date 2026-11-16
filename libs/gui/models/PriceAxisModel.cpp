@@ -146,7 +146,7 @@ void PriceAxisModel::calculateTicks() {
         const double screenY = valueToScreenPosition(price);
         if (screenY >= 0 && screenY <= getViewportHeight()) {
             const QString label = formatLabel(price);
-            addTick(price, screenY, label, true);
+            addTick(price, screenY, label, true, formatLabelForWidth(price));
         }
         if (++safeCount > 1000) {
             break;
@@ -165,6 +165,28 @@ QString PriceAxisModel::formatLabel(double value) const {
     const qsizetype end = dot < 0 ? label.size() : dot;
     for (qsizetype i = end - 3; i > 0 && label[i - 1] != '-'; i -= 3) label.insert(i, ',');
     return label;
+}
+
+QString PriceAxisModel::formatLabelForWidth(double value) const {
+    double priceRange = m_effectiveViewportValid
+        ? (m_effectiveMaxPrice - m_effectiveMinPrice)
+        : (getViewportEnd() - getViewportStart());
+    // A scaled unit (PEPE x1M) shows the same digits rule on the scaled values, without
+    // the currency sign: the axis tag names the unit.
+    const auto unit = PriceUnits::instance().unitFor(m_symbol);
+    const QString sign = unit.scaled() ? QString() : QStringLiteral("$");
+    value = unit.toDisplay(value);
+    priceRange = unit.toDisplay(priceRange);
+
+    if (priceRange > 1000) {
+        return sign + QString::number(static_cast<long long>(std::llround(value)));
+    } else if (priceRange > 100) {
+        return sign + QString::number(value, 'f', 1);
+    }
+    // Scaled: at least the digits of the label step (e.g. 0.001 at x1K).
+    const int decimals = unit.scaled()
+        ? std::max(2, sentinel::displayDecimals(unit.toDisplay(m_lastNiceSpacing))) : 2;
+    return sign + QString::number(value, 'f', decimals);
 }
 
 double PriceAxisModel::getViewportStart() const {

@@ -21,6 +21,7 @@ public:
         double position = 0.0;
         QString label;
         bool isMajorTick = false;
+        QString widthLabel; // sizes the price column with label (see AxisModel::TickSnapshot)
     };
 
     struct AxisLayoutSnapshot {

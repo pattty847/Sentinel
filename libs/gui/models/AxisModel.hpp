@@ -20,6 +20,9 @@ public:
         double position = 0.0;
         QString label;
         bool isMajorTick = false;
+        // The text the axis column is sized for (empty: the label itself). The price axis
+        // keeps its pre-grouping width so a label format change never moves the plot.
+        QString widthLabel;
     };
 
     enum Role {
@@ -56,11 +59,12 @@ protected:
         double position;        // Screen position (pixels)
         QString label;          // Formatted label
         bool isMajorTick;      // Major or minor tick
+        QString widthLabel;     // Text the axis column is sized for (empty: label)
         
         TickInfo()
             : value(0.0), position(0.0), label(), isMajorTick(false) {}
-        TickInfo(double v, double pos, const QString& lbl, bool major = true)
-            : value(v), position(pos), label(lbl), isMajorTick(major) {}
+        TickInfo(double v, double pos, const QString& lbl, bool major = true, const QString& width = {})
+            : value(v), position(pos), label(lbl), isMajorTick(major), widthLabel(width) {}
     };
     
     virtual void calculateTicks() = 0;
@@ -74,7 +78,8 @@ protected:
     virtual bool isViewportValid() const;
     
     void clearTicks();
-    void addTick(double value, double position, const QString& label, bool isMajorTick = true);
+    void addTick(double value, double position, const QString& label, bool isMajorTick = true,
+                 const QString& widthLabel = {});
     virtual double valueToScreenPosition(double value) const;
     void updateTicksAndNotify();
     
