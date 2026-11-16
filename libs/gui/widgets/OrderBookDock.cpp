@@ -113,9 +113,10 @@ int DomBarDelegate::dimPrefixLength(const QString& price)
 
 QColor DomBarDelegate::eatenColor(bool bidLevel, double alpha)
 {
-    // Sellers eat bids (ask colour), buyers eat asks (bid colour).
-    QColor color = barColor(!bidLevel, 1);
-    color.setAlpha(int(std::lround(150 * std::clamp(alpha, 0.0, 1.0))));
+    // A trade is direction, not resting liquidity (brief principle 1): sellers eat bids (down
+    // red), buyers eat asks (up green), at 25% while fresh.
+    QColor color = bidLevel ? theme::negative() : theme::positive();
+    color.setAlpha(int(std::lround(EatenFlashAlpha * std::clamp(alpha, 0.0, 1.0))));
     return color;
 }
 
@@ -152,7 +153,7 @@ const DomBarDelegate::TagGlyphs& DomBarDelegate::tagGlyphs(const QFont& font, qr
         m_tags.fallback = std::max(m_tags.fallback, m_tags.width[i]);
     }
     const std::array<QColor, TagGlyphs::Colours> colours{sizeTextColor(true, 1), sizeTextColor(false, 1),
-        pulledColor(1), barColor(true, 1), barColor(false, 1)};
+        pulledColor(1), theme::positive(), theme::negative()};
     for (int k = 0; k < TagGlyphs::Colours; ++k) {
         QImage strip(int(std::ceil(total * scale)), int(std::ceil(m_tags.height * scale)), QImage::Format_ARGB32_Premultiplied);
         strip.setDevicePixelRatio(scale);
@@ -223,7 +224,7 @@ QRect DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& 
     const auto& glyphs = tagGlyphs(opt.font, painter->device()->devicePixelRatioF());
     const int needed = tagWidth(glyphs, tag) + (label.isEmpty() ? 0 : tagWidth(glyphs, label) + 6);
     if (needed > opt.rect.width() - 6) return marks; // a cramped cell keeps the bar effect only
-    // Eaten: the aggressor's colour (buyers eat asks: bid colour); added: the side's tint; pulled: grey.
+    // Eaten: the aggressor's direction (buyers eat asks: up green); added: the side's tint; pulled: grey.
     const int colour = eaten ? (bid ? 4 : 3) : pulse.change > 0 ? (bid ? 0 : 1) : 2;
     const QImage& strip = glyphs.strips[colour];
     const qreal scale = glyphs.scale;

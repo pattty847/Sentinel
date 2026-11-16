@@ -1587,9 +1587,15 @@ TEST_F(DomPulseDock, FlashesPaintInTheirColours) {
         const QRect cell = table->visualRect(model->index(rowAt(*model, key), col));
         return image.pixelColor(cell.left() + int(cell.width() * x), cell.top() + int(cell.height() * y));
     };
-    // Eaten ask row: a buyer's flash (bid colour) across the row, the price cell included.
+    // Eaten ask row: a buyer's flash (up green at 25%, brief DOM-12) across the row, the price cell included.
     const QColor eaten = pixel(2001, DomModel::Price, 0.1);
-    EXPECT_GT(eaten.blue(), eaten.red() + 40);
+    const QColor expected = DomBarDelegate::over(DomBarDelegate::eatenColor(false, 1), pixel(1990, DomModel::Price, 0.1));
+    EXPECT_NEAR(eaten.red(), expected.red(), 2);
+    EXPECT_NEAR(eaten.green(), expected.green(), 2);
+    EXPECT_NEAR(eaten.blue(), expected.blue(), 2);
+    EXPECT_EQ(DomBarDelegate::eatenColor(false, 1).rgb(), theme::positive().rgb()); // buyers: up
+    EXPECT_EQ(DomBarDelegate::eatenColor(true, 1).rgb(), theme::negative().rgb());  // sellers: down
+    EXPECT_EQ(DomBarDelegate::eatenColor(true, 1).alpha(), 64);
     // Pulled bid (5 of a visible 10): a grey dashed outline where the bar was, nothing inside.
     const QColor inside = pixel(1999, DomModel::Bid, 0.85);
     EXPECT_LT(std::abs(inside.blue() - inside.red()), 12);

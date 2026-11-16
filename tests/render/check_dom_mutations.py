@@ -306,7 +306,7 @@ mutants = [
      [('    m_pulseOn = settings.value("OrderBookDock/pulse", true).toBool();\n', '')],
      'DomPulseDock.PulseTogglePersistsAndRestores'),
     ('pulse_eaten_in_level_colour', dock,
-     [('QColor color = barColor(!bidLevel, 1);', 'QColor color = barColor(bidLevel, 1);')],
+     [('QColor color = bidLevel ? theme::negative() : theme::positive();', 'QColor color = barColor(!bidLevel, 1);')],
      'DomPulseDock.FlashesPaintInTheirColours'),
     ('pulse_pulled_outline_missing', dock,
      [('            painter->fillRect(QRect(x, box.top(), w, 1), grey);\n', '')],

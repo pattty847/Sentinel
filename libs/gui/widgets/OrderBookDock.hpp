@@ -43,8 +43,9 @@ public:
     static QColor bestFill(bool bid);
     // Characters of a price text drawn dim: everything before its last three digits.
     static int dimPrefixLength(const QString& price);
-    // Liquidity Pulse: eaten rows flash in the aggressor's side colour (buyers
-    // eat asks: bid colour), added segments are bright, pulled outlines grey.
+    // Liquidity Pulse: eaten rows flash in the aggressor's direction colour at 25%
+    // (buyers eat asks: up green), added segments are bright, pulled outlines grey.
+    static constexpr int EatenFlashAlpha = 64;
     static QColor eatenColor(bool bidLevel, double alpha);
     static QColor addedColor(bool bid, double alpha);
     static QColor pulledColor(double alpha);
