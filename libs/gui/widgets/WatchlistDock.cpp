@@ -1,4 +1,6 @@
 #include "WatchlistDock.hpp"
+#include "../themes/ThemePalette.hpp"
+#include <QPainter>
 
 #include <QBrush>
 #include <QEvent>
@@ -23,6 +25,11 @@ public:
     using QTreeView::QTreeView;
     std::function<void(const QModelIndex&)> keyboardActivate;
 protected:
+    void drawRow(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override {
+        QTreeView::drawRow(painter, option, index);
+        if (index.siblingAtColumn(0).data(WatchlistDock::ActiveRole).toBool())
+            painter->fillRect(QRect(option.rect.left(), option.rect.top(), 2, option.rect.height()), theme::accent());
+    }
     void keyPressEvent(QKeyEvent* event) override {
         if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
              event->key() == Qt::Key_Space) && currentIndex().isValid()) {
@@ -279,10 +286,18 @@ void WatchlistDock::refreshRowState() {
         const bool pending = isCrypto && symbol == m_pendingSymbol;
         const bool refused = isCrypto && symbol == m_refusedSymbol;
         const QString marker = pending ? QStringLiteral("… ") : refused ? QStringLiteral("! ")
-                               : active ? QStringLiteral("● ") : QString();
+                               : QString();
         item->setText(marker + symbol);
+        item->setData(active, ActiveRole);
+        for (int column = 0; column < m_model->columnCount(); ++column) {
+            auto* cell = m_model->item(row, column);
+            QFont font = m_tree->font();
+            font.setWeight(active ? QFont::Medium : QFont::Normal);
+            cell->setFont(font);
+            if (column > 0) cell->setForeground(active ? theme::text() : theme::text3());
+        }
         item->setForeground(QBrush(QColor(pending ? "#e6c07b" : refused ? "#ef8178"
-                                         : active ? "#84d4a1" : unavailable ? "#777" : "#e0e0e0")));
+                                         : active ? "#E6EDF3" : unavailable ? "#777" : "#e0e0e0")));
         item->setToolTip(pending ? QStringLiteral("Waiting for chart confirmation")
                           : refused ? m_refusalReason
                           : unavailable ? QStringLiteral("Not in the current market catalog")

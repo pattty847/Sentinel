@@ -88,7 +88,10 @@ TEST(WatchRail, PendingAckRefusalKeyboardAndCatalogTruth) {
     EXPECT_FALSE(model->item(eth, 0)->text().startsWith("●"));
 
     dock.setChartSwitchState("ETH-USD", "");
-    EXPECT_TRUE(model->item(eth, 0)->text().startsWith("●"));
+    EXPECT_EQ(model->item(eth, 0)->text(), "ETH-USD");
+    EXPECT_TRUE(model->item(eth, 0)->data(WatchlistDock::ActiveRole).toBool());
+    EXPECT_EQ(model->item(eth, 0)->font().weight(), QFont::Medium);
+    EXPECT_EQ(model->item(eth, 0)->foreground().color(), QColor("#E6EDF3"));
     dock.setChartSwitchState("BTC-USD", "", "ETH-USD", "Connection cap reached");
     EXPECT_TRUE(model->item(eth, 0)->text().startsWith("!"));
     EXPECT_TRUE(status->text().contains("Connection cap"));
@@ -111,6 +114,23 @@ TEST(WatchRail, NameColumnUsesTheExpandedDockWidth) {
     QCoreApplication::processEvents();
     EXPECT_EQ(tree->columnWidth(0), symbolWidth);
     EXPECT_GE(tree->columnWidth(1), nameWidth + 300);
+}
+
+TEST(WatchRail, ActiveRowPaintsOnlyTwoAccentPixelsAtTheLeft) {
+    WatchlistDock dock;
+    dock.resize(500, 400);
+    dock.show();
+    dock.setChartSwitchState("BTC-USD", "");
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    QCoreApplication::processEvents();
+    const auto rect = tree->visualRect(tree->model()->index(0, 0));
+    const auto image = tree->viewport()->grab().toImage();
+    EXPECT_EQ(image.pixelColor(0, rect.center().y()), QColor("#00AAFF"));
+    EXPECT_EQ(image.pixelColor(1, rect.center().y()), QColor("#00AAFF"));
+    EXPECT_NE(image.pixelColor(2, rect.center().y()), QColor("#00AAFF"));
+    dock.setChartSwitchState("ETH-USD", "");
+    EXPECT_FALSE(tree->model()->index(0, 0).data(WatchlistDock::ActiveRole).toBool());
+    EXPECT_EQ(tree->model()->index(0, 0).data(Qt::FontRole).value<QFont>().weight(), QFont::Normal);
 }
 
 TEST(WatchRail, PinsPersistWithDefaultFormatSettings) {
