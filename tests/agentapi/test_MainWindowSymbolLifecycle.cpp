@@ -35,6 +35,8 @@
 #include <QJsonDocument>
 #include <QLineEdit>
 #include <QLabel>
+#include <QMenu>
+#include <QMenuBar>
 #include <QTreeView>
 #include <QStandardItemModel>
 #include <QSettings>
@@ -666,6 +668,26 @@ TEST(MainWindowHealthIntegration, DefaultLayoutKeepsNavigationRailUncappedAtNarr
         EXPECT_EQ(rail->maximumWidth(), cap);
         EXPECT_GE(window.findChild<ChartDock*>()->minimumWidth(), 480);
     }
+}
+
+TEST(MainWindowMenus, ToolsAndLayoutsCarryOnlyWorkingCommands) {
+    MainWindowGPU window;
+    QMenu* tools = nullptr;
+    QMenu* layouts = nullptr;
+    for (auto* action : window.menuBar()->actions()) {
+        if (action->text() == "&Tools") tools = action->menu();
+        if (action->text() == "&Layouts") layouts = action->menu();
+    }
+    ASSERT_TRUE(tools && layouts);
+    QStringList commands;
+    for (auto* action : tools->actions()) {
+        EXPECT_FALSE(action->isSeparator());
+        EXPECT_TRUE(action->isEnabled()) << action->text().toStdString();
+        commands << action->text();
+    }
+    EXPECT_EQ(commands, QStringList({"Open &SEC Filing Viewer", "Font Settings..."}));
+    ASSERT_FALSE(layouts->actions().isEmpty());
+    EXPECT_FALSE(layouts->actions().last()->isSeparator());
 }
 
 void connected(MainWindowGPU& window) {
