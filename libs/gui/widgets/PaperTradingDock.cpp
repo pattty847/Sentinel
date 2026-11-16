@@ -268,6 +268,8 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     m_sellLimitBtn->setObjectName(QStringLiteral("paperSellLimit"));
     m_flattenBtn = new QPushButton(QStringLiteral("Flatten"), ticketFrame);
     m_cancelAllBtn = new QPushButton(QStringLiteral("Cancel All"), ticketFrame);
+    m_flattenBtn->setObjectName(QStringLiteral("paperFlatten"));
+    m_cancelAllBtn->setObjectName(QStringLiteral("paperCancelAll"));
 
     const auto orderStyle = [](const QColor& side, const QColor& ink, bool market) {
         const QString color = side.name();
@@ -304,8 +306,17 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     orderGrid->addWidget(m_buyLimitBtn, 1, 0);
     orderGrid->addWidget(m_sellLimitBtn, 1, 1);
     ticketGrid->addLayout(orderGrid, 2, 0, 1, 4);
-    ticketGrid->addWidget(m_flattenBtn, 3, 0, 1, 2);
-    ticketGrid->addWidget(m_cancelAllBtn, 3, 2, 1, 2);
+    auto* actionDivider = new QFrame(ticketFrame);
+    actionDivider->setObjectName(QStringLiteral("paperActionDivider"));
+    actionDivider->setFrameShape(QFrame::HLine);
+    actionDivider->setStyleSheet("color: #2B3138;"); // line
+    ticketGrid->addWidget(actionDivider, 3, 0, 1, 4);
+    ticketGrid->setRowMinimumHeight(3, 12);
+    const QString actionStyle = QStringLiteral("QPushButton { background: transparent; color: #B6C2CF; border: 1px solid #2B3138; padding: 3px 8px; } QPushButton:disabled { color: #6E7580; }");
+    m_flattenBtn->setStyleSheet(actionStyle);
+    m_cancelAllBtn->setStyleSheet(actionStyle);
+    ticketGrid->addWidget(m_flattenBtn, 4, 2);
+    ticketGrid->addWidget(m_cancelAllBtn, 4, 3);
 
     layout->addWidget(ticketFrame);
 

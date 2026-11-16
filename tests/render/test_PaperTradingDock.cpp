@@ -10,6 +10,8 @@
 #include <QApplication>
 #include <QDoubleSpinBox>
 #include <QFocusEvent>
+#include <QFrame>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -936,4 +938,22 @@ TEST(PaperStopOperation, EpochChangeWhilePromptOpenClosesItUnsent) {
 
 TEST(PaperPolish, CurveLabelsUseMicroSize) {
     EXPECT_EQ(PnlCurveItem::labelFont().pixelSize(), 10);
+}
+
+TEST(PaperPolish, ActionsHaveDividerGapAndRightAlignment) {
+    PaperTradingDock dock;
+    dock.resize(640, 700);
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* divider = dock.findChild<QFrame*>("paperActionDivider");
+    auto* flatten = dock.findChild<QPushButton*>("paperFlatten");
+    auto* cancel = dock.findChild<QPushButton*>("paperCancelAll");
+    auto* buy = dock.findChild<QPushButton*>("paperBuyLimit");
+    ASSERT_NE(divider, nullptr);
+    ASSERT_NE(buy, nullptr);
+    ASSERT_NE(flatten, nullptr);
+    ASSERT_NE(cancel, nullptr);
+    EXPECT_GE(flatten->geometry().top() - buy->geometry().bottom(), 12);
+    EXPECT_GE(flatten->geometry().left(), buy->geometry().left());
+    EXPECT_TRUE(flatten->styleSheet().contains("background: transparent"));
 }
