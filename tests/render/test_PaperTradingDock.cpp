@@ -258,7 +258,7 @@ TEST(PaperTicket, LimitEditorFocusOutReconcilesButtons) {
     QSignalSpy finished(price, &QAbstractSpinBox::editingFinished);
     editor->selectAll();
     QTest::keyClick(editor, Qt::Key_Backspace);
-    EXPECT_TRUE(editor->text().isEmpty());
+    EXPECT_TRUE(price->cleanText().isEmpty());
     EXPECT_FALSE(buy->isEnabled());
     EXPECT_DOUBLE_EQ(price->value(), 0.25);
     {
@@ -978,4 +978,16 @@ TEST(PaperPolish, PositionUsesOneWaitingLineAndNoFrame) {
     EXPECT_EQ(waiting->text(), QStringLiteral("No data source"));
     EXPECT_EQ(dock.findChild<QLabel*>("paperLastPrice")->text(), QStringLiteral("—"));
     EXPECT_EQ(dock.findChild<QLabel*>("paperAvgPrice")->text(), QStringLiteral("—"));
+}
+
+TEST(PaperPolish, TicketFormatsStepAndGroupedPriceWithUnits) {
+    PaperTradingDock dock;
+    dock.setSymbol("BTC-USD");
+    auto* qty = dock.findChild<QDoubleSpinBox*>("paperBaseQty");
+    auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
+    ASSERT_NE(qty, nullptr);
+    ASSERT_NE(price, nullptr);
+    EXPECT_EQ(qty->text(), QStringLiteral("0.0100 BTC"));
+    dock.onTradeReceived(tick("BTC-USD", 73778.93));
+    EXPECT_EQ(price->text(), QStringLiteral("73,778.93 USD"));
 }

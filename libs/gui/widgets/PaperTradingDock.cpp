@@ -32,6 +32,7 @@
 #include <QButtonGroup>
 #include <QScrollBar>
 #include <QSignalBlocker>
+#include <QLocale>
 #include <QTimer>
 #include <QFrame>
 #include <QSplitter>
@@ -40,6 +41,26 @@
 #include <algorithm>
 
 namespace {
+class TicketSpinBox final : public QDoubleSpinBox {
+public:
+    explicit TicketSpinBox(QWidget* parent) : QDoubleSpinBox(parent) {
+        QLocale displayLocale = QLocale::c();
+        displayLocale.setNumberOptions(displayLocale.numberOptions() & ~QLocale::OmitGroupSeparator);
+        setLocale(displayLocale);
+    }
+    void setMinimumDisplayDecimals(int count) { m_minimumDisplayDecimals = count; update(); }
+protected:
+    QString textFromValue(double value) const override {
+        QString out = locale().toString(value, 'f', decimals());
+        while (out.contains('.') && out.endsWith('0') && out.size() - out.indexOf('.') - 1 > m_minimumDisplayDecimals)
+            out.chop(1);
+        if (out.endsWith('.')) out.chop(1);
+        return out;
+    }
+private:
+    int m_minimumDisplayDecimals = 0;
+};
+
 QString formatDollars(double value) {
     return QString("$%1").arg(value, 0, 'f', 2);
 }
@@ -59,9 +80,11 @@ int priceDecimals(double price) {
 // A price of `symbol`: "$0.0000050" plain, "5.04 x1M" in a scaled display unit.
 QString shownPrice(const QString& symbol, double price) {
     const auto unit = PriceUnits::instance().unitFor(symbol);
-    if (!unit.scaled()) return QString("$%1").arg(price, 0, 'f', priceDecimals(price));
+    QLocale displayLocale = QLocale::c();
+    displayLocale.setNumberOptions(displayLocale.numberOptions() & ~QLocale::OmitGroupSeparator);
+    if (!unit.scaled()) return QStringLiteral("$") + displayLocale.toString(price, 'f', priceDecimals(price));
     const double shown = unit.toDisplay(price);
-    return QString("%1 %2").arg(shown, 0, 'f', priceDecimals(shown)).arg(QLatin1String(unit.tag()));
+    return displayLocale.toString(shown, 'f', priceDecimals(shown)) + QStringLiteral(" ") + QLatin1String(unit.tag());
 }
 
 double roundedDisplayedPrice(double price, int decimals) {
@@ -246,19 +269,23 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     ticketGrid->setSpacing(4);
 
     ticketGrid->addWidget(new QLabel(QStringLiteral("Base qty"), ticketFrame), 0, 0);
-    m_manualQtySpin = new QDoubleSpinBox(ticketFrame);
+    m_manualQtySpin = new TicketSpinBox(ticketFrame);
     m_manualQtySpin->setObjectName(QStringLiteral("paperBaseQty"));
     m_manualQtySpin->setDecimals(8);
     m_manualQtySpin->setRange(0.00000001, 1000000000.0);
     m_manualQtySpin->setSingleStep(0.0001);
+    static_cast<TicketSpinBox*>(m_manualQtySpin)->setMinimumDisplayDecimals(4);
+    m_manualQtySpin->setSuffix(QStringLiteral(" ") + QStringLiteral("base"));
     m_manualQtySpin->setValue(0.01);
     ticketGrid->addWidget(m_manualQtySpin, 0, 1);
 
     ticketGrid->addWidget(new QLabel(QStringLiteral("Limit / quote"), ticketFrame), 0, 2);
-    m_limitPriceSpin = new QDoubleSpinBox(ticketFrame);
+    m_limitPriceSpin = new TicketSpinBox(ticketFrame);
     m_limitPriceSpin->setObjectName(QStringLiteral("paperLimitPrice"));
     m_limitPriceSpin->setRange(0.0, 100000000.0);
     m_limitPriceSpin->setDecimals(8);
+    static_cast<TicketSpinBox*>(m_limitPriceSpin)->setMinimumDisplayDecimals(2);
+    m_limitPriceSpin->setSuffix(QStringLiteral(" quote"));
     m_limitPriceSpin->setValue(0.0);
     ticketGrid->addWidget(m_limitPriceSpin, 0, 3);
     m_useLastBtn = new QPushButton(QStringLiteral("Use Last"), ticketFrame);
@@ -757,6 +784,8 @@ void PaperTradingDock::resetForSymbolChange() {
     m_limitUserOwned = false;
     m_algoActivityEligible = false;
     if (m_symbolLabel) m_symbolLabel->setText(m_symbol.isEmpty() ? QStringLiteral("No symbol") : m_symbol);
+    if (m_manualQtySpin) m_manualQtySpin->setSuffix(QStringLiteral(" ") + (m_symbol.isEmpty() ? QStringLiteral("base") : m_symbol.section('-', 0, 0)));
+    if (m_limitPriceSpin) m_limitPriceSpin->setSuffix(QStringLiteral(" ") + (m_symbol.isEmpty() ? QStringLiteral("quote") : m_symbol.section('-', 1, 1)));
     updateNotional();
     m_shownLast = m_shownAvg = 0.0;
     if (m_waitingLabel) {
@@ -890,6 +919,7 @@ void PaperTradingDock::updatePricePrecision(double price) {
     const int decimals = priceDecimals(price);
     if (decimals > m_limitPriceSpin->decimals()) m_limitPriceSpin->setDecimals(decimals);
     m_limitPriceSpin->setSingleStep(std::pow(10.0, -decimals));
+    static_cast<TicketSpinBox*>(m_limitPriceSpin)->setMinimumDisplayDecimals(decimals);
 }
 
 void PaperTradingDock::setAlgoState(const QString& text, const QString& reason,

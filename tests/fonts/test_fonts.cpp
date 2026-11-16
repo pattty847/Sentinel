@@ -188,7 +188,7 @@ TEST(FontWidgets, PaperTradingRuntimeAndHiddenWidgetsInheritSelectedFont) {
         EXPECT_EQ(QFontInfo(algo->font()).family(), family);
         bool foundPrice = false;
         for (auto* label : paper.findChildren<QLabel*>()) {
-            if (label->text().startsWith(QStringLiteral("$71023"))) {
+            if (label->text().startsWith(QStringLiteral("$71,023"))) {
                 foundPrice = true;
                 EXPECT_EQ(QFontInfo(label->font()).family(), family);
                 EXPECT_TRUE(label->styleSheet().contains(QStringLiteral("#4caf50")));
