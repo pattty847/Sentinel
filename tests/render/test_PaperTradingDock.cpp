@@ -1036,3 +1036,10 @@ TEST(PaperPolish, ManualButtonsRequireConnectedAccountSnapshot) {
     EXPECT_FALSE(buy->isEnabled());
     EXPECT_TRUE(buy->toolTip().contains("disconnected"));
 }
+
+TEST(PaperPolish, OrderRowsUseTwentyTwoPixels) {
+    PaperTradingDock dock;
+    auto* table = dock.findChild<QTableWidget*>("paperOrderLog");
+    ASSERT_NE(table, nullptr);
+    EXPECT_EQ(table->verticalHeader()->defaultSectionSize(), 22);
+}

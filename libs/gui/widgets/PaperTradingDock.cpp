@@ -400,6 +400,7 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
         QStringLiteral("Fill"), QStringLiteral("Price"), QStringLiteral("Status")});
     m_orderLog->horizontalHeader()->setStretchLastSection(true);
     m_orderLog->horizontalHeader()->setDefaultSectionSize(55);
+    m_orderLog->verticalHeader()->setDefaultSectionSize(22);
     m_orderLog->verticalHeader()->setVisible(false);
     m_orderLog->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_orderLog->setMaximumHeight(120);
