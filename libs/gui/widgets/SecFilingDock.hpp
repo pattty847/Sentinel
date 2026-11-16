@@ -63,5 +63,6 @@ private:
     
     QTextEdit* m_financialsDisplay;
     QLabel* m_statusLabel;
+    QLabel* m_tickerHint = nullptr;
 };
 

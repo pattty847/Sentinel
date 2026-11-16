@@ -218,7 +218,7 @@ TEST(SecResearch, SwitchClearsResultsAndNumericCellsAreReadOnlyWithUnknownMissin
     dock.onSymbolChanged("BTC-USD");
     EXPECT_EQ(dock.findChild<QLineEdit*>("secTicker")->text(), "BTC-USD");
     EXPECT_EQ(table->model()->rowCount(), 0);
-    EXPECT_TRUE(status->text().contains("unsupported"));
+    EXPECT_EQ(dock.findChild<QLabel*>("secTickerHint")->text(), "! Equity tickers only");
     EXPECT_TRUE(status->text().contains("Unknown"));
     provider.reply(0, "TRANSACTIONS_DATA:[{\"shares\":123}]\n");
     EXPECT_EQ(table->model()->rowCount(), 0);
@@ -228,6 +228,35 @@ TEST(SecResearch, SwitchClearsResultsAndNumericCellsAreReadOnlyWithUnknownMissin
     EXPECT_EQ(table->model()->rowCount(), 0);
     dock.resize(340, 380); dock.show(); QCoreApplication::processEvents();
     EXPECT_LE(status->width(), dock.width());
+}
+TEST(SecResearch, FetchReasonSitsUnderTheTickerAndDisabledFetchesUseTheDisabledToken) {
+    FixtureProvider provider;
+    SecFilingDock dock(nullptr, &provider);
+    dock.resize(500, 620); dock.show(); QCoreApplication::processEvents();
+    auto* ticker = dock.findChild<QLineEdit*>("secTicker");
+    auto* hint = dock.findChild<QLabel*>("secTickerHint");
+    ASSERT_TRUE(ticker && hint);
+    QList<QPushButton*> fetches;
+    for (auto* button : dock.findChildren<QPushButton*>())
+        if (button->text().startsWith("Fetch")) fetches.append(button);
+    ASSERT_EQ(fetches.size(), 3);
+    EXPECT_EQ(hint->text(), "Equity tickers only");
+    EXPECT_GT(hint->mapTo(&dock, QPoint()).y(), ticker->mapTo(&dock, QPoint()).y());
+    EXPECT_LT(hint->mapTo(&dock, QPoint()).y(), fetches.front()->mapTo(&dock, QPoint()).y());
+    dock.onSymbolChanged("BTC-USD"); QCoreApplication::processEvents();
+    EXPECT_EQ(hint->text(), "! Equity tickers only");
+    EXPECT_TRUE(hint->styleSheet().contains("#e6c07b"));
+    for (auto* button : fetches) {
+        ASSERT_FALSE(button->isEnabled());
+        EXPECT_EQ(button->palette().color(QPalette::Disabled, QPalette::ButtonText), QColor("#6E7580"));
+    }
+    EXPECT_FALSE(dock.findChild<QLabel*>("secStatus")->text().contains("equity"))
+        << "the reason is said once, under the ticker";
+    dock.onSymbolChanged("AAPL");
+    for (auto* button : fetches) {
+        ASSERT_TRUE(button->isEnabled());
+        EXPECT_EQ(button->palette().color(QPalette::Active, QPalette::ButtonText), QColor("#E6EDF3"));
+    }
 }
 TEST(SecResearch, ErrorsUseTheErrorRoleInOneClause) {
     FixtureProvider provider;

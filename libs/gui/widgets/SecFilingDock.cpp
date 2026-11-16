@@ -52,7 +52,22 @@ void SecFilingDock::buildUi() {
     actions->addWidget(m_fetchInsiderBtn);
     actions->addWidget(m_fetchFinancialsBtn);
     
+    // The reason the fetch buttons can be disabled sits under the field it depends on.
+    m_tickerHint = new QLabel("Equity tickers only", m_contentWidget);
+    m_tickerHint->setObjectName("secTickerHint");
+    m_tickerHint->setStyleSheet(QStringLiteral("color:%1;").arg(theme::text3().name()));
+    const QString actionStyle = QStringLiteral(
+        "QPushButton { background:%1; color:%2; border:1px solid %3; border-radius:3px; padding:4px 10px; }"
+        "QPushButton:hover { border-color:%4; }"
+        "QPushButton:pressed { background:%5; }"
+        "QPushButton:disabled { background:transparent; color:%6; border-color:%3; }")
+        .arg(theme::bg2().name(), theme::text().name(), theme::line().name(),
+             theme::accent().name(), theme::sel().name(), theme::textOff().name());
+    for (auto* button : {m_fetchFilingsBtn, m_fetchInsiderBtn, m_fetchFinancialsBtn})
+        button->setStyleSheet(actionStyle);
+
     layout->addLayout(inputLayout);
+    layout->addWidget(m_tickerHint);
     layout->addLayout(actions);
     connect(m_tickerInput, &QLineEdit::textChanged, this, &SecFilingDock::tickerEdited);
     
@@ -251,7 +266,10 @@ void SecFilingDock::tickerEdited() {
     m_fetchFilingsBtn->setEnabled(supported);
     m_fetchInsiderBtn->setEnabled(supported);
     m_fetchFinancialsBtn->setEnabled(supported);
-    updateStatus(provenance() + (supported ? " · Choose a report" : " · Unavailable: SEC reports require an equity ticker; crypto pairs are unsupported"));
+    m_tickerHint->setText(supported ? QStringLiteral("Equity tickers only")
+                                    : QStringLiteral("! Equity tickers only"));
+    m_tickerHint->setStyleSheet(QStringLiteral("color:%1;").arg((supported ? theme::text3() : theme::warn()).name()));
+    updateStatus(provenance() + (supported ? " · Choose a report" : QString()));
 }
 void SecFilingDock::onSymbolChanged(const QString& symbol) {
     m_tickerInput->setText(symbol.trimmed().toUpper());
