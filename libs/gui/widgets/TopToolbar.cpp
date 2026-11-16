@@ -321,15 +321,6 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_rangeLabel->setMinimumWidth(72);
     m_rangeLabelAction = addWidget(m_rangeLabel);
 
-    addSeparator();
-
-    m_indicatorsAction = addIconAction(":/svg/indicators.svg", "Indicators", "Indicators are not available on this chart yet");
-    m_indicatorsAction->setObjectName("chartIndicatorsAction");
-    m_indicatorsAction->setEnabled(false);
-    if (auto *button = findChild<QToolButton *>("chartIndicatorsButton")) {
-        button->setAccessibleDescription(m_indicatorsAction->toolTip());
-        button->setAttribute(Qt::WA_AlwaysShowToolTips);
-    }
     m_layoutsAction = new QAction("Layouts", this);
     m_layoutsAction->setToolTip("Save, restore or reset a workspace layout");
     m_layoutsAction->setObjectName("chartLayoutsAction");
@@ -437,7 +428,6 @@ void TopToolbar::buildControlsMenu() {
     m_labelsMenu = m_controlsMenu->addMenu("Liquidity labels");
     m_labelsMenu->setObjectName("controlsLabels");
     m_controlsMenu->addSeparator();
-    m_controlsMenu->addAction(m_indicatorsAction);
     m_layoutsMenu = m_controlsMenu->addMenu("Layouts");
     m_layoutsMenu->setObjectName("controlsLayouts");
     m_controlsMenu->addAction(m_quickSearchAction);
@@ -663,7 +653,7 @@ void TopToolbar::refreshOverflowMenu() {
             else if (button == m_footprintButton) name = "controlsFootprint";
             else if (button == m_tpoButton) name = "controlsTpo";
             else if (button == m_volumeProfileButton) name = "controlsVolumeProfile";
-            else if (command != m_indicatorsAction && command != m_fullscreenAction) continue;
+            else if (command != m_fullscreenAction) continue;
             if (name) {
                 command = m_controlsMenu->findChild<QAction *>(name);
                 if (!command) continue;
@@ -1009,7 +999,6 @@ QAction* TopToolbar::addIconAction(const QString& iconPath, const QString& text,
     button->setDefaultAction(action);
     button->setIconSize(iconSize());
     button->setToolButtonStyle(toolButtonStyle());
-    if (text == QLatin1String("Indicators")) button->setObjectName("chartIndicatorsButton");
     addWidget(button);
     return action;
 }

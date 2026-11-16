@@ -121,7 +121,6 @@ signals:
     void candlesToggled(bool enabled);
     void timeframeSelected(qlonglong timeframeMs);
     void chartTypeSelected(const QString& chartType);
-    void indicatorsRequested();
     void layoutsRequested();
     void settingsRequested();
     void liquidityRangeSettingsRequested();
@@ -202,7 +201,6 @@ private:
     bool m_gearRefreshPending = false;
     bool m_dispatchingEditorKey = false;
     QAction* m_rangeMenuAction = nullptr;
-    QAction* m_indicatorsAction = nullptr;
     QAction* m_layoutsAction = nullptr;
     QAction* m_fullscreenAction = nullptr;
     QString m_baseAssetSymbol = "BTC";

@@ -301,7 +301,7 @@ TEST(ChartToolbar, ControlVisibilityRulesPerMode) {
     }
 }
 
-TEST(ChartToolbar, NarrowChartRetainsPrimaryEntryPointsAndHonestUnavailableAction) {
+TEST(ChartToolbar, NarrowChartRetainsPrimaryEntryPoints) {
     TopToolbar toolbar;
     toolbar.resize(420, 42);
     toolbar.show();
@@ -310,14 +310,32 @@ TEST(ChartToolbar, NarrowChartRetainsPrimaryEntryPointsAndHonestUnavailableActio
     ASSERT_TRUE(toolbar.chartMenuButton()->isVisible());
     EXPECT_LT(toolbar.controlsButton()->geometry().right(), toolbar.width());
     EXPECT_LT(toolbar.chartMenuButton()->geometry().right(), toolbar.width());
-    auto *indicators = toolbar.findChild<QAction *>("chartIndicatorsAction");
-    ASSERT_TRUE(indicators);
-    EXPECT_FALSE(indicators->isEnabled());
-    EXPECT_TRUE(indicators->toolTip().contains("not available"));
     const auto vp = toolbar.findChildren<QToolButton *>();
     EXPECT_TRUE(std::any_of(vp.begin(), vp.end(), [](QToolButton *button) {
         return button->text() == "VP" && button->toolTip() == "Volume profile";
     }));
+}
+
+// B-8: a feature that does not exist has no toolbar, overflow or menu entry.
+TEST(ChartToolbar, IndicatorsStayHiddenUntilTheFeatureExists) {
+    TopToolbar toolbar;
+    toolbar.setModeState({true, true, true, true, true});
+    toolbar.show();
+    auto named = [](const QList<QAction *> &actions) {
+        return std::any_of(actions.begin(), actions.end(), [](QAction *action) {
+            return action->text() == "Indicators" || action->objectName().startsWith("chartIndicators");
+        });
+    };
+    EXPECT_FALSE(named(toolbar.findChildren<QAction *>()));
+    for (auto *button : toolbar.findChildren<QToolButton *>()) {
+        EXPECT_FALSE(button->objectName().startsWith("chartIndicators"));
+        EXPECT_FALSE(button->toolTip().contains("Indicators"));
+    }
+    emit toolbar.controlsMenu()->aboutToShow();
+    EXPECT_FALSE(named(toolbar.controlsMenu()->actions()));
+    toolbar.resize(220, 44);
+    QTest::qWait(20);
+    useOverflow(toolbar, [&](QMenu *menu) { EXPECT_FALSE(named(menu->actions())); });
 }
 
 TEST(ChartToolbar, WideChartNamesTickAndSeparatesAppearance) {
@@ -611,7 +629,6 @@ TEST(ChartToolbar, OneHiddenControlIsTheOnlyOverflowEntry) {
         EXPECT_EQ(menu->actions().size(), 1);
         EXPECT_EQ(menu->actions().first(), toolbar.findChild<QAction *>("chartFullscreenAction"));
     });
-    EXPECT_TRUE(toolbar.findChild<QToolButton *>("chartIndicatorsButton")->isVisible());
     EXPECT_TRUE(toolbar.rangeSlider()->isVisible());
 }
 
@@ -625,12 +642,10 @@ TEST(ChartToolbar, AllHiddenControlsKeepToolbarOrderAndSeparatorGroups) {
     QTest::qWait(20);
     const QStringList expected{"Candles", "Heatmap", "Footprint", "TPO", "Volume profile", "|",
         "Timeframe", "Heatmap tick mode", "Heatmap tick size", "Candle style",
-        "TPO / volume profile session", "TPO layout", "|", "Liquidity range", "|", "Indicators", "|", "Fullscreen"};
+        "TPO / volume profile session", "TPO layout", "|", "Liquidity range", "|", "Fullscreen"};
     QSignalSpy heatmap(&toolbar, &TopToolbar::heatmapToggled);
     useOverflow(toolbar, [&](QMenu *menu) {
         EXPECT_EQ(menuEntries(menu), expected);
-        EXPECT_FALSE(menuAction(menu, "chartIndicatorsAction")->isEnabled());
-        EXPECT_TRUE(menuAction(menu, "chartIndicatorsAction")->toolTip().contains("not available"));
         auto *toggle = menuAction(menu, "controlsHeatmap");
         ASSERT_TRUE(toggle);
         EXPECT_TRUE(toggle->isCheckable());
