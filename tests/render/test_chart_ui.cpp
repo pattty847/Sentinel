@@ -2258,6 +2258,22 @@ TEST_F(ChartControls, ChartMenuRoundTripsTheLabelSettings) {
     EXPECT_EQ(model->settings().labelCurrency, "asset");
 }
 
+// MENU-2: one gear entry opens the settings dialog (it was two names for one
+// dialog on different tabs).
+TEST_F(ChartControls, GearHasOneSettingsDialogEntry) {
+    QStringList opened;
+    HeatmapChartControls::MenuHooks hooks;
+    hooks.openSettings = [&](const QString &tab) { opened << tab; };
+    controls->setMenuHooks(hooks);
+    emit toolbar->chartMenu()->aboutToShow();
+    const auto entries = menuEntries(toolbar->chartMenu());
+    EXPECT_EQ(entries.filter(QRegularExpression("settings\\.\\.\\.$", QRegularExpression::CaseInsensitiveOption)),
+              QStringList{"Chart settings..."});
+    for (auto *action : toolbar->chartMenu()->actions())
+        if (!action->menu() && !action->isSeparator() && action->text().endsWith("settings...")) action->trigger();
+    EXPECT_EQ(opened, QStringList{"Chart"});
+}
+
 // One renderer, so the Labels toggle is always in the gear menu (it was
 // hidden in other chart modes), and the currency stays an appearance entry.
 TEST_F(ChartControls, LabelsToggleAndCurrencyAreAlwaysInTheAppearanceMenu) {

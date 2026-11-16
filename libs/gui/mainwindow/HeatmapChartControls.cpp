@@ -284,10 +284,9 @@ void HeatmapChartControls::buildChartMenu() {
         return a;
     };
     const auto hook = [](const std::function<void()> &f) { return f ? f : std::function<void()>{}; };
+    // One entry for the one settings dialog (MENU-2); its tabs reach the rest.
     add(menu, "Chart settings...", "chartMenuSettings",
         m_hooks.openSettings ? std::function<void()>([this] { m_hooks.openSettings("Chart"); }) : nullptr);
-    add(menu, "Heatmap settings...", "chartMenuHeatmapSettings",
-        m_hooks.openSettings ? std::function<void()>([this] { m_hooks.openSettings("Look"); }) : nullptr);
     QMenu *palettes = menu->addMenu("Heatmap palette");
     palettes->setObjectName("chartMenuPalettes");
     auto *paletteGroup = new QActionGroup(palettes);
