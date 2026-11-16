@@ -338,6 +338,24 @@ TEST(ChartToolbar, IndicatorsStayHiddenUntilTheFeatureExists) {
     useOverflow(toolbar, [&](QMenu *menu) { EXPECT_FALSE(named(menu->actions())); });
 }
 
+// TB-7: the gear paints exactly its icon; no menu indicator is drawn into it.
+TEST(ChartToolbar, GearPaintsACleanGearWithoutAMenuIndicator) {
+    TopToolbar toolbar;
+    toolbar.resize(1600, 44);
+    toolbar.show();
+    QTest::qWait(20);
+    auto *gear = toolbar.chartMenuButton();
+    ASSERT_TRUE(gear->isVisible());
+    ASSERT_TRUE(gear->menu());
+    QToolButton plain(&toolbar); // the same icon and style, without a menu
+    plain.setIcon(gear->icon());
+    plain.setIconSize(gear->iconSize());
+    plain.setGeometry(QRect(QPoint(0, 0), gear->size()));
+    plain.show();
+    QCoreApplication::processEvents();
+    EXPECT_EQ(gear->grab().toImage(), plain.grab().toImage());
+}
+
 TEST(ChartToolbar, WideChartNamesTickAndSeparatesAppearance) {
     TopToolbar toolbar;
     toolbar.resize(1920, 42);

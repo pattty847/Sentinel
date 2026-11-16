@@ -56,6 +56,8 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_chartMenuButton->setToolTip("Chart settings and appearance");
     m_chartMenuButton->setAccessibleName("Chart settings and appearance");
     m_chartMenuButton->setPopupMode(QToolButton::InstantPopup);
+    // A clean gear (TB-7): Qt's menu indicator would clip a chevron into the glyph.
+    m_chartMenuButton->setStyleSheet("QToolButton#chartMenuButton::menu-indicator { image: none; width: 0px; }");
     m_chartMenu = new QMenu(m_chartMenuButton);
     m_chartMenu->setObjectName("chartMenu");
     m_chartMenu->setToolTipsVisible(true);
