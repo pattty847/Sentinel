@@ -344,6 +344,8 @@ TEST_F(LabelLayout, OnlyColouredCellsGetLabels) {
 // it grows with the cells up to 15 px and never beyond.
 TEST_F(LabelLayout, SizeGrowsFrom12To15AndNeverShrinksBelow12) {
     auto cells = window(6, 4);
+    auto symbolStyle = style();
+    symbolStyle.currencySymbol = true; // preserve the worst-case width when the optional $ is enabled
     struct Case {
         double cellW, cellH, minSize, maxSize;
         bool any;
@@ -355,7 +357,7 @@ TEST_F(LabelLayout, SizeGrowsFrom12To15AndNeverShrinksBelow12) {
                          Case{36, 80, 12, 12, true}}) {  // narrow: 12 px, only the labels that fit
         SCOPED_TRACE(std::to_string(c.cellW) + "x" + std::to_string(c.cellH));
         const QRectF rect(0, 0, 6 * c.cellW, 4 * c.cellH);
-        layout.layout(cells, atlas(), fit(rect, 6, 4), 1.0, style(), glyphs);
+        layout.layout(cells, atlas(), fit(rect, 6, 4), 1.0, symbolStyle, glyphs);
         EXPECT_EQ(layout.stats().labels > 0, c.any);
         if (c.any) {
             EXPECT_GE(layout.stats().sizePx, c.minSize - 1e-9);
@@ -366,7 +368,7 @@ TEST_F(LabelLayout, SizeGrowsFrom12To15AndNeverShrinksBelow12) {
     }
     // Narrow cells: every drawn label's ink fits its cell; the rest are counted.
     const QRectF narrow(0, 0, 6 * 36, 4 * 80);
-    layout.layout(cells, atlas(), fit(narrow, 6, 4), 1.0, style(), glyphs);
+    layout.layout(cells, atlas(), fit(narrow, 6, 4), 1.0, symbolStyle, glyphs);
     EXPECT_GT(layout.stats().tooNarrow, 0u);
     for (const auto &[anchor, n] : labels(glyphs)) {
         double right = 0;
