@@ -148,6 +148,15 @@ void WatchlistDock::buildUi() {
     m_addButton->setObjectName("watchAdd");
     m_addButton->setText("+");
     m_addButton->setToolTip("Add pair to Pinned");
+    const QString actionStyle = QStringLiteral(
+        "QToolButton { background:%1; color:%2; border:1px solid %3; border-radius:3px; padding:3px 8px; }"
+        "QToolButton:hover { border-color:%4; }"
+        "QToolButton:pressed { background:%5; }"
+        "QToolButton:disabled { color:%6; border-color:%3; }")
+        .arg(theme::bg2().name(), theme::text().name(), theme::line().name(),
+             theme::accent().name(), theme::sel().name(), theme::textOff().name());
+    m_pinButton->setStyleSheet(actionStyle);
+    m_addButton->setStyleSheet(actionStyle);
     addRow->addWidget(m_addButton);
     layout->addLayout(addRow);
 

@@ -149,6 +149,22 @@ TEST(WatchRail, StripesStopAfterTheLastFilledRow) {
     EXPECT_EQ(image.pixelColor(10, y), image.pixelColor(10, y + last.height()));
 }
 
+TEST(WatchRail, ActionsHaveAVisibleSurfaceAndReadableDisabledInk) {
+    WatchlistDock dock;
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* pin = dock.findChild<QToolButton*>("watchPin");
+    auto* add = dock.findChild<QToolButton*>("watchAdd");
+    ASSERT_FALSE(pin->isEnabled());
+    EXPECT_EQ(pin->palette().color(QPalette::Disabled, QPalette::ButtonText), QColor("#6E7580"));
+    EXPECT_EQ(add->palette().color(QPalette::Active, QPalette::ButtonText), QColor("#E6EDF3"));
+    for (auto* button : {pin, add}) {
+        const auto pixels = button->grab().toImage();
+        EXPECT_EQ(pixels.pixelColor(2, button->height() / 2), QColor("#20252B"));
+        EXPECT_EQ(pixels.pixelColor(0, button->height() / 2), QColor("#2B3138"));
+    }
+}
+
 TEST(WatchRail, PinsPersistWithDefaultFormatSettings) {
     QTemporaryDir settingsDir;
     ASSERT_TRUE(settingsDir.isValid());
