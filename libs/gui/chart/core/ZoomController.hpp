@@ -81,6 +81,8 @@ private:
     IChartEnvironment& environment_;
     QPointF gestureAt_;
     std::unique_ptr<IZoomTimer> settleTimer_;
+    // An axis drag (zero settle) is held from its first move to endZoomGesture.
+    bool axisDragHeld_ = false;
     TimerFactory timerFactory_;
     // Only the partial notch, for one route and its axes; reversal drops it.
     int wheelAngleRemainder_ = 0;
