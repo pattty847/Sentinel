@@ -150,7 +150,7 @@ TEST(FootprintLod, NotionalAndStrictSingleSideHeavyTiers) {
     EXPECT_EQ(flowTier(25, 100, 50, 2500), FlowTier::Normal);
     EXPECT_EQ(flowTier(55, 100, 100, 2500), FlowTier::Normal);
     EXPECT_EQ(flowTier(55.01, 100, 100, 2500), FlowTier::Heavy);
-    EXPECT_DOUBLE_EQ(chart::flowTextAlpha(FlowTier::Dust), .45) << "dust prints are dimmed, not hidden";
+    EXPECT_DOUBLE_EQ(chart::flowTextAlpha(FlowTier::Dust), 0) << "dust cells have no number";
     EXPECT_DOUBLE_EQ(chart::flowTextAlpha(FlowTier::Normal), .6);
     EXPECT_DOUBLE_EQ(chart::flowTextAlpha(FlowTier::Heavy), 1);
 }
