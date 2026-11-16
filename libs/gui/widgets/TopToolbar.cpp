@@ -133,11 +133,9 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_tpoButton->setCheckable(true);
     m_tpoButton->setAutoExclusive(false);
 
-    // A text mark distinguishes volume profile from the TPO glyph at a glance.
-    m_volumeProfileButton = addIconButton(QString(), "Volume profile");
+    // An icon like every other mode (TB-5): bars on a price axis, unlike the framed TPO glyph.
+    m_volumeProfileButton = addIconButton(":/svg/volume_profile.svg", "Volume profile");
     m_volumeProfileButton->setObjectName("chartVolumeProfileButton");
-    m_volumeProfileButton->setText("VP");
-    m_volumeProfileButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_volumeProfileButton->setAccessibleName("Volume profile layer");
     m_volumeProfileButton->setCheckable(true);
     m_volumeProfileButton->setAutoExclusive(false);

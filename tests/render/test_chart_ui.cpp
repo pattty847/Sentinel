@@ -310,10 +310,47 @@ TEST(ChartToolbar, NarrowChartRetainsPrimaryEntryPoints) {
     ASSERT_TRUE(toolbar.chartMenuButton()->isVisible());
     EXPECT_LT(toolbar.controlsButton()->geometry().right(), toolbar.width());
     EXPECT_LT(toolbar.chartMenuButton()->geometry().right(), toolbar.width());
-    const auto vp = toolbar.findChildren<QToolButton *>();
-    EXPECT_TRUE(std::any_of(vp.begin(), vp.end(), [](QToolButton *button) {
-        return button->text() == "VP" && button->toolTip() == "Volume profile";
-    }));
+}
+
+// TB-5: every mode is an icon, and one glyph means one thing across the toolbar
+// and its gear menu (the magnifier is only "Show symbol chart").
+TEST(ChartToolbar, ModesAreIconsAndEachGlyphHasOneMeaning) {
+    TopToolbar toolbar;
+    toolbar.resize(1920, 44);
+    toolbar.show();
+    QTest::qWait(20);
+    for (const char *name : {"chartHeatmapButton", "chartFootprintButton", "chartTpoButton", "chartVolumeProfileButton"}) {
+        auto *button = toolbar.findChild<QToolButton *>(name);
+        ASSERT_TRUE(button) << name;
+        EXPECT_FALSE(button->icon().isNull()) << name;
+        EXPECT_EQ(button->toolButtonStyle(), Qt::ToolButtonIconOnly) << name;
+        EXPECT_TRUE(button->text().isEmpty()) << name;
+    }
+    EXPECT_EQ(toolbar.findChild<QToolButton *>("chartVolumeProfileButton")->toolTip(), "Volume profile");
+    struct Glyph {
+        QObject *command; // a toolbar button and its menu entry share one command
+        QString name;
+        QImage image;
+    };
+    QList<Glyph> glyphs;
+    for (auto *button : toolbar.findChildren<QToolButton *>()) {
+        if (!button->isVisible() || button->icon().isNull()) continue;
+        QObject *command = button->defaultAction() ? static_cast<QObject *>(button->defaultAction()) : button;
+        glyphs.append({command, button->toolTip(), button->icon().pixmap(QSize(18, 18)).toImage()});
+    }
+    emit toolbar.chartMenu()->aboutToShow();
+    emit toolbar.controlsMenu()->aboutToShow();
+    for (auto *menu : {toolbar.chartMenu(), toolbar.controlsMenu()})
+        for (auto *action : menu->actions())
+            if (action->isVisible() && !action->icon().isNull())
+                glyphs.append({action, action->text(), action->icon().pixmap(QSize(18, 18)).toImage()});
+    ASSERT_GE(glyphs.size(), 7);
+    for (int i = 0; i < glyphs.size(); ++i)
+        for (int j = i + 1; j < glyphs.size(); ++j) {
+            if (glyphs[i].command == glyphs[j].command) continue;
+            EXPECT_NE(glyphs[i].image, glyphs[j].image)
+                << glyphs[i].name.toStdString() << " and " << glyphs[j].name.toStdString() << " share a glyph";
+        }
 }
 
 // B-8: a feature that does not exist has no toolbar, overflow or menu entry.

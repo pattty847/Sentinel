@@ -378,6 +378,7 @@ set(SENTINEL_SVG_FILES
     "${SENTINEL_SVG_DIR}/search.svg"
     "${SENTINEL_SVG_DIR}/settings.svg"
     "${SENTINEL_SVG_DIR}/tpo_chart.svg"
+    "${SENTINEL_SVG_DIR}/volume_profile.svg"
     "${SENTINEL_SVG_DIR}/footprint.svg"
     "${SENTINEL_SVG_DIR}/refresh.svg"
     "${SENTINEL_SVG_DIR}/auto-refresh.svg"
@@ -433,6 +434,7 @@ set_source_files_properties("${SENTINEL_SVG_DIR}/reset_settings.svg" PROPERTIES 
 set_source_files_properties("${SENTINEL_SVG_DIR}/search.svg" PROPERTIES QT_RESOURCE_ALIAS "search.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/settings.svg" PROPERTIES QT_RESOURCE_ALIAS "settings.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/tpo_chart.svg" PROPERTIES QT_RESOURCE_ALIAS "tpo_chart.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/volume_profile.svg" PROPERTIES QT_RESOURCE_ALIAS "volume_profile.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/footprint.svg" PROPERTIES QT_RESOURCE_ALIAS "footprint.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/refresh.svg" PROPERTIES QT_RESOURCE_ALIAS "refresh.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/auto-refresh.svg" PROPERTIES QT_RESOURCE_ALIAS "auto-refresh.svg")
