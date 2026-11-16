@@ -310,7 +310,7 @@ void WatchlistDock::refreshRowState() {
         item->setData(active, ActiveRole);
         for (int column = 0; column < m_model->columnCount(); ++column) {
             auto* cell = m_model->item(row, column);
-            QFont font = m_tree->font();
+            QFont font; // Resolve family and size from the view, including later font changes.
             font.setWeight(active ? QFont::Medium : QFont::Normal);
             cell->setFont(font);
             if (column > 0) cell->setForeground(active ? theme::text() : theme::text3());

@@ -131,6 +131,12 @@ TEST(WatchRail, ActiveRowPaintsOnlyTwoAccentPixelsAtTheLeft) {
     EXPECT_EQ(image.pixelColor(0, rect.center().y()), QColor("#00AAFF"));
     EXPECT_EQ(image.pixelColor(1, rect.center().y()), QColor("#00AAFF"));
     EXPECT_NE(image.pixelColor(2, rect.center().y()), QColor("#00AAFF"));
+    QFont changed("Monaco", 14);
+    tree->setFont(changed);
+    const auto rowFont = tree->model()->index(0, 0).data(Qt::FontRole).value<QFont>().resolve(tree->font());
+    EXPECT_EQ(rowFont.family(), changed.family());
+    EXPECT_EQ(rowFont.pointSize(), changed.pointSize());
+    EXPECT_EQ(rowFont.weight(), QFont::Medium);
     dock.setChartSwitchState("ETH-USD", "");
     EXPECT_FALSE(tree->model()->index(0, 0).data(WatchlistDock::ActiveRole).toBool());
     EXPECT_EQ(tree->model()->index(0, 0).data(Qt::FontRole).value<QFont>().weight(), QFont::Normal);
