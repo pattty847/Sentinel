@@ -617,6 +617,20 @@ TEST(MainWindowHealthIntegration, LocalHostPolicyRefusalClearsOptimisticRailPend
     }
 }
 
+TEST(MainWindowHealthIntegration, StatusClusterIsAtTheLeftOfTheWindow) {
+    MainWindowGPU window;
+    auto* status = window.findChild<StatusBar*>();
+    ASSERT_TRUE(status);
+    // Expose the QWidget status host without starting the chart scene or GUI services.
+    auto* host = window.statusBar();
+    host->setParent(nullptr);
+    std::unique_ptr<QStatusBar> owner(host);
+    host->resize(1400, 28);
+    host->show();
+    QCoreApplication::processEvents();
+    EXPECT_LT(status->x(), 16);
+}
+
 TEST(MainWindowHealthIntegration, DefaultLayoutPreservesNavigationRailCapAtNarrowAndWideWidths) {
     MainWindowGPU window;
     auto* rail = window.findChild<WatchlistDock*>();

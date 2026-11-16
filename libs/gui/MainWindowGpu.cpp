@@ -354,7 +354,7 @@ void MainWindowGPU::setupUI() {
     m_subscribeButton = symbolControls.subscribeButton;
     
     // Add status bar to main window
-    statusBar()->addPermanentWidget(m_statusBar);
+    statusBar()->addWidget(m_statusBar, 1);
     statusBar()->setStyleSheet("QStatusBar { background-color: #1e1e1e; border-top: 1px solid #333; }");
     connect(this, &MainWindowGPU::symbolChanged, m_secDock, &SecFilingDock::onSymbolChanged);
     connect(this, &MainWindowGPU::symbolChanged, m_heatmapDock, &ChartDock::onSymbolChanged);

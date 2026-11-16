@@ -13,6 +13,10 @@
 #include <QComboBox>
 #include <QApplication>
 #include <QMainWindow>
+#include "widgets/StatusBar.hpp"
+#include <QLabel>
+#include <QFrame>
+#include <QStatusBar>
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTest>
@@ -97,6 +101,23 @@ TEST(ShellChrome, SplittersKeepAOnePixelLineInsideAFivePixelHandle) {
     host.ensurePolished();
     EXPECT_EQ(host.style()->pixelMetric(QStyle::PM_DockWidgetSeparatorExtent, nullptr, &host), 5);
     qApp->setStyleSheet(previous);
+}
+
+TEST(ShellChrome, StatusFieldsRemainOneLeftClusterAtWideSizes) {
+    StatusBar bar;
+    bar.resize(1200, 28);
+    bar.show();
+    QCoreApplication::processEvents();
+    auto* symbol = bar.findChild<QLabel*>("marketSymbol");
+    auto* state = bar.findChild<QLabel*>("marketState");
+    auto* age = bar.findChild<QLabel*>("marketBookAge");
+    EXPECT_EQ(symbol->x(), 8);
+    EXPECT_LT(state->x() - symbol->geometry().right(), 24);
+    EXPECT_LT(age->x() - state->geometry().right(), 24);
+    EXPECT_LT(age->geometry().right(), 500);
+    const auto dividers = bar.findChildren<QFrame*>("statusSeparator");
+    ASSERT_EQ(dividers.size(), 2);
+    for (auto* divider : dividers) EXPECT_EQ(divider->width(), 1);
 }
 
 TEST(ShellChrome, TitlesFollowTabSplitHideFloatAndRestore) {

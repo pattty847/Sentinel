@@ -1,5 +1,7 @@
 #include "StatusBar.hpp"
 #include "Version.hpp"
+#include "../themes/ThemePalette.hpp"
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QShowEvent>
@@ -18,11 +20,22 @@ StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
     m_ageLabel->setToolTip("Time since the last accepted book message. A quiet market is not necessarily stale.");
     m_versionLabel = new QLabel(QString::fromStdString(Sentinel::getVersionString()), this);
     m_versionLabel->hide();
-    setStyleSheet("StatusBar QLabel { color: #a0a0a0; } QLabel#marketSymbol { color: #ddd; font-weight: bold; }");
+    setStyleSheet(QStringLiteral("StatusBar QLabel { color:%1; font-size:11px; font-weight:400; }"
+                                "QLabel#marketSymbol { color:%2; }")
+                      .arg(theme::text3().name(), theme::text().name()));
+    const auto separator = [this, layout] {
+        auto* line = new QFrame(this);
+        line->setObjectName("statusSeparator");
+        line->setFixedSize(1, 12);
+        line->setStyleSheet(QStringLiteral("background:%1;").arg(theme::line().name()));
+        layout->addWidget(line);
+    };
     layout->addWidget(m_symbolLabel);
+    separator();
     layout->addWidget(m_stateLabel);
-    layout->addStretch();
+    separator();
     layout->addWidget(m_ageLabel);
+    layout->addStretch();
     layout->addWidget(m_versionLabel);
     m_ageTimer.setInterval(1000);
     connect(&m_ageTimer, &QTimer::timeout, this, &StatusBar::refresh);
