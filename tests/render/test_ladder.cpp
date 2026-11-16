@@ -1217,9 +1217,9 @@ TEST(WallRadar, TheOffScreenWallIsTheNearestThatPassesTheMultiple) {
     }
 }
 
-TEST(WallRadar, WallBarsUseThePremultipliedWallColours) {
+TEST(WallRadar, BarsUseTheirSideColourPremultiplied) {
     using Rgba = std::array<uchar, 4>;
-    const Rgba bid{34, 150, 139, 230}, ask{215, 75, 72, 230};
+    const Rgba bid{0, 128, 128, 128}, ask{128, 100, 0, 128}; // the side colours at 50%
     const Rgba bidWall{0, 220, 220, 220}, askWall{220, 173, 0, 220};
     const Rgba bidHot{170, 255, 255, 255}, askHot{255, 228, 128, 255}; // brighter, same side
     for (const bool radar : {true, false}) {

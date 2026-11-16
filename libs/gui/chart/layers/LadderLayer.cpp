@@ -18,19 +18,22 @@ namespace {
 constexpr int kVerticesPerBar = 6;
 constexpr int kMaxVertices = LadderSnapshot::kMaxRows * 2 * kVerticesPerBar;
 struct Rgba { uchar r, g, b, a; };
-// Wall bars (the radar) take their side's colour, the Electric palette's top stops (bid
-// cyan, ask amber); a hot wall (a recent flicker) is brighter: its side's colour lifted
+// Liquidity colours only (principle 1): every bar takes its side's colour, the Electric
+// palette's top stops (bid cyan, ask amber). Plain bars at half alpha; wall bars (the
+// radar) stronger; a hot wall (a recent flicker) brighter still: its side's colour lifted
 // toward white at full alpha. Straight values here (the owner tunes them live), stored
 // premultiplied (QSGVertexColorMaterial).
 constexpr Rgba premultiply(Rgba c) {
     return {uchar((c.r * c.a + 127) / 255), uchar((c.g * c.a + 127) / 255), uchar((c.b * c.a + 127) / 255), c.a};
 }
+constexpr Rgba kBidSrgb{0, 255, 255, 128};
+constexpr Rgba kAskSrgb{255, 200, 0, 128};
 constexpr Rgba kBidWallSrgb{0, 255, 255, 220};
 constexpr Rgba kAskWallSrgb{255, 200, 0, 220};
 constexpr Rgba kBidHotSrgb{170, 255, 255, 255};
 constexpr Rgba kAskHotSrgb{255, 228, 128, 255};
-constexpr Rgba kBid{34, 150, 139, 230};
-constexpr Rgba kAsk{215, 75, 72, 230};
+constexpr Rgba kBid = premultiply(kBidSrgb);
+constexpr Rgba kAsk = premultiply(kAskSrgb);
 constexpr Rgba kBidWall = premultiply(kBidWallSrgb);
 constexpr Rgba kAskWall = premultiply(kAskWallSrgb);
 constexpr Rgba kBidHot = premultiply(kBidHotSrgb);
