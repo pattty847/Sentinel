@@ -39,7 +39,6 @@ WatchlistDock::WatchlistDock(QWidget* parent)
     : DockablePanel("WatchlistDock", "Watchlist", parent)
     , m_tree(new WatchTreeView(m_contentWidget))
     , m_model(new QStandardItemModel(this)) {
-    setMaximumWidth(280);
     initPresets();
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
     settings.beginGroup(kSettingsGroup);

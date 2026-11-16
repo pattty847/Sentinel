@@ -98,6 +98,21 @@ TEST(WatchRail, PendingAckRefusalKeyboardAndCatalogTruth) {
     EXPECT_TRUE(status->text().contains("unavailable"));
 }
 
+TEST(WatchRail, NameColumnUsesTheExpandedDockWidth) {
+    WatchlistDock dock;
+    EXPECT_EQ(dock.maximumWidth(), QWIDGETSIZE_MAX);
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    dock.resize(320, 400);
+    dock.show();
+    QCoreApplication::processEvents();
+    const int symbolWidth = tree->columnWidth(0);
+    const int nameWidth = tree->columnWidth(1);
+    dock.resize(640, 400);
+    QCoreApplication::processEvents();
+    EXPECT_EQ(tree->columnWidth(0), symbolWidth);
+    EXPECT_GE(tree->columnWidth(1), nameWidth + 300);
+}
+
 TEST(WatchRail, PinsPersistWithDefaultFormatSettings) {
     QTemporaryDir settingsDir;
     ASSERT_TRUE(settingsDir.isValid());
