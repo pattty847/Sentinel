@@ -62,7 +62,7 @@ TpoStyleEditor::TpoStyleEditor(QWidget* parent) : QWidget(parent) {
     m_reach = new QComboBox(this);
     m_reach->setObjectName("tpoStyle.reach");
     m_reach->addItem("Profile width", "profile");
-    m_reach->addItem("Across the session", "session");
+    m_reach->addItem("Whole session", "session");
     m_reach->setToolTip("POC, VAH, VAL, IBH and IBL lines run across the profile or across the whole session.");
     form->addRow("Level lines", m_reach);
     for (QWidget* field : {static_cast<QWidget*>(m_preset), static_cast<QWidget*>(m_reach)})

@@ -2180,6 +2180,43 @@ TEST(HeatmapSettingsDialogLook, PlainNamesAndAnAdvancedGroupForInternals) {
     EXPECT_EQ(model.settings().cvdReset, "tpoSession");
 }
 
+// SET-5: one field style: every combo and spin box outside a table is one height
+// and one of three widths, on a bg2 fill.
+TEST(HeatmapSettingsDialogLook, FieldsShareOneHeightAndThreeWidths) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    UnifiedGridRenderer renderer;
+    HeatmapSettingsDialog dialog(&model, &renderer);
+    TopToolbar::TickSelectorState ticks;
+    ticks.enabled = true;
+    ticks.offeredUnits = {100, 500};
+    ticks.drawnUnits = 100;
+    ticks.priceScale = 100;
+    dialog.setTickSelectorState(ticks); // refills the preset combo
+    int fields = 0;
+    for (auto *field : dialog.tabs()->findChildren<QWidget *>()) {
+        if (!qobject_cast<QComboBox *>(field) && !qobject_cast<QAbstractSpinBox *>(field)) continue;
+        bool inTable = false;
+        for (auto *p = field->parentWidget(); p; p = p->parentWidget()) inTable = inTable || qobject_cast<QTableWidget *>(p);
+        if (inTable) continue;
+        ++fields;
+        SCOPED_TRACE(field->objectName().toStdString());
+        EXPECT_EQ(field->minimumHeight(), 24);
+        EXPECT_EQ(field->maximumHeight(), 24);
+        EXPECT_EQ(field->minimumWidth(), field->maximumWidth());
+        EXPECT_TRUE(field->minimumWidth() == 64 || field->minimumWidth() == 96 || field->minimumWidth() == 128)
+            << field->minimumWidth();
+    }
+    EXPECT_GT(fields, 30);
+    dialog.tabs()->setCurrentIndex(1);
+    dialog.show();
+    QCoreApplication::processEvents();
+    auto *spin = child<QDoubleSpinBox>(dialog, "minRowPx");
+    const QImage pixels = spin->grab().toImage();
+    EXPECT_EQ(pixels.pixelColor(3, spin->height() / 2), theme::bg2()) << "bg2 fill";
+    EXPECT_EQ(pixels.pixelColor(spin->width() / 2, 0), theme::line()) << "line border";
+}
+
 // Qt fixes the scene graph backend at the first QQuickWindow of the process,
 // shown or not. The tests below construct plain windows, so main() selects the
 // rhi backend first; otherwise every OffscreenQuick after them fails with

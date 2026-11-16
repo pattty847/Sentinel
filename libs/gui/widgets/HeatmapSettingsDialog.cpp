@@ -71,7 +71,55 @@ QString dialogStyle() {
         "QToolButton#settingsHelp { color: @text3; background: transparent; border: 1px solid @line; border-radius: 8px;"
         " min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; padding: 0; }"
         "QToolButton#settingsHelp:hover { color: @text; border-color: @selLine; }"
-        "QLabel#settingsNote { color: @text3; }"));
+        "QLabel#settingsNote { color: @text3; }"
+        // Fields: one look for combos and spin boxes, chevrons inside the border.
+        "QComboBox, QAbstractSpinBox { background: @bg2; color: @text; border: 1px solid @line; border-radius: 3px;"
+        " padding: 0 22px 0 6px; }"
+        "QComboBox:focus, QAbstractSpinBox:focus { border-color: @accent; }"
+        "QComboBox:disabled, QAbstractSpinBox:disabled { color: @textOff; }"
+        "QComboBox::drop-down { subcontrol-origin: border; subcontrol-position: center right; width: 20px; border: none; background: transparent; }"
+        "QComboBox::down-arrow { image: url(:/svg/chevron_down.svg); width: 8px; height: 8px; }"
+        "QComboBox QAbstractItemView { background: @bg2; color: @text; border: 1px solid @line; selection-background-color: @sel; }"
+        "QAbstractSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 20px; border: none; background: transparent; }"
+        "QAbstractSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 20px; border: none; background: transparent; }"
+        "QAbstractSpinBox::up-arrow { image: url(:/svg/chevron_up.svg); width: 8px; height: 8px; }"
+        "QAbstractSpinBox::down-arrow { image: url(:/svg/chevron_down.svg); width: 8px; height: 8px; }"));
+}
+
+// Fields: one height and three widths (the smallest that fits the longest
+// choice or value), except inside tables, which size their own cells.
+constexpr int kFieldHeight = 24, kFieldChrome = 30; // 6 px inset, 22 px chevrons, 2 px border
+constexpr int kFieldWidths[] = {64, 96, 128};
+int fieldTextWidth(const QWidget *field) {
+    const QFontMetrics metrics(field->font());
+    int widest = 0;
+    const auto take = [&](const QString &text) { widest = std::max(widest, metrics.horizontalAdvance(text)); };
+    if (auto *combo = qobject_cast<const QComboBox *>(field)) {
+        for (int i = 0; i < combo->count(); ++i) take(combo->itemText(i));
+    } else if (auto *spin = qobject_cast<const QSpinBox *>(field)) {
+        for (int v : {spin->minimum(), spin->maximum()}) take(spin->prefix() + QString::number(v) + spin->suffix());
+        take(spin->specialValueText());
+    } else if (auto *spin = qobject_cast<const QDoubleSpinBox *>(field)) {
+        for (double v : {spin->minimum(), spin->maximum()})
+            take(spin->prefix() + QString::number(v, 'f', spin->decimals()) + spin->suffix());
+    }
+    return widest;
+}
+void sizeField(QWidget *field) {
+    const int need = fieldTextWidth(field) + kFieldChrome;
+    int width = kFieldWidths[std::size(kFieldWidths) - 1];
+    for (int w : kFieldWidths)
+        if (need <= w) { width = w; break; }
+    field->setFixedSize(width, kFieldHeight);
+}
+void applyFieldStyle(QWidget *page) {
+    for (auto *field : page->findChildren<QWidget *>()) {
+        if (!qobject_cast<QComboBox *>(field) && !qobject_cast<QAbstractSpinBox *>(field)) continue;
+        bool inTable = false;
+        for (auto *p = field->parentWidget(); p && p != page; p = p->parentWidget())
+            inTable = inTable || qobject_cast<QAbstractItemView *>(p);
+        if (!inTable) sizeField(field);
+    }
 }
 
 // One form grid on every tab: a right-aligned label column, then the fields.
@@ -257,7 +305,7 @@ void HeatmapGradientEditor::addRow(double position, const QString &color) {
     auto *spin = new QDoubleSpinBox(table_);
     spin->setRange(0, 1);
     spin->setAlignment(Qt::AlignRight);
-    spin->setStyleSheet("QDoubleSpinBox { padding:0px; }");
+    spin->setStyleSheet("QDoubleSpinBox { padding: 0 22px 0 2px; }");
     spin->setDecimals(3);
     spin->setSingleStep(0.05);
     spin->setKeyboardTracking(false);
@@ -414,7 +462,7 @@ void HeatmapSettingsDialog::buildUi() {
     m_tabs->addTab(scrollTab(buildDebugTab(), "debugSettingsScroll"), "Debug");
     m_tabs->addTab(scrollTab(buildTpoTab(), "tpoSettingsScroll"), "TPO");
     for (int i = 0; i < m_tabs->count(); ++i)
-        applyFormGrid(static_cast<QScrollArea *>(m_tabs->widget(i))->widget());
+        for (auto *pass : {applyFormGrid, applyFieldStyle}) pass(static_cast<QScrollArea *>(m_tabs->widget(i))->widget());
     for (int i = 0; i < m_tabs->count(); ++i)
         m_tabs->setTabToolTip(i, m_tabs->tabText(i) == "Budgets"
             ? QStringLiteral("Open memory settings. The GPU group is for this chart; the RAM group applies to all charts.")
@@ -525,9 +573,9 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     connect(m_tradesAboveCandles, &QCheckBox::toggled, this, [this](bool on) { apply({{"tradesAboveCandles", on}}); });
     m_bubblePlacement = new QComboBox(page);
     m_bubblePlacement->setObjectName("bubblePlacement");
-    m_bubblePlacement->addItem("Individual (trade time)", "individual");
-    m_bubblePlacement->addItem("Auto (zoom dependent)", "auto");
-    m_bubblePlacement->addItem("Slot (candle centre)", "slot");
+    m_bubblePlacement->addItem("Individual", "individual");
+    m_bubblePlacement->addItem("Auto", "auto");
+    m_bubblePlacement->addItem("Slot", "slot");
     form->addRow("Bubble placement", m_bubblePlacement);
     connect(m_bubblePlacement, &QComboBox::currentIndexChanged, this, [this] {
         apply({{"bubblePlacement", m_bubblePlacement->currentData().toString()}});
@@ -535,7 +583,7 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_tradeMinMode = new QComboBox(page);
     m_tradeMinMode->setObjectName("tradeMinNotionalMode");
     m_tradeMinMode->addItem("All trades", 0);
-    m_tradeMinMode->addItem("Auto (visible median)", -1);
+    m_tradeMinMode->addItem("Auto (median)", -1);
     m_tradeMinMode->addItem("Custom minimum", 1);
     form->addRow("Minimum notional (quote)", m_tradeMinMode);
     m_tradeMinNotional = doubleSpin(page, "tradeMinNotional", 0.01, 1e12, 100, 2);
@@ -1039,8 +1087,8 @@ void HeatmapSettingsDialog::applyBudgets() {
 void HeatmapSettingsDialog::setTickSelectorState(const TopToolbar::TickSelectorState &state) {
     m_tickState = state;
     TopToolbar::fillTickPresetCombo(m_manualTick, state,
-                                    state.enabled ? QStringLiteral("Loading presets...")
-                                                  : QStringLiteral("Presets come from loaded data (GPU renderer)"));
+                                    state.enabled ? QStringLiteral("Loading…") : QStringLiteral("No presets"));
+    sizeField(m_manualTick);
     m_manualTick->setEnabled(!state.offeredUnits.empty());
     m_manualTick->setToolTip(state.offeredUnits.empty()
         ? QStringLiteral("No loaded data offers presets yet (the GPU renderer loads them).")
