@@ -32,6 +32,8 @@ public:
 
     explicit AxisTextService(const ChartTextAtlas& atlas, QObject* parent = nullptr);
     static QColor textColor();
+    static bool tickClearOfDate(const QRectF& tick, const QRectF& date);
+    static constexpr int kDatePx = 13;
 
     void setPriceAxisSource(QObject* source);
     void setTimeAxisSource(QObject* source);

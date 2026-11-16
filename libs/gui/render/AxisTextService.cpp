@@ -35,6 +35,9 @@ AxisTextService::AxisTextService(const ChartTextAtlas& atlas, QObject* parent)
 }
 
 QColor AxisTextService::textColor() { return theme::text2(); }
+bool AxisTextService::tickClearOfDate(const QRectF& tick, const QRectF& date) {
+    return date.isEmpty() || !tick.intersects(date.adjusted(-2, 0, 2, 0));
+}
 
 void AxisTextService::setPriceAxisSource(QObject *source) {
     syncAxisTicks(m_priceAxisSource, m_priceAxisConnections, m_priceAxisTicks,
@@ -182,8 +185,8 @@ void AxisTextService::refreshAxisLayout() {
 
     const int nextPriceAxisWidth = AxisLayout::measurePriceAxisWidthPx(
         m_atlas, axisScale, priceLabels, m_priceAxisWidthPx);
-    const int nextTimeAxisHeight = std::max(36, AxisLayout::measureTimeAxisHeightPx(
-        m_atlas, axisScale, m_timeAxisHeightPx));
+    const int nextTimeAxisHeight = AxisLayout::measureTimeAxisHeightPx(
+        m_atlas, axisScale, m_timeAxisHeightPx);
 
     {
         std::lock_guard<std::mutex> lock(m_axisLayoutMutex);
@@ -337,7 +340,7 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
         0.5 * static_cast<qreal>(atlas.glyphTopPx() +
                                  atlas.glyphBottomPx()) *
         static_cast<qreal>(axisLayout.axisScale);
-    const qreal timeAnchorY = timeSafeRect.bottom() - 0.5 * axisLayout.axisLabelPx;
+    const qreal timeAnchorY = timeSafeRect.center().y();
     const QColor axisColor = textColor();
     for (const auto &tick : priceTicks) {
         ChartTextRun run;
@@ -360,6 +363,21 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
         }
         renderer.submitRun(run, ChartTextRenderer::Priority::High);
     }
+    QRectF dateRect;
+    if (!timeDate.isEmpty()) {
+        ChartTextRun date;
+        date.text = timeDate;
+        date.anchor = QPointF(timeSafeRect.left() + 4, timeAnchorY);
+        date.color = axisColor;
+        date.scale = float(kDatePx) / atlas.fontPx();
+        date.hAlign = ChartTextRun::HorizontalAlign::Left;
+        date.vAlign = ChartTextRun::VerticalAlign::Center;
+        date.useStableMetrics = true;
+        date.pixelSnap = axisPixelSnap;
+        if (AxisLayout::runFitsRect(atlas, date, timeSafeRect, &dateRect))
+            renderer.submitRun(date, ChartTextRenderer::Priority::High);
+        else dateRect = {};
+    }
     for (const auto &tick : timeTicks) {
         ChartTextRun run;
         run.text = tick.label;
@@ -375,22 +393,9 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
             continue;
         }
         if (runRect.left() < timeSafeRect.left() ||
-            runRect.right() > timeSafeRect.right()) {
+            runRect.right() > timeSafeRect.right() || !tickClearOfDate(runRect, dateRect)) {
             continue;
         }
         renderer.submitRun(run, ChartTextRenderer::Priority::High);
-    }
-    if (!timeDate.isEmpty()) {
-        ChartTextRun date;
-        date.text = timeDate;
-        date.anchor = QPointF(timeSafeRect.left() + 4, timeSafeRect.top() + 5);
-        date.color = axisColor;
-        date.scale = 10.0f / atlas.fontPx();
-        date.hAlign = ChartTextRun::HorizontalAlign::Left;
-        date.vAlign = ChartTextRun::VerticalAlign::Center;
-        date.useStableMetrics = true;
-        date.pixelSnap = axisPixelSnap;
-        if (AxisLayout::runFitsRect(atlas, date, timeSafeRect))
-            renderer.submitRun(date, ChartTextRenderer::Priority::High);
     }
 }

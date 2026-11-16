@@ -113,7 +113,7 @@ void TimeAxisModel::calculateTicks() {
         if (timestamp < timeStart - step) continue;
         double screenX = valueToScreenPosition(static_cast<double>(timestamp));
         if (screenX >= 0 && screenX <= getViewportWidth()) {
-            QString label = firstVisible
+            QString label = firstVisible && step < 86'400'000
                 ? QDateTime::fromMSecsSinceEpoch(timestamp, m_timezone).toString(step < 60000 ? "HH:mm:ss" : "HH:mm")
                 : formatTimeLabel(timestamp, step);
             addTick(static_cast<double>(timestamp), screenX, label, true);
