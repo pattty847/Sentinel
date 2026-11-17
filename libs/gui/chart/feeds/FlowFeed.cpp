@@ -215,6 +215,7 @@ void FlowFeed::selectSymbol() {
     const auto symbol = ports_.symbol ? ports_.symbol() : QString{};
     if (symbol == symbol_) return;
     symbol_ = symbol;
+    band_ = 0; // band hysteresis belongs to the old symbol's view
     buffer_.clear();
     withdraw();
 }
@@ -334,6 +335,7 @@ void FlowFeed::publishRows() {
     const auto* series = buffer_.series(symbol_, frame.activeTimeframeMs);
     // Numbers off caps the stage at Cells, as the layer does, so bands stay at the Cells height.
     const auto stage = !numbers_ && lod_ == FootprintStage::Numbers ? FootprintStage::Cells : lod_;
+    if (frame.activeTimeframeMs != bandTimeframeMs_) { band_ = 0; bandTimeframeMs_ = frame.activeTimeframeMs; }
     if (series && bin(out, *series, frame, stage, band_)) {
         band_ = out.bandRows;
         out.windowState = windowState(*series, frame);

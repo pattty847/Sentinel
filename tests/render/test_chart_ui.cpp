@@ -2925,6 +2925,46 @@ TEST(FootprintFlowFeed, EarlyNewSymbolHistorySurvivesSelectionAndHiddenLod) {
     EXPECT_EQ(layer.presentation().coverage.barCount, 0);
     feed.publishRows(); ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
 }
+TEST(FootprintFlowFeed, BandHistoryResetsOnSymbolAndTimeframeChange) {
+    chart::FootprintCellsLayer layer;
+    chart::FlowFeed feed(layer.mailbox());
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000;
+    auto& r = frame.raster;
+    r.valid = true; r.dpr = 1; r.tick = 1; r.tfMs = 1000; r.colPxF = 50; r.rowPxF = 5.9; // Cells
+    r.widthDev = 200; r.heightDev = 59;
+    r.drawnStartMs = 1000; r.drawnEndMs = 5000; r.drawnMinPrice = 95; r.drawnMaxPrice = 105;
+    QString symbol = "BTC-USD";
+    feed.setPorts({[&] { return frame; }, [&] { return symbol; }, [] {}});
+    feed.setEnabled(true);
+    const auto deliver = [&] {
+        auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+        batch->symbol = symbol; batch->timeframeMs = frame.activeTimeframeMs;
+        auto& bar = batch->bars.emplace_back().bar;
+        bar.startMs = frame.activeTimeframeMs; bar.timeframeMs = frame.activeTimeframeMs;
+        bar.nativeTick = 1; bar.baseScale = 1; bar.lowRow = 100; bar.rows = {{0, 10, 20}};
+        feed.receive(batch);
+    };
+    auto current = std::make_unique<chart::FlowSnapshot>();
+    const auto band = [&](double row) {
+        r.rowPxF = row;
+        feed.publishRows();
+        EXPECT_TRUE(layer.mailbox().take(current));
+        EXPECT_TRUE(current->valid);
+        return current->bandRows;
+    };
+    // 5.9 px rows need k = 2 for the 6 px Cells minimum; at 6 px k = 2 is held (6 + 1 margin).
+    deliver();
+    ASSERT_EQ(band(5.9), 2);
+    ASSERT_EQ(band(6), 2) << "held history";
+    symbol = "ETH-USD"; deliver();
+    EXPECT_EQ(band(6), 1) << "a new symbol starts without the old band history";
+    ASSERT_EQ(band(5.9), 2);
+    ASSERT_EQ(band(6), 2);
+    frame.activeTimeframeMs = 60000; r.tfMs = 60000;
+    r.drawnStartMs = 0; r.drawnEndMs = 240000; deliver();
+    EXPECT_EQ(band(6), 1) << "a new timeframe starts without the old band history";
+}
 
 TEST(FootprintKnobs, QmlWritesPersistAndProcessOnlyModelApplicationDoesNot) {
     TempStore store;
