@@ -49,6 +49,8 @@ public:
     QLabel* tickVeilLabel() const { return m_tickVeilLabel; }
     // "$0.5"; in a scaled unit "0.01 x1M" (PEPE's 1e-8 tick).
     static QString tickText(int64_t units, double priceScale, sentinel::PriceDisplayUnit unit = {});
+    // A positive value in fixed notation with its significant digits (no exponent).
+    static QString fixedText(double value);
     // Fills a preset combo (the toolbar's or the settings dialog's): only offered
     // presets are selectable; a shown value no loaded data builds (a locked Manual
     // tick) is listed as the current item, marked unavailable and disabled; with

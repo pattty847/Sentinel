@@ -2,6 +2,8 @@
 #include "SentinelLogging.hpp"
 #include "themes/ThemePalette.hpp"
 #include <QAction>
+#include <QLocale>
+#include <cmath>
 #include <QActionEvent>
 #include <QToolButton>
 #include <QWidget>
@@ -1187,12 +1189,27 @@ void TopToolbar::setLayerToggleStates(bool heatmapEnabled,
     }
 }
 
+QString TopToolbar::fixedText(double value) {
+    // The amount grammar of LiquidityRangeSlider::amountText (fixed notation,
+    // thousands separators, never an exponent) without its 3-digit rounding and
+    // floor: a tick is exact, so it keeps up to 12 significant digits.
+    if (!std::isfinite(value) || value <= 0) return QStringLiteral("0");
+    if (value >= 1000 && std::abs(value - std::round(value)) < 1e-9)
+        return QLocale(QLocale::English, QLocale::UnitedStates).toString(std::round(value), 'f', 0);
+    const int decimals = std::clamp(11 - int(std::floor(std::log10(value))), 0, 12);
+    QString text = QString::number(value, 'f', decimals);
+    if (text.contains(QLatin1Char('.'))) {
+        while (text.endsWith(QLatin1Char('0'))) text.chop(1);
+        if (text.endsWith(QLatin1Char('.'))) text.chop(1);
+    }
+    return text;
+}
+
 QString TopToolbar::tickText(int64_t units, double priceScale, sentinel::PriceDisplayUnit unit) {
     if (units <= 0 || !(priceScale > 0)) return QStringLiteral("-");
     if (unit.scaled())
-        return QString::number(unit.toDisplay(double(units) / priceScale), 'g', 12) + QLatin1Char(' ') +
-               QLatin1String(unit.tag());
-    return QStringLiteral("$") + QString::number(double(units) / priceScale, 'g', 12);
+        return fixedText(unit.toDisplay(double(units) / priceScale)) + QLatin1Char(' ') + QLatin1String(unit.tag());
+    return QStringLiteral("$") + fixedText(double(units) / priceScale);
 }
 
 void TopToolbar::fillTickPresetCombo(QComboBox* combo, const TickSelectorState& state, const QString& emptyText) {

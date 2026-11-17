@@ -489,6 +489,20 @@ TEST(ChartToolbar, SymbolFieldTooltipNamesTheFullSymbol) {
     EXPECT_EQ(toolbar.symbolSearch()->toolTip(), toolbar.symbolSearch()->placeholderText());
 }
 
+// Tick values read in fixed notation, never with an exponent.
+TEST(ChartToolbar, TickTextHasNoExponent) {
+    EXPECT_EQ(TopToolbar::tickText(1, 1e8), "$0.00000001");
+    EXPECT_EQ(TopToolbar::tickText(1, 1e5), "$0.00001");
+    EXPECT_EQ(TopToolbar::tickText(1, 100), "$0.01");
+    EXPECT_EQ(TopToolbar::tickText(15, 100), "$0.15");
+    EXPECT_EQ(TopToolbar::tickText(500, 100), "$5");
+    EXPECT_EQ(TopToolbar::tickText(10000, 100), "$100");
+    EXPECT_EQ(TopToolbar::tickText(250000, 100), "$2,500");
+    for (const int64_t units : {1, 3, 7, 25})
+        for (const double scale : {1e8, 1e10, 1e12})
+            EXPECT_FALSE(TopToolbar::tickText(units, scale).contains('e')) << units << "/" << scale;
+}
+
 TEST(ChartToolbar, WideChartNamesTickAndSeparatesAppearance) {
     TopToolbar toolbar;
     toolbar.resize(1920, 42);
