@@ -207,23 +207,11 @@ MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
         }
     });
 
-    // Track render-thread frame work and chart interaction for the status readout.
+    // Track render-thread frame work and chart interaction for telemetry and frame stats.
     if (m_qquickView) {
         PerformanceMonitor::instance().attachToWindow(m_qquickView);
     }
-    if (m_statusBar) {
-        auto& perfMon = PerformanceMonitor::instance();
-        connect(&perfMon, &PerformanceMonitor::frameStatsChanged, m_statusBar, &StatusBar::setFrameStats);
-        connect(&perfMon, &PerformanceMonitor::cpuUsageChanged, m_statusBar, &StatusBar::setCpuUsage);
-        connect(&perfMon, &PerformanceMonitor::gpuUsageChanged, m_statusBar, &StatusBar::setGpuUsage);
-        connect(&perfMon, &PerformanceMonitor::latencyChanged, m_statusBar, &StatusBar::setLatency);
-        connect(&perfMon, &PerformanceMonitor::uploadBandwidthChanged, m_statusBar, &StatusBar::setUploadBandwidth);
-        if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
-            connect(remote->streamClient(), &SentinelStreamClient::coinbaseLatencyReceived,
-                    m_statusBar, &StatusBar::setCoinbaseLatency, Qt::QueuedConnection);
-        }
-    }
-    
+
     m_modeController = new ChartModeController(this);
     if (m_qmlController) {
         m_qmlController->setChartModeController(m_modeController);

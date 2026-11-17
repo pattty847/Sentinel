@@ -298,6 +298,25 @@ TEST(MarketHealth, RemoteReconnectRequestRetainsAgesUntilFreshSnapshot) {
         client->bookDeliveryGeneration("BTC-USD"), "ready", 1); drainHealth();
     EXPECT_EQ(h.snapshot("BTC-USD").state, State::Live);
 }
+// The status bar shows market context only. A setter that discards its value
+// (CPU, GPU, frame stats, latency, Coinbase latency, upload bandwidth, a generic
+// Ready string) invites callers to wire data that never reaches the screen.
+template <class T> concept AcceptsCpuUsage = requires(T& t) { t.setCpuUsage(0); };
+template <class T> concept AcceptsGpuUsage = requires(T& t) { t.setGpuUsage(0); };
+template <class T> concept AcceptsFrameStats = requires(T& t) { t.setFrameStats(QString()); };
+template <class T> concept AcceptsLatency = requires(T& t) { t.setLatency(0); };
+template <class T> concept AcceptsCoinbaseLatency = requires(T& t) { t.setCoinbaseLatency(0); };
+template <class T> concept AcceptsUploadBandwidth = requires(T& t) { t.setUploadBandwidth(0.0); };
+template <class T> concept AcceptsReadyStatus = requires(T& t) { t.setReadyStatus(QString()); };
+TEST(MarketHealthWidgets, StatusBarOffersNoSetterThatDiscardsItsValue) {
+    EXPECT_FALSE(AcceptsCpuUsage<StatusBar>);
+    EXPECT_FALSE(AcceptsGpuUsage<StatusBar>);
+    EXPECT_FALSE(AcceptsFrameStats<StatusBar>);
+    EXPECT_FALSE(AcceptsLatency<StatusBar>);
+    EXPECT_FALSE(AcceptsCoinbaseLatency<StatusBar>);
+    EXPECT_FALSE(AcceptsUploadBandwidth<StatusBar>);
+    EXPECT_FALSE(AcceptsReadyStatus<StatusBar>);
+}
 TEST(MarketHealthWidgets, StatusAndTelemetryStopPollingWhileHiddenAndKeepUnknowns) {
     MarketHealth health; ready(health);
     int reads = 0;

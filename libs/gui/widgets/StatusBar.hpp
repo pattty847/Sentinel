@@ -14,15 +14,6 @@ public:
     void setMessage(const QString& message);
     void setConnectionStatus(bool connected);
     void setConnectionConnecting();
-    // Compatibility with existing hubs; these measurements are intentionally
-    // omitted from the compact status bar (including unsupported CPU/GPU zeros).
-    void setCpuUsage(int) {}
-    void setGpuUsage(int) {}
-    void setFrameStats(const QString&) {}
-    void setLatency(int) {}
-    void setCoinbaseLatency(int) {}
-    void setUploadBandwidth(double) {}
-    void setReadyStatus(const QString& status = "Ready");
     void showVersion();
 protected:
     void showEvent(QShowEvent*) override;

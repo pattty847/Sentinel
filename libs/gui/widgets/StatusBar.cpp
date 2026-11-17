@@ -82,5 +82,4 @@ void StatusBar::showEvent(QShowEvent* event) { QWidget::showEvent(event); refres
 void StatusBar::hideEvent(QHideEvent* event) { m_ageTimer.stop(); QWidget::hideEvent(event); }
 void StatusBar::setConnectionStatus(bool connected) { if (!m_health) m_stateLabel->setText(connected ? "Waiting for subscription" : "Disconnected"); }
 void StatusBar::setConnectionConnecting() { if (!m_health) m_stateLabel->setText("Initializing"); }
-void StatusBar::setReadyStatus(const QString&) { /* A generic Ready string cannot prove market health. */ }
 void StatusBar::showVersion() { m_versionLabel->setVisible(!m_versionLabel->isVisible()); }
