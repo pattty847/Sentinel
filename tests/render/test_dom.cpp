@@ -1919,8 +1919,17 @@ TEST_F(DomDock, LeanStripAndChartsKeepTheBaseLayoutAt320) {
     const int width = lean->width();
     EXPECT_EQ(lean->height(), 3 * row + 14 + std::max(16, row));
     EXPECT_EQ(lean->depthRect(), QRect(0, 2 * row - 1, width, 15));
-    const int historyLeft = fm.horizontalAdvance(lean->caption()) + 6;
+    // Base numbers: the history starts after BASE's caption text, whatever caption() returns.
+    ASSERT_EQ(width, 312); // 320 px dock less the 4 px content margins
+    const int historyLeft = fm.horizontalAdvance(QString::fromUtf8("±15 · 2m")) + 6;
     EXPECT_EQ(lean->historyRect(), QRect(historyLeft, 3 * row + 14, width - 3 - historyLeft, std::max(16, row)));
+    EXPECT_EQ(lean->historyRect().width(), 312 - 3 - historyLeft);
+    std::cout << "DOM_HISTORY_WIDTH=" << lean->historyRect().width() << '\n';
+    // The first price row (pinned at the current value with the DOM-10 toggles; was base + 5 px).
+    const int firstPrice = table->mapTo(dock.widget(), QPoint(0, 0)).y() + table->horizontalHeader()->height();
+    std::cout << "DOM_FIRST_PRICE=" << firstPrice << '\n';
+    constexpr int kFirstPrice = 166;
+    EXPECT_EQ(firstPrice, kFirstPrice);
     // Aggregation and spread/state stay two lines, as on base.
     EXPECT_LT(dock.findChild<QLabel*>("domAggregation")->y(), dock.findChild<QLabel*>("domBookSummary")->y());
     const QString directory = qEnvironmentVariable("DOM_LEAN_SHOT_DIR"); // optional diagnostic artifact
@@ -2064,9 +2073,9 @@ TEST_F(DomDock, LeanOnlyWorksOnExposedTicksAndResets) {
 }
 
 TEST_F(DomDock, LeanStatesItsQuoteUnitOnce) {
-    EXPECT_TRUE(static_cast<LeanGaugeWidget*>(dock.findChild<QWidget*>("domLeanStrip"))->caption().contains("USD"));
+    EXPECT_TRUE(static_cast<LeanGaugeWidget*>(dock.findChild<QWidget*>("domLeanStrip"))->depthCaption().contains("USD"));
     dock.onSymbolChanged("ETH-BTC");
-    EXPECT_TRUE(static_cast<LeanGaugeWidget*>(dock.findChild<QWidget*>("domLeanStrip"))->caption().contains("BTC"));
+    EXPECT_TRUE(static_cast<LeanGaugeWidget*>(dock.findChild<QWidget*>("domLeanStrip"))->depthCaption().contains("BTC"));
 }
 
 TEST_F(DomDock, LeanIgnoresPinnedLadderAndUsesNativeTick) {
@@ -2156,7 +2165,8 @@ TEST(DomLean, NearBandsLeftFarBandsRightInTheDimTokenWithTheUnitOnce) {
     ASSERT_LT(gauge.bands()[2].imbalance, 0);
     LeanGaugeWidget widget(gauge);
     widget.setUnit("USD");
-    EXPECT_EQ(widget.caption(), QString::fromUtf8("±15 USD · 2m"));
+    EXPECT_EQ(widget.depthCaption(), QString::fromUtf8("Depth ±100 USD")); // the unit, once
+    EXPECT_EQ(widget.caption(), QString::fromUtf8("±15 · 2m"));             // base's history caption
     widget.resize(400, widget.sizeHint().height());
     QImage image(widget.size(), QImage::Format_ARGB32_Premultiplied);
     image.fill(QColor("#1E1E1E"));

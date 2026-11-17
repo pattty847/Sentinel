@@ -11,9 +11,10 @@ public:
     // Public paint entry for the allocation/pixel test; no data access or computation here.
     void paint(QPainter& painter);
     QSize sizeHint() const override { return {280, minimumHeight()}; }
-    // The quote unit of the band distances ("USD"), shown once in the history caption.
+    // The quote unit of the band distances ("USD"), shown once in the depth label.
     void setUnit(const QString& unit);
     QString caption() const;
+    QString depthCaption() const;
     // Chart areas, which paint uses (test hooks; the strip's layout is held for an owner lab):
     // the mirrored depth polyline (baseline at its bottom, 14 px scale) and the history line.
     QRect depthRect() const { return {0, 2 * m_rowHeight - 1, width(), 15}; }

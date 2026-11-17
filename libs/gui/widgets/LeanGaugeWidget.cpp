@@ -50,8 +50,14 @@ void LeanGaugeWidget::setUnit(const QString& unit)
 
 QString LeanGaugeWidget::caption() const
 {
-    // The distances' unit, stated once.
-    return m_unit.isEmpty() ? QStringLiteral("±15 · 2m") : QStringLiteral("±15 %1 · 2m").arg(m_unit);
+    // The history caption keeps base's width so the history chart keeps its size.
+    return QStringLiteral("±15 · 2m");
+}
+
+QString LeanGaugeWidget::depthCaption() const
+{
+    // The distances' unit, stated once, in the depth label's row.
+    return m_unit.isEmpty() ? QStringLiteral("Depth ±100") : QStringLiteral("Depth ±100 %1").arg(m_unit);
 }
 
 void LeanGaugeWidget::updateMetrics()
@@ -79,7 +85,7 @@ void LeanGaugeWidget::prepareText()
         m_labels[i] = textImage("±" + QString::number(sentinel::book::LeanGauge::Distances[i]), textFont, m_scale, label);
     const std::array<QString, 7> states{"Waiting for book", "", "Bid only", "Ask only", "Invalid book", "Crossed · stale", "Near / far disagree"};
     for (size_t i = 0; i < states.size(); ++i) m_status[i] = textImage(states[i], textFont, m_scale, label);
-    m_depthLabel = textImage("Depth ±100", textFont, m_scale, label);
+    m_depthLabel = textImage(depthCaption(), textFont, m_scale, label);
     m_historyLabel = textImage(caption(), textFont, m_scale, label);
 }
 
