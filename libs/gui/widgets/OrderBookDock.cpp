@@ -572,21 +572,16 @@ void OrderBookDock::buildUi()
     m_status = label("domFreshness");
     // The row-grouping menu leads the aggregation line: the heading has no room for a
     // fifth control at the 180 px minimum (INV-125).
-    // One 22 px meta row (brief DOM-7): grouping menu, row size, spread, and the feed state
-    // only when it is not Live.
-    auto* meta = new QWidget(m_contentWidget);
-    meta->setObjectName("domMeta");
-    meta->setFixedHeight(22);
-    auto* aggregationLine = new QHBoxLayout(meta);
-    aggregationLine->setContentsMargins(0, 0, 0, 0);
-    aggregationLine->setSpacing(6);
+    auto* aggregationLine = new QHBoxLayout;
+    aggregationLine->setSpacing(4);
     aggregationLine->addWidget(m_aggregation, 1);
-    aggregationLine->addWidget(m_summary);
-    aggregationLine->addWidget(m_status);
-    for (QLabel* fitted : {m_summary, m_status}) fitted->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    layout->addLayout(aggregationLine);
+    auto* summaryLine = new QHBoxLayout;
+    summaryLine->setSpacing(4);
+    summaryLine->addWidget(m_summary, 1);
+    summaryLine->addWidget(m_status, 2);
     m_status->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    m_summary->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    layout->addWidget(meta);
+    layout->addLayout(summaryLine);
     m_status->setText("Waiting for book");
     buildLean(heading, layout);
     buildLadder(layout);
@@ -1209,13 +1204,12 @@ void OrderBookDock::updateSummary()
         m_status->setVisible(health.state != MarketHealth::State::Live);
         m_status->setToolTip(health.reason);
     } else {
-        // Non-remote sources retain their readiness facts with the shared words; state text
-        // shows only when it is not Live (brief DOM-7), the tooltip always has it.
+        m_status->setVisible(true);
+        // Non-remote sources retain their readiness facts with the shared words.
         const auto state = m_freshness.connected == false ? MarketHealth::State::Disconnected
             : m_freshness.snapshotStale ? MarketHealth::State::Stale
             : m_freshness.awaitingBook || m_freshness.lastChangeMs <= 0 ? MarketHealth::State::WaitingForBook
             : m_freshness.connected == true ? MarketHealth::State::Live : MarketHealth::State::Initializing;
-        m_status->setVisible(state != MarketHealth::State::Live);
         fullStatus = MarketHealth::stateText(state);
         if (m_freshness.lastChangeMs > 0) {
             const double seconds = std::max<qint64>(0, QDateTime::currentMSecsSinceEpoch() - m_freshness.lastChangeMs) / 1000.0;
@@ -1223,21 +1217,11 @@ void OrderBookDock::updateSummary()
         }
         m_status->setToolTip(fullStatus);
     }
-    const auto fitWidth = [](QLabel* label, const QString& text) {
-        label->setText(text);
-        const int width = label->fontMetrics().horizontalAdvance(text) + 2;
-        if (label->width() != width || label->minimumWidth() != width) label->setFixedWidth(width);
-    };
-    fitWidth(m_status, fullStatus);
-    // The row size yields first: whole " · " segments drop, never a cut number.
-    QString aggregation = m_model->aggregation(true);
-    const int room = m_aggregation->width();
-    while (m_aggregation->fontMetrics().horizontalAdvance(aggregation) > room && aggregation.contains(QStringLiteral(" · ")))
-        aggregation.truncate(aggregation.lastIndexOf(QStringLiteral(" · ")));
-    if (m_aggregation->fontMetrics().horizontalAdvance(aggregation) > room) aggregation.clear();
-    m_aggregation->setText(aggregation);
+    m_status->setText(fullStatus);
+    m_status->setMaximumWidth(m_status->fontMetrics().horizontalAdvance(m_status->text()) + 2);
+    m_aggregation->setText(m_model->aggregation(true));
     m_aggregation->setToolTip(m_model->aggregation() + "\n" + m_model->executionSummary());
-    fitWidth(m_summary, m_model->summary(!wide));
+    m_summary->setText(m_model->summary(!wide));
     m_summary->setToolTip(m_model->summary() + "\n" + m_model->executionSummary());
     updatePulseFooter();
 }

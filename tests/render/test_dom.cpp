@@ -1196,14 +1196,10 @@ TEST_F(DomDock, NarrowLadderFitsWithoutScrollingAndRestoresExecutionColumns) {
         const auto* summary = dock.findChild<QLabel*>("domBookSummary");
         const auto* freshness = dock.findChild<QLabel*>("domFreshness");
         EXPECT_FALSE(aggregation->wordWrap());
-        EXPECT_EQ(summary->y(), aggregation->y()); // one meta row
-        EXPECT_EQ(freshness->parentWidget(), aggregation->parentWidget());
-        EXPECT_LT(table->y() - (dock.findChild<QWidget*>("domLeanStrip")->isVisible() ? dock.findChild<QWidget*>("domLeanStrip")->height() + 2 : 0), 80); // heading + one meta row
-        // The row size yields whole segments, never a cut number; the tooltip keeps all of it.
-        EXPECT_LE(aggregation->fontMetrics().horizontalAdvance(aggregation->text()), aggregation->width()) << width;
-        EXPECT_LE(summary->fontMetrics().horizontalAdvance(summary->text()), summary->width()) << width;
-        if (width >= 400) EXPECT_TRUE(aggregation->text().contains("USD") && aggregation->text().contains("BTC"));
-        EXPECT_TRUE(aggregation->toolTip().contains("USD") && aggregation->toolTip().contains("BTC"));
+        EXPECT_EQ(summary->y(), freshness->y());
+        EXPECT_LT(table->y() - (dock.findChild<QWidget*>("domLeanStrip")->isVisible() ? dock.findChild<QWidget*>("domLeanStrip")->height() + 2 : 0), 110); // heading + two metadata lines, not a seven-line paragraph.
+        EXPECT_TRUE(aggregation->text().contains("USD"));
+        EXPECT_TRUE(aggregation->text().contains("BTC"));
         EXPECT_TRUE(table->horizontalHeader()->toolTip().contains("last 60 s by trade time"));
         EXPECT_TRUE(table->horizontalHeader()->toolTip().contains("unknown"));
     }
@@ -1903,7 +1899,9 @@ TEST_F(DomDock, DISABLED_SustainedUpdateAndRasterPaintBenchmark) {
     qApp->setStyleSheet(previousStyle);
 }
 
-TEST_F(DomDock, ControlsBeforeTheFirstPriceAreOneMetaRowAndA44PxLean) {
+TEST_F(DomDock, LeanStripAndChartsKeepTheBaseLayoutAt320) {
+    // The top strip's layout is on hold for an owner lab (DOM-7): pin the base geometry so a
+    // later change to the strip height or its chart areas is deliberate.
     const QString previousStyle = qApp->styleSheet();
     qApp->setStyleSheet(DarkTheme{}.stylesheet());
     QFont app = dock.font();
@@ -1914,20 +1912,18 @@ TEST_F(DomDock, ControlsBeforeTheFirstPriceAreOneMetaRowAndA44PxLean) {
     show();
     QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
     QCoreApplication::processEvents();
-    auto* lean = dock.findChild<QWidget*>("domLeanStrip");
+    auto* lean = static_cast<LeanGaugeWidget*>(dock.findChild<QWidget*>("domLeanStrip"));
     ASSERT_TRUE(lean->isVisible());
-    const int leanRow = std::max(14, lean->fontMetrics().height());
-    EXPECT_EQ(lean->height(), 2 * leanRow + std::max(16, leanRow)); // 44 px at the 10 pt Roboto Mono
-    EXPECT_EQ(dock.findChild<QWidget*>("domMeta")->height(), 22);
-    // Status text only when the feed is not Live; this book is live.
-    emit source.connectionStatusChanged(true);
-    source.update({{true, 200, 2}});
-    QTest::qWait(90);
-    EXPECT_TRUE(dock.findChild<QLabel*>("domFreshness")->isHidden()) << dock.findChild<QLabel*>("domFreshness")->text().toStdString();
-    const int firstPrice = table->mapTo(dock.widget(), QPoint(0, 0)).y() + table->horizontalHeader()->height();
-    EXPECT_LE(firstPrice, 125) << "was ~195 px (brief DOM-7)";
-    // Optional diagnostic artifact (same variable as the Lean snapshots), outside the checkout.
-    const QString directory = qEnvironmentVariable("DOM_LEAN_SHOT_DIR");
+    const QFontMetrics fm(lean->font());
+    const int row = std::max(14, fm.height());
+    const int width = lean->width();
+    EXPECT_EQ(lean->height(), 3 * row + 14 + std::max(16, row));
+    EXPECT_EQ(lean->depthRect(), QRect(0, 2 * row - 1, width, 15));
+    const int historyLeft = fm.horizontalAdvance(lean->caption()) + 6;
+    EXPECT_EQ(lean->historyRect(), QRect(historyLeft, 3 * row + 14, width - 3 - historyLeft, std::max(16, row)));
+    // Aggregation and spread/state stay two lines, as on base.
+    EXPECT_LT(dock.findChild<QLabel*>("domAggregation")->y(), dock.findChild<QLabel*>("domBookSummary")->y());
+    const QString directory = qEnvironmentVariable("DOM_LEAN_SHOT_DIR"); // optional diagnostic artifact
     if (!directory.isEmpty()) EXPECT_TRUE(dock.grab().save(directory + "/dom-320-synthetic.png"));
     qApp->setStyleSheet(previousStyle);
 }
@@ -2142,11 +2138,11 @@ TEST(DomLean, InheritsLargeFontAndMarksCrossedValuesStale) {
         for (int x = left; x < 250; ++x)
             if (fresh.pixelColor(x, y).lightness() > 150) { first = std::min(first, y); last = y; }
     EXPECT_GE(last - first + 1, fm.capHeight() - 2);
-    EXPECT_EQ(widget.height(), 2 * std::max(14, fm.height()) + std::max(16, fm.height())); // two band rows and one plot row
+    EXPECT_GT(widget.height(), 78);
     gauge.update({bids, asks, 0, 1, 202, 201}, 0, 500);
     ASSERT_EQ(gauge.state(), sentinel::book::LeanGauge::State::Crossed);
     const QImage stale = render();
-    const QRect status = widget.captionRect();
+    const QRect status(2, 2 * std::max(14, fm.height()) + 14, 230, fm.height());
     EXPECT_NE(fresh.copy(status), stale.copy(status)); // stale must override near/far disagreement
     EXPECT_EQ(fresh.copy(0, 0, 500, 2 * fm.height()), stale.copy(0, 0, 500, 2 * fm.height()));
 }
@@ -2205,19 +2201,10 @@ TEST(DomLean, PaintMirrorsBidLeftAskRightAndDrawsHistory) {
             for (int x = area.left(); x <= area.right(); ++x) count += image.pixelColor(x, y) == colour;
         return count;
     };
-    // Depth mirrored in its own box: bids left of its centre, asks right.
-    const QRect depth = widget.depthRect();
-    ASSERT_GT(depth.width(), 60);
-    const QRect depthBid(depth.left(), depth.top(), depth.width() / 2, depth.height());
-    const QRect depthAsk(depth.left() + depth.width() / 2 + 1, depth.top(), depth.width() / 2, depth.height());
-    EXPECT_GT(countColour(depthBid, bid), 30);
-    EXPECT_EQ(countColour(depthBid, ask), 0);
-    EXPECT_GT(countColour(depthAsk, ask), 30);
-    EXPECT_EQ(countColour(depthAsk, bid), 0);
-    // The ±15 history (bid-leaning for two minutes) fills its box beside the caption.
-    const QRect history = widget.historyRect();
-    EXPECT_GT(history.left(), widget.captionRect().right());
-    EXPECT_GT(countColour(history, bid), history.width() / 2);
+    EXPECT_GT(countColour(QRect(0, 2 * row, 200, 14), bid), 100);
+    EXPECT_EQ(countColour(QRect(200, 2 * row, 200, 14), bid), 0);
+    EXPECT_GT(countColour(QRect(200, 2 * row, 200, 14), ask), 100);
+    EXPECT_GT(countColour(QRect(100, 3 * row + 14, 297, std::max(16, row)), bid), 200);
 }
 
 // ---- Row grouping (client side) ----
