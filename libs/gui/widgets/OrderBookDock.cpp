@@ -26,10 +26,20 @@
 #include <QTableView>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <tuple>
 #include <array>
 #include <cmath>
+#include <limits>
 
 namespace {
+// The ladder header measures each section's own content (text, style padding, header font):
+// the 11 px header can be wider than the 10 px cells it labels (W-0155: "Sell vol" was clipped).
+class DomHeader : public QHeaderView {
+public:
+    using QHeaderView::QHeaderView;
+    int contentWidth(int section) const { return sectionSizeFromContents(section).width(); }
+};
+
 // Bars use the upper part of each side's palette ramp: its low end is black,
 // which would vanish on the dark ladder.
 constexpr double RampStart = 0.55;
@@ -59,10 +69,43 @@ QColor DomBarDelegate::barColor(bool bid, double fraction)
 
 QColor DomBarDelegate::sizeTextColor(bool bid, double fraction)
 {
+    // Opacity rises with the fraction from a floor that keeps 4.5:1 on the dark ladder.
     const QColor bar = barColor(bid, fraction);
     const auto tint = [](int channel) { return channel + (255 - channel) * 7 / 10; };
     return QColor(tint(bar.red()), tint(bar.green()), tint(bar.blue()),
-                  int(std::lround(255 * (0.5 + 0.5 * std::clamp(fraction, 0.0, 1.0)))));
+                  int(std::lround(255 * (0.8 + 0.2 * std::clamp(fraction, 0.0, 1.0)))));
+}
+
+QColor DomBarDelegate::over(const QColor& top, const QColor& bottom)
+{
+    const double a = top.alphaF();
+    const auto mix = [&](int t, int b) { return int(std::lround(t * a + b * (1 - a))); };
+    return QColor(mix(top.red(), bottom.red()), mix(top.green(), bottom.green()), mix(top.blue(), bottom.blue()));
+}
+
+double DomBarDelegate::contrast(const QColor& a, const QColor& b)
+{
+    const auto luminance = [](const QColor& c) {
+        const auto channel = [](double v) { return v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * channel(c.redF()) + 0.7152 * channel(c.greenF()) + 0.0722 * channel(c.blueF());
+    };
+    const double la = luminance(a), lb = luminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+QColor DomBarDelegate::inkOn(const QColor& under, const QColor& light)
+{
+    // The side's tint while it reads at the floor on what is under it, else dark ink; on a
+    // mid-luminance fill only pure white or black reach 4.5:1 (one always does).
+    if (contrast(over(light, under), under) >= ReadingFloor) return light;
+    QColor best = light;
+    double bestContrast = contrast(over(light, under), under);
+    for (const QColor& ink : {QColor(10, 14, 18), QColor(Qt::white), QColor(Qt::black)}) {
+        const double c = contrast(ink, under);
+        if (c >= ReadingFloor) return ink;
+        if (c > bestContrast) { best = ink; bestContrast = c; }
+    }
+    return best;
 }
 
 QColor DomBarDelegate::bestFill(bool bid) { return barColor(bid, 0.75); }
@@ -78,9 +121,10 @@ int DomBarDelegate::dimPrefixLength(const QString& price)
 
 QColor DomBarDelegate::eatenColor(bool bidLevel, double alpha)
 {
-    // Sellers eat bids (ask colour), buyers eat asks (bid colour).
-    QColor color = barColor(!bidLevel, 1);
-    color.setAlpha(int(std::lround(150 * std::clamp(alpha, 0.0, 1.0))));
+    // A trade is direction, not resting liquidity (brief principle 1): sellers eat bids (down
+    // red), buyers eat asks (up green), at 25% while fresh.
+    QColor color = bidLevel ? theme::negative() : theme::positive();
+    color.setAlpha(int(std::lround(EatenFlashAlpha * std::clamp(alpha, 0.0, 1.0))));
     return color;
 }
 
@@ -117,7 +161,7 @@ const DomBarDelegate::TagGlyphs& DomBarDelegate::tagGlyphs(const QFont& font, qr
         m_tags.fallback = std::max(m_tags.fallback, m_tags.width[i]);
     }
     const std::array<QColor, TagGlyphs::Colours> colours{sizeTextColor(true, 1), sizeTextColor(false, 1),
-        pulledColor(1), barColor(true, 1), barColor(false, 1)};
+        pulledColor(1), theme::positive(), theme::negative()};
     for (int k = 0; k < TagGlyphs::Colours; ++k) {
         QImage strip(int(std::ceil(total * scale)), int(std::ceil(m_tags.height * scale)), QImage::Format_ARGB32_Premultiplied);
         strip.setDevicePixelRatio(scale);
@@ -145,9 +189,10 @@ int DomBarDelegate::tagWidth(const TagGlyphs& glyphs, const QString& text) const
     return width;
 }
 
-void DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& opt, int row, bool bid,
-                                const QRect& area, double value, bool cumulative, const QString& label) const
+QRect DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& opt, int row, bool bid,
+                                 const QRect& area, double value, bool cumulative, const QString& label) const
 {
+    QRect marks;
     const DomPulseCell pulse = m_model->pulse(row, bid);
     const int span = std::max(0, area.width());
     // A bar extent [inner, outer] in fractions of the cell, drawn from the price side.
@@ -161,7 +206,8 @@ void DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& o
         // Added: a bright segment that grows outward from the old bar end.
         const double inner = m_model->barFraction(std::max(0.0, value - pulse.change), bid, cumulative);
         const double outer = m_model->barFraction(value, bid, cumulative);
-        painter->fillRect(extent(inner, inner + (outer - inner) * pulse.grow), addedColor(bid, pulse.changeAlpha));
+        marks = extent(inner, inner + (outer - inner) * pulse.grow);
+        painter->fillRect(marks, addedColor(bid, pulse.changeAlpha));
     } else if (pulse.change < 0 && pulse.changeAlpha > 0) {
         // Pulled: a dashed outline of the removed size beyond the bar.
         const double inner = m_model->barFraction(value, bid, cumulative);
@@ -175,17 +221,18 @@ void DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& o
             painter->fillRect(QRect(x, box.bottom(), w, 1), grey);
         }
         painter->fillRect(QRect(bid ? box.left() : box.right(), box.top(), 1, box.height()), grey);
+        marks = box;
     }
     // One tag per cell, the newer flash; left-aligned, opposite the right-aligned size.
     const bool eaten = pulse.eatenAlpha > 0 && pulse.eatenAlpha >= pulse.changeAlpha;
     const double alpha = eaten ? pulse.eatenAlpha : pulse.changeAlpha;
-    if (alpha <= 0) return;
+    if (alpha <= 0) return marks;
     const QString& tag = m_model->pulseTag(row, bid, eaten);
-    if (tag.isEmpty()) return;
+    if (tag.isEmpty()) return marks;
     const auto& glyphs = tagGlyphs(opt.font, painter->device()->devicePixelRatioF());
     const int needed = tagWidth(glyphs, tag) + (label.isEmpty() ? 0 : tagWidth(glyphs, label) + 6);
-    if (needed > opt.rect.width() - 6) return; // a cramped cell keeps the bar effect only
-    // Eaten: the aggressor's colour (buyers eat asks: bid colour); added: the side's tint; pulled: grey.
+    if (needed > opt.rect.width() - 6) return marks; // a cramped cell keeps the bar effect only
+    // Eaten: the aggressor's direction (buyers eat asks: up green); added: the side's tint; pulled: grey.
     const int colour = eaten ? (bid ? 4 : 3) : pulse.change > 0 ? (bid ? 0 : 1) : 2;
     const QImage& strip = glyphs.strips[colour];
     const qreal scale = glyphs.scale;
@@ -202,6 +249,7 @@ void DomBarDelegate::paintPulse(QPainter* painter, const QStyleOptionViewItem& o
         x += w;
     }
     painter->setOpacity(1);
+    return marks;
 }
 
 void DomBarDelegate::drawFitted(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text, const QColor& color)
@@ -217,6 +265,48 @@ void DomBarDelegate::drawFitted(QPainter* painter, const QStyleOptionViewItem& o
     painter->drawText(opt.rect.adjusted(3, 0, -3, 0), Qt::AlignRight | Qt::AlignVCenter, text);
 }
 
+QRect DomBarDelegate::sizeTextRect(const QStyleOptionViewItem& opt, const QString& text)
+{
+    if (text.isEmpty()) return {};
+    const QRect box = opt.rect.adjusted(3, 0, -3, 0);
+    const int width = std::min(box.width(), opt.fontMetrics.horizontalAdvance(text));
+    return {box.right() + 1 - width, opt.rect.top() + 2, width, std::max(0, opt.rect.height() - 4)};
+}
+
+QColor DomBarDelegate::textBacking() { return theme::bg0(); }
+
+QColor DomBarDelegate::rowRule()
+{
+    QColor rule = theme::line();
+    rule.setAlpha(128);
+    return rule;
+}
+
+void DomBarDelegate::drawSplit(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text,
+                               const QColor& onBar, const QColor& offBar, int edge, bool barRight)
+{
+    if (text.isEmpty()) return;
+    const QRect box = opt.rect.adjusted(3, 0, -3, 0);
+    const int left = box.right() + 1 - std::min(box.width(), opt.fontMetrics.horizontalAdvance(text));
+    // Wholly on one side of the bar edge: one pass.
+    const bool allOn = barRight ? edge <= left : edge > box.right();
+    const bool allOff = barRight ? edge > box.right() : edge <= left;
+    if (allOn || allOff) { // geometry alone decides the passes: Pulse never changes the paint calls
+        drawFitted(painter, opt, text, allOn ? onBar : offBar);
+        return;
+    }
+    // Straddling: the same text twice, each pass clipped to its side (no substrings).
+    const QRect barSide = barRight ? QRect(edge, opt.rect.top(), opt.rect.right() - edge + 1, opt.rect.height())
+                                   : QRect(opt.rect.left(), opt.rect.top(), edge - opt.rect.left(), opt.rect.height());
+    const QRect offSide = barRight ? QRect(opt.rect.left(), opt.rect.top(), edge - opt.rect.left(), opt.rect.height())
+                                   : QRect(edge, opt.rect.top(), opt.rect.right() - edge + 1, opt.rect.height());
+    painter->setClipRect(barSide);
+    drawFitted(painter, opt, text, onBar);
+    painter->setClipRect(offSide);
+    drawFitted(painter, opt, text, offBar);
+    painter->setClipping(false);
+}
+
 void DomBarDelegate::paintSize(QPainter* painter, const QStyleOptionViewItem& opt, const QModelIndex& index, const QString& label) const
 {
     const bool bid = index.column() == DomModel::Bid;
@@ -226,33 +316,59 @@ void DomBarDelegate::paintSize(QPainter* painter, const QStyleOptionViewItem& op
     const bool best = m_model->isBest(row, bid);
     const QRect area = opt.rect.adjusted(2, 2, -2, -2);
     const int span = std::max(0, area.width());
-    QColor text = sizeTextColor(bid, 0);
+    // Ink per side of the bar edge, each at the reading floor on what is under it.
+    const QColor ground = opt.palette.color(QPalette::Base);
+    QColor light = sizeTextColor(bid, 0), underBar = ground;
+    QRect bar;
     if (best) {
-        painter->fillRect(area, bestFill(bid));
-        text = QColor(10, 14, 18);
+        bar = area;
+        underBar = bestFill(bid);
+        painter->fillRect(area, underBar);
     } else if (value > 0) {
         const double fraction = m_model->barFraction(value, bid, cumulative);
         const int width = int(std::lround(fraction * span));
-        QRect bar = area;
+        bar = area;
         if (bid) bar.setLeft(area.right() - width + 1);
         else bar.setWidth(width);
         QColor fill = barColor(bid, fraction);
         fill.setAlpha(150);
         painter->fillRect(bar, fill);
-        text = sizeTextColor(bid, fraction);
+        underBar = over(fill, ground);
+        light = sizeTextColor(bid, fraction);
     }
-    paintPulse(painter, opt, row, bid, area, value, cumulative, label);
+    if (m_model->dimmed(row, value)) light = theme::text3(); // de-emphasised, never hidden
+    const QRect marks = paintPulse(painter, opt, row, bid, area, value, cumulative, label);
+    const QRect text = sizeTextRect(opt, label);
     if (!cumulative && !best) {
-        // Faint depth line: cumulative size from the touch, on the cumulative scale.
+        // Faint depth line: cumulative size from the touch, on the cumulative scale, at 35%
+        // and under the text: it stops at the digits' box instead of running through them.
         const double depth = m_model->barFraction(m_model->size(row, bid, true), bid, true);
         if (depth > 0) {
             const int offset = int(std::lround(depth * (span - 1)));
             QColor line = sizeTextColor(bid, depth);
-            line.setAlpha(70);
-            painter->fillRect(QRect(bid ? area.right() - offset : area.left() + offset, opt.rect.top(), 1, opt.rect.height()), line);
+            line.setAlpha(DepthLineAlpha);
+            const int x = bid ? area.right() - offset : area.left() + offset;
+            if (text.isEmpty() || x < text.left() - 1 || x > text.right() + 1) {
+                painter->fillRect(QRect(x, opt.rect.top(), 1, opt.rect.height()), line);
+            } else {
+                painter->fillRect(QRect(x, opt.rect.top(), 1, text.top() - opt.rect.top()), line);
+                painter->fillRect(QRect(x, text.bottom() + 1, 1, opt.rect.bottom() - text.bottom()), line);
+            }
         }
     }
-    drawFitted(painter, opt, label, text);
+    QColor offInk = inkOn(ground, light);
+    QColor onInk = bar.isEmpty() ? offInk : inkOn(underBar, light);
+    // Size text always wins (brief DOM-2): where a Pulse mark or the eaten-row flash lies under
+    // the digits, they get a dark backing and light ink. Pulse marks themselves are unchanged.
+    if (!text.isEmpty() && (marks.intersects(text) || m_model->pulse(row, true).eatenAlpha > 0 ||
+                            m_model->pulse(row, false).eatenAlpha > 0)) {
+        const QColor backing = textBacking();
+        painter->fillRect(text.adjusted(-2, 0, 2, 0).intersected(area), backing);
+        onInk = offInk = inkOn(backing, sizeTextColor(bid, 1));
+    }
+    const int edge = bar.isEmpty() ? (bid ? std::numeric_limits<int>::max() : std::numeric_limits<int>::min())
+                                   : bid ? bar.left() : bar.right() + 1;
+    drawSplit(painter, opt, label, onInk, offInk, edge, bid);
 }
 
 void DomBarDelegate::paintPrice(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text) const
@@ -284,6 +400,8 @@ void DomBarDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option
     opt.text.clear();
     const auto* style = opt.widget ? opt.widget->style() : QApplication::style();
     style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
+    // Rows are separated by a horizontal hairline only; no vertical rules (brief DOM-13).
+    painter->fillRect(QRect(opt.rect.left(), opt.rect.bottom(), opt.rect.width(), 1), rowRule());
     painter->save();
     // Eaten: the whole row flashes in the aggressor's colour while it fades.
     for (const bool bidLevel : {true, false}) {
@@ -351,13 +469,15 @@ QHBoxLayout* OrderBookDock::buildHeading()
     font.setBold(true);
     m_symbolLabel->setFont(font);
     m_symbolLabel->setMinimumWidth(0);
-    // The symbol yields width so the symbol, Σ and Recenter fit the 180 px minimum dock.
+    // The symbol yields width so the heading fits the 180 px minimum dock (Σ and Follow move
+    // to the meta menu below 300 px).
     m_symbolLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    m_recenter = new QPushButton("Recenter", m_contentWidget);
+    m_recenter = new QPushButton("Follow", m_contentWidget);
     m_recenter->setObjectName("domRecenter");
     m_recenter->setAccessibleName("Recenter and follow the market");
     m_recenter->setCheckable(true);
-    m_recenter->setToolTip("Follow the market. Scrolling pauses follow and pins the price ladder.");
+    m_recenter->setToolTip("Follow the market: on keeps the market centred. Scrolling turns it off and pins the price "
+                           "ladder; click to recenter and follow again.");
     connect(m_recenter, &QPushButton::clicked, this, &OrderBookDock::recenter);
     m_cumulative = new QToolButton(m_contentWidget);
     m_cumulative->setText("Σ");
@@ -396,8 +516,10 @@ void OrderBookDock::buildLadder(QVBoxLayout* layout)
     m_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_table->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     m_table->setTextElideMode(Qt::ElideNone);
+    m_table->setShowGrid(false); // the delegate draws the row hairline
     m_table->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_table->verticalHeader()->hide();
+    m_table->setHorizontalHeader(new DomHeader(Qt::Horizontal, m_table));
     tableChrome::apply(m_table);
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     m_table->horizontalHeader()->setDefaultAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -421,7 +543,17 @@ void OrderBookDock::buildUi()
     layout->setSpacing(2);
     auto* heading = buildHeading();
     auto* headingWidget = new QWidget(m_contentWidget);
+    headingWidget->setObjectName("domHeading");
     headingWidget->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    // Pulse, Lean, Σ and Follow share the one toggle look (brief WIN-3, DOM-10): off is
+    // transparent with a line border, on is the selection fill and border.
+    headingWidget->setStyleSheet(QStringLiteral(
+        "QToolButton, QPushButton { background: transparent; border: 1px solid %1; border-radius: 3px; "
+        "padding: 2px 6px; color: %2; }"
+        "QToolButton:hover, QPushButton:hover { border-color: %3; }"
+        "QToolButton:checked, QPushButton:checked { background: %4; border-color: %3; color: %2; }"
+        "QToolButton[hiddenByWidth=\"true\"]:checked { background: transparent; border: 1px dashed %3; }")
+        .arg(theme::line().name(), theme::text().name(), theme::selLine().name(), theme::sel().name()));
     heading->setContentsMargins(0, 0, 0, 0);
     heading->setSizeConstraint(QLayout::SetNoConstraint);
     headingWidget->setLayout(heading);
@@ -472,7 +604,7 @@ void OrderBookDock::buildLean(QHBoxLayout* heading, QVBoxLayout* layout)
     m_lean->setText("Lean");
     m_lean->setAccessibleName("Lean Gauge");
     m_lean->setCheckable(true);
-    m_lean->setToolTip("Book imbalance, depth and two minute history; expands at 280 px dock width.");
+    m_lean->setToolTip(QStringLiteral("Book imbalance, depth and two minute history; shows from %1 px dock width.").arg(LeanWidth));
     heading->insertWidget(2, m_lean);
     m_heading = heading;
     m_leanStrip = new LeanGaugeWidget(m_leanGauge, m_contentWidget);
@@ -500,18 +632,22 @@ void OrderBookDock::fitHeading()
 {
     // Restyling repolishes every button, so it happens only when compact mode flips. The
     // unmodified width is measured again only after a font, style or button-text change.
+    // Below MenuWidth, Σ and Follow move into the meta row's menu (brief DOM-4) so the symbol
+    // keeps its room; docking stays free at any width.
+    const bool narrow = width() < MenuWidth;
+    if (narrow != m_headingNarrow) {
+        m_headingNarrow = narrow;
+        m_cumulative->setVisible(!narrow);
+        m_recenter->setVisible(!narrow);
+    }
     if (m_headingNatural < 0) {
         if (m_headingCompact) applyHeadingStyle(false);
         m_headingCompact = false;
-        int needed = 4 * m_heading->spacing();
-        for (QWidget* button : {static_cast<QWidget*>(m_pulse), static_cast<QWidget*>(m_lean),
-                                static_cast<QWidget*>(m_cumulative), static_cast<QWidget*>(m_recenter)}) {
-            button->ensurePolished();
-            needed += button->sizeHint().width();
-        }
-        m_headingNatural = needed;
+        const auto natural = [](QWidget* button) { button->ensurePolished(); return button->sizeHint().width(); };
+        m_headingNarrowNatural = 2 * m_heading->spacing() + natural(m_pulse) + natural(m_lean);
+        m_headingNatural = m_headingNarrowNatural + 2 * m_heading->spacing() + natural(m_cumulative) + natural(m_recenter);
     }
-    const bool compact = m_headingNatural > width() - 8;
+    const bool compact = (narrow ? m_headingNarrowNatural : m_headingNatural) > width() - 8;
     if (compact == m_headingCompact) return;
     m_headingCompact = compact;
     applyHeadingStyle(compact);
@@ -542,7 +678,19 @@ void OrderBookDock::buildGrouping(QHBoxLayout* line)
     const QString mode = settings.value("OrderBookDock/grouping", "auto").toString();
     m_groupMode = mode == "fixed" ? Grouping::Fixed : mode == "link" ? Grouping::Link : Grouping::Auto;
     m_fixedTick = settings.value("OrderBookDock/groupTick", 0.0).toDouble();
+    m_model->setSizeFormat(DomModel::sizeFormatFromKey(settings.value("OrderBookDock/domSizeFormat").toString()));
+    buildSizeMenu();
     updateGroupButton();
+}
+
+void OrderBookDock::setSizeFormat(DomModel::SizeFormat format)
+{
+    m_model->setSizeFormat(format);
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+    settings.setValue("OrderBookDock/domSizeFormat", DomModel::sizeFormatKey(format));
+    m_footerVersion = UINT64_MAX; // the footer totals use the same format
+    m_dirty = true;
+    if (m_displayActive) refreshDisplay();
 }
 
 void OrderBookDock::setGrouping(Grouping mode, double fixedTick)
@@ -594,6 +742,50 @@ void OrderBookDock::fillGroupMenu()
         const double tick = double(g) * native;
         const QString text = m_model->shownPrice(tick, tick) + (g == 1 ? QStringLiteral(" (server tick)") : QString());
         add(text, m_groupMode == Grouping::Fixed && m_model->requestedGroup() == g, [this, tick] { setGrouping(Grouping::Fixed, tick); });
+    }
+    m_groupMenu->addSeparator();
+    m_groupMenu->addMenu(m_sizeMenu);
+    if (m_headingNarrow) {
+        // Σ and Follow live here while the dock is too narrow for them in the heading.
+        m_groupMenu->addSeparator();
+        QAction* cumulative = m_groupMenu->addAction(QStringLiteral("Σ Cumulative size"));
+        cumulative->setObjectName("domMenuCumulative");
+        cumulative->setCheckable(true);
+        cumulative->setChecked(m_cumulative->isChecked());
+        connect(cumulative, &QAction::toggled, m_cumulative, &QToolButton::setChecked);
+        QAction* follow = m_groupMenu->addAction(QStringLiteral("Follow the market"));
+        follow->setObjectName("domMenuFollow");
+        follow->setCheckable(true);
+        follow->setChecked(m_follow);
+        connect(follow, &QAction::toggled, this, [this](bool on) {
+            if (on) recenter();
+            else stopFollowing();
+        });
+    }
+    for (QAction* action : m_sizeMenu->actions())
+        action->setChecked(action->data().toInt() == int(m_model->sizeFormat()));
+}
+
+void OrderBookDock::buildSizeMenu()
+{
+    // Size format lab (brief DOM-3): the owner compares the candidates live.
+    m_sizeMenu = new QMenu(QStringLiteral("Size format"), m_grouping);
+    m_sizeMenu->setObjectName("domSizeFormatMenu");
+    auto* formats = new QActionGroup(m_sizeMenu);
+    for (const auto& [format, text, tip] : {
+             std::tuple{DomModel::SizeFormat::Compact, "Compact: 3 digits (.0642)", "Three significant digits, no leading zero; under .0001 shows <.0001."},
+             std::tuple{DomModel::SizeFormat::Adaptive, "Adaptive digits (0.0642)",
+                        "Three significant digits, up to five while neighbouring sizes would read alike; leading zero."},
+             std::tuple{DomModel::SizeFormat::AdaptiveDim, "Adaptive, dim under $100",
+                        "Adaptive digits; sizes worth under $100 at their price are drawn dim (never hidden)."}}) {
+        QAction* action = m_sizeMenu->addAction(QString::fromUtf8(text));
+        action->setObjectName(QStringLiteral("domSizeFormat-") + DomModel::sizeFormatKey(format));
+        action->setToolTip(QString::fromUtf8(tip));
+        action->setData(int(format));
+        action->setCheckable(true);
+        formats->addAction(action);
+        const DomModel::SizeFormat chosen = format;
+        connect(action, &QAction::triggered, this, [this, chosen] { setSizeFormat(chosen); });
     }
 }
 
@@ -660,7 +852,9 @@ void OrderBookDock::updateGroupButton()
     // The mode names the button; the aggregation text beside it states the row size.
     m_grouping->setText(m_groupMode == Grouping::Auto ? QStringLiteral("Auto ▾")
                         : m_groupMode == Grouping::Link ? QStringLiteral("Link ▾") : QStringLiteral("Fixed ▾"));
-    QString tip = QStringLiteral("Row size %1 (%2 server ticks). ").arg(size).arg(group);
+    // The row size itself is said once, by the aggregation text beside this button: a tooltip
+    // is a snapshot, and a size inside it would contradict the live label after a regroup (B-13).
+    QString tip = QStringLiteral("Row grouping. ");
     if (m_groupMode == Grouping::Auto)
         tip += QStringLiteral("Auto: the smallest size at which %1% of the %2 rows each side of the touch hold size; "
                               "changes after %3 s.").arg(int(dom::AutoGroupRule::TargetFill * 100))
@@ -683,17 +877,27 @@ void OrderBookDock::updateGroupButton()
                       .arg(QString::number(m_linkTick, 'g', 12))
             : QStringLiteral("Linked: no heatmap tick yet; the nearest offered size is used.");
     else tip += QStringLiteral("Fixed.");
-    m_grouping->setToolTip(tip + QStringLiteral("\nClick to choose Auto, Link to heatmap, or a fixed size. "
-                                                "The spread above is the server's, whatever the row size."));
+    m_grouping->setToolTip(tip + QStringLiteral("\nClick to choose Auto, Link to heatmap, or a fixed size; "
+                                                "the row size is shown beside. The spread is the server's, whatever the row size."));
     if (m_groupNative > 0) sLog_App("DOM grouping mode=" << int(m_groupMode) << " group=" << group << " size=" << size);
 }
 
 void OrderBookDock::updateLeanVisibility()
 {
     fitHeading();
-    const bool visible = m_lean->isChecked() && width() >= 280;
+    const bool visible = m_lean->isChecked() && width() >= LeanWidth;
     m_leanStrip->setVisible(visible);
     if (!visible) m_leanGauge.reset();
+    // On but hidden by the width reads differently from on and shown (B-20).
+    const bool hiddenByWidth = m_lean->isChecked() && !visible;
+    if (m_lean->property("hiddenByWidth").toBool() == hiddenByWidth) return;
+    m_lean->setProperty("hiddenByWidth", hiddenByWidth);
+    m_lean->setToolTip(hiddenByWidth
+        ? QStringLiteral("Lean Gauge: on, hidden at this width; it shows from %1 px dock width.").arg(LeanWidth)
+        : QStringLiteral("Book imbalance, depth and two minute history; shows from %1 px dock width.").arg(LeanWidth));
+    m_lean->style()->unpolish(m_lean);
+    m_lean->style()->polish(m_lean);
+    m_lean->update();
 }
 
 void OrderBookDock::refreshLean()
@@ -767,6 +971,7 @@ void OrderBookDock::onSymbolChanged(const QString& symbol)
     m_symbolId = symbol.toStdString();
     ++m_leanGeneration;
     m_leanGauge.reset();
+    m_leanStrip->setUnit(symbol.contains('-') ? symbol.section('-', 1, 1) : QString());
     m_leanStrip->update();
     m_trades.clear();
     m_pulseTrades.clear();
@@ -859,7 +1064,6 @@ void OrderBookDock::stopFollowing()
 {
     if (m_programmaticScroll || !m_follow) return;
     m_follow = false;
-    m_recenter->setText("Recenter");
     m_recenter->setChecked(false);
 }
 
@@ -945,7 +1149,6 @@ void OrderBookDock::refreshDisplay()
     }
     refreshBook();
     if (m_dirty) {
-        m_recenter->setText(m_follow ? "Following" : "Recenter");
         m_recenter->setChecked(m_follow);
         m_table->horizontalHeader()->setToolTip(m_model->executionSummary());
         fitColumns();
@@ -966,9 +1169,14 @@ void OrderBookDock::fitColumns()
 {
     const int width = m_table->viewport()->width();
     const QFontMetrics fm(m_table->font());
-    const int priceWidth = std::max(54, fm.horizontalAdvance(m_model->index(0, DomModel::Price).data().toString()) + 8);
-    const int sizeWidth = fm.horizontalAdvance("0.0353") + 8;
-    const int countWidth = std::max(fm.horizontalAdvance("Sell vol"), fm.horizontalAdvance("+88.8k")) + 10;
+    const auto* header = static_cast<const DomHeader*>(m_table->horizontalHeader());
+    // Every column fits its header text as the header draws it, and its widest usual value.
+    const int priceWidth = std::max({54, fm.horizontalAdvance(m_model->index(0, DomModel::Price).data().toString()) + 8,
+                                     header->contentWidth(DomModel::Price)});
+    const int sizeWidth = std::max({fm.horizontalAdvance("0.0353") + 8, header->contentWidth(DomModel::Bid),
+                                    header->contentWidth(DomModel::Ask)});
+    const int countWidth = std::max({fm.horizontalAdvance("+88.8k") + 10, header->contentWidth(DomModel::Buys),
+                                     header->contentWidth(DomModel::Sells), header->contentWidth(DomModel::Delta)});
     const bool counts = width >= priceWidth + sizeWidth * 2 + countWidth * 3;
     const bool delta = width >= priceWidth + sizeWidth * 2 + countWidth;
     for (int col = DomModel::Buys; col < DomModel::Columns; ++col) {
@@ -1026,20 +1234,31 @@ void OrderBookDock::updatePulseFooter()
     m_footerVersion = m_model->pulseTotalsVersion();
     m_footerWidth = width;
     const QString full = m_model->pulseSummary();
-    // The longest form that fits; below that, whole " · " segments drop: never a cut number.
-    const auto fits = [&](const QString& text) { return m_pulseFooter->fontMetrics().horizontalAdvance(text) <= width; };
+    // The longest form whose every line fits: one line, one line without the biggest pull, then
+    // two lines (one per side). Never a cut number and never an unlabelled pair.
+    const auto fits = [&](const QString& text) {
+        for (const auto& line : QStringView(text).split(QLatin1Char('\n')))
+            if (m_pulseFooter->fontMetrics().horizontalAdvance(line.toString()) > width) return false;
+        return true;
+    };
     QString text = full;
-    for (const auto form : {DomModel::PulseText::Compact, DomModel::PulseText::NoMax, DomModel::PulseText::Tiny}) {
+    for (const auto form : {DomModel::PulseText::NoMax, DomModel::PulseText::TwoLines, DomModel::PulseText::Fields}) {
         if (fits(text)) break;
         text = m_model->pulseSummary(form);
     }
-    while (!fits(text) && text.contains(QStringLiteral(" · ")))
-        text = text.left(text.lastIndexOf(QStringLiteral(" · "))) + QStringLiteral(" …");
+    if (!fits(text)) {
+        // Last resort: one labelled field per line, and a field too wide for the dock is left
+        // out whole (the tooltip has every value). Never a cut number.
+        QStringList kept;
+        for (const auto& line : QStringView(text).split(QLatin1Char('\n')))
+            if (m_pulseFooter->fontMetrics().horizontalAdvance(line.toString()) <= width) kept.append(line.toString());
+        text = kept.join(QLatin1Char('\n'));
+    }
     m_pulseFooter->setText(text);
     const auto& totals = m_model->pulseTotals();
     m_pulseFooter->setToolTip(QStringLiteral("Book changes over the last %1 s in the rows on screen (plus %2 rows each way), all sizes:\n%3\n"
                                              "Added: asks %4 · bids %5 %6. Pulled = cancelled before price got there; eaten = removed by trades.")
         .arg(DomModel::PulseWindowMs / 1000).arg(DomModel::PulseMarginRows).arg(full)
-        .arg(DomModel::sizeText(totals.side[1].added), DomModel::sizeText(totals.side[0].added),
+        .arg(m_model->shownSize(totals.side[1].added), m_model->shownSize(totals.side[0].added),
              m_symbol.section('-', 0, 0)));
 }

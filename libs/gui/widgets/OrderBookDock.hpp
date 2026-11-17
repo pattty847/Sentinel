@@ -33,15 +33,30 @@ public:
     static QColor barColor(bool bid, double fraction);
     // A light tint of the bar colour whose opacity rises with the fraction.
     static QColor sizeTextColor(bool bid, double fraction);
+    // Reading floor (brief principle 5): every shown digit is at least 4.5:1 against what is under it.
+    static constexpr double ReadingFloor = 4.5;
+    static QColor over(const QColor& top, const QColor& bottom);
+    static double contrast(const QColor& a, const QColor& b);
+    // `light` when it reads at the floor on `under`, otherwise dark ink.
+    static QColor inkOn(const QColor& under, const QColor& light);
     // Fill of the best bid / best ask size cell.
     static QColor bestFill(bool bid);
     // Characters of a price text drawn dim: everything before its last three digits.
     static int dimPrefixLength(const QString& price);
-    // Liquidity Pulse: eaten rows flash in the aggressor's side colour (buyers
-    // eat asks: bid colour), added segments are bright, pulled outlines grey.
+    // Liquidity Pulse: eaten rows flash in the aggressor's direction colour at 25%
+    // (buyers eat asks: up green), added segments are bright, pulled outlines grey.
+    static constexpr int EatenFlashAlpha = 64;
     static QColor eatenColor(bool bidLevel, double alpha);
     static QColor addedColor(bool bid, double alpha);
     static QColor pulledColor(double alpha);
+    // Where a right-aligned size text sits in its cell (inside the 2 px inset), and the dark
+    // backing it gets wherever a Pulse mark lies under it.
+    static QRect sizeTextRect(const QStyleOptionViewItem& opt, const QString& text);
+    static QColor textBacking();
+    // The hairline under each row: the line token at 50%.
+    static QColor rowRule();
+    // The cumulative depth line in per-row mode: 35% alpha (brief DOM-8).
+    static constexpr int DepthLineAlpha = 89;
 private:
     // Pulse tags are drawn from glyph strips rendered once per font, scale and colour:
     // drawText, setPen(QColor) and setFont allocate in Qt on every call; drawImage does not.
@@ -56,11 +71,16 @@ private:
     };
     const TagGlyphs& tagGlyphs(const QFont& font, qreal scale) const;
     int tagWidth(const TagGlyphs& glyphs, const QString& text) const;
-    void paintPulse(QPainter* painter, const QStyleOptionViewItem& opt, int row, bool bid,
+    // Draws the cell's Pulse marks; returns the area of the bar marks (added, pulled).
+    QRect paintPulse(QPainter* painter, const QStyleOptionViewItem& opt, int row, bool bid,
                     const QRect& area, double value, bool cumulative, const QString& label) const;
     void paintSize(QPainter* painter, const QStyleOptionViewItem& opt, const QModelIndex& index, const QString& text) const;
     void paintPrice(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text) const;
     static void drawFitted(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text, const QColor& color);
+    // A size split at a bar edge: glyphs over the bar in `onBar`, the rest in `offBar`.
+    // barRight: the bar lies right of `edge` (bids), else left of it (asks).
+    static void drawSplit(QPainter* painter, const QStyleOptionViewItem& opt, const QString& text,
+                          const QColor& onBar, const QColor& offBar, int edge, bool barRight);
     DomModel* m_model;
     mutable TagGlyphs m_tags;
 };
@@ -76,6 +96,8 @@ public:
     const sentinel::book::LeanGauge& leanGauge() const { return m_leanGauge; }
     uint64_t leanSteps() const { return m_leanSteps; }
     static constexpr int PulseTradeCapacity = 4096;
+    // Below MenuWidth Σ and Follow move into the meta row's menu; the Lean strip needs LeanWidth.
+    static constexpr int MenuWidth = 300, LeanWidth = 280;
     // Row grouping (heading menu): Auto (DomGrouping AutoGroupRule with a hold), a fixed
     // row size in quote units (nearest offered choice), or Link (the heatmap's tick).
     enum class Grouping { Auto, Fixed, Link };
@@ -86,6 +108,9 @@ public:
     uint64_t autoGroupChanges() const { return m_autoHold.changes(); }
     // Heatmap tick shown now (Manual: the locked preset; Auto: the drawn tick), in quote units.
     void setHeatmapTick(qint64 units, double priceScale, bool manual);
+    // Size format lab (brief DOM-3), persisted as OrderBookDock/domSizeFormat.
+    void setSizeFormat(DomModel::SizeFormat format);
+    DomModel::SizeFormat sizeFormat() const { return m_model->sizeFormat(); }
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -115,6 +140,7 @@ private:
     void applyHeadingStyle(bool compact);
     void buildGrouping(QHBoxLayout* line);
     void fillGroupMenu();
+    void buildSizeMenu();
     void updateGrouping(const LiveOrderBook& book);
     void updateGroupButton();
     void refreshLean();
@@ -157,10 +183,11 @@ private:
     LeanGaugeWidget* m_leanStrip = nullptr;
     QToolButton* m_lean = nullptr;
     QHBoxLayout* m_heading = nullptr;
-    int m_headingNatural = -1; // unmodified heading width; -1: measure again
-    bool m_headingCompact = false;
+    int m_headingNatural = -1, m_headingNarrowNatural = -1; // unmodified heading widths; -1: measure again
+    bool m_headingCompact = false, m_headingNarrow = false;
     QToolButton* m_grouping = nullptr;
     QMenu* m_groupMenu = nullptr;
+    QMenu* m_sizeMenu = nullptr;
     Grouping m_groupMode = Grouping::Auto;
     double m_fixedTick = 0, m_linkTick = 0, m_linkScale = 0, m_groupNative = 0, m_shownNative = -1, m_shownLinkTick = -1, m_shownLinkScale = -1;
     qint64 m_linkUnits = 0, m_bandLevels = 0;

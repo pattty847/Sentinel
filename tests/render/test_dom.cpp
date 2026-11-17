@@ -2,6 +2,7 @@
 #include "models/DomGrouping.hpp"
 #include "mainwindow/AgentApiSnapshots.hpp"
 #include "themes/DarkTheme.hpp"
+#include "themes/ThemePalette.hpp"
 #include "widgets/OrderBookDock.hpp"
 #include "widgets/LeanGaugeWidget.hpp"
 #include "render/heatmap/HeatmapPalette.hpp"
@@ -127,7 +128,8 @@ TEST(DomModel, SameBucketUniqueBestAskStableEmptyRowsAndAlignment) {
     model.publish(book, trades, false);
     EXPECT_EQ(rowAt(model, 2000), row);
     EXPECT_EQ(reset.count(), 0);
-    EXPECT_TRUE(model.summary().contains("Bucketed spread 0.0 USD"));
+    EXPECT_TRUE(model.summary().contains("Bucketed spread <0.1 USD")) << model.summary().toStdString();
+    EXPECT_EQ(model.summary(true), "Spr <0.1"); // one bucket: under a tick, never "0.0"
     EXPECT_TRUE(model.aggregation().contains("0.1 USD"));
     EXPECT_TRUE(model.headerData(DomModel::Bid, Qt::Horizontal, Qt::ToolTipRole).toString().contains("BTC"));
 }
@@ -174,7 +176,7 @@ TEST(DomModel, TradesAreVolumeOverTheTrailingMinuteByTradeTimeUnknownNeverSells)
     EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Sells), .25);
     EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Delta), 1.25);
     EXPECT_EQ(model.index(r, DomModel::Buys).data().toString(), "1.5");
-    EXPECT_EQ(model.index(r, DomModel::Sells).data().toString(), ".25");
+    EXPECT_EQ(model.index(r, DomModel::Sells).data().toString(), "0.25"); // the default Adaptive format
     EXPECT_EQ(model.index(r, DomModel::Delta).data().toString(), "+1.25");
     const auto summary = model.executionSummary();
     EXPECT_TRUE(summary.contains("Traded volume in BTC · last 60 s by trade time · 5 trades")) << summary.toStdString();
@@ -194,6 +196,26 @@ TEST(DomModel, TradesAreVolumeOverTheTrailingMinuteByTradeTimeUnknownNeverSells)
     model.publish(book, trades, true, now + 51000);
     EXPECT_DOUBLE_EQ(vol(model, r, DomModel::Buys), 0);
     EXPECT_TRUE(model.index(r, DomModel::Delta).data().toString().isEmpty());
+}
+
+TEST(DomModel, AboutZeroDeltaIsDimNeutralNotRedOrGreen) {
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 1}, {false, 200.1, 1}});
+    DomTradeWindow trades;
+    trades.ingest(trade(200, AggressorSide::Buy, 0.3));
+    trades.ingest(trade(200, AggressorSide::Sell, 0.1));
+    trades.ingest(trade(200, AggressorSide::Sell, 0.2)); // 0.3 - 0.1 - 0.2 is float noise, not a direction
+    trades.ingest(trade(200.1, AggressorSide::Buy, 0.5));
+    DomModel model;
+    model.clear("BTC-USD");
+    model.publish(book, trades, true);
+    const auto delta = [&](qint64 key) { return model.index(rowAt(model, key), DomModel::Delta); };
+    ASSERT_NE(delta(2000).data(DomModel::QuantityRole).toDouble(), 0.0);
+    EXPECT_EQ(delta(2000).data().toString(), "≈0");
+    EXPECT_EQ(delta(2000).data(Qt::ForegroundRole).value<QColor>(), theme::text3());
+    EXPECT_EQ(delta(2001).data().toString(), "+0.5");
+    EXPECT_NE(delta(2001).data(Qt::ForegroundRole).value<QColor>(), theme::text3());
 }
 
 TEST(DomModel, RingEvictsOldestAndLabelsAWindowItCannotCover) {
@@ -511,13 +533,88 @@ TEST(DomModel, SizesShowThreeSignificantDigitsWithoutFloatNoise) {
     model.clear("BTC-USD");
     model.publish(book, {}, true);
     const auto bid = model.index(rowAt(model, 2000), DomModel::Bid);
-    EXPECT_EQ(bid.data().toString(), ".0032");
+    EXPECT_EQ(bid.data().toString(), "0.0032"); // the default Adaptive format keeps the leading zero
     EXPECT_DOUBLE_EQ(bid.data(DomModel::QuantityRole).toDouble(), noisy); // full value stays in data
     const auto tip = bid.data(Qt::ToolTipRole).toString();
     EXPECT_TRUE(tip.startsWith("0.0032 BTC resting bid")) << tip.toStdString();
     EXPECT_FALSE(tip.contains("0.00319999"));
     EXPECT_TRUE(model.index(rowAt(model, 2001), DomModel::Ask).data(Qt::ToolTipRole).toString().startsWith("1.234568 BTC"));
     EXPECT_EQ(model.index(rowAt(model, 2001), DomModel::Ask).data().toString(), "1.23");
+}
+
+TEST(DomModel, SizeFormatsNeverHideNeverZeroAndNeverUseAnExponent) {
+    const DomModel::SizeStyle adaptive{3, true, 1e-8}, four{4, true, 1e-8};
+    EXPECT_EQ(DomModel::sizeText(.0642, adaptive), "0.0642");
+    EXPECT_EQ(DomModel::sizeText(.000235, adaptive), "0.000235");
+    EXPECT_EQ(DomModel::sizeText(2.35e-5, adaptive), "0.0000235"); // compact shows <.0001
+    EXPECT_EQ(DomModel::sizeText(2.35e-5), "<.0001");
+    EXPECT_EQ(DomModel::sizeText(1.2e-9, adaptive), "<0.00000001");
+    EXPECT_EQ(DomModel::sizeText(1.114, adaptive), "1.11");
+    EXPECT_EQ(DomModel::sizeText(1.114, four), "1.114");
+    EXPECT_EQ(DomModel::sizeText(999.96, four), "1k");
+    EXPECT_EQ(DomModel::sizeText(999.94, four), "999.9");
+    EXPECT_EQ(DomModel::sizeText(1364.2, four), "1.364k");
+    EXPECT_EQ(DomModel::sizeText(7.1e12), "7.1t"); // was 7.1e+03b
+    EXPECT_EQ(DomModel::signedSizeText(-2.5e-6, adaptive), "-0.0000025");
+    EXPECT_EQ(DomModel::signedSizeText(0.1 + 0.2 - 0.3, adaptive), "≈0"); // float noise is cancellation
+    for (double v = 1.37e-8; v < 9e14; v *= 1.37)
+        for (const auto& style : {DomModel::SizeStyle{}, adaptive, four}) {
+            const QString text = DomModel::sizeText(v, style);
+            EXPECT_FALSE(text.contains('e')) << v;
+            EXPECT_NE(text, "0") << v;
+            EXPECT_FALSE(text.isEmpty()) << v;
+        }
+    for (const auto format : {DomModel::SizeFormat::Compact, DomModel::SizeFormat::Adaptive, DomModel::SizeFormat::AdaptiveDim})
+        EXPECT_EQ(DomModel::sizeFormatFromKey(DomModel::sizeFormatKey(format)), format);
+    EXPECT_EQ(DomModel::sizeFormatFromKey("junk"), DomModel::SizeFormat::Adaptive); // the brief's recommendation
+}
+
+TEST(DomModel, AdaptiveDigitsTellNeighbouringLevelsApartAndSettleWithoutFlicker) {
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 1.111}, {true, 199.9, 1.114}, {false, 200.1, 5}});
+    DomModel model;
+    model.clear("BTC-USD");
+    ASSERT_EQ(model.sizeFormat(), DomModel::SizeFormat::Adaptive);
+    qint64 now = 1'800'000'000'000;
+    model.publish(book, {}, true, now);
+    const auto text = [&](qint64 key) { return model.index(rowAt(model, key), DomModel::Bid).data().toString(); };
+    EXPECT_EQ(model.sizeStyle().digits, 4);
+    EXPECT_EQ(text(2000), "1.111");
+    EXPECT_EQ(text(1999), "1.114");
+    apply(book, {{true, 199.9, 3}}); // no two neighbours read alike at three digits any more
+    model.publish(book, {}, true, now += 67);
+    EXPECT_EQ(model.sizeStyle().digits, 4) << "held: no flicker on a live book";
+    EXPECT_EQ(text(2000), "1.111");
+    model.publish(book, {}, true, now += DomModel::SizeDigitsHoldMs);
+    EXPECT_EQ(model.sizeStyle().digits, 3);
+    EXPECT_EQ(text(2000), "1.11");
+    model.setSizeFormat(DomModel::SizeFormat::Compact);
+    EXPECT_EQ(text(2000), "1.11");
+    EXPECT_EQ(model.index(rowAt(model, 2001), DomModel::Ask).data().toString(), "5");
+    // Dimming: AdaptiveDim only, by notional at the row's price (USD quote).
+    EXPECT_FALSE(model.dimmed(rowAt(model, 2000), 0.4));
+    model.setSizeFormat(DomModel::SizeFormat::AdaptiveDim);
+    EXPECT_TRUE(model.dimmed(rowAt(model, 2000), 0.4));  // $80
+    EXPECT_FALSE(model.dimmed(rowAt(model, 2000), 0.6)); // $120
+}
+
+TEST(DomDelegate, EverySizeInkKeepsTheReadingFloorOnBarsAndBackground) {
+    for (const QColor ground : {QColor("#1E1E1E"), QColor("#1B1F24"), QColor("#0F1114")})
+        for (const bool bid : {true, false})
+            for (double f = 0; f <= 1.0001; f += 0.05) {
+                const QColor light = DomBarDelegate::sizeTextColor(bid, f);
+                const QColor off = DomBarDelegate::inkOn(ground, light);
+                EXPECT_GE(DomBarDelegate::contrast(DomBarDelegate::over(off, ground), ground), DomBarDelegate::ReadingFloor) << bid << f;
+                QColor fill = DomBarDelegate::barColor(bid, f);
+                fill.setAlpha(150);
+                const QColor bar = DomBarDelegate::over(fill, ground);
+                const QColor on = DomBarDelegate::inkOn(bar, light);
+                EXPECT_GE(DomBarDelegate::contrast(DomBarDelegate::over(on, bar), bar), DomBarDelegate::ReadingFloor) << bid << f;
+                const QColor best = DomBarDelegate::bestFill(bid);
+                EXPECT_GE(DomBarDelegate::contrast(DomBarDelegate::inkOn(best, light), best), DomBarDelegate::ReadingFloor) << bid;
+            }
+    EXPECT_GE(DomBarDelegate::contrast(theme::text3(), QColor("#1E1E1E")), DomBarDelegate::ReadingFloor); // dimmed sizes
 }
 
 TEST(DomModel, ManualAnchorAndRecenterAcrossRapidBookMoves) {
@@ -808,7 +905,7 @@ TEST(DomModel, LockedAndCrossedBooksRetainUniqueSideRows) {
             bids += side.contains("Bid"); asks += side.contains("Ask");
         }
         EXPECT_EQ(bids, 1); EXPECT_EQ(asks, 1);
-        EXPECT_TRUE(model.summary().contains(ask == 200 ? "spread 0.0" : "spread -1.0"));
+        EXPECT_TRUE(model.summary().contains(ask == 200 ? "spread <0.1" : "spread -1.0")) << model.summary().toStdString();
     }
 }
 
@@ -957,15 +1054,17 @@ TEST(DomPulse, ScrollFollowShiftSymbolSwitchAndWithdrawalProduceNoEvents) {
 TEST(DomPulse, FooterSumsEachKindPerSideAndNamesTheBiggestPull) {
     PulseRig rig;
     rig.step();
-    EXPECT_EQ(rig.model.pulseSummary(), "Asks pulled 0 eaten 0 · Bids pulled 0 eaten 0");
+    EXPECT_EQ(rig.model.pulseSummary(), "Ask pull 0 eat 0 · Bid pull 0 eat 0");
     const std::array first{rig.received(200.1, 1.1, sb::Aggressor::Buy), rig.received(200, 2, sb::Aggressor::Sell)};
     apply(rig.book, {{false, 200.1, 8.9}, {true, 200, 8}, {false, 200.3, 0}, {false, 200.4, 1.2}});
     rig.step(first);
     apply(rig.book, {{true, 199.7, 3.6}, {false, 200.2, 4.5}});
     rig.step();
     // Asks pulled 4 + 2.8, bids 0.4; the largest single pull is the 4 at 200.3.
-    EXPECT_EQ(rig.model.pulseSummary(), "Asks pulled 6.8 eaten 1.1 · Bids pulled .4 eaten 2 · biggest pull 4 @ 200.3");
-    EXPECT_EQ(rig.model.pulseSummary(DomModel::PulseText::Compact), "Ask pull 6.8 eat 1.1 · Bid pull .4 eat 2 · max 4 @ 200.3");
+    // One labelled grammar in every form (brief DOM-5).
+    EXPECT_EQ(rig.model.pulseSummary(), "Ask pull 6.8 eat 1.1 · Bid pull 0.4 eat 2 · max pull 4 @ 200.3");
+    EXPECT_EQ(rig.model.pulseSummary(DomModel::PulseText::NoMax), "Ask pull 6.8 eat 1.1 · Bid pull 0.4 eat 2");
+    EXPECT_EQ(rig.model.pulseSummary(DomModel::PulseText::TwoLines), "Ask pull 6.8 eat 1.1\nBid pull 0.4 eat 2");
     EXPECT_DOUBLE_EQ(rig.model.pulseTotals().side[1].added, 0.5);
     const auto version = rig.model.pulseTotalsVersion();
     rig.step();
@@ -1106,6 +1205,36 @@ TEST_F(DomDock, NarrowLadderFitsWithoutScrollingAndRestoresExecutionColumns) {
     }
 }
 
+TEST_F(DomDock, EveryHeaderTextFitsItsSectionAtTheDefaultFontAndWidths) {
+    // W-0155: the 11 px header over 10 px cells clipped "Sell vol" at its left edge.
+    const QString previousStyle = qApp->styleSheet();
+    qApp->setStyleSheet(DarkTheme{}.stylesheet());
+    QFont app = dock.font();
+    app.setPixelSize(10); // the GUI's 10 pt application font (FontManager)
+    dock.setFont(app);
+    source.update({{true, 200, 1}, {false, 200.1, 1}});
+    show();
+    auto* header = table->horizontalHeader();
+    ASSERT_EQ(header->font().pixelSize(), 11);
+    const QFontMetrics fm(header->font());
+    int volumeColumnsSeen = 0;
+    for (int width : {260, 280, 320, 400, 500, 650}) {
+        dock.resize(width, 600);
+        QCoreApplication::processEvents();
+        ASSERT_TRUE(QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection));
+        for (int col = 0; col < DomModel::Columns; ++col) {
+            if (table->isColumnHidden(col)) continue;
+            volumeColumnsSeen += col == DomModel::Sells;
+            const QString text = model->headerData(col, Qt::Horizontal, Qt::DisplayRole).toString();
+            // QSS padding 0 4px on each side of the text (TableChrome.hpp).
+            EXPECT_LE(fm.horizontalAdvance(text) + 8, header->sectionSize(col)) << text.toStdString() << " at " << width;
+        }
+    }
+    EXPECT_GT(volumeColumnsSeen, 0);
+    dock.setFont(QFont());
+    qApp->setStyleSheet(previousStyle);
+}
+
 TEST(DomDelegate, HeatmapRampPriceDigitsAndSizeTextTint) {
     // Samples of the heatmap's own default palette image (Electric): no invented colours.
     const auto texels = heatmap::gpu::paletteTexels(heatmap::gpu::gradientsFor(heatmap::HeatmapChartSettings{}));
@@ -1174,7 +1303,8 @@ TEST_F(DomDock, ScrollPinsPriceAndPositionThenButtonRestoresFollow) {
     dock.findChild<QPushButton*>("domRecenter")->click();
     EXPECT_NE(model->index(0, 0).data(DomModel::BucketRole), top);
     EXPECT_NEAR(table->visualRect(model->index(model->centerRow(), 0)).center().y(), table->viewport()->height() / 2, 22);
-    EXPECT_TRUE(dock.findChild<QPushButton*>("domRecenter")->text().contains("Following"));
+    EXPECT_TRUE(dock.findChild<QPushButton*>("domRecenter")->isChecked());
+    EXPECT_EQ(dock.findChild<QPushButton*>("domRecenter")->text(), "Follow");
     const auto recenteredTop = model->index(0, 0).data(DomModel::BucketRole);
     source.update({{true, 210, 0}, {false, 210.1, 0}, {true, 220, 1}, {false, 220.1, 1}});
     QTest::qWait(90);
@@ -1366,6 +1496,51 @@ TEST_F(DomDock, BestCellsFillInTheSideColourAndBarsUseTheRamp) {
     EXPECT_NE(pixel(next, DomModel::Bid, .45), pixel(next, DomModel::Bid, .55));
 }
 
+TEST_F(DomDock, DepthLineRunsUnderTheSizeTextAtThirtyFivePercent) {
+    // A deep wall far below keeps the cumulative line near the price side, inside the digits' box.
+    source.update({{true, 200, 10}, {true, 199.9, 5.0123}, {true, 199, 1000}, {false, 200.1, 5}});
+    dock.resize(650, 700);
+    show();
+    for (int i = 0; i < 2; ++i) QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
+    const QImage image = table->viewport()->grab().toImage();
+    const int row = rowAt(*model, 1999);
+    QStyleOptionViewItem opt;
+    opt.rect = table->visualRect(model->index(row, DomModel::Bid));
+    opt.font = table->font();
+    opt.fontMetrics = QFontMetrics(opt.font);
+    const QRect text = DomBarDelegate::sizeTextRect(opt, model->index(row, DomModel::Bid).data().toString());
+    const QRect area = opt.rect.adjusted(2, 2, -2, -2);
+    const int x = area.right() - int(std::lround(model->barFraction(model->size(row, true, true), true, true) * (area.width() - 1)));
+    ASSERT_GE(x, text.left() + 1);
+    ASSERT_LE(x, text.right() - 1);
+    EXPECT_NE(image.pixelColor(x, opt.rect.top()), image.pixelColor(x - 2, opt.rect.top())); // drawn above the text
+    EXPECT_EQ(image.pixelColor(x, text.top()), image.pixelColor(x - 2, text.top()));         // stopped at the digits
+    EXPECT_EQ(DomBarDelegate::DepthLineAlpha, 89);
+}
+
+TEST_F(DomDock, RowsHaveHorizontalHairlinesAndNoVerticalRules) {
+    source.update({{true, 200, 1}, {false, 200.1, 1}});
+    show();
+    EXPECT_FALSE(table->showGrid());
+    const QImage image = table->viewport()->grab().toImage();
+    const int row = rowAt(*model, 1997); // an empty row inside the viewport
+    const QRect bid = table->visualRect(model->index(row, DomModel::Bid));
+    const QRect price = table->visualRect(model->index(row, DomModel::Price));
+    ASSERT_TRUE(QRect(QPoint(), table->viewport()->size()).contains(bid));
+    const QColor ground = image.pixelColor(bid.center().x(), bid.center().y());
+    // Between two cells of the row: plain background, no vertical rule.
+    EXPECT_EQ(image.pixelColor(bid.right(), bid.center().y()), ground);
+    EXPECT_EQ(image.pixelColor(price.left(), price.center().y()), ground);
+    // The row's bottom pixel row: the line token at 50% over the background.
+    const QColor rule = image.pixelColor(bid.center().x(), bid.bottom());
+    const QColor expected = DomBarDelegate::over(DomBarDelegate::rowRule(), ground);
+    EXPECT_NEAR(rule.red(), expected.red(), 2);
+    EXPECT_NEAR(rule.green(), expected.green(), 2);
+    EXPECT_NEAR(rule.blue(), expected.blue(), 2);
+    EXPECT_EQ(DomBarDelegate::rowRule().alpha(), 128);
+    EXPECT_EQ(DomBarDelegate::rowRule().rgb(), theme::line().rgb());
+}
+
 TEST_F(DomDock, TradesLeaveTheWindowWithoutAnyNewEvent) {
     source.update({{true, 200, 1}, {false, 200.1, 1}});
     source.send(tradeAt(QDateTime::currentMSecsSinceEpoch() - DomTradeWindow::WindowMs + 300, 200, AggressorSide::Buy, 2));
@@ -1402,17 +1577,17 @@ TEST_F(DomPulseDock, QuietBookTotalsExpireOnScheduleFedEveryTick) {
     tick();
     const auto footer = dock.findChild<QLabel*>("domPulseFooter");
     ASSERT_TRUE(footer->isVisible());
-    EXPECT_EQ(footer->text(), "Asks pulled 0 eaten 0 · Bids pulled 5 eaten 0 · biggest pull 5 @ 199.9");
+    EXPECT_EQ(footer->text(), "Ask pull 0 eat 0 · Bid pull 5 eat 0 · max pull 5 @ 199.9");
     EXPECT_TRUE(footer->toolTip().contains("last 10 s"));
     // The bar scale decays in wall time: let it settle so only the pulse clock moves.
     QTest::qWait(700);
     // No book change for ten seconds: the totals still move, from the timer alone.
     for (int i = 1; i < 149; ++i) tick();
-    EXPECT_EQ(footer->text(), "Asks pulled 0 eaten 0 · Bids pulled 5 eaten 0 · biggest pull 5 @ 199.9");
+    EXPECT_EQ(footer->text(), "Ask pull 0 eat 0 · Bid pull 5 eat 0 · max pull 5 @ 199.9");
     tick(); // 9,983 ms after the pull
-    EXPECT_TRUE(footer->text().contains("Bids pulled 5"));
+    EXPECT_TRUE(footer->text().contains("Bid pull 5"));
     tick(); // 10,050 ms
-    EXPECT_EQ(footer->text(), "Asks pulled 0 eaten 0 · Bids pulled 0 eaten 0");
+    EXPECT_EQ(footer->text(), "Ask pull 0 eat 0 · Bid pull 0 eat 0");
 }
 
 TEST_F(DomPulseDock, TradesAreStampedOnReceiptAndEatTheNextSnapshot) {
@@ -1489,9 +1664,15 @@ TEST_F(DomPulseDock, FlashesPaintInTheirColours) {
         const QRect cell = table->visualRect(model->index(rowAt(*model, key), col));
         return image.pixelColor(cell.left() + int(cell.width() * x), cell.top() + int(cell.height() * y));
     };
-    // Eaten ask row: a buyer's flash (bid colour) across the row, the price cell included.
+    // Eaten ask row: a buyer's flash (up green at 25%, brief DOM-12) across the row, the price cell included.
     const QColor eaten = pixel(2001, DomModel::Price, 0.1);
-    EXPECT_GT(eaten.blue(), eaten.red() + 40);
+    const QColor expected = DomBarDelegate::over(DomBarDelegate::eatenColor(false, 1), pixel(1990, DomModel::Price, 0.1));
+    EXPECT_NEAR(eaten.red(), expected.red(), 2);
+    EXPECT_NEAR(eaten.green(), expected.green(), 2);
+    EXPECT_NEAR(eaten.blue(), expected.blue(), 2);
+    EXPECT_EQ(DomBarDelegate::eatenColor(false, 1).rgb(), theme::positive().rgb()); // buyers: up
+    EXPECT_EQ(DomBarDelegate::eatenColor(true, 1).rgb(), theme::negative().rgb());  // sellers: down
+    EXPECT_EQ(DomBarDelegate::eatenColor(true, 1).alpha(), 64);
     // Pulled bid (5 of a visible 10): a grey dashed outline where the bar was, nothing inside.
     const QColor inside = pixel(1999, DomModel::Bid, 0.85);
     EXPECT_LT(std::abs(inside.blue() - inside.red()), 12);
@@ -1514,6 +1695,35 @@ TEST_F(DomPulseDock, FlashesPaintInTheirColours) {
             ink += c != image.pixelColor(x, plain.top() + (y - cell.top())) && std::abs(c.red() - c.blue()) < 20;
         }
     EXPECT_GT(ink, 8);
+}
+
+TEST_F(DomPulseDock, SizeTextWinsOverPulseMarks) {
+    dock.resize(650, 700); QCoreApplication::processEvents();
+    source.update({{false, 200.2, 10.1}}); // +6.1: the added segment reaches the ask cell's outer end
+    for (int i = 0; i < 4; ++i) tick();     // fully grown, still bright
+    const int row = rowAt(*model, 2002);
+    ASSERT_GT(cell(2002, false).change, 0);
+    ASSERT_GT(cell(2002, false).changeAlpha, 0.5);
+    const QImage image = table->viewport()->grab().toImage();
+    QStyleOptionViewItem opt;
+    opt.rect = table->visualRect(model->index(row, DomModel::Ask));
+    opt.font = table->font();
+    opt.fontMetrics = QFontMetrics(opt.font);
+    const QRect text = DomBarDelegate::sizeTextRect(opt, model->index(row, DomModel::Ask).data().toString());
+    ASSERT_FALSE(text.isEmpty());
+    // Above the digits, inside the text box: the dark backing, not the bright segment.
+    EXPECT_EQ(image.pixelColor(text.center().x(), text.top()), DomBarDelegate::textBacking());
+    // Beside the box the segment still shows: the mark is kept, only the digits win.
+    const QColor segment = image.pixelColor(text.left() - 5, text.top());
+    EXPECT_NE(segment, DomBarDelegate::textBacking());
+    EXPECT_GT(segment.lightness(), 100);
+    // An unflashed size of the same column has no backing.
+    const QRect plain = DomBarDelegate::sizeTextRect(QStyleOptionViewItem([&] {
+        QStyleOptionViewItem o(opt); o.rect = table->visualRect(model->index(rowAt(*model, 2001), DomModel::Ask)); return o; }()),
+        model->index(rowAt(*model, 2001), DomModel::Ask).data().toString());
+    EXPECT_NE(image.pixelColor(plain.center().x(), plain.top()), DomBarDelegate::textBacking());
+    const QString directory = qEnvironmentVariable("DOM_LEAN_SHOT_DIR"); // optional diagnostic artifact
+    if (!directory.isEmpty()) EXPECT_TRUE(dock.grab().save(directory + "/dom-pulse-synthetic.png"));
 }
 
 TEST(DomPulse, InPlaceTagDigitsMatchTheLadderSizeText) {
@@ -1540,12 +1750,12 @@ TEST(DomPulse, TagAlphabetCoversEverythingFormatSizeEmits) {
 
 TEST_F(DomPulseDock, ExponentTagsRenderEveryGlyph) {
     dock.resize(650, 700); QCoreApplication::processEvents();
-    source.update({{true, 199.9, 7.1e12}});
+    source.update({{true, 199.9, 7.1e15}}); // beyond 999t: the one exponent form
     for (int i = 0; i < 20; ++i) tick(); // the add fades
     source.update({{true, 199.9, 0}});
     tick();
     const int row = rowAt(*model, 1999);
-    ASSERT_EQ(model->pulseTag(row, true, false), "-7.1e+03b");
+    ASSERT_EQ(model->pulseTag(row, true, false), "-7.1e+03t");
     const QImage image = table->viewport()->grab().toImage();
     const QRect cell = table->visualRect(model->index(row, DomModel::Bid));
     const QRect plain = table->visualRect(model->index(rowAt(*model, 1990), DomModel::Bid));
@@ -1689,6 +1899,98 @@ TEST_F(DomDock, DISABLED_SustainedUpdateAndRasterPaintBenchmark) {
     qApp->setStyleSheet(previousStyle);
 }
 
+TEST_F(DomDock, LeanStripAndChartsKeepTheBaseLayoutAt320) {
+    // The top strip's layout is on hold for an owner lab (DOM-7): pin the base geometry so a
+    // later change to the strip height or its chart areas is deliberate.
+    const QString previousStyle = qApp->styleSheet();
+    qApp->setStyleSheet(DarkTheme{}.stylesheet());
+    QFont app = dock.font();
+    app.setPixelSize(10); // the GUI's 10 pt application font
+    dock.setFont(app);
+    source.update({{true, 200, 1}, {false, 200.1, 1}});
+    dock.resize(320, 700);
+    show();
+    QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
+    QCoreApplication::processEvents();
+    auto* lean = static_cast<LeanGaugeWidget*>(dock.findChild<QWidget*>("domLeanStrip"));
+    ASSERT_TRUE(lean->isVisible());
+    const QFontMetrics fm(lean->font());
+    const int row = std::max(14, fm.height());
+    const int width = lean->width();
+    EXPECT_EQ(lean->height(), 3 * row + 14 + std::max(16, row));
+    EXPECT_EQ(lean->depthRect(), QRect(0, 2 * row - 1, width, 15));
+    // Base numbers: the history starts after BASE's caption text, whatever caption() returns.
+    ASSERT_EQ(width, 312); // 320 px dock less the 4 px content margins
+    const int historyLeft = fm.horizontalAdvance(QString::fromUtf8("±15 · 2m")) + 6;
+    EXPECT_EQ(lean->historyRect(), QRect(historyLeft, 3 * row + 14, width - 3 - historyLeft, std::max(16, row)));
+    EXPECT_EQ(lean->historyRect().width(), 312 - 3 - historyLeft);
+    std::cout << "DOM_HISTORY_WIDTH=" << lean->historyRect().width() << '\n';
+    // The first price row (pinned at the current value with the DOM-10 toggles; was base + 5 px).
+    const int firstPrice = table->mapTo(dock.widget(), QPoint(0, 0)).y() + table->horizontalHeader()->height();
+    std::cout << "DOM_FIRST_PRICE=" << firstPrice << '\n';
+    constexpr int kFirstPrice = 166;
+    EXPECT_EQ(firstPrice, kFirstPrice);
+    // Aggregation and spread/state stay two lines, as on base.
+    EXPECT_LT(dock.findChild<QLabel*>("domAggregation")->y(), dock.findChild<QLabel*>("domBookSummary")->y());
+    const QString directory = qEnvironmentVariable("DOM_LEAN_SHOT_DIR"); // optional diagnostic artifact
+    if (!directory.isEmpty()) EXPECT_TRUE(dock.grab().save(directory + "/dom-320-synthetic.png"));
+    qApp->setStyleSheet(previousStyle);
+}
+
+TEST_F(DomDock, NarrowDockMovesSigmaAndFollowIntoTheMetaMenuAndMarksLeanHidden) {
+    const QString previousStyle = qApp->styleSheet();
+    qApp->setStyleSheet(DarkTheme{}.stylesheet());
+    source.update({{true, 200, 1}, {true, 199.9, 2}, {false, 200.1, 1}});
+    show();
+    auto* lean = dock.findChild<QToolButton*>("domLean");
+    auto* cumulative = dock.findChild<QToolButton*>("domCumulative");
+    auto* follow = dock.findChild<QPushButton*>("domRecenter");
+    ASSERT_TRUE(lean->isChecked());
+    const QImage wideOn = lean->grab().toImage();
+    EXPECT_FALSE(lean->property("hiddenByWidth").toBool());
+    dock.resize(260, 600); // the default layout's width today (brief DOM-4)
+    QCoreApplication::processEvents();
+    QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(cumulative->isHidden());
+    EXPECT_TRUE(follow->isHidden());
+    // The symbol keeps its whole name.
+    auto* symbol = dock.findChild<QLabel*>("domSymbol");
+    EXPECT_TRUE(symbol->isVisible());
+    EXPECT_GE(symbol->width(), symbol->fontMetrics().horizontalAdvance(symbol->text()));
+    // B-20: Lean on but hidden by the width says so and looks different from on-and-shown.
+    EXPECT_TRUE(dock.findChild<QWidget*>("domLeanStrip")->isHidden());
+    EXPECT_TRUE(lean->property("hiddenByWidth").toBool());
+    EXPECT_TRUE(lean->toolTip().contains("on, hidden at this width")) << lean->toolTip().toStdString();
+    EXPECT_NE(lean->grab().toImage().pixelColor(3, lean->height() / 2), wideOn.pixelColor(3, wideOn.height() / 2));
+    // Σ and Follow are in the meta row's menu while narrow.
+    auto* menu = dock.findChild<QMenu*>("domGroupingMenu");
+    emit menu->aboutToShow();
+    auto* menuCumulative = dock.findChild<QAction*>("domMenuCumulative");
+    auto* menuFollow = dock.findChild<QAction*>("domMenuFollow");
+    ASSERT_NE(menuCumulative, nullptr);
+    ASSERT_NE(menuFollow, nullptr);
+    EXPECT_TRUE(menuFollow->isChecked());
+    menuCumulative->trigger();
+    EXPECT_TRUE(model->cumulative());
+    EXPECT_TRUE(cumulative->isChecked()); // one state, persisted as before
+    menuCumulative->trigger();
+    EXPECT_FALSE(model->cumulative());
+    menuFollow->trigger();
+    EXPECT_FALSE(follow->isChecked());
+    emit menu->aboutToShow();
+    dock.findChild<QAction*>("domMenuFollow")->trigger();
+    EXPECT_TRUE(follow->isChecked());
+    dock.resize(320, 600);
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(cumulative->isHidden());
+    EXPECT_FALSE(follow->isHidden());
+    EXPECT_FALSE(lean->property("hiddenByWidth").toBool());
+    emit menu->aboutToShow();
+    EXPECT_EQ(dock.findChild<QAction*>("domMenuCumulative"), nullptr);
+    qApp->setStyleSheet(previousStyle);
+}
+
 TEST_F(DomDock, LeanTogglePersistsAndCollapsesAt180) {
     auto* toggle = dock.findChild<QToolButton*>("domLean");
     auto* strip = dock.findChild<QWidget*>("domLeanStrip");
@@ -1704,6 +2006,7 @@ TEST_F(DomDock, LeanTogglePersistsAndCollapsesAt180) {
     EXPECT_EQ(table->horizontalScrollBar()->maximum(), 0);
     for (const char* name : {"domLean", "domPulse", "domCumulative", "domRecenter"}) {
         auto* button = dock.findChild<QWidget*>(name);
+        if (button->isHidden()) continue; // Σ and Follow are in the meta menu below 300 px
         EXPECT_GE(button->mapTo(&dock, QPoint()).x(), 0);
         EXPECT_LE(button->mapTo(&dock, QPoint(button->width(), 0)).x(), 180);
     }
@@ -1767,6 +2070,12 @@ TEST_F(DomDock, LeanOnlyWorksOnExposedTicksAndResets) {
     source.book.clear(); emit source.liveOrderBookUpdated("BTC-USD", {}); flushEvents();
     EXPECT_EQ(dock.leanGauge().historySize(), 0u);
     QTest::qWait(90); EXPECT_EQ(dock.leanGauge().state(), sentinel::book::LeanGauge::State::Empty);
+}
+
+TEST_F(DomDock, LeanStatesItsQuoteUnitOnce) {
+    EXPECT_TRUE(static_cast<LeanGaugeWidget*>(dock.findChild<QWidget*>("domLeanStrip"))->depthCaption().contains("USD"));
+    dock.onSymbolChanged("ETH-BTC");
+    EXPECT_TRUE(static_cast<LeanGaugeWidget*>(dock.findChild<QWidget*>("domLeanStrip"))->depthCaption().contains("BTC"));
 }
 
 TEST_F(DomDock, LeanIgnoresPinnedLadderAndUsesNativeTick) {
@@ -1845,6 +2154,36 @@ TEST(DomLean, InheritsLargeFontAndMarksCrossedValuesStale) {
     const QRect status(2, 2 * std::max(14, fm.height()) + 14, 230, fm.height());
     EXPECT_NE(fresh.copy(status), stale.copy(status)); // stale must override near/far disagreement
     EXPECT_EQ(fresh.copy(0, 0, 500, 2 * fm.height()), stale.copy(0, 0, 500, 2 * fm.height()));
+}
+
+TEST(DomLean, NearBandsLeftFarBandsRightInTheDimTokenWithTheUnitOnce) {
+    std::array<double, 401> bids{}, asks{};
+    bids[199] = 3; asks[201] = 1; asks[230] = 10; // inside ±50 only: ±5 and ±15 lean bid, ±50 and ±100 ask
+    sentinel::book::LeanGauge gauge;
+    gauge.update({bids, asks, 0, 1, 199, 201}, 0, 0);
+    ASSERT_GT(gauge.bands()[1].imbalance, 0);
+    ASSERT_LT(gauge.bands()[2].imbalance, 0);
+    LeanGaugeWidget widget(gauge);
+    widget.setUnit("USD");
+    EXPECT_EQ(widget.depthCaption(), QString::fromUtf8("Depth ±100 USD")); // the unit, once
+    EXPECT_EQ(widget.caption(), QString::fromUtf8("±15 · 2m"));             // base's history caption
+    widget.resize(400, widget.sizeHint().height());
+    QImage image(widget.size(), QImage::Format_ARGB32_Premultiplied);
+    image.fill(QColor("#1E1E1E"));
+    QPainter painter(&image); widget.paint(painter); painter.end();
+    const QFontMetrics fm(widget.font());
+    const int row = std::max(14, fm.height());
+    const int label = fm.horizontalAdvance("±100") + 4, value = fm.horizontalAdvance("-100%") + 4;
+    const int center = label + (200 - label - value) / 2;
+    // Column-major: ±15 (bid) under ±5 on the left, ±50 (ask) at the top of the right column.
+    EXPECT_EQ(image.pixelColor(center - 4, row + row / 2), DomBarDelegate::barColor(true, 1));
+    EXPECT_EQ(image.pixelColor(200 + center + 4, row / 2), DomBarDelegate::barColor(false, 1));
+    // Labels read in the dim text token, not the 3.6:1 disabled grey.
+    int brightest = 0;
+    for (int y = 0; y < row; ++y)
+        for (int x = 2; x < label; ++x) brightest = std::max(brightest, image.pixelColor(x, y).lightness());
+    EXPECT_GE(brightest, theme::text3().lightness() - 8);
+    EXPECT_GE(DomBarDelegate::contrast(theme::text3(), QColor("#1E1E1E")), 4.5);
 }
 
 TEST(DomLean, PaintMirrorsBidLeftAskRightAndDrawsHistory) {
@@ -2350,7 +2689,8 @@ TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
     tick();
     EXPECT_EQ(model->group(), 20);
     EXPECT_EQ(button->text(), "Link ▾");
-    EXPECT_TRUE(button->toolTip().startsWith("Row size 2 (20 server ticks)")) << button->toolTip().toStdString();
+    EXPECT_TRUE(dock.findChild<QLabel*>("domAggregation")->text().startsWith("Rows 2 USD"));
+    EXPECT_FALSE(button->toolTip().contains("Row size 2")) << button->toolTip().toStdString(); // said once, by the label
     dock.setHeatmapTick(50, 100, false); // heatmap Auto: the same hold
     tick();
     EXPECT_EQ(model->group(), 20);
@@ -2379,6 +2719,95 @@ TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
     tick();
     EXPECT_EQ(dock.grouping(), OrderBookDock::Grouping::Auto);
     EXPECT_EQ(button->text(), "Auto ▾");
+}
+
+TEST(DomModel, AdaptiveDigitsFollowSigmaAndTheHeldDropWithoutMarketEvents) {
+    // Codex F1: Σ and the 2 s drop back must reach the cells with no further book change.
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 1.111}, {true, 199.9, 0.003}, {false, 200.1, 5}});
+    DomModel model;
+    model.clear("BTC-USD");
+    qint64 now = 1'800'000'000'000;
+    const auto tickOnce = [&](qint64 ms) { // the dock's 67 ms loop: publish only when asked
+        now += ms;
+        if (model.needsRepublish(now)) model.publish(book, {}, true, now);
+    };
+    model.publish(book, {}, true, now);
+    for (int i = 0; i < 10; ++i) tickOnce(67); // settle the bar scale
+    ASSERT_EQ(model.sizeStyle().digits, 3);
+    const auto text = [&](qint64 key) { return model.index(rowAt(model, key), DomModel::Bid).data().toString(); };
+    model.setCumulative(true);                  // 1.111 and 1.114: alike at three digits
+    tickOnce(67);
+    EXPECT_EQ(model.sizeStyle().digits, 4);
+    EXPECT_EQ(text(2000), "1.111");
+    EXPECT_EQ(text(1999), "1.114");
+    model.setCumulative(false);                 // 1.111 and 0.003: three digits will do, after the hold
+    tickOnce(67);
+    EXPECT_EQ(model.sizeStyle().digits, 4);
+    for (int i = 0; i < 40 && model.sizeStyle().digits == 4; ++i) tickOnce(67);
+    EXPECT_EQ(model.sizeStyle().digits, 3) << "the held drop republishes by itself";
+    EXPECT_EQ(text(2000), "1.11");
+    for (int i = 0; i < 5; ++i) EXPECT_FALSE(model.needsRepublish(now += 67)) << "then it settles";
+}
+
+TEST(DomModel, AdaptiveDigitsSeparateNeighboursAtTheDustFloor) {
+    // Codex F2: 1.0001e-8 and 1.0049e-8 must not both read 0.00000001.
+    EXPECT_EQ(DomModel::sizeText(1.0049e-8, {5, true, 1e-8}), "0.000000010049");
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 1.0001e-8}, {true, 199.9, 1.0049e-8}, {false, 200.1, 5}});
+    DomModel model;
+    model.clear("BTC-USD");
+    model.publish(book, {}, true);
+    const auto text = [&](qint64 key) { return model.index(rowAt(model, key), DomModel::Bid).data().toString(); };
+    EXPECT_NE(text(2000), text(1999)) << text(2000).toStdString();
+}
+
+TEST_F(DomDock, SizeFormatIsOneSettingInTheDockMenuAndPersists) {
+    source.update({{true, 200, 1.111}, {true, 199.9, 1.114}, {false, 200.1, 2.35e-5}});
+    show();
+    ASSERT_EQ(dock.sizeFormat(), DomModel::SizeFormat::Adaptive); // the brief's recommendation by default
+    auto* menu = dock.findChild<QMenu*>("domGroupingMenu");
+    emit menu->aboutToShow();
+    emit menu->aboutToShow(); // reopening keeps one submenu
+    EXPECT_EQ(dock.findChildren<QMenu*>("domSizeFormatMenu").size(), 1);
+    auto* compact = dock.findChild<QAction*>("domSizeFormat-compact");
+    ASSERT_NE(compact, nullptr);
+    EXPECT_FALSE(compact->isChecked());
+    EXPECT_TRUE(dock.findChild<QAction*>("domSizeFormat-adaptive")->isChecked());
+    const auto text = [&](qint64 key, int col) { return model->index(rowAt(*model, key), col).data().toString(); };
+    EXPECT_EQ(text(2001, DomModel::Ask), "0.0000235");
+    EXPECT_EQ(text(2000, DomModel::Bid), "1.111");
+    compact->trigger();
+    EXPECT_EQ(model->sizeFormat(), DomModel::SizeFormat::Compact);
+    EXPECT_EQ(text(2001, DomModel::Ask), "<.0001");
+    EXPECT_EQ(text(2000, DomModel::Bid), "1.11");
+    {
+        Source other;
+        OrderBookDock reopened{nullptr, &other};
+        EXPECT_EQ(reopened.sizeFormat(), DomModel::SizeFormat::Compact);
+    }
+    dock.findChild<QAction*>("domSizeFormat-adaptiveDim")->trigger();
+    EXPECT_EQ(model->sizeFormat(), DomModel::SizeFormat::AdaptiveDim);
+    dock.setSizeFormat(DomModel::SizeFormat::Adaptive); // later tests read the default
+}
+
+TEST_F(DomDock, RowSizeIsSaidOnceSoATooltipNeverContradictsTheLabel) {
+    // B-13: "Rows 1 USD" beside a tooltip still reading "Row size 2 (20 server ticks)".
+    source.update({{true, 200, 1}, {false, 200.1, 1}});
+    dock.setGrouping(OrderBookDock::Grouping::Fixed, 2.0);
+    show();
+    QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
+    auto* button = dock.findChild<QToolButton*>("domGrouping");
+    auto* label = dock.findChild<QLabel*>("domAggregation");
+    ASSERT_TRUE(label->text().startsWith("Rows 2 USD")) << label->text().toStdString();
+    const QString tip = button->toolTip();
+    dock.setGrouping(OrderBookDock::Grouping::Fixed, 1.0);
+    QMetaObject::invokeMethod(&dock, "refreshDisplay", Qt::DirectConnection);
+    EXPECT_TRUE(label->text().startsWith("Rows 1 USD")) << label->text().toStdString();
+    EXPECT_EQ(button->toolTip(), tip); // a tooltip open across the regroup still agrees with the label
+    dock.setGrouping(OrderBookDock::Grouping::Fixed, 0.1);
 }
 
 TEST_F(DomDock, PageScrollAndScrollbarJumpFillExposedGroupedRowsBeforePaint) {
@@ -2414,8 +2843,12 @@ TEST_F(DomDock, CheckedTogglesLookDifferentInTheDarkTheme) {
     const QString previousStyle = qApp->styleSheet();
     qApp->setStyleSheet(DarkTheme{}.stylesheet());
     show();
-    for (const char* name : {"domPulse", "domLean", "domCumulative"}) {
-        auto* button = dock.findChild<QToolButton*>(name);
+    // All four heading buttons in the one toggle style (brief DOM-10, WIN-3).
+    std::vector<QColor> offBorders, onFills;
+    for (const char* name : {"domPulse", "domLean", "domCumulative", "domRecenter"}) {
+        auto* button = dock.findChild<QAbstractButton*>(name);
+        ASSERT_NE(button, nullptr) << name;
+        ASSERT_TRUE(button->isCheckable()) << name;
         const bool was = button->isChecked(); // persisted: restore it for later tests
         button->setChecked(false);
         const QImage off = button->grab().toImage();
@@ -2423,8 +2856,16 @@ TEST_F(DomDock, CheckedTogglesLookDifferentInTheDarkTheme) {
         const QImage on = button->grab().toImage();
         const QPoint corner(3, button->height() / 2); // background beside the text
         EXPECT_NE(off.pixelColor(corner), on.pixelColor(corner)) << name;
+        EXPECT_EQ(on.pixelColor(corner), theme::sel()) << name;
+        offBorders.push_back(off.pixelColor(button->width() / 2, 0));
+        onFills.push_back(on.pixelColor(corner));
         button->setChecked(was);
     }
+    for (size_t i = 1; i < offBorders.size(); ++i) {
+        EXPECT_EQ(offBorders[i], offBorders[0]) << i;
+        EXPECT_EQ(onFills[i], onFills[0]) << i;
+    }
+    EXPECT_EQ(dock.findChild<QPushButton*>("domRecenter")->text(), "Follow");
     qApp->setStyleSheet(previousStyle);
 }
 
@@ -2440,11 +2881,18 @@ TEST_F(DomDock, HeadingRestylesOnlyWhenCompactModeFlips) {
     pulse->installEventFilter(&counter);
     for (int width : {640, 600, 520, 450}) { dock.resize(width, 600); QCoreApplication::processEvents(); }
     EXPECT_EQ(counter.styles, 0) << "wide resizes keep the styles";
-    dock.resize(180, 600); QCoreApplication::processEvents();
-    EXPECT_GT(counter.styles, 0);
+    // Four buttons wider than the dock just above the 300 px menu threshold: the heading
+    // restyles once on the flip to compact, then not again while it stays compact.
+    auto* follow = dock.findChild<QPushButton*>("domRecenter");
+    follow->setText("Follow the market now"); // a long label stands in for a large font
+    QEvent restyled(QEvent::StyleChange);      // the heading measures again after a style change
+    QApplication::sendEvent(&dock, &restyled);
+    QCoreApplication::processEvents();
+    dock.resize(300, 600); QCoreApplication::processEvents();
+    EXPECT_GT(counter.styles, 0) << dock.width() << " " << pulse->sizeHint().width() << " " << follow->sizeHint().width();
     EXPECT_FALSE(pulse->styleSheet().isEmpty());
     const int compact = counter.styles;
-    for (int width : {185, 190, 182}) { dock.resize(width, 600); QCoreApplication::processEvents(); }
+    for (int width : {305, 310, 302}) { dock.resize(width, 600); QCoreApplication::processEvents(); }
     EXPECT_EQ(counter.styles, compact);
     qApp->setStyleSheet(previousStyle);
 }
@@ -2465,15 +2913,37 @@ TEST_F(DomDock, HeadingButtonsKeepTheirWholeTextFrom180To650) {
             for (const char* name : {"domGrouping", "domPulse", "domLean", "domCumulative", "domRecenter", "domSymbol"}) {
                 if (QString(name) == "domSymbol") continue; // the symbol yields its width
                 auto* button = dock.findChild<QWidget*>(name);
+                if (button->isHidden()) continue; // in the meta menu at this width
                 EXPECT_GE(button->width(), button->sizeHint().width()) << name << " at " << width;
                 EXPECT_LE(button->mapTo(&dock, QPoint(button->width(), 0)).x(), width) << name << " at " << width;
             }
-            EXPECT_TRUE(dock.findChild<QToolButton*>("domGrouping")->toolTip().startsWith(
-                mode == OrderBookDock::Grouping::Auto ? "Row size" : tick == 1.0 ? "Row size 1 (10" : "Row size 0.1 (1"))
+            EXPECT_TRUE(dock.findChild<QToolButton*>("domGrouping")->toolTip().startsWith("Row grouping."))
                 << dock.findChild<QToolButton*>("domGrouping")->toolTip().toStdString();
         }
     }
     qApp->setStyleSheet(previousStyle);
+}
+
+TEST_F(DomPulseDock, FooterWithLongFractionalTotalsNeverCutsANumber) {
+    // Codex F3: "Ask pull 0.00000001 eat 0.00000001" is wider than a 180 px dock's footer.
+    source.update({{false, 200.3, 1.23456e-7}, {true, 199.8, 2.34567e-7}});
+    tick();
+    source.update({{false, 200.3, 0}, {true, 199.8, 0}});
+    tick();
+    auto* footer = dock.findChild<QLabel*>("domPulseFooter");
+    ASSERT_TRUE(footer->toolTip().contains("0.000000123")) << footer->toolTip().toStdString();
+    for (int width : {180, 260, 320}) {
+        dock.resize(width, 600);
+        QCoreApplication::processEvents();
+        tick();
+        const QString text = footer->text();
+        ASSERT_FALSE(text.isEmpty()) << width;
+        for (const QString& line : text.split('\n')) {
+            EXPECT_LE(footer->fontMetrics().horizontalAdvance(line), footer->width()) << width << " " << line.toStdString();
+            EXPECT_TRUE(line.startsWith("Ask ") || line.startsWith("Bid ")) << line.toStdString(); // labelled fields only
+        }
+        if (width == 180) EXPECT_GE(text.count('\n'), 1) << text.toStdString();
+    }
 }
 
 TEST_F(DomPulseDock, FooterNeverCutsANumberAt180To400) {
@@ -2482,14 +2952,25 @@ TEST_F(DomPulseDock, FooterNeverCutsANumberAt180To400) {
     source.update({{false, 200.2, 0}});
     tick();
     auto* footer = dock.findChild<QLabel*>("domPulseFooter");
+    bool twoLines = false;
     for (int width = 180; width <= 400; width += 20) {
         dock.resize(width, 600);
         QCoreApplication::processEvents();
         tick();
         const QString text = footer->text();
-        EXPECT_LE(footer->fontMetrics().horizontalAdvance(text), footer->width()) << width << " " << text.toStdString();
-        EXPECT_FALSE(text.isEmpty());
+        ASSERT_FALSE(text.isEmpty());
+        // Every line fits whole and keeps the labelled grammar: no "/" pairs, no "…".
+        const QStringList lines = text.split('\n');
+        for (const QString& line : lines)
+            EXPECT_LE(footer->fontMetrics().horizontalAdvance(line), footer->width()) << width << " " << line.toStdString();
+        EXPECT_TRUE(text.contains("Ask pull ") && text.contains(" eat ") && text.contains("Bid pull ")) << text.toStdString();
+        EXPECT_FALSE(text.contains('/') || text.contains(QString::fromUtf8("…"))) << text.toStdString();
+        if (lines.size() == 2) {
+            twoLines = true;
+            EXPECT_GE(footer->height(), 2 * footer->fontMetrics().lineSpacing() - 1) << width;
+        }
     }
+    EXPECT_TRUE(twoLines) << "narrow docks break the footer into one line per side";
 }
 
 } // namespace
