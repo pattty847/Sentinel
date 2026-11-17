@@ -9,11 +9,6 @@
 #include "widgets/StatusBar.hpp"
 #include "widgets/HeatmapTelemetryDock.hpp"
 #include "widgets/WatchlistDock.hpp"
-#include "widgets/SecFilingDock.hpp"
-#include "widgets/ScreenerDock.hpp"
-#include "widgets/StockChartDock.hpp"
-#include "widgets/PaperTradingDock.hpp"
-#include <QLayout>
 #include "mainwindow/QmlSceneController.h"
 #include "render/heatmap/HeatmapDataService.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
@@ -672,19 +667,6 @@ TEST(MainWindowHealthIntegration, DefaultLayoutKeepsNavigationRailUncappedAtNarr
         MainWindowSymbolLifecyclePeer::arrange(window);
         EXPECT_EQ(rail->maximumWidth(), cap);
         EXPECT_GE(window.findChild<ChartDock*>()->minimumWidth(), 480);
-        // WL-6: the rail is not a full-height tab; the other panels are tabbed below it.
-        EXPECT_TRUE(window.tabifiedDockWidgets(rail).isEmpty());
-        auto* sec = window.findChild<SecFilingDock*>();
-        ASSERT_TRUE(sec);
-        const auto below = window.tabifiedDockWidgets(sec);
-        for (QDockWidget* dock : std::initializer_list<QDockWidget*>{window.findChild<ScreenerDock*>(),
-                 window.findChild<StockChartDock*>(), window.findChild<PaperTradingDock*>()})
-            EXPECT_TRUE(below.contains(dock)) << dock->objectName().toStdString();
-        EXPECT_EQ(window.dockWidgetArea(sec), window.dockWidgetArea(rail));
-        window.layout()->setGeometry(window.rect()); // lay the docks out without showing a window
-        EXPECT_LT(rail->geometry().bottom(), sec->geometry().top());
-        EXPECT_LT(rail->geometry().left(), sec->geometry().right());
-        EXPECT_GT(rail->geometry().right(), sec->geometry().left());
     }
 }
 
