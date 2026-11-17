@@ -42,6 +42,7 @@
 #include <QJsonArray>
 #include <QPushButton>
 #include <QQuickWindow>
+#include <QScreen>
 #include <QSettings>
 #include <QSGGeometry>
 #include <QSGGeometryNode>
@@ -2230,12 +2231,38 @@ TEST(HeatmapSettingsDialogLook, DialogIsResizableAndRemembersItsSize) {
         HeatmapSettingsDialog first(&model, nullptr);
         EXPECT_TRUE(first.isSizeGripEnabled());
         first.show();
-        first.resize(701, 653);
+        first.resize(701, 553); // inside the offscreen screen (800x600)
         QCoreApplication::processEvents();
         first.close();
     }
     HeatmapSettingsDialog second(&model, nullptr);
-    EXPECT_EQ(second.size(), QSize(701, 653));
+    EXPECT_EQ(second.size(), QSize(701, 553));
+}
+
+// SET-7: a corrupt, zero, negative or absurd saved size falls back to 600x720;
+// any size is clamped to the screen's available area.
+TEST(HeatmapSettingsDialogLook, RestoredSizeRejectsBadValuesAndFitsTheScreen) {
+    const QRect screen(0, 0, 1920, 1050);
+    const QSize fallback(600, 720);
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(), screen), fallback);
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(QStringLiteral("garbage")), screen), fallback);
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(QSize(0, 0)), screen), fallback);
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(QSize(-5, 400)), screen), fallback);
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(QSize(1'000'000, 900)), screen), fallback);
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(QSize(700, 650)), screen), QSize(700, 650));
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(QSize(3000, 2000)), screen), QSize(1920, 1050));
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(), QRect(0, 0, 1280, 600)), QSize(600, 600));
+    // Through the dialog, with the isolated QSettings this test binary uses.
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+    for (const QVariant &bad : {QVariant(QStringLiteral("garbage")), QVariant(QSize(0, 0)), QVariant(QSize(99999, 99999))}) {
+        settings.setValue("chartSettingsDialog/size", bad);
+        settings.sync();
+        HeatmapSettingsDialog dialog(&model, nullptr);
+        const QRect available = dialog.screen()->availableGeometry();
+        EXPECT_EQ(dialog.size(), fallback.boundedTo(available.size())) << bad.toString().toStdString();
+    }
 }
 
 // SET-8: hex text on colour swatches is upper case at regular weight.

@@ -24,6 +24,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QScreen>
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
@@ -422,8 +423,7 @@ HeatmapSettingsDialog::HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *mode
     // polished before it was named would miss.
     setStyleSheet(dialogStyle());
     // Resizable; the size the user left it at comes back next time.
-    const QSize saved = sizeSettings().value(kSizeKey).toSize();
-    resize(saved.isValid() ? saved : QSize(600, 720));
+    resize(restoredSize(sizeSettings().value(kSizeKey), screen() ? screen()->availableGeometry() : QRect()));
     connect(&chart::TradeBubbleStyleChanges::instance(), &chart::TradeBubbleStyleChanges::changed,
             this, [this] { refreshBubbleStyle(); });
     if (m_model) connect(m_model, &heatmap::HeatmapSettingsModel::changed, this, [this] { refreshFromModel(); });
@@ -1236,6 +1236,15 @@ void HeatmapSettingsDialog::showStatus(const QString &text, bool error) {
 }
 
 QString HeatmapSettingsDialog::statusText() const { return m_status->text(); }
+
+QSize HeatmapSettingsDialog::restoredSize(const QVariant &saved, const QRect &available) {
+    constexpr int kMaxSide = 16384; // larger than any display: a corrupt value
+    QSize size = saved.metaType().id() == QMetaType::QSize ? saved.toSize() : QSize();
+    if (size.width() <= 0 || size.height() <= 0 || size.width() > kMaxSide || size.height() > kMaxSide)
+        size = QSize(600, 720);
+    if (available.width() > 0 && available.height() > 0) size = size.boundedTo(available.size());
+    return size;
+}
 
 void HeatmapSettingsDialog::hideEvent(QHideEvent *event) {
     sizeSettings().setValue(kSizeKey, size());
