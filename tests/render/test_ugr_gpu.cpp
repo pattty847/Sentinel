@@ -6,6 +6,9 @@
 #include "chart/core/PriceFitter.hpp"
 #include "UnifiedGridRenderer.h"
 #include "BookTopFixture.hpp"
+#include "GoldenFlowSource.hpp"
+#include "chart/core/FootprintLod.hpp"
+#include "mainwindow/ChartAgentPort.hpp"
 #include "chart/shell/HeatmapChartPort.hpp"
 #include "chart/core/LiveEdge.hpp"
 #include "datasources/CandleSeriesBuffer.hpp"
@@ -114,14 +117,30 @@ recording::Hmc2Record tinyMinute(const std::string &layer, int64_t i) {
     r.midOpen = r.midClose = r.midMin = r.midMax = r.midOpen * 100 / 1e10;
     return r;
 }
+// A third recorded symbol at BTC's price and price scale on another native grid: $4 rows
+// in both layers. BTC's $10 tick is no multiple of them; ALT's own ticks start at $20.
+recording::Hmc2Record altMinute(const std::string &layer, int64_t i) {
+    auto r = syntheticMinute(layer, i);
+    const int64_t units = 400;
+    const double mid = r.midOpen;
+    r.header.symbol = "ALT-USD";
+    r.header.rowTickUnits = units;
+    const int64_t shift = std::llround(mid * 100 / double(units)) - (r.bidRowLo + r.bidRowHi + 1) / 2;
+    r.bidRowLo += shift; r.bidRowHi += shift; r.askRowLo += shift; r.askRowHi += shift;
+    for (auto &e : r.entries) e.row += shift;
+    return r;
+}
 void configureFixture() {
     fixtureDir = new QTemporaryDir;
     writeRecording(*fixtureDir, 4 * 60);
-    lab::LabData::setLocalSymbolsForTest({"BTC-USD", "TINY-USD"});
+    lab::LabData::setLocalSymbolsForTest({"BTC-USD", "TINY-USD", "ALT-USD"});
     {
         recording::Hmc2Store writer(fixtureDir->path().toStdString());
         for (int64_t i = 0; i < 4 * 60; ++i)
-            for (const char *layer : {"deep", "near"}) writer.append(tinyMinute(layer, i));
+            for (const char *layer : {"deep", "near"}) {
+                writer.append(tinyMinute(layer, i));
+                writer.append(altMinute(layer, i));
+            }
     }
     lab::LabData::configure(fixtureDir->path().toStdString(), epoch + 4 * kHourMs);
 }
@@ -2478,6 +2497,34 @@ TEST_F(UgrGpu, SymbolSwitchCarryAcrossPriceScalesAndUnpricedSwitches) {
     EXPECT_GT(std::abs((view->getMaxPrice() - view->getMinPrice()) - 2'000), 100) << "the default seed, no carry";
     EXPECT_NEAR((view->getMaxPrice() + view->getMinPrice()) / 2, 100'000, 1e-6);
     ugr->setCandleBuffer(nullptr);
+}
+
+// The footprint bins its rows on the drawn tick. With the heatmap layer off and only
+// the footprint on, a switch to a symbol on another native grid must still choose that
+// symbol's tick: the previous symbol's tick is no multiple of the new rows, so every
+// bar would be skipped and the cells never load (owner, ETH after BTC).
+TEST_F(UgrGpu, FootprintWithoutTheHeatmapLoadsAfterASymbolSwitch) {
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    const double btcTick = layer().tickPrice();
+    ASSERT_GT(btcTick, 0);
+    ugr->layers()->setFootprintEnabled(true);
+    ugr->layers()->setHeatmapEnabled(false);
+    GoldenFlowSource source;
+    ugr->agentPort().bindFlowSource(source);
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    ugr->setActiveSymbol("ALT-USD");
+    ugr->setLiveBook(bookWithTop(100'099.9, 100'100.2));
+    ugr->view()->setViewport(viewLo, viewHi, 99'900, 100'300);
+    ASSERT_TRUE(frames(2)) << error.toStdString();
+    source.deliver(viewLo, 12, 100'040.0, 16, "ALT-USD", 4);
+    const auto &coverage = ugr->footprintPresentation()->coverage;
+    const bool loaded = pump(15'000, [&] { return coverage.barCount == 12; });
+    const double tick = drawn().tick;
+    EXPECT_TRUE(loaded) << "footprint bars drawn=" << coverage.barCount << " drawn tick=" << tick
+                        << " BTC tick=" << btcTick;
+    EXPECT_NEAR(std::remainder(tick, 4.0), 0, 1e-9) << "the drawn tick is on ALT's rows: " << tick;
+    EXPECT_FALSE(ugr->layers()->heatmapEnabled());
 }
 
 // A fit is all or nothing. Before any snapshot (no book, trade or
