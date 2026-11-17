@@ -887,7 +887,11 @@ TEST_F(TradeOverlay, VolumeProfileValueAreaPinsSeventyPercentRangeAndTranslucent
         }
         auto* bars = static_cast<QSGGeometryNode*>(va->nextSibling());
         const auto* barVertices = bars->geometry()->vertexDataAsColoredPoint2D();
-        const int visibleBars = priceMin == 100 ? 8 : 3;
+        // 120..125: the bins touching the view (115..120, 125..130) clip to no height.
+        const int visibleBars = priceMin == 100 ? 8 : 1;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+        EXPECT_EQ(bars->geometry()->vertexCount(), visibleBars * 4);
+#endif
         for (int i = 0; i < visibleBars * 4; ++i) {
             EXPECT_EQ(barVertices[i].r, 100 * int(barVertices[i].a) / 255);
             EXPECT_EQ(barVertices[i].g, 160 * int(barVertices[i].a) / 255);
@@ -1058,6 +1062,34 @@ TEST_F(TradeOverlay, VolumeProfileBarsClipToThePlotWithoutAPaneClip) {
         EXPECT_FLOAT_EQ(bottom, float(surface.bottom()));
         renderer.render(&root, true, surface, 100, 108, bins, snap, 1.0, snapY); // reset the cache key
     }
+}
+
+TEST_F(TradeOverlay, VolumeProfileDropsBarsClippedToNoHeightOnAFractionalPlotOrigin) {
+    // Plot at y = 30.25: bin 107..108 lies above a 100..107 view; its bottom edge snaps
+    // to 30, above the plot. Clamping must not leave an inverted bar (30.25 -> 30).
+    VolumeProfileRenderer renderer;
+    QSGNode root;
+    VolumeProfileState::Snapshot snap;
+    snap.minPrice = 100;
+    snap.tickSize = 1;
+    snap.gridHeight = 8;
+    const std::vector<float> bins{1, 2, 3, 4, 5, 6, 7, 8};
+    const QRectF surface(20, 30.25, 800, 400);
+    renderer.render(&root, true, surface, 100, 107, bins, snap, 1.0, true);
+    const auto* g = static_cast<QSGGeometryNode*>(root.firstChild()->nextSibling())->geometry();
+    const auto* v = g->vertexDataAsColoredPoint2D();
+    const auto* idx = g->indexDataAsUShort();
+    int drawn = 0;
+    for (int i = 0; i < g->indexCount(); i += 6) {
+        if (idx[i] == idx[i + 1] && idx[i + 1] == idx[i + 2]) continue; // degenerate spare
+        ++drawn;
+        const auto& topLeft = v[idx[i]];
+        const auto& bottomLeft = v[idx[i + 2]];
+        EXPECT_GT(bottomLeft.y, topLeft.y) << "bar " << i / 6;
+        EXPECT_GE(topLeft.y, float(surface.top()));
+        EXPECT_LE(bottomLeft.y, float(surface.bottom()));
+    }
+    EXPECT_EQ(drawn, 7) << "bins 100..107 draw; 107..108 has no height left";
 }
 
 TEST_F(TradeOverlay, VolumeProfileEdgesUseDevicePixelsOnlyAtRest) {
