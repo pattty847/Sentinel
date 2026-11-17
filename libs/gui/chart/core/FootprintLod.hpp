@@ -57,10 +57,20 @@ inline int64_t footprintSpanCount(double cells) {
 }
 // Smallest k whose worst case fits the cell budget: a run of rows spans at most
 // ceil(rows / k) + 1 bands in each visible bar.
-inline int64_t footprintBudgetBandRows(int64_t visibleBars, int64_t visibleRows, int64_t maxCells) {
+inline int64_t footprintBudgetFitRows(int64_t visibleBars, int64_t visibleRows, int64_t maxCells) {
     if (visibleBars <= 0 || visibleRows <= 0) return 1;
     const int64_t perBar = std::max<int64_t>(1, maxCells / visibleBars - 1);
     return std::max<int64_t>(1, (visibleRows + perBar - 1) / perBar);
+}
+// A budget factor shrinks back only once the smaller factor fits this fraction less budget.
+inline constexpr double kFootprintBudgetHysteresis = 1.0 / 16;
+// The budget factor, holding the previous k across zoom (as footprintBandRows does) until a
+// smaller k fits the budget with the margin to spare; growing to fit is immediate.
+inline int64_t footprintBudgetBandRows(int64_t visibleBars, int64_t visibleRows, int64_t maxCells,
+                                       int64_t previous = 0) {
+    const int64_t spare = maxCells - int64_t(double(maxCells) * kFootprintBudgetHysteresis);
+    return std::max(footprintBudgetFitRows(visibleBars, visibleRows, maxCells),
+                    std::min(previous, footprintBudgetFitRows(visibleBars, visibleRows, spare)));
 }
 // Bands sit on the absolute drawn-row grid, so a pan never re-partitions them.
 inline int64_t footprintBandStart(int64_t row, int64_t rows) {

@@ -4472,6 +4472,29 @@ TEST_F(UgrWheelCpu, InputRouterNativeZoomAndEndSettle) {
     EXPECT_FALSE(chart.zoomGesturing());
 }
 
+TEST_F(UgrWheelCpu, InputRouterNativePinchDuringAHeldAxisDragLeavesTheDragHeld) {
+    resetWheelView();
+    chart.view()->zoomPriceDrag(48, 160); // the button stays down
+    ASSERT_TRUE(chart.zoomGesturing());
+    QNativeGestureEvent begin(Qt::BeginNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+                              {320, 160}, {320, 160}, {320, 160}, 0, {}, 0);
+    QCoreApplication::sendEvent(&chart, &begin);
+    QNativeGestureEvent zoom(Qt::ZoomNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+                             {320, 160}, {320, 160}, {320, 160}, .2, {}, 1);
+    QCoreApplication::sendEvent(&chart, &zoom);
+    EXPECT_TRUE(chart.zoomGesturing());
+    EXPECT_FALSE(chart.gestureSettlePending()) << "a pinch joining a held drag arms no settle";
+    QNativeGestureEvent end(Qt::EndNativeGesture, QPointingDevice::primaryPointingDevice(), 2,
+                            {320, 160}, {320, 160}, {320, 160}, 0, {}, 2);
+    QCoreApplication::sendEvent(&chart, &end);
+    EXPECT_TRUE(end.isAccepted());
+    EXPECT_TRUE(chart.zoomGesturing()) << "the pinch end must not settle the held drag";
+    EXPECT_FALSE(chart.zoomGliding());
+    EXPECT_FALSE(chart.gestureSettlePending());
+    chart.view()->endZoomGesture(); // release
+    EXPECT_FALSE(chart.zoomGesturing());
+}
+
 TEST_F(UgrWheelCpu, MacMousePixelsStillMoveOneRungPerNotchOnEveryRoute) {
     for (const auto route : {Chart, TimeAxis, PriceAxis}) {
         SCOPED_TRACE(route);

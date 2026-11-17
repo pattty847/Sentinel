@@ -345,6 +345,41 @@ TEST_F(ZoomTest, AxisDragCancelsPendingWheelSettle) {
         EXPECT_FALSE(c.glide().gesture);
     }
 }
+TEST_F(ZoomTest, WheelSettleNeverEndsAHeldAxisDrag) {
+    // A trackpad scroll (and a pinch's safety timeout) while an axis drag is held must
+    // not settle the drag's gesture; only the release does.
+    z.zoomPriceDrag(48, 198);
+    ASSERT_TRUE(c.glide().gesture);
+    wheel(30, false, 2, true); // continuous scroll on the chart during the drag
+    EXPECT_FALSE(z.gestureSettlePending());
+    timer.advance(2000);
+    EXPECT_TRUE(c.glide().gesture);
+    EXPECT_FALSE(c.glide().price.active);
+    EXPECT_FALSE(c.glide().time.active);
+    z.zoomContinuousFor(1.1, 400, 200, true, false, chart::ZoomController::kGestureSafetyMs);
+    timer.advance(2000);
+    EXPECT_TRUE(c.glide().gesture);
+    wheel(0, false, 3, true); // the scroll's own end phase
+    EXPECT_TRUE(c.glide().gesture);
+    z.endWheelGesture();        // the pinch's native end
+    EXPECT_TRUE(c.glide().gesture);
+    EXPECT_FALSE(z.gestureSettlePending());
+    z.zoomPriceDrag(24, 197);   // the drag moves on inside the same gesture
+    EXPECT_TRUE(c.glide().gesture);
+    z.endZoomGesture();         // release
+    EXPECT_FALSE(c.glide().gesture);
+    EXPECT_TRUE(c.glide().price.active || c.glide().time.active);
+    // After the release a scroll settles on its own again.
+    c.zoomGlide().endZoomGlide();
+    wheel(30, false, 2, true);
+    EXPECT_TRUE(z.gestureSettlePending());
+    timer.advance(chart::ZoomController::kGestureSettleMs);
+    EXPECT_FALSE(c.glide().gesture);
+    // With no drag held, a wheel or pinch completion settles at once.
+    z.zoomContinuousFor(1.1, 400, 200, true, false, chart::ZoomController::kGestureSafetyMs);
+    z.endWheelGesture();
+    EXPECT_FALSE(c.glide().gesture);
+}
 TEST_F(ZoomTest, AxisWrappersPreserveOwnershipAndExplicitRelease) {
     v.setAutoPriceScale(true);
     z.zoomPriceWheel(0,0,0,200);

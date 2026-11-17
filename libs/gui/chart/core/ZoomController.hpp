@@ -38,7 +38,11 @@ public:
     void zoomContinuous(double factor, double x, double y, bool time = true, bool price = true);
     // Zero timeout keeps an axis drag continuous until release or cancellation.
     void zoomContinuousFor(double factor, double x, double y, bool time, bool price, int settleMs);
+    // Explicit end: an axis drag's release or cancel (QML), a click. Settles the gesture.
     void endZoomGesture();
+    // A wheel or pinch completed (scroll end, pinch end, settle timeout): settles the
+    // gesture unless an axis drag is still held, which settles only at its release.
+    void endWheelGesture();
     void wheelZoom(int angle, bool pixelDeltaNull, int phase, bool precise,
                    double x, double y, bool time, bool price, WheelRoute route);
     void zoomTimeWheel(int angleDelta, int pixelDelta, int phase, double x);
@@ -81,6 +85,8 @@ private:
     IChartEnvironment& environment_;
     QPointF gestureAt_;
     std::unique_ptr<IZoomTimer> settleTimer_;
+    // An axis drag (zero settle) is held from its first move to endZoomGesture.
+    bool axisDragHeld_ = false;
     TimerFactory timerFactory_;
     // Only the partial notch, for one route and its axes; reversal drops it.
     int wheelAngleRemainder_ = 0;

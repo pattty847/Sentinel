@@ -110,7 +110,7 @@ Budget budget(const chart_raster::RasterCamera& cam, int64_t timeframeMs, double
     const int64_t bars = footprintSpanCount(columns), rows = footprintSpanCount(rowsShown);
     Budget plan;
     plan.band = std::max(footprintBandRows(cam.rowPxF / cam.dpr, stage, previous),
-                         footprintBudgetBandRows(bars, rows, FlowSnapshot::kMaxCells));
+                         footprintBudgetBandRows(bars, rows, FlowSnapshot::kMaxCells, previous));
     const double perBar = double(std::max<int64_t>(1, FlowSnapshot::kMaxCells / bars - 1));
     plan.padPrice = std::clamp((perBar * double(plan.band) - double(rows)) * 0.5, 0.0, height / cam.tick) * cam.tick;
     plan.padMs = std::clamp((FlowSnapshot::kMaxBars - 2 - columns) * 0.5 * double(timeframeMs), 0.0, width);
@@ -215,6 +215,7 @@ void FlowFeed::selectSymbol() {
     const auto symbol = ports_.symbol ? ports_.symbol() : QString{};
     if (symbol == symbol_) return;
     symbol_ = symbol;
+    band_ = 0; // band hysteresis belongs to the old symbol's view
     buffer_.clear();
     withdraw();
 }
@@ -334,6 +335,7 @@ void FlowFeed::publishRows() {
     const auto* series = buffer_.series(symbol_, frame.activeTimeframeMs);
     // Numbers off caps the stage at Cells, as the layer does, so bands stay at the Cells height.
     const auto stage = !numbers_ && lod_ == FootprintStage::Numbers ? FootprintStage::Cells : lod_;
+    if (frame.activeTimeframeMs != bandTimeframeMs_) { band_ = 0; bandTimeframeMs_ = frame.activeTimeframeMs; }
     if (series && bin(out, *series, frame, stage, band_)) {
         band_ = out.bandRows;
         out.windowState = windowState(*series, frame);

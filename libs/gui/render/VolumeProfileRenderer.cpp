@@ -66,7 +66,7 @@ void fillRect(QSGGeometry* geo, const QRectF& r, const QColor& c) {
     geo->markIndexDataDirty();
 }
 
-// Clip filled VP rectangles before submission, including the POC thickness.
+// Clip filled VP rectangles and bars before submission, including the POC thickness.
 // Retain geometry storage when a rectangle is completely outside the surface.
 void fillClippedRect(QSGGeometry* geo, const QRectF& rect,
                      const QRectF& surface, const QColor& color) {
@@ -259,6 +259,16 @@ void VolumeProfileRenderer::ensureNodes(QSGNode* parentNode) {
     }
 }
 
+void VolumeProfileRenderer::reportBarCap(int visible, int drawn) {
+    // 16-bit indices address four vertices per bar, so at most kMaxIndexedBars bars draw;
+    // the wire allows taller grids. The lowest-priced visible bins are the ones dropped.
+    if (m_barCapReported) return;
+    m_barCapReported = true;
+    sLog_Warning("Volume profile bars capped at the 16-bit index limit: visible=" << visible
+                 << " drawn=" << drawn << " dropped=" << (visible - drawn)
+                 << " (reported once per renderer)");
+}
+
 void VolumeProfileRenderer::clearGeometry() {
     // Hide the draw ranges; keep nodes and allocated buffers for reuse.
     if (m_vaNode)   setDrawCounts(m_vaNode->geometry(), 0, 0);
@@ -333,15 +343,29 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
         // Centre price of bin i: snap.maxPrice - (i + 0.5) * snap.tickSize
         const double gridMaxPrice = snap.minPrice + static_cast<double>(n) * snap.tickSize;
 
+        // A bar's edges, snapped and then clamped to the plot like the VA band and POC (with
+        // no docked pane there is no clip node). A bar the clamp leaves without positive
+        // height (an edge bin on a fractional plot origin, a bin touching the view) is
+        // dropped; an unclipped sub-pixel bar keeps its snapped edges as before.
+        const auto barEdges = [&](int i, float& y0, float& y1) {
+            if (!std::isfinite(bins[static_cast<size_t>(i)])) return false;
+            const double binTop    = gridMaxPrice - static_cast<double>(i)     * snap.tickSize;
+            const double binBottom = gridMaxPrice - static_cast<double>(i + 1) * snap.tickSize;
+            if (binTop < viewMinPrice || binBottom > viewMaxPrice) return false;
+            const double top = priceEdge(binTop), bottom = priceEdge(binBottom);
+            y0 = static_cast<float>(std::clamp(top, drawRect.top(), drawRect.bottom()));
+            y1 = static_cast<float>(std::clamp(bottom, drawRect.top(), drawRect.bottom()));
+            const bool clipped = y0 != static_cast<float>(top) || y1 != static_cast<float>(bottom);
+            return !clipped || y1 > y0;
+        };
         // Count visible bins first to size the geometry.
-        int visCount = 0;
-        for (int i = 0; i < n && visCount < kMaxIndexedBars; ++i) {
-            if (!std::isfinite(bins[static_cast<size_t>(i)])) continue;
-            const double binTop    = gridMaxPrice - static_cast<double>(i)       * snap.tickSize;
-            const double binBottom = gridMaxPrice - static_cast<double>(i + 1)   * snap.tickSize;
-            if (binTop < viewMinPrice || binBottom > viewMaxPrice) continue;
-            ++visCount;
+        int visible = 0;
+        for (int i = 0; i < n; ++i) {
+            float y0 = 0, y1 = 0;
+            if (barEdges(i, y0, y1)) ++visible;
         }
+        const int visCount = std::min(visible, kMaxIndexedBars);
+        if (visible > visCount) reportBarCap(visible, visCount);
 
         auto* geo = m_barsNode->geometry();
         if (visCount > m_barCapacity) {
@@ -359,19 +383,14 @@ void VolumeProfileRenderer::rebuildGeometry(const QRectF& drawRect,
         const quint8 cb = static_cast<quint8>(m_barColor.blue());
 
         for (int i = 0; i < n && vi / 4 < visCount; ++i) {
+            float y0 = 0, y1 = 0;
+            if (!barEdges(i, y0, y1)) continue;
             const float vol = bins[static_cast<size_t>(i)];
-            if (!std::isfinite(bins[static_cast<size_t>(i)])) continue;
-            const double binTop    = gridMaxPrice - static_cast<double>(i)     * snap.tickSize;
-            const double binBottom = gridMaxPrice - static_cast<double>(i + 1) * snap.tickSize;
-            if (binTop < viewMinPrice || binBottom > viewMaxPrice) continue;
-
             const float barFrac  = vol / maxVol;
             const float barWidth = vpWidth * barFrac;
             // Bars extend leftward from vpRight.
             const float x0 = vpRight - barWidth;
             const float x1 = vpRight;
-            const float y0 = priceEdge(binTop);
-            const float y1 = priceEdge(binBottom);
             // Intensity: brighter for higher volume (keep hue, scale alpha).
             const quint8 ca = static_cast<quint8>(
                 std::clamp(static_cast<int>(80 + 175 * barFrac), 80, 255));

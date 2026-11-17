@@ -92,7 +92,8 @@ private:
     uint64_t serial_ = 0;
     bool enabled_ = false;
     FootprintStage lod_ = FootprintStage::Hidden;
-    int64_t band_ = 0;
+    int64_t band_ = 0; // band factor history, cleared on a symbol or timeframe change
+    int64_t bandTimeframeMs_ = 0;
     bool numbers_ = true;
 };
 } // namespace chart

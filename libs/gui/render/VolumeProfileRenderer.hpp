@@ -97,8 +97,11 @@ private:
     uint64_t m_deliveryRevision = 0; // render thread only
     uint64_t m_geometryRebuilds = 0;
     uint64_t m_geometryAllocations = 0;
+    bool m_barCapReported = false; // render thread only
 
     void ensureNodes(QSGNode* parentNode);
+    // Warns once when more visible bins than 16-bit indices can draw are dropped.
+    void reportBarCap(int visible, int drawn);
     void clearGeometry();
     // Rebuild all three geometry nodes from the current bins + snap.
     void rebuildGeometry(const QRectF& drawRect,

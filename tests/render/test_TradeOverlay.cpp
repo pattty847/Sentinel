@@ -887,7 +887,11 @@ TEST_F(TradeOverlay, VolumeProfileValueAreaPinsSeventyPercentRangeAndTranslucent
         }
         auto* bars = static_cast<QSGGeometryNode*>(va->nextSibling());
         const auto* barVertices = bars->geometry()->vertexDataAsColoredPoint2D();
-        const int visibleBars = priceMin == 100 ? 8 : 3;
+        // 120..125: the bins touching the view (115..120, 125..130) clip to no height.
+        const int visibleBars = priceMin == 100 ? 8 : 1;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+        EXPECT_EQ(bars->geometry()->vertexCount(), visibleBars * 4);
+#endif
         for (int i = 0; i < visibleBars * 4; ++i) {
             EXPECT_EQ(barVertices[i].r, 100 * int(barVertices[i].a) / 255);
             EXPECT_EQ(barVertices[i].g, 160 * int(barVertices[i].a) / 255);
@@ -989,6 +993,103 @@ TEST_F(TradeOverlay, VolumeProfileCapsBarsAtUnsignedShortIndexLimit) {
         for (int i = 0; i < 6; ++i) EXPECT_EQ(int(idx[bar * 6 + i]), expected[i]);
     }
     EXPECT_EQ(idx[maxBars * 6 - 2], 65535);
+}
+
+namespace {
+QStringList* g_vpLog = nullptr;
+void captureVpLog(QtMsgType, const QMessageLogContext&, const QString& message) {
+    if (g_vpLog && message.contains("Volume profile")) g_vpLog->append(message);
+}
+}
+
+TEST_F(TradeOverlay, VolumeProfileReportsBarsDroppedAtTheIndexLimitOnce) {
+    constexpr int maxBars = 16384;
+    VolumeProfileRenderer renderer;
+    QSGNode root;
+    VolumeProfileState::Snapshot snap;
+    snap.minPrice = 100;
+    snap.tickSize = 1;
+    snap.gridHeight = maxBars + 3;
+    const std::vector<float> bins(size_t(maxBars + 3), 1);
+    const QRectF surface(20, 30, 800, 400);
+    QStringList log;
+    g_vpLog = &log;
+    const auto previous = qInstallMessageHandler(captureVpLog);
+    renderer.render(&root, true, surface, 100, 100.0 + double(bins.size()), bins, snap, 1.0, true);
+    renderer.render(&root, true, surface, 99, 100.0 + double(bins.size()), bins, snap, 1.0, true); // rebuilt, still capped
+    snap.gridHeight = 4;
+    renderer.render(&root, true, surface, 100, 104, {1, 2, 3, 4}, snap, 1.0, true); // under the cap
+    qInstallMessageHandler(previous);
+    g_vpLog = nullptr;
+    ASSERT_EQ(log.size(), 1) << log.join('\n').toStdString();
+    EXPECT_TRUE(log[0].contains("visible=16387")) << log[0].toStdString();
+    EXPECT_TRUE(log[0].contains("drawn=16384")) << log[0].toStdString();
+    EXPECT_TRUE(log[0].contains("dropped=3")) << log[0].toStdString();
+}
+
+TEST_F(TradeOverlay, VolumeProfileBarsClipToThePlotWithoutAPaneClip) {
+    // With the CVD pane off, PaneChartLayer adds no clip node: bars straddling the top or
+    // bottom of the plot must be clipped by the renderer, as the VA band and POC are.
+    VolumeProfileRenderer renderer;
+    QSGNode root;
+    VolumeProfileState::Snapshot snap;
+    snap.minPrice = 100;
+    snap.tickSize = 1;
+    snap.gridHeight = 8;
+    const std::vector<float> bins{1, 2, 3, 4, 5, 6, 7, 8};
+    const QRectF surface(20, 30, 800, 400);
+    for (bool snapY : {true, false}) {
+        SCOPED_TRACE(snapY);
+        renderer.render(&root, true, surface, 100.5, 107.5, bins, snap, 1.0, snapY);
+        auto* bars = static_cast<QSGGeometryNode*>(root.firstChild()->nextSibling());
+        const auto* g = bars->geometry();
+        const auto* v = g->vertexDataAsColoredPoint2D();
+        const auto* idx = g->indexDataAsUShort();
+        int drawn = 0;
+        float top = 1e9f, bottom = -1e9f;
+        for (int i = 0; i < g->indexCount(); i += 3) {
+            if (idx[i] == idx[i + 1] && idx[i + 1] == idx[i + 2]) continue; // degenerate spare
+            ++drawn;
+            for (int k = 0; k < 3; ++k) {
+                const float y = v[idx[i + k]].y;
+                EXPECT_GE(y, surface.top());
+                EXPECT_LE(y, surface.bottom());
+                top = std::min(top, y); bottom = std::max(bottom, y);
+            }
+        }
+        EXPECT_EQ(drawn, 16) << "all 8 bins, the two partial edge bins included";
+        EXPECT_FLOAT_EQ(top, float(surface.top()));
+        EXPECT_FLOAT_EQ(bottom, float(surface.bottom()));
+        renderer.render(&root, true, surface, 100, 108, bins, snap, 1.0, snapY); // reset the cache key
+    }
+}
+
+TEST_F(TradeOverlay, VolumeProfileDropsBarsClippedToNoHeightOnAFractionalPlotOrigin) {
+    // Plot at y = 30.25: bin 107..108 lies above a 100..107 view; its bottom edge snaps
+    // to 30, above the plot. Clamping must not leave an inverted bar (30.25 -> 30).
+    VolumeProfileRenderer renderer;
+    QSGNode root;
+    VolumeProfileState::Snapshot snap;
+    snap.minPrice = 100;
+    snap.tickSize = 1;
+    snap.gridHeight = 8;
+    const std::vector<float> bins{1, 2, 3, 4, 5, 6, 7, 8};
+    const QRectF surface(20, 30.25, 800, 400);
+    renderer.render(&root, true, surface, 100, 107, bins, snap, 1.0, true);
+    const auto* g = static_cast<QSGGeometryNode*>(root.firstChild()->nextSibling())->geometry();
+    const auto* v = g->vertexDataAsColoredPoint2D();
+    const auto* idx = g->indexDataAsUShort();
+    int drawn = 0;
+    for (int i = 0; i < g->indexCount(); i += 6) {
+        if (idx[i] == idx[i + 1] && idx[i + 1] == idx[i + 2]) continue; // degenerate spare
+        ++drawn;
+        const auto& topLeft = v[idx[i]];
+        const auto& bottomLeft = v[idx[i + 2]];
+        EXPECT_GT(bottomLeft.y, topLeft.y) << "bar " << i / 6;
+        EXPECT_GE(topLeft.y, float(surface.top()));
+        EXPECT_LE(bottomLeft.y, float(surface.bottom()));
+    }
+    EXPECT_EQ(drawn, 7) << "bins 100..107 draw; 107..108 has no height left";
 }
 
 TEST_F(TradeOverlay, VolumeProfileEdgesUseDevicePixelsOnlyAtRest) {
