@@ -1395,10 +1395,11 @@ TEST(ChartShell, LadderStripReservesItsWidthBeforeThePriceAxis) {
 // Rendered shell: bars only inside the strip, on the chart's rows, price labels
 // still in the axis, at DPR 1 and after a change to DPR 2; a symbol switch drops them.
 namespace {
+// The plain bars: bid cyan and ask amber at 50% over the dark plot (black to bg0).
 bool barColour(QRgb c) {
-    const auto near = [](int a, int b) { return std::abs(a - b) <= 12; };
-    return (near(qRed(c), 34) && near(qGreen(c), 150) && near(qBlue(c), 139)) ||
-           (near(qRed(c), 215) && near(qGreen(c), 75) && near(qBlue(c), 72));
+    const auto near = [](int a, int b) { return std::abs(a - b) <= 14; };
+    return (qRed(c) <= 24 && near(qGreen(c), 134) && near(qBlue(c), 135)) ||
+           (near(qRed(c), 132) && near(qGreen(c), 106) && qBlue(c) <= 24);
 }
 bool labelColour(QRgb c) { return qRed(c) > 180 && qGreen(c) > 180 && qBlue(c) > 180; }
 } // namespace

@@ -76,7 +76,10 @@ int arrow(QSGGeometry::ColoredPoint2D* v, const BadgePill& p) {
 
 using EdgeSlots = std::array<std::array<const WallCandidate*, 2>, 2>;
 
-QRgb textColour(BadgePill::Colour c) { return c == BadgePill::Hot ? kHotText : c == BadgePill::Ask ? kAskText : kBidText; }
+QRgb textColour(BadgePill::Colour c) {
+    static constexpr QRgb kText[] = {kBidText, kAskText, kBidHotText, kAskHotText};
+    return kText[c];
+}
 } // namespace
 
 int formatMoney(double usd, char* out) {
@@ -181,7 +184,7 @@ EdgeSlots edgeSlots(const LadderSnapshot& s, const chart_raster::RasterCamera& c
     return slot;
 }
 
-// Notional, then the distance from the drawn edge to the wall: $1.07M  +$61.0. A scaled
+// Notional, then the distance from the drawn edge to the wall, dimmed: $1.07M  +$61.0. A scaled
 // display unit (PEPE x1M) shows the distance in that unit: $1.07M  +0.03 x1M.
 BadgePill edgePill(const WallCandidate& c, int side, bool top, const chart_raster::RasterCamera& cam,
                    sentinel::PriceDisplayUnit unit) {
@@ -190,6 +193,7 @@ BadgePill edgePill(const WallCandidate& c, int side, bool top, const chart_raste
     p.arrow = top ? 1 : -1;
     p.hollow = c.capped;
     p.length = formatMoney(double(c.size) * c.price, p.text);
+    p.dimFrom = p.length;
     p.length += append(p.text + p.length, top ? "  +" : "  -");
     const double distance = top ? c.price - cam.drawnMaxPrice : cam.drawnMinPrice - c.price;
     if (!unit.scaled()) {
@@ -306,7 +310,7 @@ bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int 
     const bool ask = askUsd >= bidUsd;
     const bool hot = row.flags & (ask ? LadderRow::kAskHot : LadderRow::kBidHot);
     BadgePill p;
-    p.colour = hot ? BadgePill::Hot : ask ? BadgePill::Ask : BadgePill::Bid;
+    p.colour = ask ? (hot ? BadgePill::AskHot : BadgePill::Ask) : (hot ? BadgePill::BidHot : BadgePill::Bid);
     p.length = formatMoney(ask ? askUsd : bidUsd, p.text);
     const double right = snap(f.itemBounds.right() - kBadgeInsetPx, cam.dpr);
     finishPill(p, right, top, cam.dpr);
@@ -318,7 +322,7 @@ bool LadderBadges::placeRow(const LadderSnapshot& s, const FrameContext& f, int 
 
 // Glyphs keep their offsets from the pill's text origin.
 void LadderBadges::compose(const BadgePill& p) {
-    const QColor colour = QColor::fromRgba(textColour(p.colour));
+    const QColor colour = QColor::fromRgba(textColour(p.colour)), dim = QColor::fromRgba(kDistanceText);
     double pen = 0;
     for (int i = 0; i < p.length; ++i) {
         const UnitGlyph& u = unit_[size_t(p.text[i] & 0x7f)];
@@ -327,7 +331,7 @@ void LadderBadges::compose(const BadgePill& p) {
             glyph.rect = QRectF(p.textLeft + (pen + u.left) * scale_, p.textTop + u.top * scale_, u.width * scale_,
                                 u.height * scale_);
             glyph.uv = u.uv;
-            glyph.color = colour;
+            glyph.color = i < p.dimFrom ? colour : dim;
             glyph.debugAnchor = QPointF(p.textLeft, p.textTop);
             glyphs_.push_back(glyph);
         }

@@ -25,6 +25,14 @@ void rectangle(Vertex*& out, const QRectF& r, QColor color) {
     for (const auto p : {r.topLeft(), r.bottomLeft(), r.topRight(), r.topRight(), r.bottomLeft(), r.bottomRight()})
         vertex(out, p, color);
 }
+// DELTA uses the direction pair, one style for every bar: the pill at 25% and the
+// value in full colour. Down text is the small-text down token (#FF8C82): #F6465D on
+// its own 25% pill is below 4.5:1.
+constexpr double kPillAlpha = .25;
+constexpr double kGutterPad = 4; // the row labels' inset and their gap to the first column
+QColor deltaText(double delta) {
+    return !footerPill(delta) ? ChartLookSettings::footprintText() : delta > 0 ? theme::positive() : QColor(0xFF, 0x8C, 0x82);
+}
 void pill(Vertex*& out, const QRectF& r, QColor color) {
     const double radius = std::min(r.height() * .5, r.width() * .5);
     const auto edge = [&](int i) {
@@ -74,15 +82,18 @@ double FlowFooterLayer::measure(const char* value, const ChartTextAtlas& atlas) 
     for (const char* c = value; *c; ++c) width += atlas.glyph(QChar(*c)).advance;
     return width * FlowFooterLayout::textPx / atlas.fontPx();
 }
-void FlowFooterLayer::text(const char* value, const QRectF& box, const ChartTextAtlas& atlas) {
+// Values end at their column's right edge, so the three rows share one column grid;
+// row labels start at the gutter's left edge.
+void FlowFooterLayer::text(const char* value, const QRectF& box, const ChartTextAtlas& atlas, const QColor& color,
+                           bool right) {
     const double scale = FlowFooterLayout::textPx / atlas.fontPx();
-    double pen = box.center().x() - measure(value, atlas) * .5;
+    double pen = right ? box.right() - measure(value, atlas) : box.left();
     for (const char* c = value; *c && glyphs_.size() < kGlyphs; ++c) {
         const auto& g = atlas.glyph(QChar(*c));
         ChartGlyphInstance glyph;
         glyph.rect = {pen + g.bounds.left() * scale, box.top() - atlas.glyphTopPx() * scale + g.bounds.top() * scale,
                       g.bounds.width() * scale, g.bounds.height() * scale};
-        glyph.uv = g.uv; glyph.color = ChartLookSettings::footprintText();
+        glyph.uv = g.uv; glyph.color = color;
         glyphs_.push_back(glyph); pen += g.advance * scale;
     }
 }
@@ -93,38 +104,54 @@ void FlowFooterLayer::measureAtlas(const ChartTextAtlas& atlas) {
     labelWidth_ = footerLabelWidth([&](char c) {
         return atlas.glyph(QChar(c)).advance * FlowFooterLayout::textPx / atlas.fontPx();
     });
-    rowLabelWidth_ = measure("DELTA", atlas) + 8;
+    deltaLabelWidth_ = measure("DELTA", atlas); cumLabelWidth_ = measure("CUM", atlas);
+    spaceWidth_ = measure(" ", atlas);
 }
 void FlowFooterLayer::column(int index, double x, double width, const ChartTextAtlas& atlas, Vertex*& out) {
     const auto& snapshot = cvd_.current();
     const auto& totals = snapshot.totals[size_t(index)];
     const double values[] = {totals.delta, snapshot.series.points[size_t(index)].value, totals.volume};
-    if (footerPill(totals.delta) && maximum_ > 0) {
+    if (footerPill(totals.delta)) {
         auto color = totals.delta > 0 ? theme::positive() : theme::negative();
-        color.setAlphaF(.15 + .65 * std::clamp(std::abs(totals.delta) / maximum_, 0.0, 1.0));
+        color.setAlphaF(kPillAlpha);
         pill(out, {x - width * .5 - 2, layout_.rowTop(0) - 1, width + 4, FlowFooterLayout::textPx + 2}, color);
     }
     for (int row = 0; row < 3; ++row) {
         char value[24]; footerNumber(values[row], value, row < 2);
-        text(value, {x - width * .5, layout_.rowTop(row), width, FlowFooterLayout::textPx}, atlas);
+        text(value, {x - width * .5, layout_.rowTop(row), width, FlowFooterLayout::textPx}, atlas,
+             row == 0 ? deltaText(totals.delta) : ChartLookSettings::footprintText(), true);
     }
     ++columns_;
+}
+// The gutter: DELTA / CUM / VOL, the unit once after DELTA and the CUM reset rule.
+double FlowFooterLayer::gutterWidth(const ChartTextAtlas& atlas) {
+    const auto& snapshot = cvd_.current();
+    footerUnit(snapshot.unit.data(), unit_);
+    const double delta = deltaLabelWidth_ + (unit_[0] ? spaceWidth_ + measure(unit_, atlas) : 0);
+    const double cum = cumLabelWidth_ + spaceWidth_ + measure(footerResetLabel(snapshot.reset), atlas);
+    return std::max(delta, cum) + 2 * kGutterPad;
+}
+void FlowFooterLayer::drawGutter(double width, const ChartTextAtlas& atlas) {
+    if (bounds_.width() < width) return;
+    const char* names[] = {"DELTA", "CUM", "VOL"};
+    const QColor color = ChartLookSettings::footprintText();
+    const double x = bounds_.left() + kGutterPad;
+    for (int row = 0; row < 3; ++row)
+        text(names[row], {x, layout_.rowTop(row), width, FlowFooterLayout::textPx}, atlas, color, false);
+    if (unit_[0])
+        text(unit_, {x + deltaLabelWidth_ + spaceWidth_, layout_.rowTop(0), width, FlowFooterLayout::textPx}, atlas, color, false);
+    text(footerResetLabel(cvd_.current().reset), {x + cumLabelWidth_ + spaceWidth_, layout_.rowTop(1), width, FlowFooterLayout::textPx},
+         atlas, color, false);
 }
 void FlowFooterLayer::drawColumns(const ChartFrame& frame, const ChartTextAtlas& atlas, Vertex*& out) {
     const auto& snapshot = cvd_.current();
     const auto& cam = frame.context.raster;
     measureAtlas(atlas);
     const double width = labelWidth_;
-    const double labels = rowLabelWidth_;
+    const double labels = gutterWidth(atlas);
     const double left = bounds_.left() + labels;
     const double barWidth = cam.colPxF / cam.dpr * snapshot.timeframeMs / cam.tfMs;
     stride_ = FlowFooterLayout::stride(barWidth, width + 4);
-    maximum_ = 0;
-    for (int i = 0; i < snapshot.series.count; ++i) {
-        const auto time = snapshot.series.points[size_t(i)].timeMs;
-        if (double(time) < cam.drawnEndMs && double(time) + snapshot.timeframeMs > cam.drawnStartMs && snapshot.totals[size_t(i)].valid)
-            maximum_ = std::max(maximum_, std::abs(snapshot.totals[size_t(i)].delta));
-    }
     for (int i = 0; i < snapshot.series.count && columns_ < kColumns; ++i) {
         const auto time = snapshot.series.points[size_t(i)].timeMs;
         if (!snapshot.totals[size_t(i)].valid || !FlowFooterLayout::selected(time, snapshot.timeframeMs, stride_)) continue;
@@ -132,10 +159,7 @@ void FlowFooterLayer::drawColumns(const ChartFrame& frame, const ChartTextAtlas&
         if (x - width * .5 - 2 < left || x + width * .5 + 2 > bounds_.right()) continue;
         column(i, x, width, atlas, out);
     }
-    if (bounds_.width() < labels) return;
-    const char* names[] = {"DELTA", "CUM", "VOL"};
-    for (int row = 0; row < 3; ++row)
-        text(names[row], {bounds_.left() + 2, layout_.rowTop(row), labels - 4, FlowFooterLayout::textPx}, atlas);
+    drawGutter(labels, atlas);
 }
 void FlowFooterLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& context) {
     if (!gate_) return;
@@ -162,7 +186,9 @@ void FlowFooterLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& con
 }
 void FlowFooterLayer::submitLabels(const ChartFrame&, LayerNodeContext& context) {
     if (!drawing_ || glyphs_.empty() || !context.atlasReady) return;
-    if (!reserved_) reserved_ = context.text.reserve(ChartLookSettings::footprintText(), kGlyphs);
+    if (!reserved_)
+        reserved_ = context.text.reserve(ChartLookSettings::footprintText(), kGlyphs) &&
+            context.text.reserve(deltaText(1), kColumns * 6) && context.text.reserve(deltaText(-1), kColumns * 6);
     context.text.submitGlyphs(glyphs_, ChartTextRenderer::Priority::High);
 }
 } // namespace chart

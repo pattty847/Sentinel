@@ -31,7 +31,7 @@ class LayerVisibility : public QObject {
     Q_PROPERTY(bool wallRadarEnabled READ wallRadarEnabled NOTIFY layerVisibilityChanged)
     Q_PROPERTY(double wallMultiple READ wallMultiple NOTIFY layerVisibilityChanged)
 public:
-    static constexpr int kLadderWidthPx = 120, kLadderMinWidthPx = 60, kLadderMaxWidthPx = 240;
+    static constexpr int kLadderWidthPx = 64, kLadderMinWidthPx = 60, kLadderMaxWidthPx = 240;
     static constexpr double kWallMultiple = 4, kWallMinMultiple = 1.5, kWallMaxMultiple = 20;
     std::function<void(std::string_view, bool, bool)> report;
     std::function<void()> requestUpdate;

@@ -41,6 +41,9 @@ struct CvdSnapshot {
     int64_t timeframeMs = 0;
     CvdReset reset = CvdReset::Visible;
     std::array<char, 80> label{};
+    // The base asset the footer's values are in ("BTC" for BTC-USD): up to 20 characters,
+    // the symbol rule's limit per side (AgentApiCodec, MainWindowGpu).
+    std::array<char, 21> unit{};
 };
 class CvdMailbox {
 public:
@@ -80,5 +83,6 @@ private:
     QTimer timer_;
     QMetaObject::Connection sourceConnection_;
     QString symbol_;
+    std::array<char, 21> unit_{};
 };
 } // namespace chart

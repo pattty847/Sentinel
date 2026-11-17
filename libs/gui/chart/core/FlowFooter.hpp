@@ -1,4 +1,5 @@
 #pragma once
+#include "chart/core/CvdSeries.hpp"
 #include "chart/core/FlowNumberFormat.hpp"
 #include <algorithm>
 #include <cmath>
@@ -36,7 +37,7 @@ struct FlowFooterLayout {
     }
 };
 // Bounds all formatter forms: three significant digits, decimal/suffix,
-// the >999B cap, and the unsigned <.01 sentinel. Independent of live data.
+// the >999B cap, and the unsigned <0.01 sentinel. Independent of live data.
 template<class Advance>
 double footerLabelWidth(Advance advance) {
     double digit = 0;
@@ -45,11 +46,39 @@ double footerLabelWidth(Advance advance) {
     const double magnitude = std::max({3 * digit + advance('.'), 3 * digit + suffix + advance('.'),
                                       advance('>') + 3 * digit + advance('B')});
     const double signedWidth = magnitude + std::max(advance('+'), advance('-'));
-    return std::max(signedWidth, advance('<') + advance('.') + advance('0') + advance('1'));
+    return std::max(signedWidth, advance('<') + 2 * advance('0') + advance('.') + advance('1'));
+}
+// Gutter labels. The unit after DELTA shows at most kFooterUnitGlyphs characters; a
+// longer base asset keeps its first six and ends in "..", never silently cut. The
+// CUM label names its reset (the CVD title's rule) so a footer without a strip says it.
+constexpr int kFooterUnitGlyphs = 8;
+inline void footerUnit(const char* unit, char (&out)[kFooterUnitGlyphs + 1]) {
+    int n = 0;
+    while (unit[n] && n <= kFooterUnitGlyphs) ++n;
+    if (n <= kFooterUnitGlyphs) {
+        std::copy_n(unit, n, out);
+    } else {
+        std::copy_n(unit, kFooterUnitGlyphs - 2, out);
+        out[kFooterUnitGlyphs - 2] = out[kFooterUnitGlyphs - 1] = '.';
+        n = kFooterUnitGlyphs;
+    }
+    out[n] = '\0';
+}
+inline const char* footerResetLabel(CvdReset reset) {
+    return reset == CvdReset::Visible ? "view" : reset == CvdReset::UtcDay ? "day" : "sess";
 }
 inline bool footerPill(double delta) { return std::isfinite(delta) && std::abs(delta) >= .01; }
+// One leading-zero rule for the footer: a magnitude below 1 keeps its zero
+// (+0.09, 0.50, <0.01); the shared flow format drops it for footprint cells.
 inline int footerNumber(double value, char (&out)[24], bool signedValue) {
-    const int size = flowNumber(value, out, signedValue ? FlowNumberContext::SignedLabel : FlowNumberContext::Footprint);
+    int size = flowNumber(value, out, signedValue ? FlowNumberContext::SignedLabel : FlowNumberContext::Footprint);
+    int lead = 0;
+    while (lead < size && (out[lead] == '-' || out[lead] == '<')) ++lead;
+    if (lead < size && out[lead] == '.') {
+        std::move_backward(out + lead, out + size + 1, out + size + 2);
+        out[lead] = '0';
+        ++size;
+    }
     if (signedValue && value >= .01 && size) {
         std::move_backward(out, out + size + 1, out + size + 2);
         out[0] = '+';

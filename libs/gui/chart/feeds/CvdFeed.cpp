@@ -112,6 +112,9 @@ void CvdFeed::selectSymbol() {
     const auto symbol = ports_.symbol ? ports_.symbol() : QString{};
     if (symbol == symbol_) return;
     symbol_ = symbol; buffer_.clear();
+    unit_ = {};
+    const auto base = symbol.section(QLatin1Char('-'), 0, 0).toLatin1();
+    std::copy_n(base.constData(), std::min<qsizetype>(base.size(), qsizetype(unit_.size() - 1)), unit_.begin());
     mailbox_.back().series.clear(); mailbox_.post();
 }
 void CvdFeed::onFrameChanged() {
@@ -155,7 +158,7 @@ void CvdFeed::build(CvdSnapshot& out, const FlowSeriesBuffer::Series& source,
 void CvdFeed::publish() {
     selectSymbol();
     auto& out = mailbox_.back();
-    out.series.clear(); out.reset = presentation_.reset;
+    out.series.clear(); out.reset = presentation_.reset; out.unit = unit_;
     const auto frame = ports_.frame ? ports_.frame() : MappingFrameContext{};
     out.timeframeMs = frame.activeTimeframeMs > 0 ? std::max<int64_t>(1000, frame.activeTimeframeMs) : 0;
     if (presentation_.stripPx || presentation_.flowFooter) {

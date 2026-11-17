@@ -208,7 +208,7 @@ On first use, per-chart defaults come from the client YAML keys below (also supp
 | (settings only) `footprintDustNotional` | 2500 | Quote-currency side threshold: below it, no volume fill and 22% text alpha. |
 | (settings only) `footprintNumbers` | true | Allows the Numbers stage (from a 96.013 logical px column; rows merge into 17 px bands; 2 px retention band); false caps footprint LOD at Cells. |
 | (settings only) `showLadder` | false | Boolean; the chart-edge book ladder strip (chart menu "Order book ladder"). |
-| (settings only) `ladderWidthPx` | 120 | Integer 60..240 logical px; the strip width while the ladder is on (chart menu "Ladder width"). |
+| (settings only) `ladderWidthPx` | 64 | Integer 60..240 logical px; the strip width while the ladder is on (chart menu "Ladder width"). |
 | (settings only) `showWallRadar` | false | Boolean; wall marks on the ladder (chart menu "Wall radar"; turning it on there also turns the ladder on). |
 | (settings only) `wallMultiple` | 4 | Number 1.5..20; a ladder bin is a wall at this multiple of its side's median nonempty display bin among the 32 nearest its touch (chart menu "Wall threshold": 2, 3, 4, 6, 8). |
 

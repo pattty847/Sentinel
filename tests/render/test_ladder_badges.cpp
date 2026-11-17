@@ -240,7 +240,7 @@ TEST(LadderBadges, ThinBandsChooseTheLargestWallNotionalAndKeepItsRowAndSide) {
         EXPECT_EQ(text(rig.pills()[0]), "$2.22k");
         EXPECT_EQ(rig.pills()[0].colour, BadgePill::Ask);
         EXPECT_EQ(text(rig.pills()[1]), "$5.26k");
-        EXPECT_EQ(rig.pills()[1].colour, BadgePill::Hot);
+        EXPECT_EQ(rig.pills()[1].colour, BadgePill::AskHot);
         EXPECT_NEAR(rig.pills()[0].rect.center().y(), rig.cam.yDev(170.5) / dpr, 0.5 / dpr);
         EXPECT_NEAR(rig.pills()[1].rect.center().y(), rig.cam.yDev(164.5) / dpr, 0.5 / dpr);
         EXPECT_FALSE(rig.pills()[0].rect.intersects(rig.pills()[1].rect));
@@ -582,11 +582,38 @@ TEST(LadderBadges, ABinWithBothSidesLargeGetsOneBadgeForTheLargerNotional) {
     rig.wall(104, S::kAsk, 7, 60'000, 3, true); // tie: ask (hot)
     rig.post();
     ASSERT_EQ(rig.pills().size(), 3u);
-    EXPECT_EQ(rig.pills()[0].colour, BadgePill::Hot) << "bin 104: tie -> ask";
+    EXPECT_EQ(rig.pills()[0].colour, BadgePill::AskHot) << "bin 104: tie -> ask";
     EXPECT_EQ(text(rig.pills()[0]), "$732");
     EXPECT_EQ(rig.pills()[1].colour, BadgePill::Bid) << "bin 102: bid larger";
     EXPECT_EQ(text(rig.pills()[1]), "$1.23k");
     EXPECT_EQ(rig.pills()[2].colour, BadgePill::Ask) << "bin 100: ask larger";
+}
+
+// Principle 1: cyan/amber is liquidity only. A hot wall keeps its side's hue and is
+// brighter, never the other side's colour.
+TEST(LadderBadges, AHotWallKeepsItsSideColourAndIsBrighter) {
+    BadgeRig rig(camera(90, 110));
+    rig.snapshot();
+    rig.wall(108, S::kBid, 10);
+    rig.wall(104, S::kBid, 10, 60'000, 3, true);
+    rig.wall(100, S::kAsk, 10);
+    rig.wall(96, S::kAsk, 10, 60'000, 3, true);
+    rig.post();
+    ASSERT_EQ(rig.pills().size(), 4u);
+    const BadgePill::Colour want[] = {BadgePill::Bid, BadgePill::BidHot, BadgePill::Ask, BadgePill::AskHot};
+    const QRgb text[] = {chart::kBidText, chart::kBidHotText, chart::kAskText, chart::kAskHotText};
+    size_t glyph = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(rig.pills()[i].colour, want[i]);
+        for (int c = 0; c < inkChars(rig.pills()[i]); ++c, ++glyph)
+            EXPECT_EQ(rig.layer.badges().glyphs()[glyph].color.rgba(), text[i]);
+    }
+    const auto luma = [](QRgb c) { return 0.2126 * qRed(c) + 0.7152 * qGreen(c) + 0.0722 * qBlue(c); };
+    EXPECT_GT(luma(chart::kBidHotText), luma(chart::kBidText));
+    EXPECT_GT(luma(chart::kAskHotText), luma(chart::kAskText));
+    EXPECT_GT(qBlue(chart::kBidHotText), qRed(chart::kBidHotText)) << "cyan family";
+    EXPECT_GT(qRed(chart::kAskHotText), qBlue(chart::kAskHotText)) << "amber family";
 }
 
 TEST(LadderBadges, ARowCutByTheEdgeOrUnderAnEdgePillHasNoBadge) {
@@ -693,6 +720,30 @@ TEST(LadderBadges, EdgePillsStackAskNearestTheEdgeAndFollowTheCurrentWindow) {
     rig.post();
     EXPECT_EQ(rig.layer.badges().stats().edgePills, 0);
     EXPECT_EQ(rig.layer.badgeVertexCount(), 0);
+}
+
+// OVL-9: the notional reads first; the distance after it is dimmed, not a second value
+// in the same weight.
+TEST(LadderBadges, AnEdgePillDimsItsDistance) {
+    BadgeRig rig(camera(90, 110));
+    rig.snapshot();
+    rig.candidate(S::kAsk, S::kAbove, 120, 50);
+    rig.candidate(S::kBid, S::kBelow, 85, 20);
+    rig.wall(100, S::kBid, 10);
+    rig.post();
+    ASSERT_EQ(rig.pills().size(), 3u);
+    ASSERT_EQ(text(rig.pills()[0]), "$6.00k  +$10.0");
+    ASSERT_EQ(text(rig.pills()[1]), "$1.70k  -$5.00");
+    const auto& glyphs = rig.layer.badges().glyphs();
+    std::string colours;
+    for (const auto& glyph : glyphs) {
+        const QRgb c = glyph.color.rgba();
+        colours += c == chart::kDistanceText ? 'd' : c == chart::kAskText ? 'a' : c == chart::kBidText ? 'b' : '?';
+    }
+    EXPECT_EQ(colours, "aaaaaadddddd" "bbbbbbdddddd" "bbbbbb") << "row badges are never dimmed";
+    const auto luma = [](QRgb c) { return 0.2126 * qRed(c) + 0.7152 * qGreen(c) + 0.0722 * qBlue(c); };
+    EXPECT_LT(luma(chart::kDistanceText), luma(chart::kAskText));
+    EXPECT_LT(luma(chart::kDistanceText), luma(chart::kBidText));
 }
 
 TEST(LadderBadges, ABidAboveTheWindowPointsUpAndAnEdgeKeepsTheNearerOfASide) {
@@ -840,7 +891,7 @@ ColourNodes colourNodes(QSGNode& root) {
             const auto& colour = static_cast<ChartTextMaterial*>(node->material())->color();
             if (same(colour, chart::kBidText)) out.bid = node;
             if (same(colour, chart::kAskText)) out.ask = node;
-            if (same(colour, chart::kHotText)) out.hot = node;
+            if (same(colour, chart::kAskHotText)) out.hot = node;
         }
     return out;
 }
@@ -886,10 +937,10 @@ TEST(LadderBadgesGpu, WarmedFramesAllocateNothingThroughEndFrame) {
     fillFrame(rig, 1);
     rig.post();
     ASSERT_TRUE(rig.layer.drawing());
-    EXPECT_EQ(rig.text.textureCount(), 3) << "every badge colour reserved with its texture";
+    EXPECT_EQ(rig.text.textureCount(), 5) << "every badge colour reserved with its texture";
     const size_t bytes = rig.text.capacityBytes();
     const int capacity = rig.text.nodeCapacityGlyphs();
-    EXPECT_GE(capacity, 3 * chart::kMaxBadgeGlyphs);
+    EXPECT_GE(capacity, 4 * chart::kMaxBadgeGlyphs);
     const size_t layoutBytes = rig.layer.badges().capacityBytes();
     std::vector<std::string> seen;
     size_t allocations = 0;
@@ -915,7 +966,7 @@ TEST(LadderBadgesGpu, WarmedFramesAllocateNothingThroughEndFrame) {
         EXPECT_EQ(rig.layer.badges().stats().edgePills, f >= 60 ? 4 : 0);
     }
     EXPECT_EQ(allocations, 0u);
-    EXPECT_EQ(rig.text.textureCount(), 3);
+    EXPECT_EQ(rig.text.textureCount(), 5);
     EXPECT_EQ(rig.text.capacityBytes(), bytes);
     EXPECT_EQ(rig.text.nodeCapacityGlyphs(), capacity);
     EXPECT_EQ(rig.layer.badges().capacityBytes(), layoutBytes);
@@ -961,7 +1012,7 @@ TEST(LadderBadgesGpu, WarmedFramesAllocateNothingThroughEndFrame) {
     drawOn(root2);
     gCounting = false;
     EXPECT_GT(gAllocations.load(), 0u) << "the new root's nodes and textures";
-    EXPECT_EQ(rig.text.textureCount(), 3);
+    EXPECT_EQ(rig.text.textureCount(), 5);
     const auto fresh = colourNodes(root2);
     ASSERT_TRUE(fresh.bid && fresh.ask && fresh.hot);
     for (auto* node : {fresh.bid, fresh.ask, fresh.hot}) {

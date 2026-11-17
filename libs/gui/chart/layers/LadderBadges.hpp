@@ -40,9 +40,14 @@ constexpr double kArrowPx = 8, kArrowGapPx = 4, kArrowStrokePx = 1.5;
 
 // Colours. Text is straight ARGB (the text material); geometry is premultiplied
 // (QSGVertexColorMaterial) from the straight values here.
+// A hot wall (a recent flicker) keeps its side's hue, lifted toward white.
 constexpr QRgb kBidText = qRgba(191, 246, 255, 255);
 constexpr QRgb kAskText = qRgba(255, 224, 160, 255);
-constexpr QRgb kHotText = qRgba(255, 208, 77, 255);
+constexpr QRgb kBidHotText = qRgba(235, 253, 255, 255);
+constexpr QRgb kAskHotText = qRgba(255, 243, 214, 255);
+// An edge pill's distance from the drawn edge is secondary to the wall's notional:
+// the dim text role (text3, about 7:1 on the pill).
+constexpr QRgb kDistanceText = qRgba(147, 161, 175, 255);
 struct BadgeRgba { uchar r, g, b, a; };
 constexpr BadgeRgba kPillBackSrgb{12, 16, 22, 235};
 constexpr BadgeRgba kBidArrowSrgb{0, 255, 255, 255};
@@ -53,7 +58,7 @@ constexpr BadgeRgba kAskArrowSrgb{255, 200, 0, 255};
 int formatMoney(double usd, char* out);
 
 struct BadgePill {
-    enum Colour : uint8_t { Bid, Ask, Hot };
+    enum Colour : uint8_t { Bid, Ask, BidHot, AskHot };
     QRectF rect; // the background, logical px, on device pixels
     double textLeft = 0, textTop = 0;
     char text[kBadgeChars] = {};
@@ -61,6 +66,7 @@ struct BadgePill {
     Colour colour = Bid;
     int8_t arrow = 0; // +1 up (wall above), -1 down (below), 0 a row badge
     bool hollow = false; // the side's scan stopped short: a larger wall may lie farther out
+    int dimFrom = kBadgeChars; // text from this index (an edge pill's distance) is kDistanceText
 };
 
 struct BadgeStats {
