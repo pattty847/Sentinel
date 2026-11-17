@@ -22,6 +22,7 @@
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/HeatmapTelemetryDock.hpp"
 #include "widgets/TopToolbar.hpp"
+#include "themes/ThemePalette.hpp"
 #include "SyntheticHmc2Fixture.hpp"
 #include <QAction>
 #include <QAbstractButton>
@@ -41,6 +42,7 @@
 #include <QJsonArray>
 #include <QPushButton>
 #include <QQuickWindow>
+#include <QScreen>
 #include <QSettings>
 #include <QSGGeometry>
 #include <QSGGeometryNode>
@@ -50,7 +52,11 @@
 #include <QScrollBar>
 #include <QSpinBox>
 #include <QSlider>
+#include <QStyleOption>
+#include <QLabel>
+#include <QToolButton>
 #include "chart/shell/TradeBubbleStyleStore.hpp"
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTemporaryDir>
@@ -65,6 +71,7 @@
 #include <QQmlComponent>
 #include <QQuickWindow>
 #include <iostream>
+#include <set>
 
 struct TradeBubbleRendererTest {
     static void publish(UnifiedGridRenderer& r, const TimeAxisMapping& m) { r.m_bubbles.publish(m); }
@@ -1720,7 +1727,7 @@ TEST(HeatmapSettingsDialogTest, ShortDialogScrollsToLookControlsWithoutChangingP
     opacity->setValue(0.6);
     EXPECT_DOUBLE_EQ(t.reload().opacity, 0.6);
     auto *reset = child<QPushButton>(dialog, "resetLook");
-    scroll->ensureWidgetVisible(reset);
+    EXPECT_FALSE(scroll->isAncestorOf(reset)); // in the footer: visible without scrolling
     EXPECT_TRUE(reset->isVisible());
     reset->click();
     EXPECT_DOUBLE_EQ(t.reload().opacity, model.defaultSettings().opacity);
@@ -1997,6 +2004,304 @@ TEST(HeatmapSettingsDialogTest, ApiChangesReachTheDialogAndToolbar) {
     EXPECT_EQ(toolbar.tickModeCombo()->currentIndex(), 1); // Manual, shown though disabled (no GPU chart)
     EXPECT_EQ(toolbar.tickPresetCombo()->currentData().toLongLong(), 1000);
     EXPECT_EQ(t.reload().palettePreset, "Electric"); // persist:false
+}
+
+// ------------------------------------------- dialog look (UI brief, SET items)
+int countColor(const QImage &image, const QRect &area, const QColor &color) {
+    int n = 0;
+    for (int y = area.top(); y <= area.bottom(); ++y)
+        for (int x = area.left(); x <= area.right(); ++x) n += image.pixelColor(x, y) == color;
+    return n;
+}
+
+// SET-1: off is an empty box; on is a white tick on the selection fill with an
+// accent border, not a solid accent square.
+TEST(HeatmapSettingsDialogLook, CheckedBoxShowsAWhiteTickOnTheSelectionFill) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    dialog.show();
+    QCoreApplication::processEvents();
+    auto *box = child<QCheckBox>(dialog, "showLabels");
+    ASSERT_TRUE(box->isChecked());
+    QStyleOptionButton option;
+    option.initFrom(box);
+    const QRect indicator = box->style()->subElementRect(QStyle::SE_CheckBoxIndicator, &option, box);
+    ASSERT_GE(indicator.width(), 12);
+    const int area = indicator.width() * indicator.height();
+    const QImage on = box->grab().toImage();
+    int white = 0;
+    for (int y = indicator.top(); y <= indicator.bottom(); ++y)
+        for (int x = indicator.left(); x <= indicator.right(); ++x) {
+            const QColor c = on.pixelColor(x, y);
+            white += c.red() > 220 && c.green() > 220 && c.blue() > 220;
+        }
+    EXPECT_GT(countColor(on, indicator, theme::sel()), area / 4) << "selection fill";
+    EXPECT_GT(countColor(on, indicator, theme::accent()), 0) << "accent border";
+    EXPECT_LT(countColor(on, indicator, theme::accent()), area / 2) << "not a solid accent square";
+    EXPECT_GT(white, 4) << "white tick";
+    box->setChecked(false);
+    const QImage off = box->grab().toImage();
+    EXPECT_GT(countColor(off, indicator, theme::bg2()), area / 2) << "empty bg2 box";
+    EXPECT_EQ(countColor(off, indicator, theme::sel()), 0);
+}
+
+// SET-3: Close is the only primary button; each tab's Reset is a quiet action at
+// the footer's left (one at a time, never inside the scrolled tab); Log settings
+// is a quiet action inside the Debug tab.
+TEST(HeatmapSettingsDialogLook, CloseIsTheOnlyPrimaryAndResetIsAQuietFooterAction) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    dialog.resize(640, 600);
+    dialog.show();
+    QCoreApplication::processEvents();
+    const auto fill = [](QPushButton *button) {
+        return button->grab().toImage().pixelColor(button->width() - 3, button->height() / 2);
+    };
+    auto *close = child<QPushButton>(dialog, "settingsClose");
+    ASSERT_TRUE(close);
+    EXPECT_EQ(fill(close), theme::primary());
+    for (int tab = 0; tab < dialog.tabs()->count(); ++tab) {
+        dialog.tabs()->setCurrentIndex(tab);
+        QCoreApplication::processEvents();
+        const QString name = dialog.tabs()->tabText(tab);
+        SCOPED_TRACE(name.toStdString());
+        int visibleResets = 0;
+        for (auto *button : dialog.findChildren<QPushButton *>())
+            visibleResets += button->objectName().startsWith("reset") && button->isVisible();
+        EXPECT_EQ(visibleResets, 1);
+        auto *reset = child<QPushButton>(dialog, ("reset" + name).toUtf8().constData());
+        ASSERT_TRUE(reset);
+        EXPECT_TRUE(reset->isVisible());
+        EXPECT_FALSE(dialog.tabs()->isAncestorOf(reset));
+        EXPECT_LT(reset->mapTo(&dialog, QPoint()).x(), dialog.width() / 4);
+        EXPECT_LE(reset->height(), close->height());
+        EXPECT_NE(fill(reset), theme::primary());
+        for (auto *button : dialog.tabs()->currentWidget()->findChildren<QPushButton *>())
+            if (button->isVisible()) EXPECT_NE(fill(button), theme::primary()) << button->objectName().toStdString();
+    }
+    auto *log = child<QPushButton>(dialog, "logSettings");
+    ASSERT_TRUE(log);
+    int logTab = -1;
+    for (int tab = 0; tab < dialog.tabs()->count(); ++tab)
+        if (dialog.tabs()->widget(tab)->isAncestorOf(log)) logTab = tab;
+    EXPECT_EQ(dialog.tabs()->tabText(logTab), "Debug");
+}
+
+// SET-4: one form grid on every tab, sections included: a 180 px right-aligned
+// label column, 8 px to the fields, 8 px between rows.
+TEST(HeatmapSettingsDialogLook, EveryTabSharesOneRightAlignedFormGrid) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    UnifiedGridRenderer renderer;
+    HeatmapSettingsDialog dialog(&model, &renderer);
+    dialog.resize(720, 760);
+    dialog.show();
+    for (int tab = 0; tab < dialog.tabs()->count(); ++tab) {
+        dialog.tabs()->setCurrentIndex(tab);
+        QCoreApplication::processEvents();
+        SCOPED_TRACE(dialog.tabs()->tabText(tab).toStdString());
+        QWidget *page = qobject_cast<QScrollArea *>(dialog.tabs()->widget(tab))->widget();
+        std::set<int> labelEnds, fieldStarts;
+        QStringList where; // label text @ label end / field start, for a failure message
+        int rows = 0;
+        for (auto *form : page->findChildren<QFormLayout *>()) {
+            EXPECT_EQ(form->horizontalSpacing(), 8);
+            EXPECT_EQ(form->verticalSpacing(), 8);
+            for (int row = 0; row < form->rowCount(); ++row) {
+                auto *labelItem = form->itemAt(row, QFormLayout::LabelRole);
+                auto *fieldItem = form->itemAt(row, QFormLayout::FieldRole);
+                if (!fieldItem || form->itemAt(row, QFormLayout::SpanningRole)) continue; // a section
+                ASSERT_TRUE(labelItem) << "a field without the label column, row " << row;
+                auto *label = qobject_cast<QLabel *>(labelItem->widget());
+                ASSERT_TRUE(label);
+                if (!label->isVisible()) continue;
+                ++rows;
+                EXPECT_EQ(label->width(), 180) << label->text().toStdString();
+                EXPECT_TRUE(label->alignment() & Qt::AlignRight) << label->text().toStdString();
+                const int labelEnd = label->mapTo(page, QPoint(label->width(), 0)).x();
+                const int fieldStart = form->parentWidget()->mapTo(page, fieldItem->geometry().topLeft()).x();
+                labelEnds.insert(labelEnd);
+                fieldStarts.insert(fieldStart);
+                where << QStringLiteral("%1@%2/%3").arg(label->text()).arg(labelEnd).arg(fieldStart);
+            }
+        }
+        EXPECT_GT(rows, 0);
+        EXPECT_EQ(labelEnds.size(), 1u) << "labels end at one x: " << where.join(", ").toStdString();
+        EXPECT_EQ(fieldStarts.size(), 1u) << "fields start at one x: " << where.join(", ").toStdString();
+        if (labelEnds.size() == 1 && fieldStarts.size() == 1) EXPECT_EQ(*fieldStarts.begin() - *labelEnds.begin(), 8);
+    }
+}
+
+// SET-2: no permanent help paragraphs; the dialog says one sentence, and each
+// group's longer explanation sits behind its "?".
+TEST(HeatmapSettingsDialogLook, LongHelpSitsBehindAQuestionMarkPerGroup) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    EXPECT_EQ(child<QLabel>(dialog, "settingsNote")->text(), "Changes take effect immediately.");
+    for (int tab = 0; tab < dialog.tabs()->count(); ++tab)
+        for (auto *label : dialog.tabs()->widget(tab)->findChildren<QLabel *>())
+            EXPECT_FALSE(label->text().contains(". ")) << "a paragraph on " << dialog.tabs()->tabText(tab).toStdString()
+                                                       << ": " << label->text().toStdString();
+    QStringList help;
+    for (auto *button : dialog.findChildren<QToolButton *>("settingsHelp")) {
+        EXPECT_EQ(button->text(), "?");
+        help << button->toolTip();
+    }
+    for (const char *phrase : {"Their size grows with the cell", "Picking a preset locks Manual",
+                               "at most the GPU cap", "each tier is 1..4096 MiB", "back off to at least 5 s",
+                               "Theme and style are saved for every chart"})
+        EXPECT_TRUE(help.join('\n').contains(phrase)) << phrase;
+}
+
+// SET-6: plain names (labels and choices only; keys and values unchanged) and an
+// Advanced group for internal tuning.
+TEST(HeatmapSettingsDialogLook, PlainNamesAndAnAdvancedGroupForInternals) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    QStringList names;
+    for (auto *label : dialog.findChildren<QLabel *>()) names << label->text();
+    for (auto *group : dialog.findChildren<QGroupBox *>()) names << group->title();
+    for (const char *internal : {"Hysteresis", "Shader", "TPO Bracket", "TPO Session", "device pixels", "Live min",
+                                 "(0–1)", "quote currency"})
+        for (const auto &name : names) EXPECT_FALSE(name.contains(internal)) << name.toStdString();
+    auto *tick = child<QGroupBox>(dialog, "tickAdvanced");
+    ASSERT_TRUE(tick);
+    EXPECT_EQ(tick->title(), "Advanced");
+    EXPECT_TRUE(tick->isAncestorOf(child<QDoubleSpinBox>(dialog, "minRowPx")));
+    EXPECT_TRUE(tick->isAncestorOf(child<QDoubleSpinBox>(dialog, "hysteresis")));
+    EXPECT_TRUE(child<QGroupBox>(dialog, "lookAdvanced")->title().startsWith("Advanced"));
+    for (const char *key : {"footprintIntensity", "footprintCandle", "cvdReset", "cvdStyle", "cvdFillAnchor"}) {
+        auto *combo = child<QComboBox>(dialog, key);
+        for (int i = 0; i < combo->count(); ++i)
+            EXPECT_NE(combo->itemText(i), combo->itemData(i).toString()) << key << " shows its raw value";
+    }
+    auto *reset = child<QComboBox>(dialog, "cvdReset");
+    EXPECT_EQ(reset->itemText(reset->findData("utcDay")), "UTC day");
+    // The keys stay: picking a plain name still writes the setting value.
+    reset->setCurrentIndex(reset->findData("tpoSession"));
+    EXPECT_EQ(model.settings().cvdReset, "tpoSession");
+}
+
+// SET-5: one field style: every combo and spin box outside a table is one height
+// and one of three widths, on a bg2 fill.
+TEST(HeatmapSettingsDialogLook, FieldsShareOneHeightAndThreeWidths) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    UnifiedGridRenderer renderer;
+    HeatmapSettingsDialog dialog(&model, &renderer);
+    TopToolbar::TickSelectorState ticks;
+    ticks.enabled = true;
+    ticks.offeredUnits = {100, 500};
+    ticks.drawnUnits = 100;
+    ticks.priceScale = 100;
+    dialog.setTickSelectorState(ticks); // refills the preset combo
+    int fields = 0;
+    for (auto *field : dialog.tabs()->findChildren<QWidget *>()) {
+        if (!qobject_cast<QComboBox *>(field) && !qobject_cast<QAbstractSpinBox *>(field)) continue;
+        bool inTable = false;
+        for (auto *p = field->parentWidget(); p; p = p->parentWidget()) inTable = inTable || qobject_cast<QTableWidget *>(p);
+        if (inTable) continue;
+        ++fields;
+        SCOPED_TRACE(field->objectName().toStdString());
+        EXPECT_EQ(field->minimumHeight(), 24);
+        EXPECT_EQ(field->maximumHeight(), 24);
+        EXPECT_EQ(field->minimumWidth(), field->maximumWidth());
+        EXPECT_TRUE(field->minimumWidth() == 64 || field->minimumWidth() == 96 || field->minimumWidth() == 128)
+            << field->minimumWidth();
+    }
+    EXPECT_GT(fields, 30);
+    dialog.tabs()->setCurrentIndex(1);
+    dialog.show();
+    QCoreApplication::processEvents();
+    auto *spin = child<QDoubleSpinBox>(dialog, "minRowPx");
+    const QImage pixels = spin->grab().toImage();
+    EXPECT_EQ(pixels.pixelColor(3, spin->height() / 2), theme::bg2()) << "bg2 fill";
+    EXPECT_EQ(pixels.pixelColor(spin->width() / 2, 0), theme::line()) << "line border";
+}
+
+// SET-7: the dialog is resizable and opens at the size it was left at.
+TEST(HeatmapSettingsDialogLook, DialogIsResizableAndRemembersItsSize) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    {
+        HeatmapSettingsDialog first(&model, nullptr);
+        EXPECT_TRUE(first.isSizeGripEnabled());
+        first.show();
+        first.resize(701, 553); // inside the offscreen screen (800x600)
+        QCoreApplication::processEvents();
+        first.close();
+    }
+    HeatmapSettingsDialog second(&model, nullptr);
+    EXPECT_EQ(second.size(), QSize(701, 553));
+}
+
+// SET-7: a corrupt, zero, negative or absurd saved size falls back to 600x720;
+// any size is clamped to the screen's available area.
+TEST(HeatmapSettingsDialogLook, RestoredSizeRejectsBadValuesAndFitsTheScreen) {
+    const QRect screen(0, 0, 1920, 1050);
+    const QSize fallback(600, 720);
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(), screen), fallback);
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(QStringLiteral("garbage")), screen), fallback);
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(QSize(0, 0)), screen), fallback);
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(QSize(-5, 400)), screen), fallback);
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(QSize(1'000'000, 900)), screen), fallback);
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(QSize(700, 650)), screen), QSize(700, 650));
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(QSize(3000, 2000)), screen), QSize(1920, 1050));
+    EXPECT_EQ(HeatmapSettingsDialog::restoredSize(QVariant(), QRect(0, 0, 1280, 600)), QSize(600, 600));
+    // Through the dialog, with the isolated QSettings this test binary uses.
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
+    for (const QVariant &bad : {QVariant(QStringLiteral("garbage")), QVariant(QSize(0, 0)), QVariant(QSize(99999, 99999))}) {
+        settings.setValue("chartSettingsDialog/size", bad);
+        settings.sync();
+        HeatmapSettingsDialog dialog(&model, nullptr);
+        const QRect available = dialog.screen()->availableGeometry();
+        EXPECT_EQ(dialog.size(), fallback.boundedTo(available.size())) << bad.toString().toStdString();
+    }
+}
+
+// SET-8: hex text on colour swatches is upper case at regular weight.
+TEST(HeatmapSettingsDialogLook, SwatchHexIsUpperCaseRegularWeight) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    auto *bid = child<HeatmapGradientEditor>(dialog, "bidGradient");
+    bid->setStopColor(1, "#00ffff");
+    auto *swatch = qobject_cast<QPushButton *>(bid->table()->cellWidget(1, 1));
+    ASSERT_TRUE(swatch);
+    EXPECT_EQ(swatch->text(), "#00FFFF");
+    EXPECT_EQ(model.settings().bidGradient.back().color, "#00ffff"); // the value keeps its spelling
+    ASSERT_TRUE(model.apply({{"candleWickColor", "#abcdef"}}).isEmpty());
+    auto *wick = child<QPushButton>(dialog, "candleWickColor");
+    EXPECT_EQ(wick->text(), wick->text().toUpper());
+    for (QPushButton *button : {swatch, wick}) {
+        button->ensurePolished();
+        EXPECT_EQ(button->font().weight(), QFont::Normal);
+    }
+    for (auto *colour : dialog.findChildren<QToolButton *>())
+        if (colour->objectName().endsWith(".color")) EXPECT_EQ(colour->text(), colour->text().toUpper());
+}
+
+// SET-9: every tab has one fixed width, whichever tab is selected.
+TEST(HeatmapSettingsDialogLook, TabsKeepOneFixedWidth) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    dialog.resize(720, 600);
+    dialog.show();
+    QTabBar *bar = dialog.tabs()->tabBar();
+    std::set<int> widths;
+    for (int selected = 0; selected < bar->count(); ++selected) {
+        dialog.tabs()->setCurrentIndex(selected);
+        QCoreApplication::processEvents();
+        for (int tab = 0; tab < bar->count(); ++tab) widths.insert(bar->tabRect(tab).width());
+    }
+    EXPECT_EQ(widths.size(), 1u) << "tab widths differ";
 }
 
 // Qt fixes the scene graph backend at the first QQuickWindow of the process,
@@ -2723,6 +3028,7 @@ int main(int argc, char **argv) {
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, styleSettings.path());
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
+    Q_INIT_RESOURCE(sentinel_svg_resources); // the dialog's checkbox tick and field chevrons
     lab::selectQuickSceneGraph(); // before any QQuickWindow: Qt fixes the backend at the first one
     ::testing::InitGoogleTest(&argc, argv);
     std::cout << "[sentinel] " << lab::describeRhi().toStdString() << std::endl;

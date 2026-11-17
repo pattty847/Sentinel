@@ -365,6 +365,8 @@ set(SENTINEL_SVG_FILES
     "${SENTINEL_SVG_DIR}/camera.svg"
     "${SENTINEL_SVG_DIR}/candlestick_chart.svg"
     "${SENTINEL_SVG_DIR}/chevron_down.svg"
+    "${SENTINEL_SVG_DIR}/chevron_up.svg"
+    "${SENTINEL_SVG_DIR}/checkbox_tick.svg"
     "${SENTINEL_SVG_DIR}/menu_check.svg"
     "${SENTINEL_SVG_DIR}/menu_chevron.svg"
     "${SENTINEL_SVG_DIR}/full_screen.svg"
@@ -421,6 +423,8 @@ set_source_files_properties("${SENTINEL_SVG_DIR}/candlestick_chart.svg" PROPERTI
 set_source_files_properties("${SENTINEL_SVG_DIR}/menu_chevron.svg" PROPERTIES QT_RESOURCE_ALIAS "menu_chevron.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/menu_check.svg" PROPERTIES QT_RESOURCE_ALIAS "menu_check.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/chevron_down.svg" PROPERTIES QT_RESOURCE_ALIAS "chevron_down.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/chevron_up.svg" PROPERTIES QT_RESOURCE_ALIAS "chevron_up.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/checkbox_tick.svg" PROPERTIES QT_RESOURCE_ALIAS "checkbox_tick.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/full_screen.svg" PROPERTIES QT_RESOURCE_ALIAS "full_screen.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/grid_view.svg" PROPERTIES QT_RESOURCE_ALIAS "grid_view.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/indicators.svg" PROPERTIES QT_RESOURCE_ALIAS "indicators.svg")

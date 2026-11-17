@@ -102,7 +102,7 @@ void TradeBubbleStyleEditor::setStyleModel(const trade_bubbles::StyleModel& styl
         auto& row = rows_[i];
         row.visible->setChecked(e.visible);
         const QString hex = QString::fromStdString(tpo::hexColor(e.color));
-        row.color->setText(hex);
+        row.color->setText(hex.toUpper());
         row.color->setStyleSheet("QToolButton { border-bottom: 3px solid " + hex + "; }");
         row.opacity->setValue(int(std::lround(e.opacity * 100)));
         row.width->setValue(int(std::lround(e.width * 10)));

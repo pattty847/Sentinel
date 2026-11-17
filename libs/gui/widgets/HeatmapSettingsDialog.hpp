@@ -12,6 +12,7 @@ class QFormLayout;
 #include <QDialog>
 #include <QJsonObject>
 #include <QPointer>
+#include <QVariant>
 #include <QWidget>
 #include <vector>
 #include "chart/shell/TradeBubbleStyleStore.hpp"
@@ -72,6 +73,12 @@ public:
     QString statusText() const;
     // The settings keys each tab owns (its Reset button restores them).
     static QStringList tabKeys(const QString &tab);
+    // The size to open at: the saved size if it is a sane QSize (else 600x720),
+    // clamped to the screen's available area.
+    static QSize restoredSize(const QVariant &saved, const QRect &available);
+
+protected:
+    void hideEvent(QHideEvent *event) override; // remembers the dialog's size
 
 signals:
     // Tick actions go through the chart's controls, as the toolbar's do (a preset

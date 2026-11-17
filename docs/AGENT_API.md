@@ -115,10 +115,10 @@ in `GET /api/v1/state` under `layers`. QML exposes them on
 | `footprintIntensity` | `bar` (default), `window` | Footprint → Volume scale |
 | `footprintCandle` | `spine` (default), `full` | Footprint → Candle |
 | `footprintNumbers` | boolean, true | Footprint → Show numbers |
-| `footprintDustNotional` | finite nonnegative quote amount, 2500 | Footprint → Dust threshold (quote currency) |
+| `footprintDustNotional` | finite nonnegative quote amount, 2500 | Footprint → Dust threshold (quote) |
 | `flowFooter` | boolean, false | Order flow → Show flow footer |
 | `cvdStripPx` | integer 0..400, 0 | Order flow → Strip height |
-| `cvdReset` | `visible` (default), `utcDay`, `tpoSession` | Order flow → Reset |
+| `cvdReset` | `visible` (default), `utcDay`, `tpoSession` | Order flow → Resets at |
 | `cvdStyle` | `line` (default), `area` | Order flow → Style |
 | `cvdFillAnchor` | `auto` (default), `zero`, `edge`, `none` | Order flow → Area fill anchor |
 

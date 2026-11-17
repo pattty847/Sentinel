@@ -6,6 +6,7 @@
 #include "TopToolbar.hpp"
 #include "TpoStyleEditor.hpp"
 #include "TradeBubbleStyleEditor.hpp"
+#include "../themes/ThemePalette.hpp"
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -23,11 +24,15 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QScreen>
+#include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QTabBar>
 #include <QTableWidget>
+#include <QToolButton>
+#include <QToolTip>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
@@ -35,6 +40,130 @@
 namespace {
 constexpr uint64_t MiB = 1ull << 20, KiB = 1ull << 10;
 const QStringList kPalettes{"Electric", "Fire", "Ocean", "Monochrome", "Matrix", "Custom"};
+
+// The dialog remembers its size (window geometry, not a chart setting).
+constexpr auto kSizeKey = "chartSettingsDialog/size";
+QSettings sizeSettings() { return QSettings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal"); }
+
+// The dialog's own stylesheet, written with @token names from ThemePalette.
+QString themed(QString qss) {
+    // Longer names first: @text3 before @text, @selLine before @sel.
+    const std::pair<const char *, QColor> tokens[] = {
+        {"@textOff", theme::textOff()}, {"@text3", theme::text3()}, {"@text", theme::text()},
+        {"@selLine", theme::selLine()}, {"@sel", theme::sel()},     {"@accent", theme::accent()},
+        {"@bg1", theme::bg1()},         {"@bg2", theme::bg2()},     {"@line", theme::line()},
+        {"@primary", theme::primary()}};
+    for (const auto &[name, color] : tokens) qss.replace(QLatin1String(name), color.name(QColor::HexRgb).toUpper());
+    return qss;
+}
+QString dialogStyle() {
+    return themed(QStringLiteral(
+        "QDialog { background-color: @bg1; } QLabel, QCheckBox { color: #C9D4DD; }"
+        // Checkboxes: an empty box when off, a white tick on the selection fill when on.
+        "QCheckBox::indicator { width: 14px; height: 14px; background: @bg2; border: 1px solid @line; border-radius: 3px; }"
+        "QCheckBox::indicator:checked { background: @sel; border-color: @accent; image: url(:/svg/checkbox_tick.svg); }"
+        "QCheckBox::indicator:disabled { border-color: @textOff; }"
+        // Buttons: action by default; quiet (Reset, Log settings) is text only; Close is the one primary.
+        "QPushButton { background: @bg2; color: @text; border: 1px solid @line; border-radius: 3px; padding: 4px 10px; }"
+        "QPushButton:hover { border-color: @selLine; }"
+        "QPushButton:disabled { color: @textOff; }"
+        "QPushButton[settingsRole=\"quiet\"] { background: transparent; border-color: transparent; color: @text3; padding: 2px 6px; }"
+        "QPushButton[settingsRole=\"quiet\"]:hover { color: @text; border-color: @line; }"
+        "QPushButton#settingsClose { background: @primary; border-color: @primary; color: #FFFFFF; padding: 6px 16px; }"
+        "QPushButton#settingsClose:hover { background: #3472A0; border-color: #3472A0; }"
+        // Sections: a dim title over a hairline, no box, so their rows share the page's grid.
+        "QGroupBox { color: @text3; border: none; border-top: 1px solid @line; margin-top: 22px; padding: 0; }"
+        "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; left: 0; top: 4px; padding: 0; }"
+        "QToolButton#settingsHelp { color: @text3; background: transparent; border: 1px solid @line; border-radius: 8px;"
+        " min-width: 14px; max-width: 14px; min-height: 14px; max-height: 14px; padding: 0; }"
+        "QToolButton#settingsHelp:hover { color: @text; border-color: @selLine; }"
+        "QLabel#settingsNote { color: @text3; }"
+        // Fields: one look for combos and spin boxes, chevrons inside the border.
+        "QComboBox, QAbstractSpinBox { background: @bg2; color: @text; border: 1px solid @line; border-radius: 3px;"
+        " padding: 0 22px 0 6px; }"
+        "QComboBox:focus, QAbstractSpinBox:focus { border-color: @accent; }"
+        "QComboBox:disabled, QAbstractSpinBox:disabled { color: @textOff; }"
+        "QComboBox::drop-down { subcontrol-origin: border; subcontrol-position: center right; width: 20px; border: none; background: transparent; }"
+        "QComboBox::down-arrow { image: url(:/svg/chevron_down.svg); width: 8px; height: 8px; }"
+        "QComboBox QAbstractItemView { background: @bg2; color: @text; border: 1px solid @line; selection-background-color: @sel; }"
+        "QAbstractSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 20px; border: none; background: transparent; }"
+        "QAbstractSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 20px; border: none; background: transparent; }"
+        "QAbstractSpinBox::up-arrow { image: url(:/svg/chevron_up.svg); width: 8px; height: 8px; }"
+        "QAbstractSpinBox::down-arrow { image: url(:/svg/chevron_down.svg); width: 8px; height: 8px; }"
+        // Tabs: one fixed width, so selecting a tab never moves the others.
+        "QTabBar::tab { width: 64px; padding: 6px 6px; background: @bg2; color: @text3; border: 1px solid @line; border-bottom: none; }"
+        "QTabBar::tab:selected { background: @bg1; color: @text; }"
+        "QTabBar::tab:hover { color: @text; }"));
+}
+
+// Fields: one height and three widths (the smallest that fits the longest
+// choice or value), except inside tables, which size their own cells.
+constexpr int kFieldHeight = 24, kFieldChrome = 30; // 6 px inset, 22 px chevrons, 2 px border
+constexpr int kFieldWidths[] = {64, 96, 128};
+int fieldTextWidth(const QWidget *field) {
+    const QFontMetrics metrics(field->font());
+    int widest = 0;
+    const auto take = [&](const QString &text) { widest = std::max(widest, metrics.horizontalAdvance(text)); };
+    if (auto *combo = qobject_cast<const QComboBox *>(field)) {
+        for (int i = 0; i < combo->count(); ++i) take(combo->itemText(i));
+    } else if (auto *spin = qobject_cast<const QSpinBox *>(field)) {
+        for (int v : {spin->minimum(), spin->maximum()}) take(spin->prefix() + QString::number(v) + spin->suffix());
+        take(spin->specialValueText());
+    } else if (auto *spin = qobject_cast<const QDoubleSpinBox *>(field)) {
+        for (double v : {spin->minimum(), spin->maximum()})
+            take(spin->prefix() + QString::number(v, 'f', spin->decimals()) + spin->suffix());
+    }
+    return widest;
+}
+void sizeField(QWidget *field) {
+    const int need = fieldTextWidth(field) + kFieldChrome;
+    int width = kFieldWidths[std::size(kFieldWidths) - 1];
+    for (int w : kFieldWidths)
+        if (need <= w) { width = w; break; }
+    field->setFixedSize(width, kFieldHeight);
+}
+void applyFieldStyle(QWidget *page) {
+    for (auto *field : page->findChildren<QWidget *>()) {
+        if (!qobject_cast<QComboBox *>(field) && !qobject_cast<QAbstractSpinBox *>(field)) continue;
+        bool inTable = false;
+        for (auto *p = field->parentWidget(); p && p != page; p = p->parentWidget())
+            inTable = inTable || qobject_cast<QAbstractItemView *>(p);
+        if (!inTable) sizeField(field);
+    }
+}
+
+// One form grid on every tab: a right-aligned label column, then the fields.
+constexpr int kLabelColumn = 180, kGridGap = 8, kPageMargin = 12;
+void applyFormGrid(QWidget *page) {
+    if (auto *layout = page->layout()) layout->setContentsMargins(kPageMargin, kPageMargin, kPageMargin, kPageMargin);
+    for (auto *group : page->findChildren<QGroupBox *>())
+        if (auto *layout = group->layout()) layout->setContentsMargins(0, kGridGap, 0, 0);
+    for (auto *form : page->findChildren<QFormLayout *>()) {
+        form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
+        form->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
+        form->setRowWrapPolicy(QFormLayout::DontWrapRows);
+        form->setHorizontalSpacing(kGridGap);
+        form->setVerticalSpacing(kGridGap);
+        for (int row = 0; row < form->rowCount(); ++row) {
+            // itemAt(FieldRole) also returns a spanning row's item: check that first.
+            if (form->itemAt(row, QFormLayout::SpanningRole)) continue; // a section spanning both columns
+            QLayoutItem *field = form->itemAt(row, QFormLayout::FieldRole);
+            if (!field) continue;
+            QLayoutItem *labelItem = form->itemAt(row, QFormLayout::LabelRole);
+            auto *label = labelItem ? qobject_cast<QLabel *>(labelItem->widget()) : nullptr;
+            if (!labelItem) { // a field without a name keeps the label column
+                label = new QLabel;
+                if (field->widget()) label->setToolTip(field->widget()->toolTip());
+                form->setWidget(row, QFormLayout::LabelRole, label);
+            }
+            if (!label) continue;
+            label->setFixedWidth(kLabelColumn);
+            label->setWordWrap(true);
+            label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        }
+    }
+}
 
 struct SliderWithLabel {
     QSlider *slider;
@@ -73,11 +202,18 @@ QSpinBox *intSpin(QWidget *parent, const char *name, int lo, int hi, int step, c
     spin->setKeyboardTracking(false);
     return spin;
 }
-QLabel *note(const QString &text, QWidget *parent) {
-    auto *label = new QLabel(text, parent);
-    label->setWordWrap(true);
-    label->setStyleSheet("QLabel { color: #AABBC6; }");
-    return label;
+// A group's longer explanation sits behind a "?" (hover or click) instead of a
+// permanent paragraph.
+void addHelp(QFormLayout *form, const QString &text, QWidget *parent) {
+    auto *button = new QToolButton(parent);
+    button->setObjectName("settingsHelp");
+    button->setText("?");
+    button->setAccessibleName("Help");
+    button->setToolTip("<p>" + text.toHtmlEscaped() + "</p>"); // rich text wraps
+    QObject::connect(button, &QToolButton::clicked, button, [button] {
+        QToolTip::showText(button->mapToGlobal(QPoint(0, button->height())), button->toolTip(), button);
+    });
+    form->addRow(QString(), button);
 }
 // A setting's name and control explain the same thing on hover.
 void describe(QFormLayout *form, QWidget *field, const QString &text) {
@@ -106,11 +242,13 @@ QJsonArray gradientJson(const std::vector<heatmap::GradientStop> &stops) {
     for (const auto &s : stops) out.append(QJsonObject{{"position", s.position}, {"color", QString::fromStdString(s.color)}});
     return out;
 }
-// Black text on light swatches, white on dark (perceived luminance).
+// Black text on light swatches, white on dark (perceived luminance); the hex
+// is regular weight and upper case so it reads at 1x (no bold "f").
 QString swatchStyle(const QString &color) {
     const QColor c(color.left(7));
     const double luma = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue();
-    return QStringLiteral("QPushButton { background: %1; color: %2; }").arg(color.left(7), luma > 140 ? "#000000" : "#FFFFFF");
+    return QStringLiteral("QPushButton { background: %1; color: %2; font-weight: normal; }")
+        .arg(color.left(7), luma > 140 ? "#000000" : "#FFFFFF");
 }
 
 class CandlePreview final : public QWidget {
@@ -181,14 +319,14 @@ void HeatmapGradientEditor::addRow(double position, const QString &color) {
     auto *spin = new QDoubleSpinBox(table_);
     spin->setRange(0, 1);
     spin->setAlignment(Qt::AlignRight);
-    spin->setStyleSheet("QDoubleSpinBox { padding:0px; }");
+    spin->setStyleSheet("QDoubleSpinBox { padding: 0 22px 0 2px; }");
     spin->setDecimals(3);
     spin->setSingleStep(0.05);
     spin->setKeyboardTracking(false);
     spin->setValue(position);
     spin->setToolTip(table_->horizontalHeaderItem(0)->toolTip());
     table_->setCellWidget(row, 0, spin);
-    auto *button = new QPushButton(color, table_);
+    auto *button = new QPushButton(color.toUpper(), table_);
     button->setProperty("color", color);
     button->setToolTip(table_->horizontalHeaderItem(1)->toolTip());
     button->setStyleSheet(swatchStyle(color));
@@ -212,7 +350,7 @@ void HeatmapGradientEditor::addRow(double position, const QString &color) {
 void HeatmapGradientEditor::setStopColor(int row, const QString &color) {
     auto *button = qobject_cast<QPushButton *>(table_->cellWidget(row, 1));
     if (!button) return;
-    button->setText(color);
+    button->setText(color.toUpper());
     button->setProperty("color", color);
     button->setStyleSheet(swatchStyle(color));
     update();
@@ -279,9 +417,13 @@ HeatmapSettingsDialog::HeatmapSettingsDialog(heatmap::HeatmapSettingsModel *mode
     setObjectName("heatmapSettingsDialog");
     setWindowTitle("Chart Settings");
     setModal(false);
-    resize(520, 560);
-    setStyleSheet("QDialog { background-color: #1B1F24; } QLabel, QCheckBox { color: #C9D4DD; }");
+    setSizeGripEnabled(true);
     buildUi();
+    // After buildUi: rules select on object names and roles, which a widget
+    // polished before it was named would miss.
+    setStyleSheet(dialogStyle());
+    // Resizable; the size the user left it at comes back next time.
+    resize(restoredSize(sizeSettings().value(kSizeKey), screen() ? screen()->availableGeometry() : QRect()));
     connect(&chart::TradeBubbleStyleChanges::instance(), &chart::TradeBubbleStyleChanges::changed,
             this, [this] { refreshBubbleStyle(); });
     if (m_model) connect(m_model, &heatmap::HeatmapSettingsModel::changed, this, [this] { refreshFromModel(); });
@@ -330,6 +472,7 @@ void HeatmapSettingsDialog::buildUi() {
     auto *layout = new QVBoxLayout(this);
     m_tabs = new QTabWidget(this);
     m_tabs->setObjectName("heatmapSettingsTabs");
+    m_tabs->setUsesScrollButtons(true); // a narrow dialog scrolls the fixed-width tabs
     m_tabs->addTab(scrollTab(buildChartTab(), "chartSettingsScroll"), "Chart");
     m_tabs->addTab(scrollTab(buildTickTab(), "tickSettingsScroll"), "Tick");
     m_tabs->addTab(scrollTab(buildLookTab(), "lookSettingsScroll"), "Look");
@@ -338,12 +481,16 @@ void HeatmapSettingsDialog::buildUi() {
     m_tabs->addTab(scrollTab(buildDebugTab(), "debugSettingsScroll"), "Debug");
     m_tabs->addTab(scrollTab(buildTpoTab(), "tpoSettingsScroll"), "TPO");
     for (int i = 0; i < m_tabs->count(); ++i)
+        for (auto *pass : {applyFormGrid, applyFieldStyle}) pass(static_cast<QScrollArea *>(m_tabs->widget(i))->widget());
+    for (int i = 0; i < m_tabs->count(); ++i)
         m_tabs->setTabToolTip(i, m_tabs->tabText(i) == "Budgets"
             ? QStringLiteral("Open memory settings. The GPU group is for this chart; the RAM group applies to all charts.")
             : "Open " + m_tabs->tabText(i) + " settings for this chart.");
     for (auto *button : m_tabs->tabBar()->findChildren<QAbstractButton *>())
         button->setToolTip("Scroll the tab strip to reach more settings tabs.");
-    layout->addWidget(note("Changes take effect immediately. Close keeps saved chart settings; session-only controls are labelled.", this));
+    auto *note = new QLabel("Changes take effect immediately.", this);
+    note->setObjectName("settingsNote");
+    layout->addWidget(note);
     layout->addWidget(m_tabs);
 
     m_status = new QLabel(this);
@@ -351,22 +498,32 @@ void HeatmapSettingsDialog::buildUi() {
     m_status->setWordWrap(true);
     layout->addWidget(m_status);
 
+    // Footer: the current tab's Reset as a quiet action on the left, Close (the
+    // only primary) on the right.
+    auto *footer = new QHBoxLayout;
+    QList<QPushButton *> resets;
+    for (int i = 0; i < m_tabs->count(); ++i) {
+        resets << resetButton(m_tabs->tabText(i), this);
+        resets.back()->setVisible(i == m_tabs->currentIndex());
+        footer->addWidget(resets.back());
+    }
+    connect(m_tabs, &QTabWidget::currentChanged, this, [resets](int index) {
+        for (int i = 0; i < resets.size(); ++i) resets[i]->setVisible(i == index);
+    });
+    footer->addStretch();
     auto *buttons = new QDialogButtonBox(this);
-    auto *logButton = buttons->addButton("Log Settings", QDialogButtonBox::ActionRole);
     auto *closeButton = buttons->addButton(QDialogButtonBox::Close);
-    logButton->setToolTip("Write this chart's settings and gamma, contrast and floor values to the Sentinel run log. Use it when diagnosing the chart.");
+    closeButton->setObjectName("settingsClose");
     closeButton->setToolTip("Close settings; changes already applied stay in effect. Session-only changes last until the app closes.");
-    buttons->setStyleSheet(
-        "QDialogButtonBox QPushButton { background-color: #2B5A7A; color: #FFFFFF; border: none; padding: 8px 16px; border-radius: 4px; }"
-        "QDialogButtonBox QPushButton:hover { background-color: #3472A0; }");
-    layout->addWidget(buttons);
-    connect(logButton, &QPushButton::clicked, this, &HeatmapSettingsDialog::logSettings);
+    footer->addWidget(buttons);
+    layout->addLayout(footer);
     connect(closeButton, &QPushButton::clicked, this, &QDialog::close);
 }
 
 QPushButton *HeatmapSettingsDialog::resetButton(const QString &tab, QWidget *parent) {
     auto *button = new QPushButton("Reset " + tab + " to defaults", parent);
     button->setObjectName("reset" + tab);
+    button->setProperty("settingsRole", "quiet");
     button->setToolTip("Restore the configured defaults for " + tab + ". Use it to undo changes on this tab."
                       + (tab == "Chart" ? " Candle style is not reset." : ""));
     connect(button, &QPushButton::clicked, this, [this, tab] {
@@ -416,9 +573,8 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_labelMaxPx->setSuffix(" px");
     form->addRow("Label size, smallest", m_labelMinPx);
     form->addRow("Label size, largest", m_labelMaxPx);
-    form->addRow(note("GPU labels appear on coloured cells above the range low when the text fits. "
-                      "Their size grows with the cell, up to the largest size.",
-                      page));
+    addHelp(form, "GPU labels appear on coloured cells above the range low when the text fits. "
+                  "Their size grows with the cell, up to the largest size.", page);
     addFlowControls(form, page);
     auto* bubbleGroup = new QGroupBox("Trade bubbles", page);
     auto* bubbleLayout = new QVBoxLayout(bubbleGroup);
@@ -436,9 +592,9 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     connect(m_tradesAboveCandles, &QCheckBox::toggled, this, [this](bool on) { apply({{"tradesAboveCandles", on}}); });
     m_bubblePlacement = new QComboBox(page);
     m_bubblePlacement->setObjectName("bubblePlacement");
-    m_bubblePlacement->addItem("Individual (trade time)", "individual");
-    m_bubblePlacement->addItem("Auto (zoom dependent)", "auto");
-    m_bubblePlacement->addItem("Slot (candle centre)", "slot");
+    m_bubblePlacement->addItem("Individual", "individual");
+    m_bubblePlacement->addItem("Auto", "auto");
+    m_bubblePlacement->addItem("Slot", "slot");
     form->addRow("Bubble placement", m_bubblePlacement);
     connect(m_bubblePlacement, &QComboBox::currentIndexChanged, this, [this] {
         apply({{"bubblePlacement", m_bubblePlacement->currentData().toString()}});
@@ -446,9 +602,9 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_tradeMinMode = new QComboBox(page);
     m_tradeMinMode->setObjectName("tradeMinNotionalMode");
     m_tradeMinMode->addItem("All trades", 0);
-    m_tradeMinMode->addItem("Auto (visible median)", -1);
+    m_tradeMinMode->addItem("Auto (median)", -1);
     m_tradeMinMode->addItem("Custom minimum", 1);
-    form->addRow("Minimum trade notional (quote)", m_tradeMinMode);
+    form->addRow("Minimum notional (quote)", m_tradeMinMode);
     m_tradeMinNotional = doubleSpin(page, "tradeMinNotional", 0.01, 1e12, 100, 2);
     m_tradeMinNotional->setValue(100);
     form->addRow("Custom minimum (quote)", m_tradeMinNotional);
@@ -495,7 +651,7 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     candleForm->addRow("Body opacity", m_candleBodyOpacity);
     candleForm->addRow("Body width (column)", m_candleBodyFraction);
     candleForm->addRow("Maximum body width", m_candleMaxBodyPx);
-    candleForm->addRow("Wick width (device pixels)", m_candleWickWidth);
+    candleForm->addRow("Wick width", m_candleWickWidth);
     m_showVolumeBars = new QCheckBox("Show volume bars", candles);
     m_showVolumeBars->setObjectName("showVolumeBars");
     m_volumeBandPercent = intSpin(candles, "volumeBandPercent", 10, 40, 1, "%");
@@ -512,7 +668,6 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_candlePreview = new CandlePreview(m_model, candles);
     candleForm->addRow("Preview", m_candlePreview);
     form->addRow(candles);
-    form->addRow(resetButton("Chart", page));
     describe(form, m_showLabels, "Show liquidity sizes on GPU heatmap cells above the range low when text fits. Turn off to reduce clutter.");
     describe(form, currencyRow, "Show liquidity as USD notional or base-asset size. Use USD to compare value, or Asset to compare quantity.");
     m_labelCurrencySymbol->setToolTip("Show a dollar sign before USD liquidity numbers in heatmap cells.");
@@ -581,20 +736,24 @@ QWidget *HeatmapSettingsDialog::buildTickTab() {
     m_manualTick = new QComboBox(page);
     m_manualTick->setObjectName("manualTick");
     form->addRow("Tick preset", m_manualTick);
-    m_minRowPx = doubleSpin(page, "minRowPx", 0.5, 32, 0.25, 2);
+    addHelp(form, "GPU heatmap: Auto chooses a tick that keeps rows at least the minimum height; "
+                  "the switch margin (hysteresis) limits switching near that height. Picking a preset locks Manual. "
+                  "The choice is remembered per symbol and timeframe; entering Manual restores it or locks the drawn tick. "
+                  "Loaded data offers the presets. Columns that cannot build a locked tick are veiled.", page);
+    // Auto's tuning: internal, so it sits in an Advanced group.
+    auto *advanced = new QGroupBox("Advanced", page);
+    advanced->setObjectName("tickAdvanced");
+    auto *advancedForm = new QFormLayout(advanced);
+    m_minRowPx = doubleSpin(advanced, "minRowPx", 0.5, 32, 0.25, 2);
     m_minRowPx->setSuffix(" px");
-    form->addRow("Min row height (Auto)", m_minRowPx);
-    m_hysteresis = doubleSpin(page, "hysteresis", 0, 0.9, 0.05, 2);
-    form->addRow("Hysteresis h (Auto)", m_hysteresis);
-    form->addRow(note("GPU heatmap: Auto chooses a tick that keeps rows at least the minimum height; "
-                      "hysteresis limits switching near that height. Picking a preset locks Manual. "
-                      "The choice is remembered per symbol and timeframe; entering Manual restores it or locks the drawn tick. "
-                      "Loaded data offers the presets. Columns that cannot build a locked tick are veiled.", page));
-    form->addRow(resetButton("Tick", page));
+    advancedForm->addRow("Min row height (Auto)", m_minRowPx);
+    m_hysteresis = doubleSpin(advanced, "hysteresis", 0, 0.9, 0.05, 2);
+    advancedForm->addRow("Switch margin (Auto)", m_hysteresis);
+    form->addRow(advanced);
     describe(form, m_tickMode, "Auto adjusts GPU heatmap price rows as you zoom. Manual restores the tick remembered for this symbol and timeframe, or locks the drawn tick.");
     describe(form, m_manualTick, "Presets some loaded data can build. Picking one locks Manual.");
-    describe(form, m_minRowPx, "Target minimum GPU heatmap row height in physical pixels (0.5-32) in Auto. Raise it for coarser, taller rows.");
-    describe(form, m_hysteresis, "Margin around Auto's row-height threshold (0-0.9; 0 = no margin). Raise it to reduce tick switching during small zoom changes.");
+    describe(advancedForm, m_minRowPx, "Target minimum GPU heatmap row height in physical pixels (0.5-32) in Auto. Raise it for coarser, taller rows.");
+    describe(advancedForm, m_hysteresis, "Margin around Auto's row-height threshold (0-0.9; 0 = no margin). Raise it to reduce tick switching during small zoom changes.");
 
     connect(m_tickMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         if (m_loading) return;
@@ -642,12 +801,12 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     auto *resetSensitivity = new QPushButton("Reset range to auto", page);
     resetSensitivity->setObjectName("sensitivityResetAuto");
     resetSensitivity->setToolTip("Fit this symbol's visible liquidity again when it is available.");
-    form->addRow(resetSensitivity);
+    form->addRow(QString(), resetSensitivity);
     connect(resetSensitivity, &QPushButton::clicked, this, [this] {
         if (const auto error = m_model->resetSensitivityToAuto(); !error.isEmpty()) showStatus(error, true);
     });
     m_opacity = doubleSpin(page, "opacity", 0, 1, 0.05, 2);
-    form->addRow("Opacity (0–1)", m_opacity);
+    form->addRow("Opacity", m_opacity);
     m_smoothZoomOut = new QCheckBox("Blend cells when zoomed out", page);
     m_smoothZoomOut->setObjectName("smoothZoomOut");
     form->addRow("Zoom-out smoothing", m_smoothZoomOut);
@@ -660,7 +819,8 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     fadeRow->addWidget(m_crossfadeOn);
     fadeRow->addWidget(m_crossfadeMs);
     form->addRow("Transition", fadeRow);
-    auto *tone = new QGroupBox("Tone mapping (this session)", page);
+    auto *tone = new QGroupBox("Advanced: tone mapping (this session)", page);
+    tone->setObjectName("lookAdvanced");
     auto *toneForm = new QFormLayout(tone);
     auto [gammaSlider, gammaLabel] = makeSlider(tone, 10, 500, 85);
     m_gammaSlider = gammaSlider;
@@ -682,9 +842,8 @@ QWidget *HeatmapSettingsDialog::buildLookTab() {
     auto *floorRow = new QHBoxLayout;
     floorRow->addWidget(m_floorSlider);
     floorRow->addWidget(m_floorLabel);
-    toneForm->addRow("Shader floor", floorRow);
+    toneForm->addRow("Intensity floor", floorRow);
     form->addRow(tone);
-    form->addRow(resetButton("Look", page));
     describe(form, m_palette, "Choose the heatmap's bid and ask colour scale. Pick Custom to use the gradient stops below.");
     describe(form, m_paperPositionStyle, "Show a compact position and live PnL tag at the entry line, or shade the full interval between entry and mark.");
     describe(form, m_bubblesOverFootprint, "Keep trade bubbles at full opacity, or dim their fill and ring to 35% while footprint numbers are drawn.");
@@ -747,7 +906,7 @@ QWidget *HeatmapSettingsDialog::buildBudgetsTab() {
     chartForm->addRow("GPU memory cap", m_gpuCapMiB);
     m_uploadKiB = intSpin(chart, "uploadBudgetBytes", 1, 128 * 1024, 512, " KiB");
     chartForm->addRow("Upload budget per frame", m_uploadKiB);
-    chartForm->addRow(note("The upload budget is at most 128 MiB and at most the GPU cap.", chart));
+    addHelp(chartForm, "The upload budget is at most 128 MiB and at most the GPU cap.", chart);
     layout->addWidget(chart);
 
     auto *process = new QGroupBox("Process RAM tiers (all charts)", page);
@@ -758,10 +917,9 @@ QWidget *HeatmapSettingsDialog::buildBudgetsTab() {
     processForm->addRow("Decoded chunks", m_decodedMiB);
     processForm->addRow("Span sources", m_spanMiB);
     processForm->addRow("CPU ceiling", m_ceilingMiB);
-    processForm->addRow(note("These apply process-wide, to every chart, at once. The CPU ceiling must be at least "
-                             "decoded chunks + span sources; each tier is 1..4096 MiB.", process));
+    addHelp(processForm, "These apply process-wide, to every chart, at once. The CPU ceiling must be at least "
+                         "decoded chunks + span sources; each tier is 1..4096 MiB.", process);
     layout->addWidget(process);
-    layout->addWidget(resetButton("Budgets", page));
     layout->addStretch();
     describe(chartForm, m_gpuCapMiB, "GPU heatmap cache budget for this chart, in MiB. Raise it if panning reloads tiles; tiles on screen or kept as a stand-in while detail loads can keep usage above the cap.");
     describe(chartForm, m_uploadKiB, "GPU heatmap upload budget per frame, in KiB; capped at 128 MiB and the GPU memory cap. Lower it to spread uploads across frames, or raise it to load tiles sooner.");
@@ -782,10 +940,9 @@ QWidget *HeatmapSettingsDialog::buildLiveTab() {
     auto *page = new QWidget(this);
     auto *form = new QFormLayout(page);
     m_liveMinInterval = intSpin(page, "liveMinIntervalMs", 100, 5000, 50, " ms");
-    form->addRow("Live min interval", m_liveMinInterval);
-    form->addRow(note("The shortest spacing of live-edge compositions (the server publishes at 1 Hz). Slow "
-                      "compositions back off to at least 5 s.", page));
-    form->addRow(resetButton("Live", page));
+    form->addRow("Minimum refresh interval", m_liveMinInterval);
+    addHelp(form, "The shortest spacing of live-edge compositions (the server publishes at 1 Hz). Slow "
+                  "compositions back off to at least 5 s.", page);
     describe(form, m_liveMinInterval, "Minimum spacing of GPU refreshes of the newest heatmap columns in milliseconds (100-5000); the server publishes at 1 Hz. Raise it to reduce refresh work; slow refreshes back off to at least 5 seconds.");
     connect(m_liveMinInterval, &QSpinBox::valueChanged, this, [this](int ms) { apply({{"liveMinIntervalMs", ms}}); });
     return page;
@@ -797,45 +954,48 @@ QWidget *HeatmapSettingsDialog::buildDebugTab() {
     m_showTelemetry = new QCheckBox("Show the heatmap telemetry dock", page);
     m_showTelemetry->setObjectName("showTelemetry");
     form->addRow("Telemetry", m_showTelemetry);
-    form->addRow(resetButton("Debug", page));
     describe(form, m_showTelemetry, "Show the heatmap telemetry dock with tick, cache, upload and timing values. Use it to diagnose missing data or slow rendering.");
     connect(m_showTelemetry, &QCheckBox::toggled, this, [this](bool on) { apply({{"showTelemetry", on}}); });
+    auto *logButton = new QPushButton("Log settings", page);
+    logButton->setObjectName("logSettings");
+    logButton->setProperty("settingsRole", "quiet");
+    form->addRow("Run log", logButton);
+    describe(form, logButton, "Write this chart's settings and gamma, contrast and floor values to the Sentinel run log. Use it when diagnosing the chart.");
+    connect(logButton, &QPushButton::clicked, this, &HeatmapSettingsDialog::logSettings);
     return page;
 }
 
 QWidget *HeatmapSettingsDialog::buildTpoTab() {
     auto *page = new QWidget(this);
     auto *form = new QFormLayout(page);
-    form->addRow(note("Bracket, session and layout apply to this session.", page));
     m_tpoTimeframeCombo = new QComboBox(page);
     m_tpoTimeframeCombo->addItem("15m", 900000);
     m_tpoTimeframeCombo->addItem("30m", 1800000);
     m_tpoTimeframeCombo->addItem("1h", 3600000);
     m_tpoTimeframeCombo->addItem("4h", 14400000);
     m_tpoTimeframeCombo->addItem("1D", 86400000);
-    form->addRow("TPO Bracket", m_tpoTimeframeCombo);
+    form->addRow("Bracket (this session)", m_tpoTimeframeCombo);
     m_tpoSessionCombo = new QComboBox(page);
     for (const auto &[name, id] : std::initializer_list<std::pair<const char *, int>>{
              {"New York", 0}, {"London", 1}, {"Asia", 2}, {"Australia", 3}, {"24H", 4}, {"1W", 5}, {"1M", 6}})
         m_tpoSessionCombo->addItem(name, id);
-    form->addRow("TPO Session", m_tpoSessionCombo);
+    form->addRow("Session (this session)", m_tpoSessionCombo);
     m_tpoLayoutCombo = new QComboBox(page);
     m_tpoLayoutCombo->setObjectName("tpoLayout");
     m_tpoLayoutCombo->addItem("Collapsed", "collapsed");
     m_tpoLayoutCombo->addItem("Split", "split");
-    form->addRow("TPO Layout", m_tpoLayoutCombo);
+    form->addRow("Layout (this session)", m_tpoLayoutCombo);
     m_tpoThemeCombo = new QComboBox(page);
     m_tpoThemeCombo->setObjectName("tpoTheme");
     m_tpoThemeCombo->addItem("Rainbow", "rainbow");
     m_tpoThemeCombo->addItem("Calm", "calm");
     m_tpoThemeCombo->addItem("Sage", "sage");
     m_tpoThemeCombo->addItem("Indigo -> Sky", "indigo");
-    form->addRow("TPO Theme", m_tpoThemeCombo);
+    form->addRow("Theme", m_tpoThemeCombo);
     m_tpoStyleEditor = new TpoStyleEditor(page);
     m_tpoStyleEditor->setObjectName("tpoStyleEditor");
     form->addRow(m_tpoStyleEditor);
-    form->addRow(note("Theme and style are saved for every chart.", page));
-    form->addRow(resetButton("TPO", page));
+    addHelp(form, "Bracket, session and layout apply to this session. Theme and style are saved for every chart.", page);
     describe(form, m_tpoTimeframeCombo, "Time covered by each TPO letter (15 minutes to 1 day). Use shorter brackets for more detail. A bracket that does not divide the session evenly, or gives too many columns, is changed to the nearest one that does. This session only.");
     describe(form, m_tpoSessionCombo, "Group TPO letters into a regional session, UTC day, week or month. Change it to compare profiles over that trading window; this session only.");
     describe(form, m_tpoLayoutCombo, "Collapsed packs each price row into a profile; Split keeps brackets in separate time columns. Use Split to follow the session's sequence, this session only.");
@@ -862,9 +1022,11 @@ QWidget *HeatmapSettingsDialog::buildTpoTab() {
 }
 
 void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
-    const auto combo = [this](QFormLayout* rows, QWidget* group, const char* key, const char* label, QStringList choices, const char* help) {
+    // Choices: {shown name, setting value}.
+    using Choices = std::initializer_list<std::pair<const char*, const char*>>;
+    const auto combo = [this](QFormLayout* rows, QWidget* group, const char* key, const char* label, Choices choices, const char* help) {
         auto* control = new QComboBox(group); control->setObjectName(key);
-        for (const auto& choice : choices) control->addItem(choice, choice);
+        for (const auto& [name, value] : choices) control->addItem(name, value);
         rows->addRow(label, control);
         describe(rows, control, help);
         connect(control, &QComboBox::currentIndexChanged, this, [this, control, key] {
@@ -873,30 +1035,30 @@ void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
     };
     auto* footprint = new QGroupBox("Footprint", page);
     auto* rows = new QFormLayout(footprint);
-    combo(rows, footprint, "footprintIntensity", "Volume scale", {"bar", "window"}, "Scale outward bars against the largest single-side cell in this candle or visible window.");
-    combo(rows, footprint, "footprintCandle", "Candle", {"spine", "full"}, "Use a narrow candle at the left of each flow card, or the full candle appearance.");
+    combo(rows, footprint, "footprintIntensity", "Volume scale", {{"Per candle", "bar"}, {"Visible window", "window"}}, "Scale outward bars against the largest single-side cell in this candle or visible window.");
+    combo(rows, footprint, "footprintCandle", "Candle", {{"Spine", "spine"}, {"Full candle", "full"}}, "Use a narrow candle at the left of each flow card, or the full candle appearance.");
     auto* numbers = new QCheckBox("Show numbers", footprint); numbers->setObjectName("footprintNumbers");
-    rows->addRow(numbers);
+    rows->addRow("Numbers", numbers);
     describe(rows, numbers, "Show 13 px bid and ask amounts when both columns fit. Zero sides stay blank.");
     connect(numbers, &QCheckBox::toggled, this, [this](bool on) { apply({{"footprintNumbers", on}}); });
     auto* dust = new QDoubleSpinBox(footprint); dust->setObjectName("footprintDustNotional");
     dust->setRange(0, 9007199254740991.0); dust->setDecimals(2); dust->setSingleStep(100);
-    rows->addRow("Dust threshold (quote currency)", dust);
+    rows->addRow("Dust threshold (quote)", dust);
     describe(rows, dust, "Side volume times its row price below this quote amount gets faint text and no volume fill.");
     connect(dust, &QDoubleSpinBox::valueChanged, this, [this](double value) { apply({{"footprintDustNotional", value}}); });
     form->addRow(footprint);
     auto* cvd = new QGroupBox("Order flow", page); rows = new QFormLayout(cvd);
     auto* footer = new QCheckBox("Show flow footer", cvd); footer->setObjectName("flowFooter");
-    rows->addRow(footer);
+    rows->addRow("Flow footer", footer);
     describe(rows, footer, "Show per-bar delta, cumulative delta and volume above the CVD strip.");
     connect(footer, &QCheckBox::toggled, this, [this](bool on) { apply({{"flowFooter", on}}); });
     auto* height = new QSpinBox(cvd); height->setObjectName("cvdStripPx"); height->setRange(0, 400);
     height->setSuffix(" px"); height->setSpecialValueText("Off"); rows->addRow("Strip height", height);
     describe(rows, height, "Cumulative volume delta strip height in pixels. Zero hides the strip.");
     connect(height, &QSpinBox::valueChanged, this, [this](int value) { apply({{"cvdStripPx", value}}); });
-    combo(rows, cvd, "cvdReset", "Reset", {"utcDay", "visible", "tpoSession"}, "Anchor cumulative delta at UTC midnight, the visible window, or the TPO session open.");
-    combo(rows, cvd, "cvdStyle", "Style", {"line", "area"}, "Draw cumulative volume delta as a line or a filled area around zero.");
-    combo(rows, cvd, "cvdFillAnchor", "Area fill anchor", {"auto", "zero", "edge", "none"},
+    combo(rows, cvd, "cvdReset", "Resets at", {{"UTC day", "utcDay"}, {"Visible window", "visible"}, {"TPO session", "tpoSession"}}, "Anchor cumulative delta at UTC midnight, the visible window, or the TPO session open.");
+    combo(rows, cvd, "cvdStyle", "Style", {{"Line", "line"}, {"Area", "area"}}, "Draw cumulative volume delta as a line or a filled area around zero.");
+    combo(rows, cvd, "cvdFillAnchor", "Area fill anchor", {{"Auto", "auto"}, {"Zero", "zero"}, {"Plot edge", "edge"}, {"None", "none"}},
           "Auto fills to zero when crossed, or to the near plot edge for one-sign data. Edge also fills to zero when crossed. None draws the line only.");
     form->addRow(cvd);
 }
@@ -944,8 +1106,8 @@ void HeatmapSettingsDialog::applyBudgets() {
 void HeatmapSettingsDialog::setTickSelectorState(const TopToolbar::TickSelectorState &state) {
     m_tickState = state;
     TopToolbar::fillTickPresetCombo(m_manualTick, state,
-                                    state.enabled ? QStringLiteral("Loading presets...")
-                                                  : QStringLiteral("Presets come from loaded data (GPU renderer)"));
+                                    state.enabled ? QStringLiteral("Loading…") : QStringLiteral("No presets"));
+    sizeField(m_manualTick);
     m_manualTick->setEnabled(!state.offeredUnits.empty());
     m_manualTick->setToolTip(state.offeredUnits.empty()
         ? QStringLiteral("No loaded data offers presets yet (the GPU renderer loads them).")
@@ -990,7 +1152,7 @@ void HeatmapSettingsDialog::refreshFromModel() {
     set(m_labelMaxPx, s.labelMaxPx);
     auto swatch = [](QPushButton *button, const std::string &value) {
         const QString color = QString::fromStdString(value);
-        button->setText(color == "auto" ? "Body colour" : color);
+        button->setText(color == "auto" ? "Body colour" : color.toUpper());
         button->setStyleSheet(color == "auto" ? QString{} : swatchStyle(color));
     };
     swatch(m_candleUpColor, s.candleUpColor);
@@ -1074,6 +1236,20 @@ void HeatmapSettingsDialog::showStatus(const QString &text, bool error) {
 }
 
 QString HeatmapSettingsDialog::statusText() const { return m_status->text(); }
+
+QSize HeatmapSettingsDialog::restoredSize(const QVariant &saved, const QRect &available) {
+    constexpr int kMaxSide = 16384; // larger than any display: a corrupt value
+    QSize size = saved.metaType().id() == QMetaType::QSize ? saved.toSize() : QSize();
+    if (size.width() <= 0 || size.height() <= 0 || size.width() > kMaxSide || size.height() > kMaxSide)
+        size = QSize(600, 720);
+    if (available.width() > 0 && available.height() > 0) size = size.boundedTo(available.size());
+    return size;
+}
+
+void HeatmapSettingsDialog::hideEvent(QHideEvent *event) {
+    sizeSettings().setValue(kSizeKey, size());
+    QDialog::hideEvent(event);
+}
 
 void HeatmapSettingsDialog::logSettings() const {
     if (m_model)
