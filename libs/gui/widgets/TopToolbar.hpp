@@ -65,8 +65,9 @@ public:
     // in fixed slots, in a fixed order (TB-3): symbol, modes, timeframe, tick,
     // candle style, mode-specific, then the actions pinned right. controlVisibility()
     // is the ONE place the rules live:
-    // - tick and candle style always keep their slot, disabled while the heatmap
-    //   or candles are off, so a mode switch moves nothing to their right;
+    // - tick and candle style always keep their slot, so a mode switch moves
+    //   nothing to their right; the tick is disabled only while both the heatmap
+    //   and the footprint are off, candle style while candles are off;
     // - liquidity range: heatmap is on;
     // - palette and label appearance: the gear menu, leaving the primary strip
     //   for navigation and data controls;

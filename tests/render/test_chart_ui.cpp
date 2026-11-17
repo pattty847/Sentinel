@@ -2700,7 +2700,7 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     pump(300, [] { return false; });
     auto shown = toolbar->shownControls();
     EXPECT_TRUE(shown.tickSelector) << "a fixed slot (TB-3)";
-    EXPECT_FALSE(toolbar->tickModeCombo()->isEnabled()) << "disabled while the heatmap is off";
+    EXPECT_FALSE(toolbar->tickModeCombo()->isEnabled()) << "disabled while the heatmap and the footprint are off";
     EXPECT_FALSE(shown.rangeSlider);
     EXPECT_FALSE(shown.palette);
     EXPECT_FALSE(shown.liquidity);

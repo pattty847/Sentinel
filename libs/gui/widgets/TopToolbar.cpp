@@ -951,7 +951,8 @@ void TopToolbar::setFullscreen(bool fullscreen) {
 TopToolbar::ControlVisibility TopToolbar::controlVisibility(const ModeState &mode) {
     ControlVisibility v;
     // Fixed slots (TB-3): tick and candle style keep their place in every mode
-    // and are disabled while their layer is off, so nothing to their right moves.
+    // and are disabled while their layers are off (tick: heatmap and footprint;
+    // style: candles), so nothing to their right moves.
     v.tickSelector = true;
     // Appearance lives in the gear menu. Retain the selectors as model adapters
     // for existing callers, without consuming primary toolbar width.
