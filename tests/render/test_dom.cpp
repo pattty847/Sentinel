@@ -1527,9 +1527,10 @@ TEST_F(DomDock, RowsHaveHorizontalHairlinesAndNoVerticalRules) {
     show();
     EXPECT_FALSE(table->showGrid());
     const QImage image = table->viewport()->grab().toImage();
-    const int row = rowAt(*model, 1990); // an empty row
+    const int row = rowAt(*model, 1997); // an empty row inside the viewport
     const QRect bid = table->visualRect(model->index(row, DomModel::Bid));
     const QRect price = table->visualRect(model->index(row, DomModel::Price));
+    ASSERT_TRUE(QRect(QPoint(), table->viewport()->size()).contains(bid));
     const QColor ground = image.pixelColor(bid.center().x(), bid.center().y());
     // Between two cells of the row: plain background, no vertical rule.
     EXPECT_EQ(image.pixelColor(bid.right(), bid.center().y()), ground);
@@ -1915,7 +1916,8 @@ TEST_F(DomDock, ControlsBeforeTheFirstPriceAreOneMetaRowAndA44PxLean) {
     QCoreApplication::processEvents();
     auto* lean = dock.findChild<QWidget*>("domLeanStrip");
     ASSERT_TRUE(lean->isVisible());
-    EXPECT_EQ(lean->height(), 44);
+    const int leanRow = std::max(14, lean->fontMetrics().height());
+    EXPECT_EQ(lean->height(), 2 * leanRow + std::max(16, leanRow)); // 44 px at the 10 pt Roboto Mono
     EXPECT_EQ(dock.findChild<QWidget*>("domMeta")->height(), 22);
     // Status text only when the feed is not Live; this book is live.
     emit source.connectionStatusChanged(true);
@@ -2839,16 +2841,18 @@ TEST_F(DomDock, HeadingRestylesOnlyWhenCompactModeFlips) {
     pulse->installEventFilter(&counter);
     for (int width : {640, 600, 520, 450}) { dock.resize(width, 600); QCoreApplication::processEvents(); }
     EXPECT_EQ(counter.styles, 0) << "wide resizes keep the styles";
-    // A large font forces the compact heading: it restyles once on the flip, then not again.
-    QFont large = dock.font();
-    large.setPixelSize(24);
-    dock.setFont(large);
+    // Four buttons wider than the dock just above the 300 px menu threshold: the heading
+    // restyles once on the flip to compact, then not again while it stays compact.
+    auto* follow = dock.findChild<QPushButton*>("domRecenter");
+    follow->setText("Follow the market now"); // a long label stands in for a large font
+    QEvent restyled(QEvent::StyleChange);      // the heading measures again after a style change
+    QApplication::sendEvent(&dock, &restyled);
     QCoreApplication::processEvents();
-    dock.resize(180, 600); QCoreApplication::processEvents();
-    EXPECT_GT(counter.styles, 0);
+    dock.resize(300, 600); QCoreApplication::processEvents();
+    EXPECT_GT(counter.styles, 0) << dock.width() << " " << pulse->sizeHint().width() << " " << follow->sizeHint().width();
     EXPECT_FALSE(pulse->styleSheet().isEmpty());
     const int compact = counter.styles;
-    for (int width : {185, 190, 182}) { dock.resize(width, 600); QCoreApplication::processEvents(); }
+    for (int width : {305, 310, 302}) { dock.resize(width, 600); QCoreApplication::processEvents(); }
     EXPECT_EQ(counter.styles, compact);
     qApp->setStyleSheet(previousStyle);
 }
