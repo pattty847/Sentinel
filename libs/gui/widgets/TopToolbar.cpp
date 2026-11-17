@@ -74,6 +74,12 @@ TopToolbar::TopToolbar(QWidget* parent)
     // Leave room for gear, subscribe and overflow even on very narrow charts.
     m_symbolSearch->setMinimumWidth(60);
     m_symbolSearch->setMaximumWidth(110);
+    // The field can clip a long symbol: its tooltip always names it in full.
+    const auto nameSymbol = [this](const QString &text) {
+        m_symbolSearch->setToolTip(text.isEmpty() ? m_symbolSearch->placeholderText() : text);
+    };
+    nameSymbol(m_symbolSearch->text());
+    connect(m_symbolSearch, &QLineEdit::textChanged, this, nameSymbol);
     addWidget(m_symbolSearch);
 
     m_subscribeButton = new QToolButton(this);

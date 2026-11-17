@@ -479,6 +479,16 @@ TEST(ChartToolbar, CaptionsAreDimMicroLabelsBoundToTheirEditors) {
     EXPECT_FALSE(toolbar.findChild<QLabel *>("chartTpoLayoutLabel")->isVisible());
 }
 
+// The symbol field may clip a long symbol; its tooltip names it in full.
+TEST(ChartToolbar, SymbolFieldTooltipNamesTheFullSymbol) {
+    TopToolbar toolbar;
+    EXPECT_EQ(toolbar.symbolSearch()->toolTip(), "BTC-USD");
+    toolbar.symbolSearch()->setText("FARTCOIN-USD");
+    EXPECT_EQ(toolbar.symbolSearch()->toolTip(), "FARTCOIN-USD");
+    toolbar.symbolSearch()->clear();
+    EXPECT_EQ(toolbar.symbolSearch()->toolTip(), toolbar.symbolSearch()->placeholderText());
+}
+
 TEST(ChartToolbar, WideChartNamesTickAndSeparatesAppearance) {
     TopToolbar toolbar;
     toolbar.resize(1920, 42);
