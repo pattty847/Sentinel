@@ -220,7 +220,9 @@ one pill style for every bar (the direction pair at 25% fill, the value in the
 direction colour; down text `#FF8C82` for contrast); CUM reads the exact CVD value and reset anchor; VOL uses unsigned
 flow-bar volume. No flow bar means no values. The atlas keeps ASCII row labels
 DELTA / CUM / VOL, left-aligned in a fixed left gutter, with the base unit stated once
-after DELTA (`DELTA BTC`). The three values of a bar end on one right edge, so the rows
+after DELTA (`DELTA BTC`; more than eight characters show six and `..`) and the reset
+rule after CUM (`CUM view`, `CUM day`, `CUM sess`), so a footer without the strip's
+title still says what CUM resets on. The three values of a bar end on one right edge, so the rows
 share one column grid, and a magnitude below 1 keeps its leading zero (`+0.09`, `<0.01`). Narrow bars show every k-th absolute bar index. The stride uses the widest possible
 formatted value at the current atlas size, so panning, re-anchoring and live magnitude
 changes preserve its phase. The footer hides when the remaining surface

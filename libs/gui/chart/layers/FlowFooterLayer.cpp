@@ -104,7 +104,8 @@ void FlowFooterLayer::measureAtlas(const ChartTextAtlas& atlas) {
     labelWidth_ = footerLabelWidth([&](char c) {
         return atlas.glyph(QChar(c)).advance * FlowFooterLayout::textPx / atlas.fontPx();
     });
-    deltaLabelWidth_ = measure("DELTA", atlas); spaceWidth_ = measure(" ", atlas);
+    deltaLabelWidth_ = measure("DELTA", atlas); cumLabelWidth_ = measure("CUM", atlas);
+    spaceWidth_ = measure(" ", atlas);
 }
 void FlowFooterLayer::column(int index, double x, double width, const ChartTextAtlas& atlas, Vertex*& out) {
     const auto& snapshot = cvd_.current();
@@ -122,15 +123,32 @@ void FlowFooterLayer::column(int index, double x, double width, const ChartTextA
     }
     ++columns_;
 }
+// The gutter: DELTA / CUM / VOL, the unit once after DELTA and the CUM reset rule.
+double FlowFooterLayer::gutterWidth(const ChartTextAtlas& atlas) {
+    const auto& snapshot = cvd_.current();
+    footerUnit(snapshot.unit.data(), unit_);
+    const double delta = deltaLabelWidth_ + (unit_[0] ? spaceWidth_ + measure(unit_, atlas) : 0);
+    const double cum = cumLabelWidth_ + spaceWidth_ + measure(footerResetLabel(snapshot.reset), atlas);
+    return std::max(delta, cum) + 2 * kGutterPad;
+}
+void FlowFooterLayer::drawGutter(double width, const ChartTextAtlas& atlas) {
+    if (bounds_.width() < width) return;
+    const char* names[] = {"DELTA", "CUM", "VOL"};
+    const QColor color = ChartLookSettings::footprintText();
+    const double x = bounds_.left() + kGutterPad;
+    for (int row = 0; row < 3; ++row)
+        text(names[row], {x, layout_.rowTop(row), width, FlowFooterLayout::textPx}, atlas, color, false);
+    if (unit_[0])
+        text(unit_, {x + deltaLabelWidth_ + spaceWidth_, layout_.rowTop(0), width, FlowFooterLayout::textPx}, atlas, color, false);
+    text(footerResetLabel(cvd_.current().reset), {x + cumLabelWidth_ + spaceWidth_, layout_.rowTop(1), width, FlowFooterLayout::textPx},
+         atlas, color, false);
+}
 void FlowFooterLayer::drawColumns(const ChartFrame& frame, const ChartTextAtlas& atlas, Vertex*& out) {
     const auto& snapshot = cvd_.current();
     const auto& cam = frame.context.raster;
     measureAtlas(atlas);
     const double width = labelWidth_;
-    // The gutter: DELTA / CUM / VOL and, once, the unit after DELTA.
-    const char* unit = snapshot.unit[0] ? snapshot.unit.data() : nullptr;
-    const double unitX = deltaLabelWidth_ + spaceWidth_;
-    const double labels = (unit ? unitX + measure(unit, atlas) : deltaLabelWidth_) + 2 * kGutterPad;
+    const double labels = gutterWidth(atlas);
     const double left = bounds_.left() + labels;
     const double barWidth = cam.colPxF / cam.dpr * snapshot.timeframeMs / cam.tfMs;
     stride_ = FlowFooterLayout::stride(barWidth, width + 4);
@@ -141,13 +159,7 @@ void FlowFooterLayer::drawColumns(const ChartFrame& frame, const ChartTextAtlas&
         if (x - width * .5 - 2 < left || x + width * .5 + 2 > bounds_.right()) continue;
         column(i, x, width, atlas, out);
     }
-    if (bounds_.width() < labels) return;
-    const char* names[] = {"DELTA", "CUM", "VOL"};
-    const QColor color = ChartLookSettings::footprintText();
-    for (int row = 0; row < 3; ++row)
-        text(names[row], {bounds_.left() + kGutterPad, layout_.rowTop(row), labels, FlowFooterLayout::textPx}, atlas, color, false);
-    if (unit)
-        text(unit, {bounds_.left() + kGutterPad + unitX, layout_.rowTop(0), labels, FlowFooterLayout::textPx}, atlas, color, false);
+    drawGutter(labels, atlas);
 }
 void FlowFooterLayer::updateNodes(const ChartFrame& frame, LayerNodeContext& context) {
     if (!gate_) return;

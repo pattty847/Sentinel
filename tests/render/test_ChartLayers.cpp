@@ -191,6 +191,7 @@ TEST(HeatmapLayer, AfterRenderingWithoutHostCallbacksConsumesFrameRequest) {
 #include <QTemporaryDir>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <new>
 
 namespace {
@@ -1651,7 +1652,7 @@ TEST(FlowFooter, FreshDataPanAndLabelsAllocateNothingAfterWarmup) {
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
-    params.fontPx = 64; params.charset = " 0123456789.+-<>kMBDELTACUMVO";
+    params.fontPx = 64; params.charset = " 0123456789.+-<>kMBDELTACUMVOviewdays";
     ASSERT_TRUE(atlas.build(params));
     chart::CvdLayer cvd;
     chart::FlowFooterLayer footer(cvd);
@@ -1674,7 +1675,7 @@ TEST(FlowFooter, FreshDataPanAndLabelsAllocateNothingAfterWarmup) {
             if (atlas.glyph(c).uv == glyph.uv) { rendered += c.toLatin1(); break; }
         }
     }
-    EXPECT_EQ(rendered, "+3.00+3.0011.2+3.00+6.0011.2+3.00+9.0011.2DELTACUMVOL");
+    EXPECT_EQ(rendered, "+3.00+3.0011.2+3.00+6.0011.2+3.00+9.0011.2DELTACUMVOLview");
     for (const auto& glyph : footer.glyphs()) {
         EXPECT_GE(glyph.rect.left(), frame.context.surfaceBounds.left());
         EXPECT_LE(glyph.rect.right(), frame.context.surfaceBounds.right());
@@ -1736,6 +1737,34 @@ TEST(FlowFooter, FooterOnlyPublishesRetainedFlowWithTheSelectedCvdAnchor) {
     }
 }
 
+// The unit follows a symbol switch and keeps the whole base asset (the symbol rule
+// allows 20 characters a side); the footer, not the feed, shortens it for display.
+TEST(FlowFooter, UnitFollowsASymbolSwitchWithTheWholeBaseAsset) {
+    chart::CvdLayer cvd;
+    chart::CvdFeed feed(cvd.mailbox(), cvd.presentation());
+    QString symbol = QStringLiteral("BTC-USD");
+    feed.setPorts({[] { return footprintFrame(); }, [&] { return symbol; }, [] { return 4; }, [] {}});
+    cvd.presentation().flowFooter = true;
+    feed.publish(); cvd.sync(footprintChartFrame());
+    EXPECT_STREQ(cvd.current().unit.data(), "BTC");
+    for (const char* base : {"FARTCOIN", "ABCDEFGHIJKLMNOPQRST"}) {
+        symbol = QString::fromLatin1(base) + QStringLiteral("-USD");
+        feed.publish(); cvd.sync(footprintChartFrame());
+        EXPECT_STREQ(cvd.current().unit.data(), base);
+    }
+}
+TEST(FlowFooterPolicy, UnitShowsEightCharactersThenAnEllipsisAndResetLabelsAreShort) {
+    char out[chart::kFooterUnitGlyphs + 1];
+    chart::footerUnit("BTC", out); EXPECT_STREQ(out, "BTC");
+    chart::footerUnit("FARTCOIN", out); EXPECT_STREQ(out, "FARTCOIN");
+    chart::footerUnit("FARTCOINS", out); EXPECT_STREQ(out, "FARTCO..");
+    chart::footerUnit("ABCDEFGHIJKLMNOPQRST", out); EXPECT_STREQ(out, "ABCDEF..");
+    chart::footerUnit("", out); EXPECT_STREQ(out, "");
+    EXPECT_STREQ(chart::footerResetLabel(chart::CvdReset::Visible), "view");
+    EXPECT_STREQ(chart::footerResetLabel(chart::CvdReset::UtcDay), "day");
+    EXPECT_STREQ(chart::footerResetLabel(chart::CvdReset::TpoSession), "sess");
+}
+
 // OVL-2: the three rows share one column grid (every value ends on its column's right
 // edge), the row labels start at one fixed gutter edge, and the unit is stated once.
 TEST(FlowFooter, RowsShareOneColumnGridBesideAFixedLabelGutter) {
@@ -1746,7 +1775,7 @@ TEST(FlowFooter, RowsShareOneColumnGridBesideAFixedLabelGutter) {
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
-    params.fontPx = 64; params.charset = " 0123456789.+-<>kMBDELTACUMVO";
+    params.fontPx = 64; params.charset = " 0123456789.+-<>kMBDELTACUMVOviewdays";
     ASSERT_TRUE(atlas.build(params));
     chart::CvdLayer cvd;
     chart::FlowFooterLayer footer(cvd);
@@ -1771,7 +1800,7 @@ TEST(FlowFooter, RowsShareOneColumnGridBesideAFixedLabelGutter) {
             if (atlas.glyph(c).uv == glyph.uv) { rendered += c.toLatin1(); break; }
     const std::string column = "+3.00+3.004.00";
     ASSERT_EQ(rendered.substr(0, column.size()), column);
-    EXPECT_EQ(rendered.substr(rendered.size() - 14), "DELTACUMVOLBTC") << "the unit once, after DELTA";
+    EXPECT_EQ(rendered.substr(rendered.size() - 18), "DELTACUMVOLBTCview") << "the unit once, after DELTA";
     const double scale = chart::FlowFooterLayout::textPx / atlas.fontPx();
     const auto pen = [&](size_t i, char c) { return glyphs[i].rect.left() - atlas.glyph(QChar(c)).bounds.left() * scale; };
     const auto end = [&](size_t i, char c) { return pen(i, c) + atlas.glyph(QChar(c)).advance * scale; };
@@ -1781,14 +1810,71 @@ TEST(FlowFooter, RowsShareOneColumnGridBesideAFixedLabelGutter) {
         EXPECT_NEAR(end(base + 4, '0'), end(base + 9, '0'), 1e-6) << "DELTA and CUM end together";
         EXPECT_NEAR(end(base + 4, '0'), end(base + 13, '0'), 1e-6) << "VOL (one character shorter) too";
     }
-    const size_t labels = glyphs.size() - 14;
+    const size_t labels = glyphs.size() - 18;
     EXPECT_NEAR(pen(labels, 'D'), footer.bounds().left() + 4, 1e-6);
     EXPECT_NEAR(pen(labels + 5, 'C'), pen(labels, 'D'), 1e-6) << "CUM starts at the gutter edge";
     EXPECT_NEAR(pen(labels + 8, 'V'), pen(labels, 'D'), 1e-6) << "VOL starts at the gutter edge";
     const double delta = atlas.glyph(QChar(' ')).advance * scale + [&] {
         double w = 0; for (char c : std::string("DELTA")) w += atlas.glyph(QChar(c)).advance; return w * scale; }();
     EXPECT_NEAR(pen(labels + 11, 'B'), pen(labels, 'D') + delta, 1e-6);
+    const double cum = atlas.glyph(QChar(' ')).advance * scale + [&] {
+        double w = 0; for (char c : std::string("CUM")) w += atlas.glyph(QChar(c)).advance; return w * scale; }();
+    EXPECT_NEAR(pen(labels + 14, 'v'), pen(labels, 'D') + cum, 1e-6) << "the reset after CUM";
     for (const auto& glyph : glyphs) EXPECT_LE(glyph.rect.right(), footer.bounds().right());
+}
+
+// Footer only (no strip, so no CVD title): the CUM label names its reset, and a long
+// unit widens the gutter, or ends in ".." past eight characters, never under a value.
+TEST(FlowFooter, FooterOnlyGutterNamesTheResetAndFitsLongUnits) {
+    QTemporaryDir cache;
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
+    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
+    ChartTextAtlas atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 64;
+    params.charset = " 0123456789.+-<>kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    ASSERT_TRUE(atlas.build(params));
+    auto source = footprintSeries();
+    for (int i = 1; i < 6; ++i) { source.bars[i * 1000] = source.bars[0]; source.bars[i * 1000].bar.startMs = i * 1000; }
+    struct Case { chart::CvdReset reset; const char* unit; std::string tail; };
+    const Case cases[] = {{chart::CvdReset::Visible, "FARTCOIN", "DELTACUMVOLFARTCOINview"},
+                          {chart::CvdReset::UtcDay, "FARTCOIN", "DELTACUMVOLFARTCOINday"},
+                          {chart::CvdReset::TpoSession, "FARTCOIN", "DELTACUMVOLFARTCOINsess"},
+                          {chart::CvdReset::Visible, "ABCDEFGHIJKLMNOPQRST", "DELTACUMVOLABCDEF..view"}};
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.tail);
+        chart::CvdLayer cvd;
+        chart::FlowFooterLayer footer(cvd);
+        cvd.presentation().flowFooter = true; cvd.presentation().stripPx = 0; cvd.presentation().reset = c.reset;
+        auto frame = footprintChartFrame(); frame.context.surfaceBounds = {0, 0, 600, 220};
+        auto feedFrame = footprintFrame(); feedFrame.raster.drawnEndMs = 6000;
+        chart::CvdFeed::build(cvd.mailbox().back(), source, feedFrame, c.reset, 4);
+        cvd.mailbox().back().unit = {};
+        std::copy_n(c.unit, std::strlen(c.unit), cvd.mailbox().back().unit.begin());
+        cvd.mailbox().post(); cvd.sync(frame); footer.sync(frame);
+        ASSERT_TRUE(footer.drawing());
+        EXPECT_FALSE(cvd.drawing()) << "no strip: no CVD title";
+        std::unique_ptr<QSGNode> root(footer.createContainer());
+        ChartTextRenderer text;
+        chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
+        footer.updateNodes(frame, context);
+        ASSERT_GE(footer.columnCount(), 1);
+        const auto& glyphs = footer.glyphs();
+        std::string rendered;
+        for (const auto& glyph : glyphs)
+            for (const auto ch : params.charset)
+                if (!glyph.uv.isNull() && atlas.glyph(ch).uv == glyph.uv) { rendered += ch.toLatin1(); break; }
+        ASSERT_GE(rendered.size(), c.tail.size());
+        EXPECT_EQ(rendered.substr(rendered.size() - c.tail.size()), c.tail);
+        const size_t gutter = glyphs.size() - c.tail.size();
+        double gutterRight = 0, valueLeft = 1e9;
+        for (size_t i = 0; i < glyphs.size(); ++i)
+            (i < gutter ? valueLeft : gutterRight) = i < gutter ? std::min(valueLeft, glyphs[i].rect.left())
+                                                                : std::max(gutterRight, glyphs[i].rect.right());
+        EXPECT_LT(gutterRight, valueLeft) << "the gutter never runs under the first value column";
+    }
 }
 
 TEST(FlowFooter, PanAndMagnitudeChangesKeepTheSameAbsoluteColumnPhase) {
