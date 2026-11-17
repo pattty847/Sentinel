@@ -987,6 +987,9 @@ QString DomModel::pulseSummary(PulseText form) const
     const auto& t = m_classifier.totals();
     const auto& bid = t.side[sentinel::book::sideIndex(sentinel::book::Side::Bid)];
     const auto& ask = t.side[sentinel::book::sideIndex(sentinel::book::Side::Ask)];
+    if (form == PulseText::Fields)
+        return QStringLiteral("Ask pull %1\nAsk eat %2\nBid pull %3\nBid eat %4")
+            .arg(shownSize(ask.pulled), shownSize(ask.eaten), shownSize(bid.pulled), shownSize(bid.eaten));
     const QString askText = QStringLiteral("Ask pull %1 eat %2").arg(shownSize(ask.pulled), shownSize(ask.eaten));
     const QString bidText = QStringLiteral("Bid pull %1 eat %2").arg(shownSize(bid.pulled), shownSize(bid.eaten));
     if (form == PulseText::TwoLines) return askText + QLatin1Char('\n') + bidText;

@@ -2914,6 +2914,28 @@ TEST_F(DomDock, HeadingButtonsKeepTheirWholeTextFrom180To650) {
     qApp->setStyleSheet(previousStyle);
 }
 
+TEST_F(DomPulseDock, FooterWithLongFractionalTotalsNeverCutsANumber) {
+    // Codex F3: "Ask pull 0.00000001 eat 0.00000001" is wider than a 180 px dock's footer.
+    source.update({{false, 200.3, 1.23456e-7}, {true, 199.8, 2.34567e-7}});
+    tick();
+    source.update({{false, 200.3, 0}, {true, 199.8, 0}});
+    tick();
+    auto* footer = dock.findChild<QLabel*>("domPulseFooter");
+    ASSERT_TRUE(footer->toolTip().contains("0.000000123")) << footer->toolTip().toStdString();
+    for (int width : {180, 260, 320}) {
+        dock.resize(width, 600);
+        QCoreApplication::processEvents();
+        tick();
+        const QString text = footer->text();
+        ASSERT_FALSE(text.isEmpty()) << width;
+        for (const QString& line : text.split('\n')) {
+            EXPECT_LE(footer->fontMetrics().horizontalAdvance(line), footer->width()) << width << " " << line.toStdString();
+            EXPECT_TRUE(line.startsWith("Ask ") || line.startsWith("Bid ")) << line.toStdString(); // labelled fields only
+        }
+        if (width == 180) EXPECT_GE(text.count('\n'), 1) << text.toStdString();
+    }
+}
+
 TEST_F(DomPulseDock, FooterNeverCutsANumberAt180To400) {
     source.update({{true, 199.9, 0}, {false, 200.2, 1364.2}}); // a pull and a large add
     tick();

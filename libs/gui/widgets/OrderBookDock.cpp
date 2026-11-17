@@ -1242,9 +1242,17 @@ void OrderBookDock::updatePulseFooter()
         return true;
     };
     QString text = full;
-    for (const auto form : {DomModel::PulseText::NoMax, DomModel::PulseText::TwoLines}) {
+    for (const auto form : {DomModel::PulseText::NoMax, DomModel::PulseText::TwoLines, DomModel::PulseText::Fields}) {
         if (fits(text)) break;
         text = m_model->pulseSummary(form);
+    }
+    if (!fits(text)) {
+        // Last resort: one labelled field per line, and a field too wide for the dock is left
+        // out whole (the tooltip has every value). Never a cut number.
+        QStringList kept;
+        for (const auto& line : QStringView(text).split(QLatin1Char('\n')))
+            if (m_pulseFooter->fontMetrics().horizontalAdvance(line.toString()) <= width) kept.append(line.toString());
+        text = kept.join(QLatin1Char('\n'));
     }
     m_pulseFooter->setText(text);
     const auto& totals = m_model->pulseTotals();
