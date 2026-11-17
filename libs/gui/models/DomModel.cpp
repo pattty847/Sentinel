@@ -92,7 +92,8 @@ namespace {
 // Decimals that show `digits` significant digits of a positive value (no exponent).
 int sizeDecimals(double value, int digits)
 {
-    return std::clamp(digits - 1 - int(std::floor(std::log10(value))), 0, 10);
+    // Twelve: five significant digits at the 1e-8 dust floor (1.0049e-8 reads 0.000000010049).
+    return std::clamp(digits - 1 - int(std::floor(std::log10(value))), 0, 12);
 }
 } // namespace
 
@@ -386,6 +387,7 @@ void DomModel::setCumulative(bool on)
 {
     if (on == m_cumulative) return;
     m_cumulative = on;
+    m_sizeStyleChanged = true; // Adaptive digits depend on the series shown: recompute at the next publish
     for (auto& valid : m_textValid) valid &= uint8_t(~((1u << Bid) | (1u << Ask)));
     emit headerDataChanged(Qt::Horizontal, Bid, Ask);
     if (m_ready) emit dataChanged(index(0, Bid), index(Rows - 1, Ask));
@@ -409,6 +411,8 @@ bool DomModel::needsRepublish(qint64 nowMs) const
 {
     if (m_visibleChanged || m_requestedGroup != m_appliedRequest) return true;
     if (m_nextExpiryMs > 0 && nowMs >= m_nextExpiryMs) return true;
+    // Adaptive size digits: a format or Σ change, or a held drop to fewer digits now due.
+    if (m_sizeStyleChanged || (m_sizeDigitsSince >= 0 && nowMs >= m_sizeDigitsSince + SizeDigitsHoldMs)) return true;
     // Liquidity Pulse: fading flashes repaint each tick, then their cleared rows once.
     if (m_pulseLive > 0 || m_repaintFirst <= m_repaintLast) return true;
     return std::any_of(m_scales.begin(), m_scales.end(), [](const Scale& s) { return s.shown != s.target; });
@@ -435,6 +439,8 @@ void DomModel::withdrawScaleWork()
     m_lastScaleMs = 0;
     m_visibleChanged = false;
     m_appliedRequest = m_requestedGroup; // applies with the next ladder
+    m_sizeStyleChanged = false;          // the next ladder formats afresh
+    m_sizeDigitsSince = -1;
     m_depthKey.reset();
     clearFlashes(false);
 }

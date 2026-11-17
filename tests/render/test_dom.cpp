@@ -2711,6 +2711,49 @@ TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
     EXPECT_EQ(button->text(), "Auto ▾");
 }
 
+TEST(DomModel, AdaptiveDigitsFollowSigmaAndTheHeldDropWithoutMarketEvents) {
+    // Codex F1: Σ and the 2 s drop back must reach the cells with no further book change.
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 1.111}, {true, 199.9, 0.003}, {false, 200.1, 5}});
+    DomModel model;
+    model.clear("BTC-USD");
+    qint64 now = 1'800'000'000'000;
+    const auto tickOnce = [&](qint64 ms) { // the dock's 67 ms loop: publish only when asked
+        now += ms;
+        if (model.needsRepublish(now)) model.publish(book, {}, true, now);
+    };
+    model.publish(book, {}, true, now);
+    for (int i = 0; i < 10; ++i) tickOnce(67); // settle the bar scale
+    ASSERT_EQ(model.sizeStyle().digits, 3);
+    const auto text = [&](qint64 key) { return model.index(rowAt(model, key), DomModel::Bid).data().toString(); };
+    model.setCumulative(true);                  // 1.111 and 1.114: alike at three digits
+    tickOnce(67);
+    EXPECT_EQ(model.sizeStyle().digits, 4);
+    EXPECT_EQ(text(2000), "1.111");
+    EXPECT_EQ(text(1999), "1.114");
+    model.setCumulative(false);                 // 1.111 and 0.003: three digits will do, after the hold
+    tickOnce(67);
+    EXPECT_EQ(model.sizeStyle().digits, 4);
+    for (int i = 0; i < 40 && model.sizeStyle().digits == 4; ++i) tickOnce(67);
+    EXPECT_EQ(model.sizeStyle().digits, 3) << "the held drop republishes by itself";
+    EXPECT_EQ(text(2000), "1.11");
+    for (int i = 0; i < 5; ++i) EXPECT_FALSE(model.needsRepublish(now += 67)) << "then it settles";
+}
+
+TEST(DomModel, AdaptiveDigitsSeparateNeighboursAtTheDustFloor) {
+    // Codex F2: 1.0001e-8 and 1.0049e-8 must not both read 0.00000001.
+    EXPECT_EQ(DomModel::sizeText(1.0049e-8, {5, true, 1e-8}), "0.000000010049");
+    LiveOrderBook book;
+    book.initialize(0, 400, 0.1);
+    apply(book, {{true, 200, 1.0001e-8}, {true, 199.9, 1.0049e-8}, {false, 200.1, 5}});
+    DomModel model;
+    model.clear("BTC-USD");
+    model.publish(book, {}, true);
+    const auto text = [&](qint64 key) { return model.index(rowAt(model, key), DomModel::Bid).data().toString(); };
+    EXPECT_NE(text(2000), text(1999)) << text(2000).toStdString();
+}
+
 TEST_F(DomDock, SizeFormatIsOneSettingInTheDockMenuAndPersists) {
     source.update({{true, 200, 1.111}, {true, 199.9, 1.114}, {false, 200.1, 2.35e-5}});
     show();
