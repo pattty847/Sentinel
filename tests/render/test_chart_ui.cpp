@@ -395,13 +395,13 @@ TEST(ChartToolbar, GearPaintsACleanGearWithoutAMenuIndicator) {
     auto *gear = toolbar.chartMenuButton();
     ASSERT_TRUE(gear->isVisible());
     ASSERT_TRUE(gear->menu());
-    QToolButton plain(&toolbar); // the same icon and style, without a menu
-    plain.setIcon(gear->icon());
-    plain.setIconSize(gear->iconSize());
-    plain.setGeometry(QRect(QPoint(0, 0), gear->size()));
-    plain.show();
-    QCoreApplication::processEvents();
-    EXPECT_EQ(gear->grab().toImage(), plain.grab().toImage());
+    const QImage withMenu = gear->grab().toImage();
+    QMenu *menu = gear->menu();
+    gear->setMenu(nullptr); // the same button and icon without a menu: nothing but the gear
+    const QImage plain = gear->grab().toImage();
+    gear->setMenu(menu);
+    ASSERT_FALSE(plain.isNull());
+    EXPECT_EQ(withMenu, plain);
 }
 
 // TB-4 / B-2: the liquidity range reads "<0.0001 – 9.41 BTC", never in scientific
