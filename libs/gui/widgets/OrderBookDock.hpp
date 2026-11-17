@@ -154,6 +154,7 @@ private:
     bool minimized() const;
     void fitColumns();
     void updateSummary();
+    void fitAggregation();
     QPointer<IGridDataSource> m_source;
     QPointer<MarketHealth> m_health;
     QString m_symbol;
@@ -165,6 +166,7 @@ private:
     QTableView* m_table = nullptr;
     QLabel* m_symbolLabel = nullptr;
     QLabel* m_aggregation = nullptr;
+    QString m_aggregationFull;
     QLabel* m_summary = nullptr;
     QLabel* m_status = nullptr;
     QPushButton* m_recenter = nullptr;

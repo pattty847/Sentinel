@@ -580,10 +580,12 @@ void OrderBookDock::buildUi()
     auto* aggregationLine = new QHBoxLayout(meta);
     aggregationLine->setContentsMargins(0, 0, 0, 0);
     aggregationLine->setSpacing(6);
+    // Spread and state take their text width first (high stretch, capped at that width); the
+    // row size takes the rest. No label sets a minimum: docking stays free down to 180 px.
     aggregationLine->addWidget(m_aggregation, 1);
-    aggregationLine->addWidget(m_summary);
-    aggregationLine->addWidget(m_status);
-    for (QLabel* fitted : {m_summary, m_status}) fitted->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    aggregationLine->addWidget(m_summary, 100);
+    aggregationLine->addWidget(m_status, 100);
+    m_aggregation->installEventFilter(this);
     m_status->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_summary->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     layout->addWidget(meta);
@@ -1078,6 +1080,10 @@ bool OrderBookDock::eventFilter(QObject* watched, QEvent* event)
         if (event->type() == QEvent::WindowStateChange) updateDisplayTimer();
         return DockablePanel::eventFilter(watched, event);
     }
+    if (watched == m_aggregation) {
+        if (event->type() == QEvent::Resize) fitAggregation();
+        return DockablePanel::eventFilter(watched, event);
+    }
     if (watched == m_table->viewport() && event->type() == QEvent::Resize && m_displayActive) {
         fitColumns();
         updateSummary();
@@ -1225,21 +1231,27 @@ void OrderBookDock::updateSummary()
     }
     const auto fitWidth = [](QLabel* label, const QString& text) {
         label->setText(text);
-        const int width = label->fontMetrics().horizontalAdvance(text) + 2;
-        if (label->width() != width || label->minimumWidth() != width) label->setFixedWidth(width);
+        label->setMaximumWidth(label->fontMetrics().horizontalAdvance(text) + 2);
     };
     fitWidth(m_status, fullStatus);
-    // The row size yields first: whole " · " segments drop, never a cut number.
-    QString aggregation = m_model->aggregation(true);
-    const int room = m_aggregation->width();
-    while (m_aggregation->fontMetrics().horizontalAdvance(aggregation) > room && aggregation.contains(QStringLiteral(" · ")))
-        aggregation.truncate(aggregation.lastIndexOf(QStringLiteral(" · ")));
-    if (m_aggregation->fontMetrics().horizontalAdvance(aggregation) > room) aggregation.clear();
-    m_aggregation->setText(aggregation);
+    m_aggregationFull = m_model->aggregation(true);
+    fitAggregation();
     m_aggregation->setToolTip(m_model->aggregation() + "\n" + m_model->executionSummary());
     fitWidth(m_summary, m_model->summary(!wide));
     m_summary->setToolTip(m_model->summary() + "\n" + m_model->executionSummary());
     updatePulseFooter();
+}
+
+void OrderBookDock::fitAggregation()
+{
+    // The row size yields first: whole " · " segments drop, never a cut number. Refitted on
+    // every update and whenever the label's width changes.
+    QString aggregation = m_aggregationFull;
+    const int room = m_aggregation->width();
+    while (m_aggregation->fontMetrics().horizontalAdvance(aggregation) > room && aggregation.contains(QStringLiteral(" · ")))
+        aggregation.truncate(aggregation.lastIndexOf(QStringLiteral(" · ")));
+    if (m_aggregation->fontMetrics().horizontalAdvance(aggregation) > room) aggregation.clear();
+    if (aggregation != m_aggregation->text()) m_aggregation->setText(aggregation);
 }
 
 void OrderBookDock::updatePulseFooter()
