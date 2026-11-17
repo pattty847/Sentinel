@@ -74,7 +74,7 @@ bool chart::ChartInputRouter::nativeGesture(QEvent* e) {
       return true;
     }
     case Qt::EndNativeGesture:
-      view_.zoom().endZoomGesture();
+      view_.zoom().endWheelGesture(); // a held axis drag is not ended by a pinch
       gesture->accept();
       return true;
     case Qt::BeginNativeGesture:

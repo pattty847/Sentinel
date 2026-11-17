@@ -279,10 +279,18 @@ void ZoomController::zoomContinuousFor(double factor, double x, double y, bool t
   applyContinuousView(cam, factor, fracX, fracY, {time, price}, {timeJoins, priceJoins});
   // A held axis drag keeps the gesture continuous: a wheel or pinch joining it arms no settle.
   if (settleMs > 0 && !axisDragHeld_) {
-    if (!settleTimer_) settleTimer_ = timerFactory_([this] { endZoomGesture(); });
+    if (!settleTimer_) settleTimer_ = timerFactory_([this] { endWheelGesture(); });
     settleTimer_->start(settleMs);
   }
   emit updateRequested();
+}
+
+void ZoomController::endWheelGesture() {
+  if (axisDragHeld_) { // the held drag settles at its release
+    if (settleTimer_) settleTimer_->stop();
+    return;
+  }
+  endZoomGesture();
 }
 
 void ZoomController::endZoomGesture() {
@@ -340,7 +348,7 @@ void ZoomController::wheelZoom(int angle, bool pixelDeltaNull, int phase, bool p
     const int clicks = std::clamp(whole, -4, 4);
     if (clicks) zoomClicks(clicks, x, y, time, price);
   } else if (kind == WheelInterpreter::Kind::End) {
-    if (!axisDragHeld_) endZoomGesture(); // a held axis drag settles at its release
+    endWheelGesture();
   } else if (kind == WheelInterpreter::Kind::Continuous) {
     zoomContinuousFor(continuousFactor(angle), x, y, time, price, kGestureSettleMs);
   }

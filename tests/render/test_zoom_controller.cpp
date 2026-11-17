@@ -361,6 +361,9 @@ TEST_F(ZoomTest, WheelSettleNeverEndsAHeldAxisDrag) {
     EXPECT_TRUE(c.glide().gesture);
     wheel(0, false, 3, true); // the scroll's own end phase
     EXPECT_TRUE(c.glide().gesture);
+    z.endWheelGesture();        // the pinch's native end
+    EXPECT_TRUE(c.glide().gesture);
+    EXPECT_FALSE(z.gestureSettlePending());
     z.zoomPriceDrag(24, 197);   // the drag moves on inside the same gesture
     EXPECT_TRUE(c.glide().gesture);
     z.endZoomGesture();         // release
@@ -371,6 +374,10 @@ TEST_F(ZoomTest, WheelSettleNeverEndsAHeldAxisDrag) {
     wheel(30, false, 2, true);
     EXPECT_TRUE(z.gestureSettlePending());
     timer.advance(chart::ZoomController::kGestureSettleMs);
+    EXPECT_FALSE(c.glide().gesture);
+    // With no drag held, a wheel or pinch completion settles at once.
+    z.zoomContinuousFor(1.1, 400, 200, true, false, chart::ZoomController::kGestureSafetyMs);
+    z.endWheelGesture();
     EXPECT_FALSE(c.glide().gesture);
 }
 TEST_F(ZoomTest, AxisWrappersPreserveOwnershipAndExplicitRelease) {
