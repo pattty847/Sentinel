@@ -91,11 +91,28 @@ TEST(PriceAxisModel, ScaledUnitLabelsAndBtcUnchanged) {
         ASSERT_LT(index, expected.size());
         EXPECT_EQ(tick.label, expected[index]);
     }
-    // BTC keeps its dollar labels; the same view without a symbol labels alike.
+    // BTC and an unscaled axis both use grouped prices without redundant decimals.
     const auto btc = axisTicks(100003.0, 2000.0, 2.0, "BTC-USD");
     const auto plain = axisTicks(100003.0, 2000.0, 2.0);
     ASSERT_EQ(btc.size(), plain.size());
     for (size_t i = 0; i < btc.size(); ++i) EXPECT_EQ(btc[i].label, plain[i].label);
-    EXPECT_EQ(btc.front().label, QStringLiteral("$100200"));
+    EXPECT_EQ(btc.front().label, QStringLiteral("100,200"));
     units.clearForTest();
+}
+
+TEST(PriceAxisModel, DecimalPlacesFollowStepAndPricesUseGrouping) {
+    PriceUnits::instance().clearForTest();
+    const auto whole = axisTicks(74'000, 1000, 100);
+    ASSERT_FALSE(whole.empty());
+    EXPECT_EQ(whole.front().label, QStringLiteral("74,000"));
+    const auto fractional = axisTicks(1234.12, .6, .01);
+    ASSERT_FALSE(fractional.empty());
+    EXPECT_TRUE(fractional.front().label.startsWith("1,234."));
+    EXPECT_EQ(fractional.front().label.size() - fractional.front().label.indexOf('.') - 1, 2);
+    const auto halves = axisTicks(74'002.5, 35, 2.5);
+    expectGrid(halves, 2.5);
+    EXPECT_EQ(halves.front().label, QStringLiteral("74,002.5"));
+    const auto quarters = axisTicks(.25, 3.5, .25);
+    expectGrid(quarters, .25);
+    EXPECT_EQ(quarters.front().label, QStringLiteral("0.25"));
 }

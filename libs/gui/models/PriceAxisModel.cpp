@@ -146,7 +146,7 @@ void PriceAxisModel::calculateTicks() {
         const double screenY = valueToScreenPosition(price);
         if (screenY >= 0 && screenY <= getViewportHeight()) {
             const QString label = formatLabel(price);
-            addTick(price, screenY, label, true);
+            addTick(price, screenY, label, true, formatLabelForWidth(price));
         }
         if (++safeCount > 1000) {
             break;
@@ -156,6 +156,18 @@ void PriceAxisModel::calculateTicks() {
 }
 
 QString PriceAxisModel::formatLabel(double value) const {
+    const auto unit = PriceUnits::instance().unitFor(m_symbol);
+    value = unit.toDisplay(value);
+    const double step = unit.toDisplay(m_lastNiceSpacing > 0 ? m_lastNiceSpacing : m_tickSize);
+    const int decimals = sentinel::displayDecimals(step);
+    QString label = QString::number(value, 'f', decimals);
+    const qsizetype dot = label.indexOf('.');
+    const qsizetype end = dot < 0 ? label.size() : dot;
+    for (qsizetype i = end - 3; i > 0 && label[i - 1] != '-'; i -= 3) label.insert(i, ',');
+    return label;
+}
+
+QString PriceAxisModel::formatLabelForWidth(double value) const {
     double priceRange = m_effectiveViewportValid
         ? (m_effectiveMaxPrice - m_effectiveMinPrice)
         : (getViewportEnd() - getViewportStart());

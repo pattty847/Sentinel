@@ -34,6 +34,7 @@ namespace heatmap::gpu {
 struct LabelStyle {
     std::span<const QRectF> occlusion;
     bool usd = true;
+    bool currencySymbol = false;
     double minPx = 12, maxPx = 15; // font size (em) in logical px
     double padX = 3, padY = 1;     // logical px on each side of the text box
     CodeWindow window;              // the colour mapping (DrawStyle codeFloor/codeRange)
@@ -80,12 +81,13 @@ private:
         float boxWidth = 0; // quad box width in atlas px (glyph padding included)
         float inkWidth = 0; // boxWidth less the atlas glyph padding at both ends
     };
-    void rebuild(const LabelCells &cells, const ChartTextAtlas &atlas, bool usd);
+    void rebuild(const LabelCells &cells, const ChartTextAtlas &atlas, bool usd, bool currencySymbol);
 
     std::shared_ptr<const LabelCells> built_;
     const ChartTextAtlas *builtAtlas_ = nullptr;
     qint64 builtAtlasKey_ = 0;
     bool builtUsd_ = true;
+    bool builtCurrencySymbol_ = false;
     std::vector<UnitGlyph> glyphs_;
     std::vector<Run> runs_;
     std::vector<int32_t> runOfCell_; // per cell: index into runs_, -1 none

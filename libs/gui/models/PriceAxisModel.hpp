@@ -25,6 +25,9 @@ public:
 protected:
     void calculateTicks() override;
     QString formatLabel(double value) const override;
+    // The pre-grouping label ("$84088.20"), used only to size the axis column: the
+    // column, and with it the plot, keeps the width it had before the grouped format.
+    QString formatLabelForWidth(double value) const;
     double getViewportStart() const override;
     double getViewportEnd() const override;
     double valueToScreenPosition(double value) const override;

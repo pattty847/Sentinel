@@ -313,7 +313,7 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 }
 
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
-    if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelMinPx", "labelMaxPx",
+    if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelCurrencySymbol", "labelMinPx", "labelMaxPx",
                                 "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleBodyFraction", "candleMaxBodyPx", "candleWickWidth", "showVolumeBars", "volumeBandPercent", "volumeOpacity", "footprintIntensity", "footprintCandle", "footprintNumbers",
                                 "footprintDustNotional", "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "cvdFillAnchor"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
@@ -400,11 +400,16 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_showLabels = new QCheckBox("Show liquidity labels on heatmap cells", page);
     m_showLabels->setObjectName("showLabels");
     form->addRow("Labels", m_showLabels);
+    auto *currencyRow = new QHBoxLayout;
     m_labelCurrency = new QComboBox(page);
     m_labelCurrency->setObjectName("labelCurrency");
-    m_labelCurrency->addItem("USD ($1.24M)", "usd");
+    m_labelCurrency->addItem("USD (1.24M)", "usd");
     m_labelCurrency->addItem("Asset (12.5)", "asset");
-    form->addRow("Label currency", m_labelCurrency);
+    currencyRow->addWidget(m_labelCurrency);
+    m_labelCurrencySymbol = new QCheckBox("Show $ on cells", page);
+    m_labelCurrencySymbol->setObjectName("labelCurrencySymbol");
+    currencyRow->addWidget(m_labelCurrencySymbol);
+    form->addRow("Label currency", currencyRow);
     m_labelMinPx = doubleSpin(page, "labelMinPx", 8, 24, 0.5, 1);
     m_labelMinPx->setSuffix(" px");
     m_labelMaxPx = doubleSpin(page, "labelMaxPx", 8, 32, 0.5, 1);
@@ -509,7 +514,8 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     form->addRow(candles);
     form->addRow(resetButton("Chart", page));
     describe(form, m_showLabels, "Show liquidity sizes on GPU heatmap cells above the range low when text fits. Turn off to reduce clutter.");
-    describe(form, m_labelCurrency, "Show liquidity as USD notional or base-asset size. Use USD to compare value, or Asset to compare quantity.");
+    describe(form, currencyRow, "Show liquidity as USD notional or base-asset size. Use USD to compare value, or Asset to compare quantity.");
+    m_labelCurrencySymbol->setToolTip("Show a dollar sign before USD liquidity numbers in heatmap cells.");
     describe(form, m_labelMinPx, "Smallest GPU liquidity text, in pixels (8-24); labels that cannot fit at this size are hidden. Raise it for readability.");
     describe(form, m_labelMaxPx, "Largest GPU liquidity text, in pixels (8-32). Raise it for bigger labels when cells have room.");
     describe(form, m_tradesAboveCandles, m_tradesAboveCandles->toolTip());
@@ -527,6 +533,7 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     connect(m_labelCurrency, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         if (index >= 0) apply({{"labelCurrency", m_labelCurrency->itemData(index).toString()}});
     });
+    connect(m_labelCurrencySymbol, &QCheckBox::toggled, this, [this](bool on) { apply({{"labelCurrencySymbol", on}}); });
     connect(m_labelMinPx, &QDoubleSpinBox::valueChanged, this, [this](double v) {
         apply({{"labelMinPx", v}, {"labelMaxPx", std::max(v, m_labelMaxPx->value())}});
     });
@@ -1004,6 +1011,7 @@ void HeatmapSettingsDialog::refreshFromModel() {
         const QSignalBlocker block(m_palette);
         m_palette->setCurrentIndex(std::max<qsizetype>(0, kPalettes.indexOf(QString::fromStdString(s.palettePreset))));
     }
+    { const QSignalBlocker block(m_labelCurrencySymbol); m_labelCurrencySymbol->setChecked(s.labelCurrencySymbol); }
     {
         const QSignalBlocker block(m_paperPositionStyle);
         m_paperPositionStyle->setCurrentIndex(std::max(0, m_paperPositionStyle->findData(QString::fromStdString(s.paperPositionStyle))));

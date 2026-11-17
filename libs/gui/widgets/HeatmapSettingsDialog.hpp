@@ -116,6 +116,7 @@ private:
     QDoubleSpinBox *m_tradeMinNotional = nullptr;
     QCheckBox *m_tradesAboveCandles = nullptr;
     QComboBox *m_labelCurrency = nullptr;
+    QCheckBox *m_labelCurrencySymbol = nullptr;
     QDoubleSpinBox *m_labelMinPx = nullptr;
     QDoubleSpinBox *m_labelMaxPx = nullptr;
     QComboBox *m_candleStyle = nullptr;

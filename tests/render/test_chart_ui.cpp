@@ -39,6 +39,7 @@
 #include <QDir>
 #include <QLabel>
 #include <QLineEdit>
+#include <QQmlProperty>
 #include <QVBoxLayout>
 #include <QToolButton>
 #include <QPainter>
@@ -1036,6 +1037,35 @@ TEST(ChartQmlPin, ProductionSceneHasNoWarnings) {
     shell.reset();
     QCoreApplication::processEvents();
     EXPECT_TRUE(warnings.isEmpty()) << warnings.join('\n').toStdString();
+}
+
+TEST(ChartShell, AxisGuttersHaveSinglePixelSolidDividers) {
+    QQmlEngine engine;
+    engine.addImportPath("qrc:/qt/qml");
+    engine.rootContext()->setContextProperty("uiTheme", QVariant::fromValue<QObject *>(nullptr));
+    engine.rootContext()->setContextProperty("dataSource", QVariant::fromValue<QObject *>(nullptr));
+    QQmlComponent component(&engine, QUrl("qrc:/qt/qml/Sentinel/Charts/qml/DepthChartView.qml"));
+    ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+    std::unique_ptr<QObject> shell(component.create());
+    ASSERT_TRUE(shell);
+    shell->setProperty("width", 960);
+    shell->setProperty("height", 640);
+    QCoreApplication::processEvents();
+    for (const auto name : {"priceAxisDivider", "timeAxisDivider"}) {
+        auto* line = shell->findChild<QQuickItem*>(name);
+        ASSERT_TRUE(line) << name;
+        EXPECT_EQ(line->property("color").value<QColor>(), QColor("#2B3138"));
+        EXPECT_EQ(QString(name) == "priceAxisDivider" ? line->width() : line->height(), 1);
+    }
+    for (const auto name : {"priceAxisChrome", "timeAxisChrome"}) {
+        auto* gutter = shell->findChild<QQuickItem*>(name);
+        ASSERT_TRUE(gutter);
+        EXPECT_EQ(gutter->property("color").value<QColor>(), QColor::fromRgbF(.05, .05, .1, .85));
+    }
+    auto* corner = shell->findChild<QQuickItem*>("axisCorner");
+    ASSERT_TRUE(corner);
+    EXPECT_EQ(QQmlProperty::read(corner, "border.width").toInt(), 1);
+    EXPECT_EQ(QQmlProperty::read(corner, "border.color").value<QColor>(), QColor::fromRgbF(1, 1, 1, .3));
 }
 
 TEST(ChartShell, PaperPositionTagFormatsSizeAndHidesOffscreenControls) {
@@ -2863,7 +2893,6 @@ TEST(FootprintFlowFeed, EarlyNewSymbolHistorySurvivesSelectionAndHiddenLod) {
     feed.publishRows(); ASSERT_TRUE(layer.mailbox().take(current)); EXPECT_FALSE(current->valid);
 }
 
-#include <QQmlProperty>
 TEST(FootprintKnobs, QmlWritesPersistAndProcessOnlyModelApplicationDoesNot) {
     TempStore store;
     HeatmapSettingsModel model(store.store, "main", store.config);

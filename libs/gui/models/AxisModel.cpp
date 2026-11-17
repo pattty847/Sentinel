@@ -111,7 +111,7 @@ void AxisModel::copyTicks(std::vector<AxisModel::TickSnapshot>& out) const {
         if (tick.label.isEmpty()) {
             continue;
         }
-        out.push_back(TickSnapshot{tick.value, tick.position, tick.label, tick.isMajorTick});
+        out.push_back(TickSnapshot{tick.value, tick.position, tick.label, tick.isMajorTick, tick.widthLabel});
     }
 }
 
@@ -184,11 +184,12 @@ void AxisModel::clearTicks() {
     m_tickWriteIndex = 0;
 }
 
-void AxisModel::addTick(double value, double position, const QString& label, bool isMajorTick) {
+void AxisModel::addTick(double value, double position, const QString& label, bool isMajorTick,
+                        const QString& widthLabel) {
     if (m_tickWriteIndex >= m_labelCapacity) {
         return;
     }
-    m_ticks[static_cast<size_t>(m_tickWriteIndex++)] = TickInfo(value, position, label, isMajorTick);
+    m_ticks[static_cast<size_t>(m_tickWriteIndex++)] = TickInfo(value, position, label, isMajorTick, widthLabel);
 }
 
 void AxisModel::updateTicksAndNotify() {
@@ -213,7 +214,7 @@ void AxisModel::updateTicksAndNotify() {
         if (std::abs(before.position - after.position) > kPosEps) {
             positionChanged = true;
         }
-        if (before.label != after.label) {
+        if (before.label != after.label || before.widthLabel != after.widthLabel) {
             labelChanged = true;
         }
         if (before.isMajorTick != after.isMajorTick) {

@@ -21,6 +21,7 @@ public:
         double position = 0.0;
         QString label;
         bool isMajorTick = false;
+        QString widthLabel; // sizes the price column with label (see AxisModel::TickSnapshot)
     };
 
     struct AxisLayoutSnapshot {
@@ -31,6 +32,7 @@ public:
     };
 
     explicit AxisTextService(const ChartTextAtlas& atlas, QObject* parent = nullptr);
+    static QColor textColor();
 
     void setPriceAxisSource(QObject* source);
     void setTimeAxisSource(QObject* source);

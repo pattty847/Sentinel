@@ -151,6 +151,19 @@ TEST(HeatmapSettingsModelTest, PersistsPerChart) {
     EXPECT_EQ(main.settings().palettePreset, "Ocean");
 }
 
+TEST(HeatmapSettingsModelTest, CurrencySymbolDefaultsOffAndCanBePatched) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    EXPECT_FALSE(model.settings().labelCurrencySymbol);
+    ASSERT_TRUE(model.apply({{"labelCurrencySymbol", true}}).isEmpty());
+    EXPECT_TRUE(model.settings().labelCurrencySymbol);
+    EXPECT_TRUE(t.reload().labelCurrencySymbol);
+    EXPECT_FALSE(HeatmapSettingsDialog::tabKeys("Look").contains("labelCurrencySymbol"));
+    EXPECT_FALSE(HeatmapSettingsDialog::tabKeys("Look").contains("labelCurrency"));
+    EXPECT_TRUE(HeatmapSettingsDialog::tabKeys("Chart").contains("labelCurrencySymbol"));
+    EXPECT_TRUE(HeatmapSettingsDialog::tabKeys("Chart").contains("labelCurrency"));
+}
+
 TEST(HeatmapSettingsModelTest, VisibleLiquidityFitsOncePerSymbolAndRemembersUserEdits) {
     TempStore t;
     t.settings.setValue("heatmap/main/sensitivityMin", 99.0);

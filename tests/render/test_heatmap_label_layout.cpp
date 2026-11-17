@@ -257,6 +257,28 @@ protected:
     std::vector<ChartGlyphInstance> glyphs;
 };
 
+TEST_F(LabelLayout, CurrencySymbolToggleChangesOnlyUsdCellGlyphs) {
+    auto cells = window(1, 1);
+    const auto camera = fit({0, 0, 180, 36}, 1, 1);
+    auto appearance = style();
+    EXPECT_FALSE(appearance.currencySymbol);
+    layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
+    ASSERT_EQ(layout.stats().labels, 1u);
+    const auto plainCount = glyphs.size();
+    ASSERT_GT(plainCount, 0u);
+    const auto plainFirst = glyphs.front().uv;
+    appearance.currencySymbol = true;
+    layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
+    EXPECT_EQ(glyphs.size(), plainCount + 1);
+    EXPECT_NE(glyphs.front().uv, plainFirst);
+    appearance.usd = false;
+    layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
+    const auto assetCount = glyphs.size();
+    appearance.currencySymbol = false;
+    layout.layout(cells, atlas(), camera, 1, appearance, glyphs);
+    EXPECT_EQ(glyphs.size(), assetCount);
+}
+
 TEST_F(LabelLayout, FootprintCardsSuppressWholeIntersectingLabelsWithoutCapacityGrowth) {
     auto cells = window(2, 1);
     const auto camera = fit({0, 0, 240, 30}, 2, 1);
@@ -322,6 +344,8 @@ TEST_F(LabelLayout, OnlyColouredCellsGetLabels) {
 // it grows with the cells up to 15 px and never beyond.
 TEST_F(LabelLayout, SizeGrowsFrom12To15AndNeverShrinksBelow12) {
     auto cells = window(6, 4);
+    auto symbolStyle = style();
+    symbolStyle.currencySymbol = true; // preserve the worst-case width when the optional $ is enabled
     struct Case {
         double cellW, cellH, minSize, maxSize;
         bool any;
@@ -333,7 +357,7 @@ TEST_F(LabelLayout, SizeGrowsFrom12To15AndNeverShrinksBelow12) {
                          Case{36, 80, 12, 12, true}}) {  // narrow: 12 px, only the labels that fit
         SCOPED_TRACE(std::to_string(c.cellW) + "x" + std::to_string(c.cellH));
         const QRectF rect(0, 0, 6 * c.cellW, 4 * c.cellH);
-        layout.layout(cells, atlas(), fit(rect, 6, 4), 1.0, style(), glyphs);
+        layout.layout(cells, atlas(), fit(rect, 6, 4), 1.0, symbolStyle, glyphs);
         EXPECT_EQ(layout.stats().labels > 0, c.any);
         if (c.any) {
             EXPECT_GE(layout.stats().sizePx, c.minSize - 1e-9);
@@ -344,7 +368,7 @@ TEST_F(LabelLayout, SizeGrowsFrom12To15AndNeverShrinksBelow12) {
     }
     // Narrow cells: every drawn label's ink fits its cell; the rest are counted.
     const QRectF narrow(0, 0, 6 * 36, 4 * 80);
-    layout.layout(cells, atlas(), fit(narrow, 6, 4), 1.0, style(), glyphs);
+    layout.layout(cells, atlas(), fit(narrow, 6, 4), 1.0, symbolStyle, glyphs);
     EXPECT_GT(layout.stats().tooNarrow, 0u);
     for (const auto &[anchor, n] : labels(glyphs)) {
         double right = 0;

@@ -16,4 +16,5 @@ inline QColor accent() { return QColor("#00AAFF"); }
 inline QColor sel() { return QColor("#2A4A6A"); }
 inline QColor selLine() { return QColor("#3A6A9A"); }
 inline QColor line() { return QColor::fromRgb(0xff2b3138); }
+inline QColor text2() { return QColor::fromRgb(0xffb6c2cf); }
 } // namespace theme

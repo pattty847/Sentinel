@@ -69,6 +69,7 @@ void HeatmapLayer::submitLabels(const ChartFrame& snapshot, LayerNodeContext& co
     heatmap::gpu::LabelStyle style;
     style.occlusion = cards;
     style.usd = settings.labelCurrency != "asset";
+    style.currencySymbol = settings.labelCurrencySymbol;
     style.minPx = settings.labelMinPx;
     style.maxPx = settings.labelMaxPx;
     style.window = {gpu->drawStyle().codeFloor, gpu->drawStyle().codeRange};

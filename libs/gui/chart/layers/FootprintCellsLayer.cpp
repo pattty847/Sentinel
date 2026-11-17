@@ -186,7 +186,7 @@ void FootprintCellsLayer::updateNodes(const ChartFrame& frame, LayerNodeContext&
 void FootprintCellsLayer::number(const Number& value, const ChartTextAtlas& atlas) {
     const auto& box = value.box;
     const auto tier = flowTier(value.volume, value.price, value.maximum, presentation_.dustNotional);
-    if (tier == FlowTier::Empty) return;
+    if (tier == FlowTier::Empty || tier == FlowTier::Dust) return;
     const bool light = flowInkIsLight(rgb(sideColour(value.bid)), value.fillAlpha, rgb(ChartLookSettings::chartBackground()),
                                       rgb(ChartLookSettings::footprintText()), rgb(ChartLookSettings::footprintInkDark()));
     const auto colour = inkColour(light, tier);
@@ -244,7 +244,7 @@ void FootprintCellsLayer::submitLabels(const ChartFrame& frame, LayerNodeContext
     }
     if (!reserved_) {
         reserved_ = true;
-        for (auto tier : {FlowTier::Dust, FlowTier::Normal, FlowTier::Heavy}) {
+        for (auto tier : {FlowTier::Normal, FlowTier::Heavy}) {
             for (bool light : {true, false}) reserved_ = context.text.reserve(inkColour(light, tier), kMaxGlyphs) && reserved_;
         }
     }

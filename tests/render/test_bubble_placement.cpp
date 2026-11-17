@@ -98,6 +98,28 @@ TEST(BubblePlacement, VisibleReferenceAndMedianChangeAndExplicitMinimumOverrides
     EXPECT_DOUBLE_EQ(radius(1e12, 1000), 18);
     EXPECT_DOUBLE_EQ(radius(1000, 1000), 9);
 }
+
+TEST(BubblePlacement, ReferenceExcludesTradesBelowDrawnMinimum) {
+    ReferenceStatistics stats;
+    std::vector<Execution> rows;
+    rows.reserve(100);
+    for (int i = 0; i < 97; ++i) rows.push_back({1000. + i, 100, .01, 0});
+    rows.push_back({1100, 100, 1, 0});
+    rows.push_back({1101, 100, 2, 0});
+    rows.push_back({1102, 100, 4, 0});
+    const auto unfiltered = stats.reference(rows);
+    EXPECT_DOUBLE_EQ(unfiltered.p95, 1);
+    for (double notional : {100., 200., 400.}) EXPECT_DOUBLE_EQ(radius(notional, unfiltered.p95), MaxRadius);
+    const auto filtered = stats.reference(rows, 50);
+    EXPECT_DOUBLE_EQ(filtered.p95, 400);
+    BubblePlacement placement;
+    const auto drawn = placement.build(rows, {Mode::Individual, filtered, 50}, 60'000);
+    ASSERT_EQ(drawn.size(), 3u);
+    EXPECT_LT(radius(drawn[0].notional, filtered.p95), radius(drawn[1].notional, filtered.p95));
+    EXPECT_LT(radius(drawn[1].notional, filtered.p95), radius(drawn[2].notional, filtered.p95));
+    EXPECT_LT(radius(drawn[2].notional, filtered.p95), MaxRadius);
+    EXPECT_DOUBLE_EQ(stats.reference(rows, 0, 2).p95, 400);
+}
 TEST(BubblePlacement, SweepIsFilteredAfterMergeAndSlotsIncludeAllSideNotional) {
     BubblePlacement p;
     const std::array rows{Execution{1000,100,1,0,"1"}, Execution{1000,101,1,0,"2"}};

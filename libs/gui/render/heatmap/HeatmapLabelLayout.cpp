@@ -30,7 +30,7 @@ size_t HeatmapLabelLayout::capacityBytes() const {
            runOfCell_.capacity() * sizeof(int32_t) + (columnX_.capacity() + rowY_.capacity()) * sizeof(double);
 }
 
-void HeatmapLabelLayout::rebuild(const LabelCells &cells, const ChartTextAtlas &atlas, bool usd) {
+void HeatmapLabelLayout::rebuild(const LabelCells &cells, const ChartTextAtlas &atlas, bool usd, bool currencySymbol) {
     ++stats_.rebuilds;
     glyphs_.clear();
     runs_.clear();
@@ -46,7 +46,7 @@ void HeatmapLabelLayout::rebuild(const LabelCells &cells, const ChartTextAtlas &
         Run run;
         run.first = uint32_t(glyphs_.size());
         float pen = 0, minX = std::numeric_limits<float>::max(), maxX = std::numeric_limits<float>::lowest();
-        for (size_t c = 0; c < text.size() && text[c]; ++c) {
+        for (size_t c = usd && !currencySymbol && text[0] == '$' ? 1 : 0; c < text.size() && text[c]; ++c) {
             const auto &g = atlas.glyph(QChar(text[c]));
             if (g.advance > 0 && !g.uv.isNull()) {
                 minX = std::min(minX, pen + float(g.bounds.left()));
@@ -82,12 +82,14 @@ void HeatmapLabelLayout::layout(const std::shared_ptr<const LabelCells> &cells, 
     if (!(tf > 0) || !(tick > 0) || !grid.columns || !grid.rows ||
         cells->cells.size() != size_t(grid.columns) * grid.rows)
         return;
-    if (cells != built_ || &atlas != builtAtlas_ || atlas.image().cacheKey() != builtAtlasKey_ || style.usd != builtUsd_) {
-        rebuild(*cells, atlas, style.usd);
+    if (cells != built_ || &atlas != builtAtlas_ || atlas.image().cacheKey() != builtAtlasKey_ ||
+        style.usd != builtUsd_ || style.currencySymbol != builtCurrencySymbol_) {
+        rebuild(*cells, atlas, style.usd, style.currencySymbol);
         built_ = cells;
         builtAtlas_ = &atlas;
         builtAtlasKey_ = atlas.image().cacheKey();
         builtUsd_ = style.usd;
+        builtCurrencySymbol_ = style.currencySymbol;
     }
     if (runs_.empty()) return;
 

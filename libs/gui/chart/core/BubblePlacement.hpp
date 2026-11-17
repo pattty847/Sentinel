@@ -66,7 +66,7 @@ struct WindowStamp {
     size_t count = 0, slotCount = 0;
     bool operator==(const WindowStamp&) const = default;
 };
-struct VisibleView { double startMs = 0, endMs = 0, tfMs = 0, minimum = 0; };
+struct VisibleView { double startMs = 0, endMs = 0, tfMs = 0, minimum = 0, minBaseSize = 0; };
 class ReferenceStatistics {
 public:
     static constexpr size_t Capacity = 100000;
@@ -85,11 +85,11 @@ public:
         const bool widthJump = initialized_ && width > 0 && nextWidth > 0 &&
                                (nextWidth >= 2*width || width >= 2*nextWidth);
         const bool settingsChanged = mode != lastMode_ || view.tfMs != lastView_.tfMs ||
-                                     view.minimum != lastView_.minimum;
+                                     view.minimum != lastView_.minimum || view.minBaseSize != lastView_.minBaseSize;
         const bool urgent = widthJump || settingsChanged;
         const bool changed = stamp != lastStamp_ || urgent;
         if (defer(changed, mode, urgent, nowMs)) return active_;
-        const Reference raw = reference(rows);
+        const Reference raw = reference(rows, view.minimum, view.minBaseSize);
         if (!initialized_) active_ = {0, 0, 0};
         settle(active_.median, raw.median, true);
         settle(active_.p95, raw.p95);
@@ -99,7 +99,7 @@ public:
         lastMode_ = mode; lastUpdateMs_ = nowMs; ++updates_;
         return active_;
     }
-    template<class Rows> Reference reference(const Rows& rows) {
+    template<class Rows> Reference reference(const Rows& rows, double minimum = 0, double minBaseSize = 0) {
         size_t count = 0;
         for (size_t i = 0; i < rows.size() && count < Capacity; ++i) {
             const auto t = rows[i];
@@ -107,8 +107,18 @@ public:
             if (std::isfinite(n) && n > 0) scratch_[count++] = n;
         }
         if (!count) return {};
-        return {select(scratch_.get(), count, (count-1)/2),
-                select(scratch_.get(), count, size_t(std::ceil(.95*double(count)))-1), 1};
+        const double median = select(scratch_.get(), count, (count-1)/2);
+        const double fallbackP95 = select(scratch_.get(), count, size_t(std::ceil(.95*double(count)))-1);
+        const double cutoff = minimum < 0 ? median : minimum;
+        size_t visible = 0;
+        for (size_t i = 0; i < rows.size() && visible < Capacity; ++i) {
+            const auto t = rows[i];
+            const double n = t.price * t.size;
+            if (std::isfinite(n) && n > 0 && n >= cutoff && t.size >= minBaseSize)
+                scratch_[visible++] = n;
+        }
+        return {median, visible ? select(scratch_.get(), visible, size_t(std::ceil(.95*double(visible)))-1)
+                                : fallbackP95, 1};
     }
 private:
     bool defer(bool changed, Mode mode, bool urgent, int64_t nowMs) {
