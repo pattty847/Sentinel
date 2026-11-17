@@ -230,7 +230,8 @@ void FlowFeed::withdraw() {
     post();
 }
 void FlowFeed::receive(SentinelStreamClient::FlowBatchPtr batch) {
-    if (!enabled_ || lod_ == FootprintStage::Hidden) return;
+    // A hidden stage still keeps the batch: a local source holds no history of its own.
+    if (!enabled_) return;
     selectSymbol();
     if (!batch || batch->symbol != symbol_) return;
     buffer_.receive(*batch);

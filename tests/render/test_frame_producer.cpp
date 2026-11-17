@@ -170,10 +170,32 @@ TEST_F(FrameProducerTest, ContinuousDragChoosesTickBeforeRasterAndHiddenSkipsCho
     EXPECT_EQ(published.current().viewportPanVisualOffset, QPointF(2.75, -1.25));
     EXPECT_TRUE(published.current().viewportDragging);
     inputs.context.overlays.heatmap = false;
+    inputs.context.overlays.footprint = false;
     EXPECT_FALSE(produce().drawHeatmap);
     EXPECT_EQ(ticks.chooses, 1);
     EXPECT_EQ(ticks.reads, 2);
     EXPECT_EQ(ticks.notes, 2);
+}
+
+// The footprint bins its rows on the drawn tick too: with the heatmap hidden it still
+// needs the tick chosen for the current symbol and view, in the frame that draws it.
+TEST_F(FrameProducerTest, FootprintWithoutTheHeatmapStillChoosesTheTick) {
+    inputs.context.overlays.heatmap = false;
+    ticks.tick = 1;
+    ticks.tickAfterChoice = 4;
+    const auto frame = produce();
+    EXPECT_FALSE(frame.drawHeatmap);
+    EXPECT_EQ(ticks.chooses, 1);
+    EXPECT_DOUBLE_EQ(ticks.chosen.priceLo, 100);
+    EXPECT_DOUBLE_EQ(ticks.chosen.priceHi, 140);
+    EXPECT_DOUBLE_EQ(frame.context.raster.tick, 4) << "the raster uses this frame's choice";
+    inputs.context.overlays.footprint = false;
+    produce();
+    EXPECT_EQ(ticks.chooses, 1) << "no layer on the price grid: nothing chooses";
+    inputs.context.overlays.footprint = true;
+    inputs.context.viewport.valid = false;
+    produce();
+    EXPECT_EQ(ticks.chooses, 1) << "an invalid view chooses nothing";
 }
 
 TEST_F(FrameProducerTest, InvalidCameraDoesNotChangeStepOrAnnounce) {

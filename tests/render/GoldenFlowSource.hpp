@@ -18,14 +18,15 @@ public:
     bool isConnectionActive() const override { return true; }
     const LiveOrderBook& getDirectLiveOrderBook(const std::string&) const override { return book; }
 
-    // `bars` one-minute bars from `firstMs`, 1-dollar rows from `lowPrice`, a fixed deterministic pattern.
-    void deliver(int64_t firstMs, int bars, double lowPrice, int rows) {
+    // `bars` one-minute bars from `firstMs`, `nativeTick` rows from `lowPrice`, a fixed deterministic pattern.
+    void deliver(int64_t firstMs, int bars, double lowPrice, int rows, const QString& symbol = "BTC-USD",
+                 double nativeTick = 1) {
         auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
-        batch->symbol = "BTC-USD"; batch->timeframeMs = 60000;
+        batch->symbol = symbol; batch->timeframeMs = 60000;
         for (int i = 0; i < bars; ++i) {
             auto& bar = batch->bars.emplace_back().bar;
-            bar.startMs = firstMs + i * 60000; bar.timeframeMs = 60000; bar.nativeTick = 1; bar.baseScale = 1;
-            bar.lowRow = int64_t(lowPrice);
+            bar.startMs = firstMs + i * 60000; bar.timeframeMs = 60000; bar.nativeTick = nativeTick; bar.baseScale = 1;
+            bar.lowRow = std::llround(lowPrice / nativeTick);
             for (int r = 0; r < rows; ++r) {
                 const auto bid = int64_t(30 + 28 * std::sin(r * 0.9 + i)), ask = int64_t(30 + 28 * std::cos(r * 0.7 + i * 1.3));
                 bar.rows.push_back({int16_t(r), bid, ask, 1, 1});

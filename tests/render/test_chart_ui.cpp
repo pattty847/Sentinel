@@ -2851,6 +2851,38 @@ TEST(FootprintFlowFeed, HiddenLodDoesNotArmOrPublishAndResumesFromSourceBuffer) 
     QTest::qWait(100); EXPECT_EQ(updates, 0);
 }
 
+// A source without the remote cache (synthetic, lab) keeps no history of its own: a batch
+// that arrives while the footprint is too zoomed out to draw is kept in the feed's
+// buffer, so zooming in shows it without another delivery.
+TEST(FootprintFlowFeed, LocalSourceKeepsBatchesReceivedWhileHidden) {
+    chart::FootprintCellsLayer layer;
+    chart::FlowFeed feed(layer.mailbox());
+    MappingFrameContext frame;
+    frame.activeTimeframeMs = 1000;
+    frame.raster = chart_raster::computeRaster({1000, 2000, 95, 105, {}, 1000, 1, 56, 120, 1}, {});
+    const auto visibleRaster = frame.raster;
+    frame.raster.colPxF = 0; // no drawable column: Hidden
+    int updates = 0;
+    feed.setPorts({[&] { return frame; }, [] { return QString("BTC-USD"); }, [&] { ++updates; }});
+    feed.setEnabled(true);
+    auto batch = std::make_shared<SentinelStreamClient::FlowBatch>();
+    batch->symbol = "BTC-USD"; batch->timeframeMs = 1000;
+    auto& bar = batch->bars.emplace_back().bar;
+    bar.startMs = 1000; bar.timeframeMs = 1000; bar.nativeTick = 1; bar.baseScale = 1;
+    bar.lowRow = 100; bar.rows = {{0, 10, 20}};
+    feed.receive(batch);
+    EXPECT_FALSE(feed.pending()) << "a hidden footprint arms nothing";
+    EXPECT_EQ(updates, 0);
+    frame.raster = visibleRaster;
+    feed.onFrameChanged();
+    feed.publishRows();
+    auto current = std::make_unique<chart::FlowSnapshot>();
+    ASSERT_TRUE(layer.mailbox().take(current));
+    ASSERT_TRUE(current->valid);
+    EXPECT_EQ(current->cellCount, 1) << "the batch received while hidden was kept";
+    EXPECT_EQ(layer.presentation().coverage.barCount, 1);
+}
+
 // Exercise the same remote cache that stores a batch before emitting its GUI signal.
 struct FlowDataSourceTest {
     static void deliver(RemoteGridDataSource& source, SentinelStreamClient::FlowBatchPtr batch) {
