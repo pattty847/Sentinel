@@ -87,8 +87,6 @@ void MenuBuilder::buildLayoutsMenu(const Callbacks& callbacks) {
             callbacks.resetLayout();
         }
     });
-    
-    m_layoutsMenu->addSeparator();
 }
 
 void MenuBuilder::buildToolsMenu(const Callbacks& callbacks) {
@@ -100,14 +98,7 @@ void MenuBuilder::buildToolsMenu(const Callbacks& callbacks) {
             callbacks.openSecFilingViewer();
         }
     });
-    
-    QAction* openMarketDataAction = m_toolsMenu->addAction("Open &Market Data Panel");
-    QObject::connect(openMarketDataAction, &QAction::triggered, [callbacks]() {
-    });
-    
-    m_toolsMenu->addSeparator();
-    QAction* settingsAction = m_toolsMenu->addAction("&Settings...");
-    settingsAction->setEnabled(false);  // Placeholder for future
+
 
     QAction* fontAction = m_toolsMenu->addAction("Font Settings...");
     QObject::connect(fontAction, &QAction::triggered, [callbacks]() {

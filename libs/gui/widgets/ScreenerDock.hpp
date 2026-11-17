@@ -11,13 +11,13 @@
 #include <QToolButton>
 #include <QCheckBox>
 #include <QComboBox>
-#include <QSlider>
 #include <QTimer>
 #include <QPointer>
 #include <QHash>
 #include <QFont>
 
 class SentinelStreamClient;
+class EmptyState;
 class QShowEvent;
 class QHideEvent;
 
@@ -48,7 +48,7 @@ private slots:
     void onRunClicked();
     void onAutoToggled(bool checked);
     void onAssetChanged(int index);
-    void onIntervalChanged(int value);
+    void onIntervalChanged(int index);
     void onRowClicked(const QModelIndex& index);
 
     void onAutoTimer();
@@ -69,6 +69,7 @@ private:
     void remeasureFontColumns();
     void updateColumns();
     void setStatus(const QString& text, bool error = false);
+    void updateEmptyText();
 
     // Stream client — not owned
     SentinelStreamClient* m_client = nullptr;
@@ -79,12 +80,12 @@ private:
 
     // UI
     QComboBox*   m_assetCombo     = nullptr;
-    QSlider*     m_intervalSlider = nullptr;
-    QLabel*      m_intervalLabel  = nullptr;
+    QComboBox*   m_intervalCombo  = nullptr;
     QCheckBox*   m_autoCheck      = nullptr;
     QToolButton* m_runBtn         = nullptr;
     QTableView*  m_table          = nullptr;
     QLabel*      m_statusLabel    = nullptr;
+    EmptyState*  m_empty          = nullptr;
 
     QStandardItemModel* m_model = nullptr;
     QPointer<QWidget> m_hostWindow;

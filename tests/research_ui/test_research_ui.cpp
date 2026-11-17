@@ -20,7 +20,16 @@
 #include <QPainter>
 #include <QDir>
 #include <QSplitter>
+#include <QGroupBox>
+#include <QHeaderView>
+#include <QPushButton>
+#include <QScrollBar>
+#include <QTableView>
+#include <QTextEdit>
+#include <QLineEdit>
 #include <memory>
+#include <cmath>
+#include <QToolButton>
 #ifdef Q_OS_UNIX
 #include <signal.h>
 #endif
@@ -153,6 +162,48 @@ TEST(StockResearch, HoverUsesDailyDateFromMatchingCandleAndSwitchClearsIt) {
     EXPECT_EQ(date->property("text").toString(), "");
     EXPECT_EQ(renderer->candleCount(), 0);
 }
+TEST(StockResearch, EmptyHintNamesTheTickerFieldAndHeaderAndFooterWaitForData) {
+    FixtureProvider provider, sec;
+    StockChartDock dock(nullptr, &provider, &sec);
+    auto* root = dock.qquickView()->rootObject(); ASSERT_NE(root, nullptr);
+    auto* header = root->findChild<QQuickItem*>("stockHeader");
+    auto* footer = root->findChild<QQuickItem*>("stockFooter");
+    ASSERT_TRUE(header && footer);
+    EXPECT_EQ(root->property("statusMsg").toString(), "Type a ticker above or pick one in the Screener");
+    EXPECT_FALSE(header->isVisible());
+    EXPECT_FALSE(footer->isVisible());
+    EXPECT_EQ(header->height(), 0);
+    dock.loadSymbol("AAPL");
+    EXPECT_FALSE(header->isVisible()) << "loading shows the centred status only";
+    provider.reply(0, candles("AAPL"));
+    EXPECT_TRUE(header->isVisible());
+    EXPECT_TRUE(footer->isVisible());
+    EXPECT_GT(header->height(), 0);
+    dock.loadSymbol("MSFT");
+    EXPECT_FALSE(header->isVisible());
+    EXPECT_FALSE(footer->isVisible());
+}
+TEST(StockResearch, RangeButtonsReadAtTheDimTokenAndUseTheSharedOnLook) {
+    FixtureProvider provider, sec;
+    StockChartDock dock(nullptr, &provider, &sec);
+    dock.show(); QCoreApplication::processEvents();
+    auto luminance = [](const QColor& c) {
+        auto channel = [](double v) { v /= 255.0; return v <= 0.03928 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * channel(c.red()) + 0.7152 * channel(c.green()) + 0.0722 * channel(c.blue());
+    };
+    int ranges = 0;
+    for (auto* button : dock.findChildren<QToolButton*>()) {
+        if (!QStringList({"1y", "2y", "5y", "10y", "max"}).contains(button->text())) continue;
+        ++ranges;
+        const QColor ink = button->palette().color(QPalette::Active, QPalette::ButtonText);
+        EXPECT_EQ(ink, QColor("#93A1AF")) << button->text().toStdString();
+        const double a = luminance(ink), b = luminance(QColor("#20252B"));
+        EXPECT_GE((std::max(a, b) + 0.05) / (std::min(a, b) + 0.05), 4.5);
+        EXPECT_TRUE(button->styleSheet().contains("#2a4a6a") && button->styleSheet().contains("#3a6a9a"))
+            << "checked range uses sel and selLine";
+    }
+    EXPECT_EQ(ranges, 5);
+}
 TEST(SecResearch, FinancialHistoriesDisplayActualObservationWithoutInventingUnits) {
     FixtureProvider provider;
     SecFilingDock dock(nullptr, &provider);
@@ -209,7 +260,7 @@ TEST(SecResearch, SwitchClearsResultsAndNumericCellsAreReadOnlyWithUnknownMissin
     dock.onSymbolChanged("BTC-USD");
     EXPECT_EQ(dock.findChild<QLineEdit*>("secTicker")->text(), "BTC-USD");
     EXPECT_EQ(table->model()->rowCount(), 0);
-    EXPECT_TRUE(status->text().contains("unsupported"));
+    EXPECT_EQ(dock.findChild<QLabel*>("secTickerHint")->text(), "! Equity tickers only");
     EXPECT_TRUE(status->text().contains("Unknown"));
     provider.reply(0, "TRANSACTIONS_DATA:[{\"shares\":123}]\n");
     EXPECT_EQ(table->model()->rowCount(), 0);
@@ -219,6 +270,89 @@ TEST(SecResearch, SwitchClearsResultsAndNumericCellsAreReadOnlyWithUnknownMissin
     EXPECT_EQ(table->model()->rowCount(), 0);
     dock.resize(340, 380); dock.show(); QCoreApplication::processEvents();
     EXPECT_LE(status->width(), dock.width());
+}
+TEST(SecResearch, FetchReasonSitsUnderTheTickerAndDisabledFetchesUseTheDisabledToken) {
+    FixtureProvider provider;
+    SecFilingDock dock(nullptr, &provider);
+    dock.resize(500, 620); dock.show(); QCoreApplication::processEvents();
+    auto* ticker = dock.findChild<QLineEdit*>("secTicker");
+    auto* hint = dock.findChild<QLabel*>("secTickerHint");
+    ASSERT_TRUE(ticker && hint);
+    QList<QPushButton*> fetches;
+    for (auto* button : dock.findChildren<QPushButton*>())
+        if (button->text().startsWith("Fetch")) fetches.append(button);
+    ASSERT_EQ(fetches.size(), 3);
+    EXPECT_EQ(hint->text(), "Equity tickers only");
+    EXPECT_GT(hint->mapTo(&dock, QPoint()).y(), ticker->mapTo(&dock, QPoint()).y());
+    EXPECT_LT(hint->mapTo(&dock, QPoint()).y(), fetches.front()->mapTo(&dock, QPoint()).y());
+    dock.onSymbolChanged("BTC-USD"); QCoreApplication::processEvents();
+    EXPECT_EQ(hint->text(), "! Equity tickers only");
+    EXPECT_TRUE(hint->styleSheet().contains("#e6c07b"));
+    for (auto* button : fetches) {
+        ASSERT_FALSE(button->isEnabled());
+        EXPECT_EQ(button->palette().color(QPalette::Disabled, QPalette::ButtonText), QColor("#6E7580"));
+    }
+    EXPECT_FALSE(dock.findChild<QLabel*>("secStatus")->text().contains("equity"))
+        << "the reason is said once, under the ticker";
+    dock.onSymbolChanged("AAPL");
+    for (auto* button : fetches) {
+        ASSERT_TRUE(button->isEnabled());
+        EXPECT_EQ(button->palette().color(QPalette::Active, QPalette::ButtonText), QColor("#E6EDF3"));
+    }
+}
+TEST(SecResearch, SectionsAreTitlesOverOneTableBorderAndEmptyTablesFitTheirHeaders) {
+    FixtureProvider provider;
+    SecFilingDock dock(nullptr, &provider);
+    dock.resize(340, 480); dock.show(); QCoreApplication::processEvents();
+    EXPECT_TRUE(dock.findChildren<QGroupBox*>().isEmpty());
+    for (const char* name : {"secFilings", "secTransactions"}) {
+        auto* table = dock.findChild<QTableView*>(name);
+        ASSERT_NE(table, nullptr);
+        auto* header = table->horizontalHeader();
+        EXPECT_TRUE(header->stretchLastSection());
+        EXPECT_FALSE(table->horizontalScrollBar()->isVisible()) << name;
+        const int last = header->logicalIndex(header->count() - 1);
+        EXPECT_LE(header->sectionViewportPosition(last) + header->sectionSize(last), table->viewport()->width()) << name;
+    }
+    dock.onSymbolChanged("AAPL");
+    QMetaObject::invokeMethod(&dock, "fetchInsiderTransactions");
+    provider.reply(0, "TRANSACTIONS_DATA:[{\"date\":\"2026-09-30\",\"filer\":\"Fixture\",\"type\":\"P\",\"shares\":1,\"price\":2}]\n");
+    EXPECT_EQ(dock.findChild<QTableView*>("secTransactions")->horizontalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
+}
+TEST(SecResearch, ErrorsUseTheErrorRoleInOneClause) {
+    FixtureProvider provider;
+    SecFilingDock dock(nullptr, &provider);
+    auto* status = dock.findChild<QLabel*>("secStatus");
+    dock.onSymbolChanged("MSFT");
+    EXPECT_FALSE(status->styleSheet().contains("#f07a6a"));
+    QMetaObject::invokeMethod(&dock, "fetchFilings");
+    provider.reply(0, {}, "fixture offline");
+    EXPECT_EQ(status->text(), QString::fromUtf8("× MSFT: fixture offline"));
+    EXPECT_TRUE(status->styleSheet().contains("#f07a6a"));
+    dock.onSymbolChanged("AAPL");
+    EXPECT_FALSE(status->styleSheet().contains("#f07a6a")) << "a new ticker clears the error look";
+    dock.findChild<QLineEdit*>("secTicker")->setText(" ");
+    QMetaObject::invokeMethod(&dock, "fetchFilings");
+    EXPECT_EQ(status->text(), QString::fromUtf8("× Enter a ticker"));
+    EXPECT_TRUE(status->styleSheet().contains("#f07a6a"));
+}
+TEST(SecResearch, EmptyResultsSayWhatToFetch) {
+    FixtureProvider provider;
+    SecFilingDock dock(nullptr, &provider);
+    dock.resize(500, 620); dock.show();
+    dock.onSymbolChanged("AAPL"); QCoreApplication::processEvents();
+    auto* filings = dock.findChild<QTableView*>("secFilings");
+    auto* empty = filings->viewport()->findChild<QWidget*>("secFilingsEmpty");
+    ASSERT_NE(empty, nullptr);
+    EXPECT_TRUE(empty->isVisible());
+    EXPECT_TRUE(empty->findChild<QLabel*>()->text().contains("Fetch Filings"));
+    EXPECT_TRUE(dock.findChild<QTextEdit*>("secFinancials")->placeholderText().contains("Fetch Financials"));
+    QMetaObject::invokeMethod(&dock, "fetchFilings");
+    provider.reply(0, "FILINGS_DATA:[{\"filingDate\":\"2026-09-30\",\"form\":\"10-K\",\"description\":\"Annual\"}]\n");
+    ASSERT_EQ(filings->model()->rowCount(), 1);
+    EXPECT_FALSE(empty->isVisible());
+    dock.onSymbolChanged("BTC-USD");
+    EXPECT_TRUE(empty->findChild<QLabel*>()->text().isEmpty()) << "no fetch hint where nothing can be fetched";
 }
 TEST(ResearchProcess, CancellationDoesNotWaitAndDestructionDoesNotCallBack) {
 #ifdef Q_OS_UNIX

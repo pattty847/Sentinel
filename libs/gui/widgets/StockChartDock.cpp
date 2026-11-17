@@ -1,6 +1,7 @@
 // Sentinel — StockChartDock
 #include "StockChartDock.hpp"
 
+#include "../themes/ThemePalette.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QDir>
@@ -27,11 +28,13 @@ static QToolButton* makePeriodBtn(const QString& label, QWidget* parent) {
     btn->setText(label);
     btn->setCheckable(true);
     btn->setMinimumHeight(22);
-    btn->setStyleSheet(
-        "QToolButton { background:#1a2028; color:#6a8090; border:1px solid #253040;"
-        " border-radius:3px; padding:0 6px; }"
-        "QToolButton:checked { background:#1e3a50; color:#60c0e0; border-color:#2a6080; }"
-        "QToolButton:hover { color:#c0d0dc; }");
+    // Off ranges read at the dim text role; the chosen one takes the shared toggle-on look.
+    btn->setStyleSheet(QStringLiteral(
+        "QToolButton { background:%1; color:%2; border:1px solid %3; border-radius:3px; padding:0 6px; }"
+        "QToolButton:checked { background:%4; color:%5; border-color:%6; }"
+        "QToolButton:hover { color:%5; }")
+        .arg(theme::bg2().name(), theme::text3().name(), theme::line().name(),
+             theme::sel().name(), theme::text().name(), theme::selLine().name()));
     return btn;
 }
 
@@ -73,9 +76,9 @@ void StockChartDock::buildUi() {
     m_tickerInput->setPlaceholderText("Ticker…");
     m_tickerInput->setFixedWidth(80);
     m_tickerInput->setMaxLength(10);
-    m_tickerInput->setStyleSheet(
-        "QLineEdit { background:#141a20; color:#c0ccd8; border:1px solid #253040;"
-        " border-radius:3px; padding:2px 6px; }");
+    m_tickerInput->setStyleSheet(QStringLiteral(
+        "QLineEdit { background:%1; color:%2; border:1px solid %3; border-radius:3px; padding:2px 6px; }")
+        .arg(theme::bg2().name(), theme::text().name(), theme::line().name()));
     toolbar->addWidget(m_tickerInput);
 
     // Period buttons
@@ -276,7 +279,7 @@ void StockChartDock::clearData() {
 }
 void StockChartDock::startFetch() {
     clearData();
-    if (m_currentTicker.isEmpty()) { setStatus("Enter a ticker to fetch daily candles"); return; }
+    if (m_currentTicker.isEmpty()) { setStatus("Type a ticker above or pick one in the Screener"); return; }
     if (!ResearchProcess::isEquityTicker(m_currentTicker)) {
         setStatus("Stock charts require an equity ticker; crypto pairs are unsupported", true);
         return;

@@ -13,10 +13,11 @@ Rectangle {
         readonly property color panel: "#1B1F24"
         readonly property color panelAlt: "#20252B"
         readonly property color border: "#2B3138"
-        readonly property color text: "#D7DDE3"
+        readonly property color text: "#E6EDF3"
         readonly property color textDim: "#93A1AF"
-        readonly property color accent: "#2BB3FF"
-        readonly property color accentSoft: "#1E4B66"
+        readonly property color accent: "#00AAFF"
+        readonly property color up: "#2EBD85"
+        readonly property color down: "#F6465D"
     }
     property font uiFont
     readonly property real fontScale: uiFont.pointSize > 0 ? uiFont.pointSize / 10 : uiFont.pixelSize / 13
@@ -29,7 +30,9 @@ Rectangle {
     property string ticker:    ""
     property string company:   ""
     property string period:    "5y"
-    property string statusMsg: "Select a stock from the Screener"
+    property string statusMsg: "Type a ticker above or pick one in the Screener"
+    // Header and footer describe loaded data; until candles arrive the centred hint stands alone.
+    readonly property bool hasData: root.candleData.length > 0
     property bool   loading:   false
     property bool   secSignalsLoading: false
 
@@ -122,8 +125,8 @@ Rectangle {
         const buys  = Number(marker.open_market_buy_count  || 0)
         const sells = Number(marker.open_market_sell_count || 0)
         const score = Number(marker.signal_strength_score  || 0)
-        if (buys > 0 && sells === 0 && score >= 0) return "#2fdd7a"
-        if (sells > 0 && buys === 0 && score <= 0) return "#ef5c55"
+        if (buys > 0 && sells === 0 && score >= 0) return theme.up
+        if (sells > 0 && buys === 0 && score <= 0) return theme.down
         if (buys > 0 || sells > 0)                 return "#e7c75f"
         return "#7a8794"
     }
@@ -347,8 +350,10 @@ Rectangle {
         // ── Header bar ────────────────────────────────────────────────────────
         Rectangle {
             id:     header
+            objectName: "stockHeader"
             width:  parent.width
-            height: Math.max(38, 30 * root.fontScale)
+            visible: root.hasData
+            height: root.hasData ? Math.max(38, 30 * root.fontScale) : 0
             color:  theme.panel
 
             Text {
@@ -639,7 +644,7 @@ Rectangle {
                                 font.family: root.uiFont.family
                                 text:           (root.hoveredCandle[modelData.key] || 0).toFixed(modelData.decimals)
                                 color:          modelData.key === "close"
-                                                    ? (root.hoveredCandle.bullish ? "#2fdd7a" : "#ef5c55")
+                                                    ? (root.hoveredCandle.bullish ? theme.up : theme.down)
                                                     : theme.text
                                 font.pixelSize: 11 * root.fontScale
                             }
@@ -739,11 +744,13 @@ Rectangle {
             }
         }
 
-        // Provider and observation times remain visible for loading and errors.
+        // Provider and observation times for the loaded candles.
         Rectangle {
             id: footer
+            objectName: "stockFooter"
             width: parent.width
-            height: 52 * root.fontScale
+            visible: root.hasData
+            height: root.hasData ? 52 * root.fontScale : 0
             color: theme.panel
             Column {
                 anchors.fill: parent

@@ -10,6 +10,7 @@
 #include <QVector>
 
 class QLabel;
+class EmptyState;
 
 class WatchlistDock : public DockablePanel {
     Q_OBJECT
@@ -49,6 +50,9 @@ private:
     void refreshRowState();
     void updatePinButton();
     void savePreferences();
+    void showProblem(const QString& message);
+    void clearProblem();
+    void refreshFooter();
     QString selectedSymbol() const;
 
     QComboBox* m_presetCombo = nullptr;
@@ -57,6 +61,7 @@ private:
     QToolButton* m_pinButton = nullptr;
     QTreeView* m_tree = nullptr;
     QLabel* m_status = nullptr;
+    EmptyState* m_empty = nullptr;
     QStandardItemModel* m_model = nullptr;
     QVector<WatchlistPreset> m_presets;
     QStringList m_pinned;
@@ -65,7 +70,6 @@ private:
     QString m_pendingSymbol;
     QString m_refusedSymbol;
     QString m_refusalReason;
-    QString m_catalogSource;
     bool m_catalogAuthoritative = false;
     bool m_fontRefreshPending = false;
 };

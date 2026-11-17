@@ -21,6 +21,7 @@
 #include <QHeaderView>
 #include <QSettings>
 #include <QScrollBar>
+#include <QSlider>
 #include <QSignalSpy>
 #include <QStandardItemModel>
 #include <QTableView>
@@ -79,7 +80,7 @@ TEST(WatchRail, PendingAckRefusalKeyboardAndCatalogTruth) {
     auto* model = qobject_cast<QStandardItemModel*>(tree->model());
     ASSERT_NE(model, nullptr);
     EXPECT_EQ(model->rowCount(), 7);
-    EXPECT_TRUE(status->text().contains("Availability unknown"));
+    EXPECT_TRUE(status->isHidden());
     QSignalSpy selected(&dock, &WatchlistDock::symbolSelected);
     const int eth = rowFor(model, "ETH-USD");
     ASSERT_GE(eth, 0);
@@ -87,7 +88,7 @@ TEST(WatchRail, PendingAckRefusalKeyboardAndCatalogTruth) {
     QTest::keyClick(tree, Qt::Key_Return);
     ASSERT_EQ(selected.count(), 1);
     EXPECT_EQ(selected.at(0).at(0).toString(), "ETH-USD");
-    EXPECT_TRUE(status->text().contains("Switching to ETH-USD"));
+    EXPECT_TRUE(status->isHidden()) << "the status bar says the switch; the rail marks the row";
     EXPECT_FALSE(model->item(eth, 0)->text().startsWith("●"));
 
     dock.setChartSwitchState("ETH-USD", "");
@@ -97,6 +98,7 @@ TEST(WatchRail, PendingAckRefusalKeyboardAndCatalogTruth) {
     EXPECT_EQ(model->item(eth, 0)->foreground().color(), QColor("#E6EDF3"));
     dock.setChartSwitchState("BTC-USD", "", "ETH-USD", "Connection cap reached");
     EXPECT_TRUE(model->item(eth, 0)->text().startsWith("!"));
+    EXPECT_FALSE(status->isHidden());
     EXPECT_TRUE(status->text().contains("Connection cap"));
     dock.setCryptoAvailability({"BTC-USD"}, true, "server catalog");
     QTest::keyClick(tree, Qt::Key_Return);
@@ -212,6 +214,98 @@ TEST(WatchRail, HoverHighlightsTheRowAndTooltipStaysBesideIt) {
             EXPECT_FALSE(widget->geometry().intersects(row));
     QToolTip::hideText();
     delete tips;
+}
+
+TEST(WatchRail, FooterSpeaksOnlyForAProblemOnOneWarningLine) {
+    WatchlistDock dock;
+    dock.findChild<QComboBox*>("watchPreset")->setCurrentIndex(0);
+    dock.resize(280, 620);
+    dock.show();
+    auto* status = dock.findChild<QLabel*>("watchStatus");
+    ASSERT_NE(status, nullptr);
+    dock.setCryptoAvailability({}, false, "No authoritative runtime market catalog");
+    dock.setChartSwitchState("ETH-USD", "");
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(status->isHidden()) << "a live chart needs no footer: nothing unknown or contradicting";
+    dock.setChartSwitchState("ETH-USD", "SOL-USD");
+    EXPECT_TRUE(status->isHidden());
+    const QString reason = QStringLiteral("SOL-USD subscription refused; the connection cap is reached and ETH-USD stays");
+    dock.setChartSwitchState("ETH-USD", "", "SOL-USD", reason);
+    QCoreApplication::processEvents();
+    ASSERT_FALSE(status->isHidden());
+    EXPECT_EQ(status->text(), "! " + reason);
+    EXPECT_EQ(status->toolTip(), reason);
+    EXPECT_FALSE(status->wordWrap());
+    EXPECT_LE(status->height(), status->fontMetrics().height() + 4) << "one line";
+    EXPECT_LE(status->width(), dock.width());
+    EXPECT_TRUE(status->styleSheet().contains("#e6c07b"));
+    dock.setChartSwitchState("ETH-USD", "");
+    EXPECT_TRUE(status->isHidden());
+}
+
+TEST(WatchRail, EntryWarningsClearOnTheNextSuccessfulActionButRefusalsStay) {
+    QTemporaryDir settingsDir;
+    ASSERT_TRUE(settingsDir.isValid());
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
+    WatchlistDock dock;
+    dock.show();
+    auto* status = dock.findChild<QLabel*>("watchStatus");
+    auto* preset = dock.findChild<QComboBox*>("watchPreset");
+    auto* entry = dock.findChild<QLineEdit*>("watchSymbolEntry");
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    // A bad entry, then a successful stock-row activation.
+    preset->setCurrentText("Top Stocks");
+    entry->setText("not a pair");
+    dock.findChild<QToolButton*>("watchAdd")->click();
+    ASSERT_FALSE(status->isHidden());
+    QTest::mouseClick(tree->viewport(), Qt::LeftButton, Qt::NoModifier,
+                      tree->visualRect(tree->model()->index(0, 0)).center());
+    EXPECT_TRUE(status->isHidden());
+    EXPECT_TRUE(status->text().isEmpty());
+    // A full Pinned list, then an unpin from the Crypto preset.
+    auto add = [&](const QString& pair) {
+        entry->setText(pair);
+        dock.findChild<QToolButton*>("watchAdd")->click();
+    };
+    add("BTC-USD");
+    for (int i = 1; i < 30; ++i) add(QStringLiteral("P%1-USD").arg(i, 2, 10, QLatin1Char('0')));
+    preset->setCurrentText("Crypto");
+    dock.setChartSwitchState("SOL-USD", "", "ETH-USD", "Connection cap reached");
+    auto select = [&](const QString& symbol) {
+        for (int row = 0; row < tree->model()->rowCount(); ++row)
+            if (tree->model()->index(row, 0).data(WatchlistDock::TickerRole).toString() == symbol)
+                tree->setCurrentIndex(tree->model()->index(row, 0));
+    };
+    auto* pin = dock.findChild<QToolButton*>("watchPin");
+    select("DOGE-USD");
+    pin->click();
+    ASSERT_EQ(status->text(), "! Pinned list is full (30 pairs)");
+    select("BTC-USD");
+    pin->click(); // unpin from the Crypto preset
+    EXPECT_FALSE(status->text().contains("full"));
+    EXPECT_EQ(status->text(), "! Connection cap reached") << "the current refusal stays";
+}
+
+TEST(WatchRail, EmptyPinnedListSaysHowToAddAPair) {
+    QTemporaryDir settingsDir;
+    ASSERT_TRUE(settingsDir.isValid());
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
+    WatchlistDock dock;
+    dock.resize(320, 400);
+    dock.show();
+    dock.findChild<QComboBox*>("watchPreset")->setCurrentText("Pinned");
+    QCoreApplication::processEvents();
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    auto* empty = tree->viewport()->findChild<QWidget*>("watchRowsEmpty");
+    ASSERT_NE(empty, nullptr);
+    ASSERT_EQ(tree->model()->rowCount(), 0);
+    EXPECT_TRUE(empty->isVisible());
+    EXPECT_EQ(empty->findChild<QLabel*>()->text(), QString::fromUtf8("No pinned pairs · add one above"));
+    dock.findChild<QLineEdit*>("watchSymbolEntry")->setText("XRP-USD");
+    dock.findChild<QToolButton*>("watchAdd")->click();
+    EXPECT_FALSE(empty->isVisible());
+    dock.findChild<QComboBox*>("watchPreset")->setCurrentText("Crypto");
+    EXPECT_FALSE(empty->isVisible());
 }
 
 TEST(WatchRail, PinsPersistWithDefaultFormatSettings) {
@@ -422,7 +516,7 @@ TEST(Screener, LongNamesKeepQuoteColumnsVisibleAndManualWidthAcrossRefreshAndRes
     QCoreApplication::processEvents();
     auto* autoCheck = dock.findChild<QCheckBox*>();
     ASSERT_NE(autoCheck, nullptr);
-    EXPECT_EQ(autoCheck->text(), "Auto");
+    EXPECT_EQ(autoCheck->text(), "Auto every");
     EXPECT_GE(autoCheck->width(), autoCheck->sizeHint().width());
     auto* table = dock.findChild<QTableView*>("screenerRows");
     auto* model = qobject_cast<QStandardItemModel*>(table->model());
@@ -677,6 +771,126 @@ TEST(Screener, RequestErrorDispatchAndUncorrelatedRecovery) {
     EXPECT_TRUE(status->text().contains("TradingView via Sentinel"));
     EXPECT_FALSE(status->text().contains("old request failed"));
     EXPECT_TRUE(received.contains("vendor as-of unavailable"));
+}
+
+bool inkBetween(const QImage& image, int x0, int x1, int y0, int y1, const QColor& background) {
+    for (int x = std::max(0, x0); x <= std::min(image.width() - 1, x1); ++x)
+        for (int y = std::max(0, y0); y <= std::min(image.height() - 1, y1); ++y) {
+            const QColor c = image.pixelColor(x, y);
+            if (std::abs(c.red() - background.red()) + std::abs(c.green() - background.green()) +
+                std::abs(c.blue() - background.blue()) > 48) return true;
+        }
+    return false;
+}
+
+TEST(Screener, EmptyTableSaysNoDataYetWithALabelledRefreshInTheTable) {
+    ScreenerDock dock;
+    SentinelStreamClient client("127.0.0.1", "1");
+    dock.setStreamClient(&client);
+    dock.resize(480, 360);
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* table = dock.findChild<QTableView*>("screenerRows");
+    auto* empty = table->viewport()->findChild<QWidget*>("screenerRowsEmpty");
+    ASSERT_NE(empty, nullptr);
+    auto* note = empty->findChild<QLabel*>("screenerRowsEmptyText");
+    auto* refresh = empty->findChild<QToolButton*>("screenerEmptyRefresh");
+    ASSERT_TRUE(note && refresh);
+    EXPECT_TRUE(empty->isVisible());
+    EXPECT_EQ(note->text(), "No data yet");
+    EXPECT_EQ(refresh->text(), "Refresh");
+    EXPECT_TRUE(refresh->isVisible());
+    const QPoint centre = refresh->mapTo(table->viewport(), refresh->rect().center());
+    EXPECT_NEAR(centre.x(), table->viewport()->width() / 2, 2);
+    EXPECT_NEAR(centre.y(), table->viewport()->height() / 2, 24);
+    refresh->click();
+    EXPECT_TRUE(dock.findChild<QTimer*>("screenerFetchTimeout")->isActive());
+    EXPECT_EQ(note->text(), QString::fromUtf8("Fetching crypto…"));
+    updateScreener(dock, "crypto", QJsonArray{QJsonObject{{"symbol", "BTC-USD"}}});
+    EXPECT_FALSE(empty->isVisible());
+    dock.findChild<QComboBox*>("screenerAsset")->setCurrentIndex(1);
+    EXPECT_TRUE(empty->isVisible());
+    EXPECT_EQ(note->text(), "No data yet");
+}
+
+TEST(Screener, AutoRefreshIsOneCheckboxWithItsIntervalAndOneLabelledRefresh) {
+    ScreenerDock dock;
+    SentinelStreamClient client("127.0.0.1", "1");
+    dock.setStreamClient(&client);
+    dock.resize(480, 360);
+    dock.show();
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(dock.findChildren<QSlider*>().isEmpty());
+    auto* autoCheck = dock.findChild<QCheckBox*>("screenerAuto");
+    auto* interval = dock.findChild<QComboBox*>("screenerInterval");
+    ASSERT_TRUE(autoCheck && interval);
+    EXPECT_EQ(autoCheck->text(), "Auto every");
+    EXPECT_TRUE(autoCheck->icon().isNull());
+    EXPECT_EQ(interval->currentText(), "120 s");
+    EXPECT_GT(interval->x(), autoCheck->x());
+    EXPECT_LE(interval->x() - autoCheck->geometry().right(), 12);
+    auto* table = dock.findChild<QTableView*>("screenerRows");
+    QList<QToolButton*> toolbarButtons;
+    for (auto* button : dock.findChildren<QToolButton*>())
+        if (!table->isAncestorOf(button) && button->isVisible() && button->parentWidget() != &dock)
+            toolbarButtons.append(button);
+    ASSERT_EQ(toolbarButtons.size(), 1);
+    EXPECT_EQ(toolbarButtons.front()->objectName(), "screenerRefresh");
+    EXPECT_EQ(toolbarButtons.front()->text(), "Refresh");
+    EXPECT_EQ(toolbarButtons.front()->toolButtonStyle(), Qt::ToolButtonTextBesideIcon);
+    interval->setCurrentIndex(interval->findText("60 s"));
+    autoCheck->setChecked(true);
+    auto* autoTimer = dock.findChild<QTimer*>("screenerAutoTimer");
+    ASSERT_TRUE(autoTimer->isActive());
+    EXPECT_EQ(autoTimer->interval(), 60000);
+    interval->setCurrentIndex(interval->findText("300 s"));
+    EXPECT_EQ(autoTimer->interval(), 300000);
+}
+
+TEST(Screener, EmptyTableFitsItsHeadersWithoutAHorizontalScrollbar) {
+    ScreenerDock dock;
+    dock.resize(480, 360);
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* table = dock.findChild<QTableView*>("screenerRows");
+    auto* header = table->horizontalHeader();
+    EXPECT_TRUE(header->stretchLastSection());
+    for (int asset : {0, 1}) {
+        dock.findChild<QComboBox*>("screenerAsset")->setCurrentIndex(asset);
+        QCoreApplication::processEvents();
+        EXPECT_FALSE(table->horizontalScrollBar()->isVisible());
+        if (asset == 1) continue; // eleven stock headers cannot all fit at 480 px; the bar still stays off
+        const int last = header->logicalIndex(header->count() - 1);
+        EXPECT_LE(header->sectionViewportPosition(last) + header->sectionSize(last), table->viewport()->width());
+    }
+    QJsonArray rows;
+    for (int i = 0; i < 3; ++i)
+        rows.append(QJsonObject{{"symbol", QStringLiteral("S%1").arg(i)},
+            {"Name", QStringLiteral("A long company name that needs the horizontal scrollbar %1").arg(i)},
+            {"Price", 1.0 + i}, {"Sector", "A long sector name"}, {"Exchange", "NASDAQ"}});
+    updateScreener(dock, "stock", rows);
+    EXPECT_EQ(table->horizontalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
+}
+
+TEST(Screener, SortArrowSitsRightAfterTheSortedHeaderText) {
+    ScreenerDock dock;
+    dock.resize(640, 360);
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* table = dock.findChild<QTableView*>("screenerRows");
+    auto* header = table->horizontalHeader();
+    ASSERT_EQ(header->sortIndicatorSection(), 0);
+    table->setColumnWidth(0, 200);
+    QCoreApplication::processEvents();
+    const QImage image = header->viewport()->grab().toImage();
+    const int left = header->sectionViewportPosition(0);
+    const int right = left + header->sectionSize(0) - 1;
+    const int textEnd = left + 4 + header->fontMetrics().horizontalAdvance("Symbol");
+    const int mid = header->height() / 2;
+    const QColor background = image.pixelColor(left + 140, mid);
+    EXPECT_TRUE(inkBetween(image, textEnd + 1, textEnd + 16, mid - 4, mid + 4, background));
+    EXPECT_FALSE(inkBetween(image, textEnd + 20, right - 3, mid - 4, mid + 4, background))
+        << "no indicator at the section's far edge";
 }
 
 TEST(WatchRailScreener, NativeVisualFixtures) {

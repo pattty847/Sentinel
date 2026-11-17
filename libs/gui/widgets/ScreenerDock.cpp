@@ -1,6 +1,7 @@
 // Sentinel — ScreenerDock
 #include "ScreenerDock.hpp"
 #include "TableChrome.hpp"
+#include "EmptyState.hpp"
 
 #include "../../core/protocol/SentinelStreamClient.hpp"
 
@@ -17,7 +18,8 @@
 #include <QLabel>
 #include <QCheckBox>
 #include <QComboBox>
-#include <QSlider>
+#include <QPainter>
+#include <QStyleOptionHeader>
 #include <QToolButton>
 #include <QIcon>
 #include <QTableView>
@@ -66,6 +68,36 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override {
         QHeaderView::mouseReleaseEvent(event);
         m_mousePressed = false;
+    }
+    // The sort arrow follows the header text instead of floating at the section's far edge.
+    void paintSection(QPainter* painter, const QRect& rect, int logicalIndex) const override {
+        if (!rect.isValid()) return;
+        QStyleOptionHeader option;
+        initStyleOptionForIndex(&option, logicalIndex);
+        option.rect = rect;
+        const auto indicator = option.sortIndicator;
+        option.sortIndicator = QStyleOptionHeader::None;
+        painter->save();
+        style()->drawControl(QStyle::CE_Header, &option, painter, this);
+        painter->restore();
+        if (indicator == QStyleOptionHeader::None) return;
+        const QRect label = style()->subElementRect(QStyle::SE_HeaderLabel, &option, this);
+        const int textWidth = fontMetrics().horizontalAdvance(option.text);
+        // Right-aligned (numeric) headers take the arrow on the text's left, still touching it.
+        const int x = option.textAlignment & Qt::AlignRight ? label.right() - textWidth - 12
+                                                            : label.left() + textWidth + 5;
+        if (x < rect.left() + 2 || x + 7 > rect.right() - 2) return; // too narrow for the arrow
+        const int y = rect.center().y();
+        const bool up = sortIndicatorOrder() == Qt::AscendingOrder; // up = A→Z, low→high
+        QPolygon arrow;
+        arrow << QPoint(x, up ? y + 2 : y - 2) << QPoint(x + 7, up ? y + 2 : y - 2)
+              << QPoint(x + 3, up ? y - 2 : y + 2);
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(theme::text3());
+        painter->drawPolygon(arrow);
+        painter->restore();
     }
     bool event(QEvent* event) override {
         if (event->type() == QEvent::UngrabMouse || event->type() == QEvent::Hide)
@@ -173,35 +205,30 @@ void ScreenerDock::buildUi() {
     m_assetCombo->setFixedWidth(80);
     toolbar->addWidget(m_assetCombo);
 
-    toolbar->addWidget(new QLabel("Interval:", m_contentWidget));
-
-    m_intervalSlider = new QSlider(Qt::Horizontal, m_contentWidget);
-    m_intervalSlider->setRange(30, 300);
-    m_intervalSlider->setSingleStep(30);
-    m_intervalSlider->setPageStep(60);
-    m_intervalSlider->setValue(m_intervalSec);
-    m_intervalSlider->setFixedWidth(100);
-    toolbar->addWidget(m_intervalSlider);
-
-    m_intervalLabel = new QLabel(QString("%1s").arg(m_intervalSec), m_contentWidget);
-    m_intervalLabel->setFixedWidth(36);
-    toolbar->addWidget(m_intervalLabel);
-
-    m_autoCheck = new QCheckBox("Auto", m_contentWidget);
+    m_autoCheck = new QCheckBox("Auto every", m_contentWidget);
+    m_autoCheck->setObjectName("screenerAuto");
     m_autoCheck->setChecked(false);
-    m_autoCheck->setIcon(QIcon(":/svg/auto-refresh.svg"));
-    m_autoCheck->setToolTip("Automatically refresh at the set interval");
+    m_autoCheck->setToolTip("Refresh automatically at the chosen interval");
     m_autoCheck->setMinimumWidth(m_autoCheck->sizeHint().width() + 4);
     toolbar->addWidget(m_autoCheck);
 
-    m_runBtn = new QToolButton(m_contentWidget);
-    m_runBtn->setObjectName("screenerRefresh");
-    m_runBtn->setIcon(QIcon(":/svg/refresh.svg"));
-    m_runBtn->setToolTip("Fetch screener data once");
-    m_runBtn->setFixedSize(28, 28);
-    toolbar->addWidget(m_runBtn);
+    m_intervalCombo = new QComboBox(m_contentWidget);
+    m_intervalCombo->setObjectName("screenerInterval");
+    for (int seconds : {30, 60, 120, 180, 300})
+        m_intervalCombo->addItem(QStringLiteral("%1 s").arg(seconds), seconds);
+    m_intervalCombo->setCurrentIndex(m_intervalCombo->findData(m_intervalSec));
+    toolbar->addWidget(m_intervalCombo);
 
     toolbar->addStretch();
+
+    m_runBtn = new QToolButton(m_contentWidget);
+    m_runBtn->setObjectName("screenerRefresh");
+    m_runBtn->setText("Refresh");
+    m_runBtn->setIcon(QIcon(":/svg/refresh.svg"));
+    m_runBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_runBtn->setToolTip("Fetch screener data once");
+    toolbar->addWidget(m_runBtn);
+
     layout->addLayout(toolbar);
 
     // ── Table ────────────────────────────────────────────────────────────────
@@ -226,6 +253,20 @@ void ScreenerDock::buildUi() {
         "QHeaderView::section { background:#252525; color:#aaa; border:none; padding:3px; }"
     );
     tableChrome::apply(m_table);
+    auto* emptyRefresh = new QToolButton;
+    emptyRefresh->setObjectName("screenerEmptyRefresh");
+    emptyRefresh->setText("Refresh");
+    emptyRefresh->setIcon(QIcon(":/svg/refresh.svg"));
+    emptyRefresh->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    emptyRefresh->setToolTip("Fetch screener data once");
+    emptyRefresh->setStyleSheet(QStringLiteral(
+        "QToolButton { background:%1; color:%2; border:1px solid %3; border-radius:3px; padding:3px 10px; }"
+        "QToolButton:hover { border-color:%4; }"
+        "QToolButton:pressed { background:%5; }")
+        .arg(theme::bg2().name(), theme::text().name(), theme::line().name(),
+             theme::accent().name(), theme::sel().name()));
+    connect(emptyRefresh, &QToolButton::clicked, this, &ScreenerDock::onRunClicked);
+    m_empty = new EmptyState(m_table, QStringLiteral("No data yet"), emptyRefresh);
     layout->addWidget(m_table, 1);
 
     // ── Status bar ───────────────────────────────────────────────────────────
@@ -240,7 +281,7 @@ void ScreenerDock::buildUi() {
     // Signals
     connect(m_assetCombo,     QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ScreenerDock::onAssetChanged);
-    connect(m_intervalSlider, &QSlider::valueChanged,
+    connect(m_intervalCombo,  QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ScreenerDock::onIntervalChanged);
     connect(m_autoCheck,      &QCheckBox::toggled,
             this, &ScreenerDock::onAutoToggled);
@@ -548,7 +589,20 @@ void ScreenerDock::updateColumns() {
                                 col == kColExtra1 || col == kColExtra2 || col == kColSector));
     for (auto it = m_userColumnWidths.cbegin(); it != m_userColumnWidths.cend(); ++it)
         if (!m_table->isColumnHidden(it.key())) m_table->setColumnWidth(it.key(), it.value());
+    if (m_model->rowCount() == 0) {
+        // Empty columns take their header width, so the headers fit and the last one stretches.
+        for (int col = 0; col < kColCount; ++col)
+            if (!m_table->isColumnHidden(col) && !m_userColumnWidths.contains(col))
+                m_table->setColumnWidth(col, m_table->horizontalHeader()->sectionSizeHint(col));
+    }
     m_adjustingColumnWidths = false;
+}
+
+void ScreenerDock::updateEmptyText() {
+    if (!m_empty) return;
+    m_empty->setText(m_fetchPending
+        ? QStringLiteral("Fetching %1…").arg(m_currentAsset == "crypto" ? QStringLiteral("crypto") : QStringLiteral("stocks"))
+        : QStringLiteral("No data yet"));
 }
 
 // ── UI slots ──────────────────────────────────────────────────────────────────
@@ -637,11 +691,12 @@ void ScreenerDock::onAssetChanged(int index) {
                        .arg(m_currentAsset == "crypto" ? QStringLiteral("Crypto") : QStringLiteral("Stocks")));
 }
 
-void ScreenerDock::onIntervalChanged(int value) {
-    m_intervalSec = value;
-    m_intervalLabel->setText(QString("%1s").arg(value));
+void ScreenerDock::onIntervalChanged(int index) {
+    const int seconds = m_intervalCombo->itemData(index).toInt();
+    if (seconds <= 0) return;
+    m_intervalSec = seconds;
     if (m_autoEnabled) {
-        m_autoTimer->setInterval(value * 1000);
+        m_autoTimer->setInterval(seconds * 1000);
     }
 }
 
@@ -660,6 +715,7 @@ void ScreenerDock::onSymbolChanged(const QString& /*symbol*/) {
 }
 
 void ScreenerDock::setStatus(const QString& text, bool error) {
+    updateEmptyText(); // every fetch-state change reports a status
     if (!m_statusLabel) return;
     m_statusLabel->setText(text);
     m_statusLabel->setStyleSheet(error

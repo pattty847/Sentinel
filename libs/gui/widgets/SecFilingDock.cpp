@@ -1,8 +1,8 @@
 #include "SecFilingDock.hpp"
 #include "TableChrome.hpp"
+#include "EmptyState.hpp"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QGroupBox>
 #include <QSplitter>
 #include <QHeaderView>
 #include <QJsonObject>
@@ -52,7 +52,22 @@ void SecFilingDock::buildUi() {
     actions->addWidget(m_fetchInsiderBtn);
     actions->addWidget(m_fetchFinancialsBtn);
     
+    // The reason the fetch buttons can be disabled sits under the field it depends on.
+    m_tickerHint = new QLabel("Equity tickers only", m_contentWidget);
+    m_tickerHint->setObjectName("secTickerHint");
+    m_tickerHint->setStyleSheet(QStringLiteral("color:%1;").arg(theme::text3().name()));
+    const QString actionStyle = QStringLiteral(
+        "QPushButton { background:%1; color:%2; border:1px solid %3; border-radius:3px; padding:4px 10px; }"
+        "QPushButton:hover { border-color:%4; }"
+        "QPushButton:pressed { background:%5; }"
+        "QPushButton:disabled { background:transparent; color:%6; border-color:%3; }")
+        .arg(theme::bg2().name(), theme::text().name(), theme::line().name(),
+             theme::accent().name(), theme::sel().name(), theme::textOff().name());
+    for (auto* button : {m_fetchFilingsBtn, m_fetchInsiderBtn, m_fetchFinancialsBtn})
+        button->setStyleSheet(actionStyle);
+
     layout->addLayout(inputLayout);
+    layout->addWidget(m_tickerHint);
     layout->addLayout(actions);
     connect(m_tickerInput, &QLineEdit::textChanged, this, &SecFilingDock::tickerEdited);
     
@@ -63,21 +78,27 @@ void SecFilingDock::buildUi() {
     // Tables and display
     QSplitter* splitter = new QSplitter(Qt::Vertical, m_contentWidget);
     
-    QGroupBox* filingsGroup = new QGroupBox("Filings", m_contentWidget);
-    QVBoxLayout* filingsLayout = new QVBoxLayout();
-    m_filingsTable = new QTableView(filingsGroup);
+    auto section = [splitter](const QString& title, QWidget* body) {
+        auto* box = new QWidget(splitter);
+        auto* column = new QVBoxLayout(box);
+        column->setContentsMargins(0, 4, 0, 0);
+        column->setSpacing(4);
+        auto* label = new QLabel(title, box);
+        label->setStyleSheet(QStringLiteral("color:%1;").arg(theme::text2().name()));
+        column->addWidget(label);
+        body->setParent(box);
+        column->addWidget(body, 1);
+        splitter->addWidget(box);
+    };
+    m_filingsTable = new QTableView;
     m_filingsModel->setHorizontalHeaderLabels({"Date", "Form Type", "Description"});
     m_filingsTable->setObjectName("secFilings");
     m_filingsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_filingsTable->setModel(m_filingsModel);
     tableChrome::apply(m_filingsTable);
     m_filingsTable->horizontalHeader()->setStretchLastSection(true);
-    filingsLayout->addWidget(m_filingsTable);
-    filingsGroup->setLayout(filingsLayout);
-    splitter->addWidget(filingsGroup);
-    QGroupBox* transactionsGroup = new QGroupBox("Insider Transactions", m_contentWidget);
-    QVBoxLayout* transactionsLayout = new QVBoxLayout();
-    m_transactionsTable = new QTableView(transactionsGroup);
+    section("Filings", m_filingsTable);
+    m_transactionsTable = new QTableView;
     m_transactionsModel->setHorizontalHeaderLabels({"Date", "Insider", "Transaction", "Shares", "Price"});
     tableChrome::align(m_transactionsModel, 3, true);
     tableChrome::align(m_transactionsModel, 4, true);
@@ -86,17 +107,15 @@ void SecFilingDock::buildUi() {
     m_transactionsTable->setModel(m_transactionsModel);
     tableChrome::apply(m_transactionsTable);
     m_transactionsTable->horizontalHeader()->setStretchLastSection(true);
-    transactionsLayout->addWidget(m_transactionsTable);
-    transactionsGroup->setLayout(transactionsLayout);
-    splitter->addWidget(transactionsGroup);
-    QGroupBox* financialsGroup = new QGroupBox("Financial Summary", m_contentWidget);
-    QVBoxLayout* financialsLayout = new QVBoxLayout();
-    m_financialsDisplay = new QTextEdit(financialsGroup);
+    section("Insider transactions", m_transactionsTable);
+    m_financialsDisplay = new QTextEdit;
     m_financialsDisplay->setObjectName("secFinancials");
     m_financialsDisplay->setReadOnly(true);
-    financialsLayout->addWidget(m_financialsDisplay);
-    financialsGroup->setLayout(financialsLayout);
-    splitter->addWidget(financialsGroup);
+    section("Financial summary", m_financialsDisplay);
+    for (auto* table : {m_filingsTable, m_transactionsTable}) fitEmptyColumns(table);
+    m_filingsEmpty = new EmptyState(m_filingsTable, QString());
+    m_transactionsEmpty = new EmptyState(m_transactionsTable, QString());
+    updateEmptyHints();
     
     splitter->setStretchFactor(0, 1);
     splitter->setStretchFactor(1, 1);
@@ -109,6 +128,7 @@ void SecFilingDock::buildUi() {
     m_statusLabel->setObjectName("secStatus");
     m_statusLabel->setWordWrap(true);
     m_statusLabel->setTextFormat(Qt::PlainText);
+    m_statusLabel->setStyleSheet(QStringLiteral("color:%1;").arg(theme::text3().name()));
     layout->addWidget(m_statusLabel);
     
     m_contentWidget->setLayout(layout);
@@ -117,7 +137,7 @@ void SecFilingDock::buildUi() {
 void SecFilingDock::fetchFilings() {
     QString ticker = m_tickerInput->text().trimmed().toUpper();
     if (ticker.isEmpty()) {
-        updateStatus("Please enter a ticker symbol", true);
+        updateStatus("Enter a ticker", true);
         return;
     }
     
@@ -131,7 +151,7 @@ void SecFilingDock::fetchFilings() {
 void SecFilingDock::fetchInsiderTransactions() {
     QString ticker = m_tickerInput->text().trimmed().toUpper();
     if (ticker.isEmpty()) {
-        updateStatus("Please enter a ticker symbol", true);
+        updateStatus("Enter a ticker", true);
         return;
     }
     
@@ -142,7 +162,7 @@ void SecFilingDock::fetchInsiderTransactions() {
 void SecFilingDock::fetchFinancialSummary() {
     QString ticker = m_tickerInput->text().trimmed().toUpper();
     if (ticker.isEmpty()) {
-        updateStatus("Please enter a ticker symbol", true);
+        updateStatus("Enter a ticker", true);
         return;
     }
     
@@ -163,7 +183,7 @@ void SecFilingDock::onFinancialsReady(const QList<SecApiClient::FinancialMetric>
 }
 
 void SecFilingDock::onApiError(const QString& error) {
-    updateStatus(provenance() + " · Unavailable: " + error, true);
+    updateStatus(QStringLiteral("%1: %2").arg(m_tickerInput->text().trimmed().toUpper(), error), true);
 }
 
 void SecFilingDock::onStatusUpdate(const QString& message) {
@@ -183,6 +203,7 @@ void SecFilingDock::displayFilings(const QList<SecApiClient::Filing>& filings) {
         m_filingsModel->appendRow(row);
     }
     m_filingsTable->resizeColumnsToContents();
+    fitEmptyColumns(m_filingsTable);
 }
 
 void SecFilingDock::displayTransactions(const QList<SecApiClient::Transaction>& transactions) {
@@ -204,6 +225,7 @@ void SecFilingDock::displayTransactions(const QList<SecApiClient::Transaction>& 
         m_transactionsModel->appendRow(row);
     }
     m_transactionsTable->resizeColumnsToContents();
+    fitEmptyColumns(m_transactionsTable);
 }
 
 void SecFilingDock::displayFinancials(const QList<SecApiClient::FinancialMetric>& metrics) {
@@ -224,15 +246,35 @@ void SecFilingDock::displayFinancials(const QList<SecApiClient::FinancialMetric>
 }
 
 void SecFilingDock::updateStatus(const QString& message, bool isError) {
-    m_statusLabel->setText(message);
-    m_statusLabel->setToolTip(message);
-    Q_UNUSED(isError);
+    // An error is one clause in the error role with its glyph; normal status stays dim.
+    const QString text = isError ? QString::fromUtf8("× ") + message : message;
+    m_statusLabel->setText(text);
+    m_statusLabel->setToolTip(text);
+    m_statusLabel->setStyleSheet(QStringLiteral("color:%1;")
+        .arg((isError ? theme::error() : theme::text3()).name()));
 }
 
 void SecFilingDock::clearResults() {
     m_filingsModel->removeRows(0, m_filingsModel->rowCount());
     m_transactionsModel->removeRows(0, m_transactionsModel->rowCount());
     m_financialsDisplay->clear();
+    for (auto* table : {m_filingsTable, m_transactionsTable}) fitEmptyColumns(table);
+}
+
+void SecFilingDock::fitEmptyColumns(QTableView* table) {
+    if (table->model()->rowCount() != 0) return;
+    // Empty columns take their header width, so every header fits and the last one stretches.
+    for (int column = 0; column < table->model()->columnCount(); ++column)
+        table->setColumnWidth(column, table->horizontalHeader()->sectionSizeHint(column));
+}
+
+void SecFilingDock::updateEmptyHints() {
+    const bool supported = ResearchProcess::isEquityTicker(m_tickerInput->text());
+    m_filingsEmpty->setText(supported ? QStringLiteral("No filings loaded · Fetch Filings") : QString());
+    m_transactionsEmpty->setText(supported ? QStringLiteral("No insider transactions loaded · Fetch Insider Tx")
+                                           : QString());
+    m_financialsDisplay->setPlaceholderText(supported ? QStringLiteral("No financial summary loaded · Fetch Financials")
+                                                      : QString());
 }
 void SecFilingDock::beginRequest() { clearResults(); }
 QString SecFilingDock::provenance() const {
@@ -247,7 +289,11 @@ void SecFilingDock::tickerEdited() {
     m_fetchFilingsBtn->setEnabled(supported);
     m_fetchInsiderBtn->setEnabled(supported);
     m_fetchFinancialsBtn->setEnabled(supported);
-    updateStatus(provenance() + (supported ? " · Choose a report" : " · Unavailable: SEC reports require an equity ticker; crypto pairs are unsupported"));
+    m_tickerHint->setText(supported ? QStringLiteral("Equity tickers only")
+                                    : QStringLiteral("! Equity tickers only"));
+    m_tickerHint->setStyleSheet(QStringLiteral("color:%1;").arg((supported ? theme::text3() : theme::warn()).name()));
+    updateEmptyHints();
+    updateStatus(provenance() + (supported ? " · Choose a report" : QString()));
 }
 void SecFilingDock::onSymbolChanged(const QString& symbol) {
     m_tickerInput->setText(symbol.trimmed().toUpper());

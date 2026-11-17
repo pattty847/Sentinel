@@ -1,5 +1,6 @@
 #include "WatchlistDock.hpp"
 #include "TableChrome.hpp"
+#include "EmptyState.hpp"
 #include "../themes/ThemePalette.hpp"
 #include <QPainter>
 
@@ -20,6 +21,21 @@
 namespace {
 const QRegularExpression kCryptoPair(QStringLiteral("^[A-Z0-9]{2,20}-[A-Z0-9]{2,20}$"));
 const QString kSettingsGroup = QStringLiteral("watchRail");
+
+// One line that elides; text() keeps the whole message (also the tooltip).
+class ElidedLabel final : public QLabel {
+public:
+    using QLabel::QLabel;
+    QSize minimumSizeHint() const override { return {0, QLabel::minimumSizeHint().height()}; }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setPen(palette().color(QPalette::WindowText));
+        const QRect area = contentsRect();
+        painter.drawText(area, Qt::AlignLeft | Qt::AlignVCenter,
+                         fontMetrics().elidedText(text(), Qt::ElideRight, area.width()));
+    }
+};
 
 class WatchTreeView final : public QTreeView {
 public:
@@ -184,10 +200,16 @@ void WatchlistDock::buildUi() {
     m_tree->header()->setStretchLastSection(true);
     layout->addWidget(m_tree, 1);
 
-    m_status = new QLabel(m_contentWidget);
+    m_empty = new EmptyState(m_tree, QStringLiteral("No pinned pairs · add one above"));
+
+    // The footer speaks only for a problem (refusal, unavailable pair, bad entry): chart state
+    // and switching live in the status bar, so a healthy rail has no footer at all.
+    m_status = new ElidedLabel(m_contentWidget);
     m_status->setObjectName("watchStatus");
-    m_status->setWordWrap(true);
-    m_status->setStyleSheet("color:#aaa;");
+    m_status->setWordWrap(false);
+    m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    m_status->setStyleSheet(QStringLiteral("color:%1;").arg(theme::warn().name()));
+    m_status->hide();
     layout->addWidget(m_status);
 
     connect(m_presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -270,7 +292,7 @@ void WatchlistDock::onRowActivated(const QModelIndex& index) {
     if (symbol.isEmpty() || asset.isEmpty()) return;
     if (asset == "crypto") {
         if (m_catalogAuthoritative && !m_supported.contains(symbol)) {
-            m_status->setText(QStringLiteral("%1 is unavailable in the current market catalog").arg(symbol));
+            showProblem(QStringLiteral("%1 is unavailable in the current market catalog").arg(symbol));
             return;
         }
         if (symbol == m_pendingSymbol) return;
@@ -278,6 +300,8 @@ void WatchlistDock::onRowActivated(const QModelIndex& index) {
         m_refusedSymbol.clear();
         m_refusalReason.clear();
         refreshRowState();
+    } else {
+        refreshFooter();
     }
     emit symbolSelected(symbol, asset);
 }
@@ -292,13 +316,12 @@ void WatchlistDock::setChartSwitchState(const QString& activeSymbol, const QStri
 }
 
 void WatchlistDock::setCryptoAvailability(const QStringList& supportedSymbols, bool authoritative,
-                                          const QString& source) {
+                                          const QString& /*source*/) {
     m_catalogAuthoritative = authoritative;
     m_supported.clear();
     if (authoritative) {
         for (const QString& symbol : supportedSymbols) m_supported.insert(symbol.trimmed().toUpper());
     }
-    m_catalogSource = source;
     refreshRowState();
 }
 
@@ -330,18 +353,28 @@ void WatchlistDock::refreshRowState() {
                           : active ? QString()
                           : isCrypto ? QStringLiteral("Availability unverified until selected") : QString());
     }
-    if (m_pendingSymbol.isEmpty() && m_refusedSymbol.isEmpty()) {
-        const QString provenance = m_catalogAuthoritative
-            ? QStringLiteral("Catalog: %1").arg(m_catalogSource.isEmpty() ? QStringLiteral("server") : m_catalogSource)
-            : QStringLiteral("Availability unknown · no quote feed");
-        m_status->setText(m_activeSymbol.isEmpty() ? provenance
-            : QStringLiteral("Chart: %1 · %2").arg(m_activeSymbol, provenance));
-    } else if (!m_refusedSymbol.isEmpty()) {
-        m_status->setText(m_refusalReason.isEmpty()
-            ? QStringLiteral("%1 unavailable").arg(m_refusedSymbol) : m_refusalReason);
-    } else {
-        m_status->setText(QStringLiteral("Switching to %1 · waiting for confirmation").arg(m_pendingSymbol));
-    }
+    refreshFooter();
+}
+
+// Entry warnings are transient: any later successful action returns the footer to the one
+// lasting problem, a subscription refusal, or hides it.
+void WatchlistDock::refreshFooter() {
+    if (!m_refusedSymbol.isEmpty())
+        showProblem(m_refusalReason.isEmpty() ? QStringLiteral("%1 unavailable").arg(m_refusedSymbol) : m_refusalReason);
+    else
+        clearProblem();
+}
+
+void WatchlistDock::clearProblem() {
+    m_status->clear();
+    m_status->setToolTip(QString());
+    m_status->hide();
+}
+
+void WatchlistDock::showProblem(const QString& message) {
+    m_status->setText(QStringLiteral("! ") + message);
+    m_status->setToolTip(message);
+    m_status->show();
 }
 
 void WatchlistDock::updatePinButton() {
@@ -357,12 +390,12 @@ void WatchlistDock::updatePinButton() {
 void WatchlistDock::addPinnedSymbol() {
     const QString symbol = m_symbolEdit->text().trimmed().toUpper();
     if (!kCryptoPair.match(symbol).hasMatch()) {
-        m_status->setText(QStringLiteral("Enter a pair such as BTC-USD"));
+        showProblem(QStringLiteral("Enter a pair such as BTC-USD"));
         return;
     }
     if (!m_pinned.contains(symbol)) {
         if (m_pinned.size() >= 30) {
-            m_status->setText(QStringLiteral("Pinned list is full (30 pairs)"));
+            showProblem(QStringLiteral("Pinned list is full (30 pairs)"));
             return;
         }
         m_pinned.append(symbol);
@@ -383,9 +416,16 @@ void WatchlistDock::addPinnedSymbol() {
 void WatchlistDock::toggleSelectedPin() {
     const QString symbol = selectedSymbol();
     if (symbol.isEmpty() || m_presetCombo->currentIndex() >= 2) return;
-    if (m_pinned.contains(symbol)) m_pinned.removeAll(symbol);
-    else if (m_pinned.size() < 30) m_pinned.append(symbol);
+    if (m_pinned.contains(symbol)) {
+        m_pinned.removeAll(symbol);
+    } else if (m_pinned.size() < 30) {
+        m_pinned.append(symbol);
+    } else {
+        showProblem(QStringLiteral("Pinned list is full (30 pairs)"));
+        return;
+    }
     savePreferences();
+    refreshFooter();
     if (m_presetCombo->currentIndex() == 1) loadPreset(1);
     else updatePinButton();
 }

@@ -10,7 +10,9 @@
 #include <QHash>
 #include <QPointer>
 #include "../models/MarketHealth.hpp"
+#include <QIcon>
 #include <QVariantMap>
+#include <array>
 #include <functional>
 #include <optional>
 #include <vector>
@@ -55,14 +57,28 @@ private:
         QLabel *value = nullptr;
         std::function<QString(const QVariantMap &)> format;
     };
+    // Collapsed health facts, in grid order.
+    enum class HealthFact { Connection, Subscription, BookAge, HeatmapAge, History, Loading, OldPicture, Count };
+    enum class Tone { Normal, Unknown, Warn, Error };
+    struct HealthRow {
+        QLabel *key = nullptr;
+        QLabel *value = nullptr;
+        Tone tone = Tone::Normal;
+        bool styled = false;
+    };
+    void setHealthFact(HealthFact id, const QString &value, Tone tone);
+    QString healthDetailText() const;
     void addSection(const QString &title);
     void addRow(const QString &name, const QString &key, std::function<QString(const QVariantMap &)> format);
 
     Provider m_provider;
     QPointer<MarketHealth> m_health;
     QLabel* m_healthSummary = nullptr;
-    QLabel* m_healthDetail = nullptr;
+    class QGridLayout* m_healthGrid = nullptr;
+    std::array<HealthRow, size_t(HealthFact::Count)> m_healthFacts{};
+    QLabel* m_healthReason = nullptr;
     class QToolButton* m_engineeringToggle = nullptr;
+    QIcon m_chevronClosed, m_chevronOpen;
     QTimer *m_timer = nullptr;
     QWidget *m_table = nullptr;
     QLabel *m_disabled = nullptr;
