@@ -51,7 +51,73 @@ QJsonValue list(std::optional<QList<qint64>> values) {
     for (qint64 value : *values) out.append(value);
     return out;
 }
+
+// POST /api/v1/layers keys. validateControl and GET /api/v1/schema read this table. A
+// Setting key is a heatmap chart setting: its validation, default and description come
+// from the settings table (heatmap::applySettingsPatch, heatmap::settingsSchema).
+enum class LayerKind { Toggle, Look, Setting };
+struct LayerDef {
+    const char* key;
+    LayerKind kind;
+    QJsonValue defaultValue = {}; // Toggle and Look only
+    bool persists = false;
+    QStringList values = {};      // Look: allowed values
+    const char* description = "";
+};
+const std::vector<LayerDef>& layerDefs() {
+    static const ClientTpoConfig tpo;
+    static const std::vector<LayerDef> table{
+        {"heatmap", LayerKind::Toggle, true, false, {}, "Heatmap primary layer, this session."},
+        {"candles", LayerKind::Toggle, true, false, {}, "Candles, this session."},
+        {"footprint", LayerKind::Toggle, false, false, {}, "Footprint cells primary layer, this session."},
+        {"tpo", LayerKind::Toggle, false, false, {}, "TPO profile primary layer, this session."},
+        {"volumeProfile", LayerKind::Toggle, false, false, {}, "Volume profile primary layer, this session."},
+        {"ladder", LayerKind::Toggle, false, false, {}, "Chart-edge book ladder strip, this session; the saved choice is showLadder in heatmap settings."},
+        {"wallRadar", LayerKind::Toggle, false, false, {}, "Wall marks on the ladder, this session; works only while ladder is on and does not turn it on."},
+        {"tpoLayout", LayerKind::Look, QString::fromStdString(tpo.layout), false, {"split", "collapsed"}, "TPO brackets in separate time columns (split) or packed into one profile (collapsed); default from client config."},
+        {"tpoTheme", LayerKind::Look, QString::fromStdString(tpo.theme), true, {"rainbow", "calm", "sage", "indigo"}, "TPO cell colours across the session; default from client config."},
+        {"tpoPreset", LayerKind::Look, "letters", true, {"letters", "blocks", "extended", "indigo"}, "TPO style preset; keeps the current theme unless the preset names its own. Reads back custom after a Settings edit."},
+        {"flowFooter", LayerKind::Setting},
+        {"cvdStripPx", LayerKind::Setting},
+        {"cvdReset", LayerKind::Setting},
+        {"cvdStyle", LayerKind::Setting},
+        {"cvdFillAnchor", LayerKind::Setting},
+        {"footprintIntensity", LayerKind::Setting},
+        {"footprintCandle", LayerKind::Setting},
+        {"footprintDustNotional", LayerKind::Setting},
+        {"footprintNumbers", LayerKind::Setting},
+    };
+    return table;
+}
+const LayerDef* findLayer(const QString& key) {
+    for (const auto& def : layerDefs()) if (key == QLatin1String(def.key)) return &def;
+    return nullptr;
+}
+QString joinOr(const QStringList& values) {
+    return values.size() < 2 ? values.join("") : values.mid(0, values.size() - 1).join(", ") + " or " + values.last();
+}
 } // namespace
+
+bool isLayerKey(const QString& key, LayerKeyKind kind) {
+    const auto* def = findLayer(key);
+    return def && def->kind == (kind == LayerKeyKind::Setting ? LayerKind::Setting : LayerKind::Look);
+}
+
+QJsonObject schemaJson() {
+    const auto settings = heatmap::settingsSchema();
+    QJsonObject layers;
+    for (const auto& def : layerDefs()) {
+        if (def.kind == LayerKind::Setting) {
+            layers.insert(QLatin1String(def.key), settings.value(QLatin1String(def.key)));
+            continue;
+        }
+        QJsonObject entry{{"type", def.kind == LayerKind::Toggle ? "boolean" : "enum"}, {"default", def.defaultValue},
+                          {"persists", def.persists}, {"description", def.description}};
+        if (!def.values.isEmpty()) entry["values"] = QJsonArray::fromStringList(def.values);
+        layers.insert(QLatin1String(def.key), entry);
+    }
+    return {{"heatmapSettings", settings}, {"layers", layers}};
+}
 
 ParseResult RequestParser::feed(const QByteArray& bytes) {
     if (m_finished) return fail(400, "bad_request", "Request already complete");
@@ -125,12 +191,14 @@ ParseResult RequestParser::feed(const QByteArray& bytes) {
     const bool known = operation || control || path == "/api/v1/state" ||
                        path == "/api/v1/candles" || path == "/api/v1/book" ||
                        path == "/api/v1/trades" || path == "/api/v1/heatmap/walls" || path == "/api/v1/heatmap/state" ||
-                       path == "/api/v1/screenshot" || path == "/screenshot" || path == "/api/v1/docks";
+                       path == "/api/v1/screenshot" || path == "/screenshot" || path == "/api/v1/docks" ||
+                       path == "/api/v1/schema";
     if (!known) return fail(404, "not_found", "Unknown route");
     const bool readable = operation || path == "/api/v1/state" || path == "/api/v1/viewport" ||
                           path == "/api/v1/candles" || path == "/api/v1/book" ||
                           path == "/api/v1/trades" || path == "/api/v1/heatmap/walls" || path == "/api/v1/heatmap/state" ||
-                          path == "/api/v1/screenshot" || path == "/screenshot" || path == "/api/v1/docks";
+                          path == "/api/v1/screenshot" || path == "/screenshot" || path == "/api/v1/docks" ||
+                          path == "/api/v1/schema";
     if (!((parts[0] == "GET" && readable) || (parts[0] == "POST" && control)))
         return fail(405, "method_not_allowed", "Method not allowed");
     if (parts[0] == "GET" && contentLength != 0) return fail(400, "bad_request", "GET body is unsupported");
@@ -161,6 +229,10 @@ ValidationResult validateQuery(const Request& request, const QString& activeSymb
     };
     if (request.path == "/api/v1/docks") {
         if (!query.isEmpty()) return reject(400, "invalid_parameter", "Docks do not accept query parameters");
+        return {};
+    }
+    if (request.path == "/api/v1/schema") {
+        if (!query.isEmpty()) return reject(400, "invalid_parameter", "Schema does not accept query parameters");
         return {};
     }
     if (request.path == "/api/v1/heatmap/walls") {
@@ -462,41 +534,19 @@ ControlValidation validateControl(const Request& request, const std::optional<QL
                 else result.body.priceMax = v.toDouble();
             } else return reject("invalid_field", "Unknown viewport field");
         } else if (kind == "layers") {
-            if (key == "flowFooter" || key == "cvdStripPx" || key == "cvdReset" || key == "cvdStyle" || key == "cvdFillAnchor") {
+            const auto* def = findLayer(key);
+            if (!def) return reject("invalid_field", "Unknown layer");
+            QString error;
+            if (def->kind == LayerKind::Setting) {
                 heatmap::HeatmapChartSettings settings;
-                const auto error = heatmap::applySettingsPatch(settings, {{key, v}});
-                if (!error.isEmpty()) return reject("invalid_layer", error.toUtf8().constData());
-                result.body.layers.insert(key, v);
-                continue;
+                error = heatmap::applySettingsPatch(settings, {{key, v}});
+            } else if (def->kind == LayerKind::Look) {
+                if (!v.isString() || !def->values.contains(v.toString())) error = key + " must be " + joinOr(def->values);
+            } else if (!v.isBool()) error = "Layer values must be boolean";
+            if (!error.isEmpty()) {
+                result.status = 422; result.code = "invalid_layer"; result.message = error;
+                return result;
             }
-            if (key == "footprintCandle" || key == "footprintDustNotional") {
-                heatmap::HeatmapChartSettings settings;
-                const auto error = heatmap::applySettingsPatch(settings, {{key, v}});
-                if (!error.isEmpty()) return reject("invalid_layer", error.toUtf8().constData());
-                result.body.layers.insert(key, v);
-                continue;
-            }
-            if (key == "footprintIntensity") {
-                if (v != "bar" && v != "window") return reject("invalid_layer", "footprintIntensity must be bar or window");
-                result.body.layers.insert(key, v);
-                continue;
-            }
-            if (key == "tpoLayout" || key == "tpoTheme" || key == "tpoPreset") {
-                static const QStringList kLayouts{"split", "collapsed"};
-                static const QStringList kThemes{"rainbow", "calm", "sage", "indigo"};
-                static const QStringList kPresets{"letters", "blocks", "extended", "indigo"};
-                const auto& allowed = key == "tpoLayout" ? kLayouts : key == "tpoTheme" ? kThemes : kPresets;
-                if (!v.isString() || !allowed.contains(v.toString()))
-                    return reject("invalid_layer", key == "tpoLayout" ? "tpoLayout must be split or collapsed"
-                                                   : key == "tpoTheme" ? "tpoTheme must be rainbow, calm, sage or indigo"
-                                                                       : "tpoPreset must be letters, blocks, extended or indigo");
-                result.body.layers.insert(key, v);
-                continue;
-            }
-            if (key != "heatmap" && key != "candles" && key != "footprint" && key != "tpo" && key != "volumeProfile" &&
-                key != "ladder" && key != "wallRadar" && key != "footprintNumbers")
-                return reject("invalid_field", "Unknown layer");
-            if (!v.isBool()) return reject("invalid_layer", "Layer values must be boolean");
             result.body.layers.insert(key, v);
         }
     }
