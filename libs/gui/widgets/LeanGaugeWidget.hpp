@@ -3,7 +3,6 @@
 #include <QImage>
 #include <QPen>
 #include <QWidget>
-#include <algorithm>
 #include <array>
 
 class LeanGaugeWidget : public QWidget {
