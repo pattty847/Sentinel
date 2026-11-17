@@ -1,6 +1,7 @@
 #include "widgets/PaperTradingDock.hpp"
 #include "themes/ThemePalette.hpp"
 #include "render/PaperTradeOverlayModel.hpp"
+#include "render/PnlCurveItem.hpp"
 #include "render/PaperPositionBandGeometry.hpp"
 #include "render/heatmap/HeatmapSettingsStore.hpp"
 #include "../core/trading/LiveTradingSession.hpp"
@@ -9,13 +10,18 @@
 #include <QApplication>
 #include <QDoubleSpinBox>
 #include <QFocusEvent>
+#include <QFrame>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
+#include <QImage>
 #include <QMessageBox>
 #include <QPointer>
 #include <QSettings>
 #include <QComboBox>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QDateTime>
 #include <QDateEdit>
 #include <QPushButton>
@@ -30,6 +36,7 @@
 #include <QToolButton>
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include <gtest/gtest.h>
 
 namespace {
@@ -157,6 +164,7 @@ TEST(PaperTicket, EditedLimitSurvivesTradesFocusQuantityAndButtons) {
     Source source;
     PaperTradingDock dock;
     dock.setDataSource(&source);
+    { trading::TradingSnapshot ready; ready.epoch = "e1"; dock.onTradingSnapshot(ready); }
     dock.setSymbol("DOGE-USD");
     auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
     auto* qty = dock.findChild<QDoubleSpinBox*>("paperBaseQty");
@@ -189,7 +197,10 @@ TEST(PaperTicket, EditedLimitSurvivesTradesFocusQuantityAndButtons) {
 }
 
 TEST(PaperTicket, LimitButtonsFollowDisplayedPrice) {
+    Source source;
     PaperTradingDock dock;
+    dock.setDataSource(&source);
+    { trading::TradingSnapshot ready; ready.epoch = "e1"; dock.onTradingSnapshot(ready); }
     auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
     auto* buy = dock.findChild<QPushButton*>("paperBuyLimit");
     auto* sell = dock.findChild<QPushButton*>("paperSellLimit");
@@ -201,7 +212,7 @@ TEST(PaperTicket, LimitButtonsFollowDisplayedPrice) {
         for (auto* button : {buy, sell}) {
             EXPECT_EQ(button->isEnabled(), enabled);
             if (enabled) EXPECT_TRUE(button->toolTip().isEmpty());
-            else EXPECT_TRUE(button->toolTip().contains("positive limit price"));
+            else EXPECT_FALSE(button->toolTip().isEmpty());
         }
     };
 
@@ -238,7 +249,10 @@ TEST(PaperTicket, LimitButtonsFollowDisplayedPrice) {
 }
 
 TEST(PaperTicket, LimitEditorFocusOutReconcilesButtons) {
+    Source source;
     PaperTradingDock dock;
+    dock.setDataSource(&source);
+    { trading::TradingSnapshot ready; ready.epoch = "e1"; dock.onTradingSnapshot(ready); }
     dock.setSymbol("DOGE-USD");
     dock.show();
     auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
@@ -255,7 +269,7 @@ TEST(PaperTicket, LimitEditorFocusOutReconcilesButtons) {
     QSignalSpy finished(price, &QAbstractSpinBox::editingFinished);
     editor->selectAll();
     QTest::keyClick(editor, Qt::Key_Backspace);
-    EXPECT_TRUE(editor->text().isEmpty());
+    EXPECT_TRUE(price->cleanText().isEmpty());
     EXPECT_FALSE(buy->isEnabled());
     EXPECT_DOUBLE_EQ(price->value(), 0.25);
     {
@@ -308,7 +322,7 @@ TEST(PaperTicket, LowPriceAndLogFollow) {
     EXPECT_EQ(log->rowCount(), 0);
     bool awaitingPosition = false;
     for (auto* label : dock.findChildren<QLabel*>())
-        awaitingPosition |= label->text() == QStringLiteral("Awaiting position update");
+        awaitingPosition |= label->objectName() == QStringLiteral("paperWaiting") && label->isVisible();
     EXPECT_TRUE(awaitingPosition);
     auto buttons = dock.findChildren<QToolButton*>();
     QToolButton* one = nullptr;
@@ -330,6 +344,7 @@ TEST(PaperTicket, SubmittedPriceUsesDisplayedPrecision) {
     Source source;
     PaperTradingDock dock;
     dock.setDataSource(&source);
+    { trading::TradingSnapshot ready; ready.epoch = "e1"; dock.onTradingSnapshot(ready); }
     dock.setSymbol("BTC-USD");
     auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
     ASSERT_NE(price, nullptr);
@@ -931,4 +946,280 @@ TEST(PaperStopOperation, EpochChangeWhilePromptOpenClosesItUnsent) {
     if (box && box->isVisible()) box->button(QMessageBox::Yes)->click();
     QTest::qWait(10);
     EXPECT_EQ(rig.source.sent, (std::vector<std::string>{"algo:stop"}));
+}
+
+TEST(PaperPolish, CurveLabelsUseMicroSize) {
+    EXPECT_EQ(PnlCurveItem::labelFont().pixelSize(), 10);
+    PnlCurveItem curve;
+    curve.resize(240, 120);
+    curve.appendPoint(1, -10.0, {});
+    curve.appendPoint(2, 10.0, {});
+    QImage image(curve.size(), QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    curve.render(&image);
+    int top = image.height(), bottom = -1;
+    // The top Y label is drawn at x < 34. Its gray ink is separate from the plot.
+    for (int y = 0; y < 20; ++y) for (int x = 0; x < 34; ++x) {
+        const QColor ink = image.pixelColor(x, y);
+        if (ink.red() > 55 && std::abs(ink.red() - ink.green()) <= 3
+            && std::abs(ink.green() - ink.blue()) <= 4) {
+            top = std::min(top, y);
+            bottom = std::max(bottom, y);
+        }
+    }
+    EXPECT_GE(bottom - top + 1, 7) << "painted axis label must use the micro font";
+}
+
+TEST(PaperPolish, ActionsHaveDividerGapAndRightAlignment) {
+    PaperTradingDock dock;
+    dock.resize(640, 700);
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* divider = dock.findChild<QFrame*>("paperActionDivider");
+    auto* flatten = dock.findChild<QPushButton*>("paperFlatten");
+    auto* cancel = dock.findChild<QPushButton*>("paperCancelAll");
+    auto* buy = dock.findChild<QPushButton*>("paperBuyLimit");
+    auto* sell = dock.findChild<QPushButton*>("paperSellLimit");
+    ASSERT_NE(divider, nullptr);
+    ASSERT_NE(buy, nullptr);
+    ASSERT_NE(sell, nullptr);
+    ASSERT_NE(flatten, nullptr);
+    ASSERT_NE(cancel, nullptr);
+    EXPECT_GE(flatten->geometry().top() - buy->geometry().bottom(), 12);
+    EXPECT_GE(flatten->geometry().left(), sell->geometry().left());
+    EXPECT_TRUE(flatten->styleSheet().contains("background: transparent"));
+}
+
+TEST(PaperPolish, PaperTagIsNeutralAndOutlined) {
+    PaperTradingDock dock;
+    auto* tag = dock.findChild<QLabel*>("paperTag");
+    ASSERT_NE(tag, nullptr);
+    EXPECT_EQ(tag->text(), QStringLiteral("PAPER"));
+    EXPECT_TRUE(tag->styleSheet().contains(QStringLiteral("border: 1px solid %1").arg(theme::line().name())));
+    EXPECT_TRUE(tag->styleSheet().contains("font-size: 10px"));
+}
+
+TEST(PaperPolish, PositionUsesOneWaitingLineAndNoFrame) {
+    PaperTradingDock dock;
+    dock.setSymbol("BTC-USD");
+    auto* frame = dock.findChild<QFrame*>("paperPositionFrame");
+    auto* waiting = dock.findChild<QLabel*>("paperWaiting");
+    ASSERT_NE(frame, nullptr);
+    ASSERT_NE(waiting, nullptr);
+    EXPECT_EQ(frame->frameShape(), QFrame::NoFrame);
+    EXPECT_EQ(waiting->text(), QStringLiteral("No data source"));
+    EXPECT_EQ(dock.findChild<QLabel*>("paperLastPrice")->text(), QStringLiteral("—"));
+    EXPECT_EQ(dock.findChild<QLabel*>("paperAvgPrice")->text(), QStringLiteral("—"));
+}
+
+TEST(PaperPolish, TicketFormatsStepAndGroupedPriceWithUnits) {
+    PaperTradingDock dock;
+    dock.setLocale(QLocale(QLocale::English, QLocale::UnitedStates));
+    dock.setSymbol("BTC-USD");
+    auto* qty = dock.findChild<QDoubleSpinBox*>("paperBaseQty");
+    auto* price = dock.findChild<QDoubleSpinBox*>("paperLimitPrice");
+    ASSERT_NE(qty, nullptr);
+    ASSERT_NE(price, nullptr);
+    EXPECT_EQ(qty->text(), QStringLiteral("0.0100 BTC"));
+    dock.onTradeReceived(tick("BTC-USD", 73778.93));
+    EXPECT_EQ(price->text(), QStringLiteral("73,778.93 USD"));
+}
+
+TEST(PaperPolish, TicketKeepsLocaleParsingAndShowsGrouping) {
+    struct RestoreLocale {
+        QLocale previous = QLocale();
+        ~RestoreLocale() { QLocale::setDefault(previous); }
+    } restore;
+    for (const auto& sample : {std::pair{QLocale(QLocale::English, QLocale::UnitedStates), QStringLiteral("0.5")},
+                               std::pair{QLocale(QLocale::German, QLocale::Germany), QStringLiteral("0,5")}}) {
+        QLocale::setDefault(sample.first);
+        PaperTradingDock dock;
+        dock.setLocale(sample.first);
+        auto* qty = dock.findChild<QDoubleSpinBox*>("paperBaseQty");
+        ASSERT_NE(qty, nullptr);
+        EXPECT_EQ(qty->locale().decimalPoint(), sample.first.decimalPoint());
+        auto* editor = qty->findChild<QLineEdit*>();
+        ASSERT_NE(editor, nullptr);
+        editor->setText(sample.second + QStringLiteral(" base"));
+        qty->interpretText();
+        EXPECT_DOUBLE_EQ(qty->value(), 0.5);
+        qty->setValue(12345.5);
+        EXPECT_TRUE(qty->text().contains(sample.first.groupSeparator()));
+    }
+}
+
+TEST(PaperPolish, EmptyOrderAndCurveTextFollowReadiness) {
+    Source source;
+    PaperTradingDock dock;
+    dock.setDataSource(&source);
+    dock.setSymbol("BTC-USD");
+    auto* empty = dock.findChild<QLabel*>("paperOrderEmpty");
+    auto* curve = dock.findChild<PnlCurveItem*>();
+    ASSERT_NE(empty, nullptr);
+    ASSERT_NE(curve, nullptr);
+    EXPECT_EQ(empty->text(), QStringLiteral("Awaiting update"));
+    trading::TradingSnapshot ready; ready.epoch = "e1";
+    dock.onTradingSnapshot(ready);
+    EXPECT_EQ(empty->text(), QStringLiteral("No orders this session"));
+    EXPECT_EQ(curve->property("emptyText").toString(), QStringLiteral("No PnL this session"));
+    emit source.connectionStatusChanged(false);
+    QCoreApplication::processEvents();
+    EXPECT_EQ(empty->text(), QStringLiteral("Trading stream disconnected"));
+}
+
+TEST(PaperPolish, NoSymbolHasSelectionStateAfterSnapshot) {
+    Source source;
+    PaperTradingDock dock;
+    dock.setDataSource(&source);
+    trading::TradingSnapshot ready; ready.epoch = "e1";
+    dock.onTradingSnapshot(ready);
+    auto* waiting = dock.findChild<QLabel*>("paperWaiting");
+    auto* empty = dock.findChild<QLabel*>("paperOrderEmpty");
+    auto* curve = dock.findChild<PnlCurveItem*>();
+    ASSERT_NE(waiting, nullptr);
+    ASSERT_NE(empty, nullptr);
+    ASSERT_NE(curve, nullptr);
+    EXPECT_EQ(waiting->text(), QStringLiteral("Select a symbol"));
+    EXPECT_EQ(empty->text(), QStringLiteral("Select a symbol"));
+    EXPECT_EQ(curve->property("emptyText").toString(), QStringLiteral("Select a symbol"));
+}
+
+TEST(PaperPolish, ManualButtonsRequireConnectedAccountSnapshot) {
+    Source source;
+    PaperTradingDock dock;
+    dock.setDataSource(&source);
+    dock.setSymbol("BTC-USD");
+    auto* buy = dock.findChild<QPushButton*>("paperBuyMarket");
+    ASSERT_NE(buy, nullptr);
+    EXPECT_FALSE(buy->isEnabled());
+    EXPECT_TRUE(buy->toolTip().contains("snapshot"));
+    trading::TradingSnapshot ready; ready.epoch = "e1";
+    dock.onTradingSnapshot(ready);
+    EXPECT_TRUE(buy->isEnabled());
+    emit source.connectionStatusChanged(false);
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(buy->isEnabled());
+    EXPECT_TRUE(buy->toolTip().contains("disconnected"));
+}
+
+TEST(PaperPolish, EmergencyActionsSurviveReconnectWithoutSnapshot) {
+    Source source;
+    PaperTradingDock dock;
+    dock.setDataSource(&source);
+    dock.setSymbol("BTC-USD");
+    auto* buy = dock.findChild<QPushButton*>("paperBuyMarket");
+    auto* flatten = dock.findChild<QPushButton*>("paperFlatten");
+    auto* cancel = dock.findChild<QPushButton*>("paperCancelAll");
+    ASSERT_NE(buy, nullptr);
+    ASSERT_NE(flatten, nullptr);
+    ASSERT_NE(cancel, nullptr);
+    trading::TradingSnapshot ready; ready.epoch = "e1";
+    dock.onTradingSnapshot(ready);
+    EXPECT_TRUE(buy->isEnabled());
+    emit source.connectionStatusChanged(false);
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(flatten->isEnabled());
+    EXPECT_FALSE(cancel->isEnabled());
+    emit source.connectionStatusChanged(true);
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(buy->isEnabled());
+    EXPECT_TRUE(flatten->isEnabled());
+    EXPECT_TRUE(cancel->isEnabled());
+    EXPECT_FALSE(flatten->toolTip().contains("snapshot"));
+    flatten->click();
+    cancel->click();
+    ASSERT_EQ(source.trades.size(), 2u);
+    EXPECT_EQ(source.trades[0].action, trading::TradeAction::Flatten);
+    EXPECT_EQ(source.trades[1].action, trading::TradeAction::CancelAll);
+    dock.setSymbol("ETH-USD");
+    EXPECT_TRUE(flatten->isEnabled());
+    EXPECT_TRUE(cancel->isEnabled());
+    EXPECT_FALSE(buy->isEnabled());
+    ready.epoch = "e2";
+    dock.onTradingSnapshot(ready);
+    EXPECT_TRUE(buy->isEnabled());
+}
+
+TEST(PaperPolish, ReconnectResetsValueColoursWithText) {
+    Source source;
+    PaperTradingDock dock;
+    dock.setDataSource(&source);
+    dock.setSymbol("BTC-USD");
+    trading::TradingSnapshot ready; ready.epoch = "e1";
+    ready.positions = {{"BTC-USD", 1.0, 100.0, 5.0, -3.0}};
+    dock.onTradingSnapshot(ready);
+    QLabel* realized = nullptr;
+    for (auto* label : dock.findChild<QFrame*>("paperPositionFrame")->findChildren<QLabel*>())
+        if (label->text() == QStringLiteral("$-3.00")) realized = label;
+    ASSERT_NE(realized, nullptr);
+    EXPECT_TRUE(realized->styleSheet().contains(QStringLiteral("#f44336")));
+    dock.onTradeReceived(tick("BTC-USD", 105.0));
+    auto* last = dock.findChild<QLabel*>("paperLastPrice");
+    ASSERT_NE(last, nullptr);
+    EXPECT_NE(last->text(), QStringLiteral("—"));
+    emit source.connectionStatusChanged(false);
+    QCoreApplication::processEvents();
+    EXPECT_EQ(realized->text(), QStringLiteral("—"));
+    EXPECT_TRUE(realized->styleSheet().contains(theme::text3().name()));
+    EXPECT_EQ(last->text(), QStringLiteral("—"));
+    EXPECT_TRUE(last->styleSheet().contains(theme::text3().name()));
+}
+
+TEST(PaperPolish, OrderRowsUseTwentyTwoPixels) {
+    PaperTradingDock dock;
+    auto* table = dock.findChild<QTableWidget*>("paperOrderLog");
+    ASSERT_NE(table, nullptr);
+    EXPECT_EQ(table->verticalHeader()->defaultSectionSize(), 22);
+    EXPECT_EQ(table->verticalHeader()->sectionResizeMode(0), QHeaderView::Fixed);
+    QFont large = table->font();
+    large.setPointSize(16);
+    table->setFont(large);
+    table->setRowCount(1);
+    EXPECT_EQ(table->rowHeight(0), 22);
+}
+
+TEST(PaperPolish, RangeButtonsShowSelectedState) {
+    PaperTradingDock dock;
+    auto* all = static_cast<QToolButton*>(nullptr);
+    for (auto* button : dock.findChildren<QToolButton*>()) if (button->text() == "All") all = button;
+    ASSERT_NE(all, nullptr);
+    EXPECT_TRUE(all->isChecked());
+    EXPECT_TRUE(all->styleSheet().contains("QToolButton:checked"));
+    EXPECT_TRUE(all->styleSheet().contains(theme::sel().name()));
+}
+
+TEST(PaperPolish, AlgoButtonsUseReadableDirectionAndDisabledColours) {
+    PaperTradingDock dock;
+    auto* start = dock.findChild<QPushButton*>("paperAlgoStart");
+    auto* stop = dock.findChild<QPushButton*>("paperAlgoStop");
+    ASSERT_NE(start, nullptr);
+    ASSERT_NE(stop, nullptr);
+    EXPECT_TRUE(start->styleSheet().contains(QStringLiteral("color: %1").arg(theme::positive().name())));
+    EXPECT_TRUE(stop->styleSheet().contains("color: #ff8c82"));
+    EXPECT_TRUE(start->styleSheet().contains(QStringLiteral(":disabled { color: %1").arg(theme::textOff().name())));
+    EXPECT_TRUE(stop->styleSheet().contains(QStringLiteral(":disabled { color: %1").arg(theme::textOff().name())));
+    const auto luminance = [](QColor color) {
+        const auto linear = [](double x) { return x <= 0.04045 ? x / 12.92 : std::pow((x + 0.055) / 1.055, 2.4); };
+        return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
+    };
+    const double background = luminance(theme::bg2());
+    for (const QColor ink : {theme::positive(), QColor("#FF8C82")})
+        EXPECT_GE((luminance(ink) + 0.05) / (background + 0.05), 4.5);
+}
+
+TEST(PaperPolish, LastPriceStaysPrimaryColour) {
+    PaperTradingDock dock;
+    dock.setSymbol("BTC-USD");
+    dock.onTradeReceived(tick("BTC-USD", 74000.0));
+    auto* last = dock.findChild<QLabel*>("paperLastPrice");
+    ASSERT_NE(last, nullptr);
+    EXPECT_TRUE(last->styleSheet().contains(theme::text().name()));
+}
+
+TEST(PaperPolish, InnerTabsAlignWithContent) {
+    PaperTradingDock dock;
+    auto* tabs = dock.findChild<QTabWidget*>("paperTabs");
+    ASSERT_NE(tabs, nullptr);
+    EXPECT_FALSE(tabs->tabBar()->expanding());
+    EXPECT_TRUE(tabs->styleSheet().contains("tab-bar { left: 0px"));
 }

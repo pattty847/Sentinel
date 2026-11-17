@@ -102,6 +102,9 @@ private:
     paper::OnAlgoStop onAlgoStopPolicy() const;
     QString sendAlgoCommand(const std::string& action, const trading::AlgoParams& params, const QString& symbol);
     void updateNotional();
+    void showFlatPosition();
+    void refreshManualReadiness();
+    void refreshEmptyStates();
     void updatePricePrecision(double price);
     void sendManualCommand(trading::TradeAction action,
                            trading::OrderSide side,
@@ -118,6 +121,7 @@ private:
     // Manual tab
     QLabel* m_lastPriceLabel = nullptr;
     QLabel* m_symbolLabel = nullptr;
+    QLabel* m_waitingLabel = nullptr;
     QLabel* m_notionalLabel = nullptr;
     QLabel* m_posLabel = nullptr;
     QLabel* m_avgPriceLabel = nullptr;
@@ -140,6 +144,7 @@ private:
     QPushButton* m_flattenBtn = nullptr;
     QPushButton* m_cancelAllBtn = nullptr;
     QTableWidget* m_orderLog = nullptr;
+    QLabel* m_orderEmptyLabel = nullptr;
     QHash<QString, int> m_orderIdToRow;
 
     // Algo tab — AvendellaMM panel
