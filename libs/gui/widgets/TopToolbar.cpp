@@ -73,7 +73,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_symbolSearch->setText("BTC-USD");
     // Leave room for gear, subscribe and overflow even on very narrow charts.
     m_symbolSearch->setMinimumWidth(60);
-    m_symbolSearch->setMaximumWidth(145);
+    m_symbolSearch->setMaximumWidth(110);
     addWidget(m_symbolSearch);
 
     m_subscribeButton = new QToolButton(this);
@@ -201,7 +201,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_tickModeCombo = new QComboBox(this);
     m_tickModeCombo->setObjectName("tickModeCombo");
     m_tickModeCombo->addItems({"Auto", "Manual"});
-    m_tickModeCombo->setFixedWidth(84);
+    m_tickModeCombo->setFixedWidth(80);
     m_tickModeCombo->setAccessibleName("Heatmap tick mode");
     m_tickModeAction = addCaptioned("Tick", "chartTickLabel", m_tickModeCombo);
     connect(m_tickModeCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
@@ -211,7 +211,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_tickPresetCombo = new ElidedTickCombo(this);
     m_tickPresetCombo->setObjectName("tickPresetCombo");
     m_tickPresetCombo->setAccessibleName("Heatmap tick size");
-    m_tickPresetCombo->setFixedWidth(84);
+    m_tickPresetCombo->setFixedWidth(72);
     m_tickPresetAction = addWidget(m_tickPresetCombo);
     connect(m_tickPresetCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
         const qint64 units = m_tickPresetCombo->itemData(index).toLongLong();
@@ -231,7 +231,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_chartTypeCombo->setObjectName("chartTypeCombo");
     m_chartTypeCombo->setAccessibleName("Candle style");
     m_chartTypeCombo->setToolTip("Candle style");
-    m_chartTypeCombo->setFixedWidth(90);
+    m_chartTypeCombo->setFixedWidth(78);
     m_chartTypeAction = addWidget(m_chartTypeCombo);
     connect(m_chartTypeCombo, &QComboBox::currentTextChanged, this, &TopToolbar::chartTypeSelected);
 
@@ -279,7 +279,7 @@ TopToolbar::TopToolbar(QWidget* parent)
 
     // GPU renderer: the two-handle range filter (replaces threshold/sensitivity).
     m_rangeSlider = new LiquidityRangeSlider(this);
-    m_rangeSlider->setFixedSize(170, 22);
+    m_rangeSlider->setFixedSize(120, 22);
     m_rangeAction = addCaptioned("Liq", "chartLiquidityLabel", m_rangeSlider);
     connect(m_rangeSlider, &LiquidityRangeSlider::rangeEdited, this, [this](double low, double high, bool final) {
         refreshRangeLabel();
@@ -287,9 +287,13 @@ TopToolbar::TopToolbar(QWidget* parent)
     });
     m_rangeLabel = new QLabel(this);
     m_rangeLabel->setObjectName("liquidityRangeLabel");
-    m_rangeLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; padding-left: 4px; }").arg(theme::text3().name()));
+    m_rangeLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; }").arg(theme::text3().name()));
     m_rangeLabel->setMinimumWidth(72);
-    m_rangeLabelAction = addWidget(m_rangeLabel);
+    // The readout belongs to the slider's slot: it hides and overflows with it.
+    if (auto *row = qobject_cast<QHBoxLayout *>(widgetForAction(m_rangeAction)->layout())) {
+        m_rangeLabel->setParent(widgetForAction(m_rangeAction));
+        row->addWidget(m_rangeLabel);
+    }
 
     // TPO-only controls (renderer state; HeatmapChartControls keeps them in sync).
     m_tpoSessionCombo = new QComboBox(this);
@@ -356,7 +360,7 @@ TopToolbar::TopToolbar(QWidget* parent)
         QList<QAction*> group{m_inlineActions[i]};
         if (i == m_pinnedFrom) m_pinnedGroup = int(m_inlineGroups.size());
         QAction *last = m_inlineActions[i] == m_tickModeAction ? m_tickVeilAction
-                      : m_inlineActions[i] == m_rangeAction ? m_rangeLabelAction : nullptr;
+                      : nullptr;
         if (last) while (group.back() != last && i + 1 < m_inlineActions.size()) group << m_inlineActions[++i];
         m_inlineGroups << group;
         for (auto *action : group) m_modeVisibility.insert(action, true);
@@ -878,7 +882,7 @@ void TopToolbar::fitControls() {
         // and subscribe stay; the gear is outside the hideable list.
         QVector<int> order;
         const auto slot = [this](int i) {
-            const QAction *first = m_inlineGroups[i].front();
+            QAction *first = m_inlineGroups[i].front();
             return !first->isSeparator() && m_modeVisibility.value(first, true);
         };
         for (int pass = 0; pass < 3; ++pass)
@@ -978,7 +982,6 @@ void TopToolbar::applyVisibility() {
     for (auto *a : {m_modeLabelAction, m_modeComboAction}) show(a, v.liquidity);
     show(m_labelsAction, v.labelsToggle);
     show(m_rangeAction, v.rangeSlider);
-    show(m_rangeLabelAction, v.rangeSlider);
     show(m_chartTypeAction, v.candleStyle);
     show(m_tpoSessionAction, v.tpoSession);
     show(m_tpoLayoutAction, v.tpoLayout);

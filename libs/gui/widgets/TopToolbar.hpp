@@ -226,6 +226,6 @@ private:
     QAction *m_tickModeAction = nullptr, *m_tickPresetAction = nullptr, *m_tickVeilAction = nullptr;
     QAction *m_chartTypeAction = nullptr, *m_paletteAction = nullptr;
     QAction *m_modeLabelAction = nullptr, *m_modeComboAction = nullptr;
-    QAction *m_labelsAction = nullptr, *m_rangeAction = nullptr, *m_rangeLabelAction = nullptr;
+    QAction *m_labelsAction = nullptr, *m_rangeAction = nullptr;
     QAction *m_tpoSessionAction = nullptr, *m_tpoLayoutAction = nullptr;
 };

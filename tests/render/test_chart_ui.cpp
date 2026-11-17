@@ -751,9 +751,12 @@ TEST(ChartToolbar, DefaultWidthKeepsTheLiquidityRangeAndLeavesNoBlankBesideOverf
     toolbar.setTickSelectorState({true, {}, false, 500, 0, {100, 500, 1000}, 100, {}});
     toolbar.setLiquidityRange(1e-9, 12, 6.7e-08, 9.41);
     toolbar.show();
+    toolbar.resize(3200, 44);
+    QTest::qWait(20);
+    const int unconstrained = toolbar.sizeHint().width();
     toolbar.resize(1146, 44); // the brief's capture width (D1)
     QTest::qWait(20);
-    EXPECT_TRUE(toolbar.rangeSlider()->isVisible()) << "hint=" << toolbar.sizeHint().width();
+    EXPECT_TRUE(toolbar.rangeSlider()->isVisible()) << "full width needed=" << unconstrained;
     EXPECT_TRUE(toolbar.rangeLabel()->isVisible());
     QToolButton *fullscreen = nullptr;
     for (auto *button : toolbar.findChildren<QToolButton *>())
@@ -865,12 +868,15 @@ TEST(ChartToolbar, OpenOverflowEditorSurvivesFitChangesAndRebuildsAfterHide) {
 TEST(ChartToolbar, OneHiddenControlIsTheOnlyOverflowEntry) {
     TopToolbar toolbar;
     ASSERT_GT(widthForOneHiddenControl(toolbar), 0);
+    // The overflow button takes the room the pinned action would free, so the
+    // first slot to overflow is the liquidity range; the action refills its blank.
     useOverflow(toolbar, [&](QMenu *menu) {
-        EXPECT_EQ(menuEntries(menu), QStringList{"Fullscreen"});
+        EXPECT_EQ(menuEntries(menu), QStringList{"Liquidity range"});
         EXPECT_EQ(menu->actions().size(), 1);
-        EXPECT_EQ(menu->actions().first(), toolbar.findChild<QAction *>("chartFullscreenAction"));
     });
-    EXPECT_TRUE(toolbar.rangeSlider()->isVisible());
+    EXPECT_FALSE(toolbar.rangeSlider()->isVisible());
+    for (auto *button : toolbar.findChildren<QToolButton *>())
+        if (button->defaultAction() == toolbar.findChild<QAction *>("chartFullscreenAction")) EXPECT_TRUE(button->isVisible());
 }
 
 TEST(ChartToolbar, AllHiddenControlsKeepToolbarOrderAndSeparatorGroups) {
@@ -911,16 +917,12 @@ TEST(ChartToolbar, WideningRestoresInlineControlAndRemovesOverflowEntryPerChart)
     wide.show();
     ASSERT_GT(widthForOneHiddenControl(narrow), 0);
     EXPECT_FALSE(wide.controlsButton()->isVisible());
-    auto *fullscreen = narrow.findChild<QAction *>("chartFullscreenAction");
-    QToolButton *button = nullptr;
-    for (auto *candidate : narrow.findChildren<QToolButton *>())
-        if (candidate->defaultAction() == fullscreen) button = candidate;
-    ASSERT_TRUE(button);
-    EXPECT_FALSE(button->isVisible());
-    EXPECT_EQ(menuEntries(narrow.controlsButton()->menu()), QStringList{"Fullscreen"});
+    auto *slider = narrow.rangeSlider();
+    EXPECT_FALSE(slider->isVisible());
+    EXPECT_EQ(menuEntries(narrow.controlsButton()->menu()), QStringList{"Liquidity range"});
     narrow.resize(1920, 44);
     QTest::qWait(20);
-    EXPECT_TRUE(button->isVisible());
+    EXPECT_TRUE(slider->isVisible());
     EXPECT_FALSE(narrow.controlsButton()->isVisible());
     EXPECT_TRUE(narrow.controlsButton()->menu()->isEmpty());
     EXPECT_FALSE(wide.controlsButton()->isVisible());
@@ -2671,7 +2673,8 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     ugr->layers()->setTpoEnabled(true); // exclusive today: the heatmap goes off
     pump(300, [] { return false; });
     auto shown = toolbar->shownControls();
-    EXPECT_FALSE(shown.tickSelector);
+    EXPECT_TRUE(shown.tickSelector) << "a fixed slot (TB-3)";
+    EXPECT_FALSE(toolbar->tickModeCombo()->isEnabled()) << "disabled while the heatmap is off";
     EXPECT_FALSE(shown.rangeSlider);
     EXPECT_FALSE(shown.palette);
     EXPECT_FALSE(shown.liquidity);
