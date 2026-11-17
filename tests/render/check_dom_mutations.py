@@ -117,7 +117,7 @@ mutants = [
     ('leading_zero_kept', model,
      [('if (!style.leadingZero && result.ptr - at >= 2', 'if (false && result.ptr - at >= 2')],
      'DomModel.SizesShowThreeSignificantDigitsWithoutFloatNoise'),
-    ('dust_in_e_notation', model,
+    ('dust_floor_removed', model,
      [('    if (value > 0 && value < style.dust) {', '    if (false) {')],
      'DomModel.SizesShowThreeSignificantDigitsWithoutFloatNoise'),
     ('size_digits_never_raised', model,
