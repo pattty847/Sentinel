@@ -284,10 +284,9 @@ void HeatmapChartControls::buildChartMenu() {
         return a;
     };
     const auto hook = [](const std::function<void()> &f) { return f ? f : std::function<void()>{}; };
+    // One entry for the one settings dialog (MENU-2); its tabs reach the rest.
     add(menu, "Chart settings...", "chartMenuSettings",
         m_hooks.openSettings ? std::function<void()>([this] { m_hooks.openSettings("Chart"); }) : nullptr);
-    add(menu, "Heatmap settings...", "chartMenuHeatmapSettings",
-        m_hooks.openSettings ? std::function<void()>([this] { m_hooks.openSettings("Look"); }) : nullptr);
     QMenu *palettes = menu->addMenu("Heatmap palette");
     palettes->setObjectName("chartMenuPalettes");
     auto *paletteGroup = new QActionGroup(palettes);
@@ -301,6 +300,7 @@ void HeatmapChartControls::buildChartMenu() {
         a->setData(preset);
         paletteGroup->addAction(a);
     }
+    // Each overlay switch heads one group with its parameters (MENU-4).
     menu->addSeparator();
     QAction *trades = add(menu, "Trades", "chartMenuTrades", [this] {
         const auto error = m_model->apply({{"showTrades", !m_model->settings().showTrades}});
@@ -321,6 +321,7 @@ void HeatmapChartControls::buildChartMenu() {
         a->setData(value);
         tradeGroup->addAction(a);
     }
+    menu->addSeparator();
     QAction *ladder = add(menu, "Order book ladder", "chartMenuLadder", [this] {
         requestLadder(!(m_renderer && m_renderer->layers()->ladderEnabled()));
     });
@@ -335,6 +336,7 @@ void HeatmapChartControls::buildChartMenu() {
         a->setData(px);
         ladderGroup->addAction(a);
     }
+    menu->addSeparator();
     QAction *radar = add(menu, "Wall radar", "chartMenuWallRadar", [this] {
         requestWallRadar(!(m_renderer && m_renderer->layers()->wallRadarEnabled()));
     });
@@ -350,6 +352,7 @@ void HeatmapChartControls::buildChartMenu() {
         a->setData(multiple);
         wallGroup->addAction(a);
     }
+    menu->addSeparator();
     QAction *labels = add(menu, "Liquidity labels", "chartMenuLabels", [this] {
         requestLabels(!m_model->settings().showLabels);
     });
@@ -374,6 +377,7 @@ void HeatmapChartControls::buildChartMenu() {
         a->setData(int(i));
         sizeGroup->addAction(a);
     }
+    menu->addSeparator();
     QMenu *candles = menu->addMenu("Candle style");
     candles->setObjectName("chartMenuCandleStyle");
     auto *candleGroup = new QActionGroup(candles);
@@ -556,9 +560,7 @@ void HeatmapChartControls::syncNow() {
                                      s.sensitivityMin, s.sensitivityMax);
         m_toolbar->setLabelOptions(s.showLabels, s.labelCurrency == "usd");
         m_toolbar->setColorPreset(QString::fromStdString(s.palettePreset));
-        m_toolbar->chartTypeCombo()->setEnabled(bool(m_renderer));
-        m_toolbar->tpoSessionCombo()->setEnabled(bool(m_renderer));
-        m_toolbar->tpoLayoutCombo()->setEnabled(bool(m_renderer));
+        m_toolbar->setChartAttached(bool(m_renderer));
         if (m_renderer) {
             m_toolbar->setTpoState(m_renderer->tpo()->tpoSessionType(), m_renderer->tpo()->tpoLayout());
             if (auto *combo = m_toolbar->chartTypeCombo(); combo && combo->currentIndex() != m_renderer->candles()->candleStyle()) {

@@ -1,5 +1,7 @@
 #include "LiquidityRangeSlider.hpp"
 #include "SentinelLogging.hpp"
+#include "themes/ThemePalette.hpp"
+#include <QLocale>
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <QFocusEvent>
@@ -9,9 +11,23 @@
 
 namespace {
 constexpr double kHandleRadius = 6;
+constexpr double kAmountFloor = 0.0001;
 bool positive(double v) { return std::isfinite(v) && v > 0; }
-QString amount(double v) { return QString::number(v, 'g', 3); }
 } // namespace
+
+QString LiquidityRangeSlider::amountText(double value) {
+    if (!positive(value)) return QStringLiteral("0");
+    if (value < kAmountFloor) return QStringLiteral("<0.0001");
+    const int decimals = std::max(0, 2 - int(std::floor(std::log10(value))));
+    const double rounded = QString::number(value, 'f', decimals).toDouble();
+    if (rounded >= 1000) return QLocale(QLocale::English, QLocale::UnitedStates).toString(rounded, 'f', 0);
+    QString text = QString::number(rounded, 'f', decimals);
+    if (text.contains(QLatin1Char('.'))) {
+        while (text.endsWith(QLatin1Char('0'))) text.chop(1);
+        if (text.endsWith(QLatin1Char('.'))) text.chop(1);
+    }
+    return text;
+}
 
 LiquidityRangeSlider::LiquidityRangeSlider(QWidget *parent) : QWidget(parent) {
     setObjectName("liquidityRangeSlider");
@@ -79,24 +95,23 @@ void LiquidityRangeSlider::paintEvent(QPaintEvent *) {
     const double cy = height() / 2.0;
     const double l = trackLeft(), r = trackRight(), xl = xOf(low_), xh = xOf(high_);
     p.setPen(Qt::NoPen);
-    p.setBrush(QColor(0x3A, 0x41, 0x4B)); // hidden below the low handle
+    p.setBrush(theme::textOff()); // hidden below the low handle
     p.drawRoundedRect(QRectF(l, cy - 2, r - l, 4), 2, 2);
     QLinearGradient ramp(xl, 0, xh, 0); // colour ramp between the handles
-    ramp.setColorAt(0, QColor(0x1F, 0x4E, 0x6E));
-    ramp.setColorAt(1, QColor(0x4F, 0xD8, 0xFF));
+    ramp.setColorAt(0, theme::sel());
+    ramp.setColorAt(1, theme::accent());
     p.setBrush(ramp);
     p.drawRect(QRectF(xl, cy - 2, xh - xl, 4));
-    p.setBrush(QColor(0x4F, 0xD8, 0xFF)); // saturated above the high handle
+    p.setBrush(theme::accent()); // saturated above the high handle
     p.drawRect(QRectF(xh, cy - 2, r - xh, 4));
     for (const auto &[x, handle] : {std::pair{xl, Handle::Low}, std::pair{xh, Handle::High}}) {
-        p.setPen(QPen(QColor(0x0E, 0x11, 0x16), 1.5));
-        p.setBrush(active_ == handle || (hasFocus() && focusedHandle_ == handle)
-                       ? QColor(0xFF, 0xFF, 0xFF) : QColor(0xC9, 0xD3, 0xDE));
+        p.setPen(QPen(theme::bg0(), 1.5));
+        p.setBrush(active_ == handle || (hasFocus() && focusedHandle_ == handle) ? theme::text() : theme::text3());
         p.drawEllipse(QPointF(x, cy), kHandleRadius, kHandleRadius);
     }
     if (hasFocus()) {
         p.setBrush(Qt::NoBrush);
-        p.setPen(QPen(QColor(0x72, 0xB7, 0xE8), 1));
+        p.setPen(QPen(theme::selLine(), 1));
         p.drawRoundedRect(rect().adjusted(0, 0, -1, -1), 3, 3);
     }
 }
@@ -204,7 +219,7 @@ void LiquidityRangeSlider::refreshTip() {
                                        "Low %1: smaller cells get no colour and no label\n"
                                        "High %2: colour saturates at and above it\n"
                                        "Home/End selects a handle; arrows adjust; Space switches handle")
-                            .arg(amount(low_), amount(high_), baseUnit_);
+                            .arg(amountText(low_), amountText(high_), baseUnit_);
     setToolTip(tip);
     setAccessibleDescription(tip);
 }

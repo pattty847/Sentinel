@@ -371,7 +371,6 @@ set(SENTINEL_SVG_FILES
     "${SENTINEL_SVG_DIR}/menu_chevron.svg"
     "${SENTINEL_SVG_DIR}/full_screen.svg"
     "${SENTINEL_SVG_DIR}/grid_view.svg"
-    "${SENTINEL_SVG_DIR}/indicators.svg"
     "${SENTINEL_SVG_DIR}/layout.svg"
     "${SENTINEL_SVG_DIR}/line_chart.svg"
     "${SENTINEL_SVG_DIR}/record.svg"
@@ -379,6 +378,7 @@ set(SENTINEL_SVG_FILES
     "${SENTINEL_SVG_DIR}/search.svg"
     "${SENTINEL_SVG_DIR}/settings.svg"
     "${SENTINEL_SVG_DIR}/tpo_chart.svg"
+    "${SENTINEL_SVG_DIR}/volume_profile.svg"
     "${SENTINEL_SVG_DIR}/footprint.svg"
     "${SENTINEL_SVG_DIR}/refresh.svg"
     "${SENTINEL_SVG_DIR}/auto-refresh.svg"
@@ -427,7 +427,6 @@ set_source_files_properties("${SENTINEL_SVG_DIR}/chevron_up.svg" PROPERTIES QT_R
 set_source_files_properties("${SENTINEL_SVG_DIR}/checkbox_tick.svg" PROPERTIES QT_RESOURCE_ALIAS "checkbox_tick.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/full_screen.svg" PROPERTIES QT_RESOURCE_ALIAS "full_screen.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/grid_view.svg" PROPERTIES QT_RESOURCE_ALIAS "grid_view.svg")
-set_source_files_properties("${SENTINEL_SVG_DIR}/indicators.svg" PROPERTIES QT_RESOURCE_ALIAS "indicators.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/layout.svg" PROPERTIES QT_RESOURCE_ALIAS "layout.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/line_chart.svg" PROPERTIES QT_RESOURCE_ALIAS "line_chart.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/record.svg" PROPERTIES QT_RESOURCE_ALIAS "record.svg")
@@ -435,6 +434,7 @@ set_source_files_properties("${SENTINEL_SVG_DIR}/reset_settings.svg" PROPERTIES 
 set_source_files_properties("${SENTINEL_SVG_DIR}/search.svg" PROPERTIES QT_RESOURCE_ALIAS "search.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/settings.svg" PROPERTIES QT_RESOURCE_ALIAS "settings.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/tpo_chart.svg" PROPERTIES QT_RESOURCE_ALIAS "tpo_chart.svg")
+set_source_files_properties("${SENTINEL_SVG_DIR}/volume_profile.svg" PROPERTIES QT_RESOURCE_ALIAS "volume_profile.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/footprint.svg" PROPERTIES QT_RESOURCE_ALIAS "footprint.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/refresh.svg" PROPERTIES QT_RESOURCE_ALIAS "refresh.svg")
 set_source_files_properties("${SENTINEL_SVG_DIR}/auto-refresh.svg" PROPERTIES QT_RESOURCE_ALIAS "auto-refresh.svg")

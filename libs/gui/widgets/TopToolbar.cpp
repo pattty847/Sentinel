@@ -1,6 +1,9 @@
 #include "TopToolbar.hpp"
 #include "SentinelLogging.hpp"
+#include "themes/ThemePalette.hpp"
 #include <QAction>
+#include <QLocale>
+#include <cmath>
 #include <QActionEvent>
 #include <QToolButton>
 #include <QWidget>
@@ -56,6 +59,8 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_chartMenuButton->setToolTip("Chart settings and appearance");
     m_chartMenuButton->setAccessibleName("Chart settings and appearance");
     m_chartMenuButton->setPopupMode(QToolButton::InstantPopup);
+    // A clean gear (TB-7): Qt's menu indicator would clip a chevron into the glyph.
+    m_chartMenuButton->setStyleSheet("QToolButton#chartMenuButton::menu-indicator { image: none; width: 0px; }");
     m_chartMenu = new QMenu(m_chartMenuButton);
     m_chartMenu->setObjectName("chartMenu");
     m_chartMenu->setToolTipsVisible(true);
@@ -70,7 +75,13 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_symbolSearch->setText("BTC-USD");
     // Leave room for gear, subscribe and overflow even on very narrow charts.
     m_symbolSearch->setMinimumWidth(60);
-    m_symbolSearch->setMaximumWidth(145);
+    m_symbolSearch->setMaximumWidth(110);
+    // The field can clip a long symbol: its tooltip always names it in full.
+    const auto nameSymbol = [this](const QString &text) {
+        m_symbolSearch->setToolTip(text.isEmpty() ? m_symbolSearch->placeholderText() : text);
+    };
+    nameSymbol(m_symbolSearch->text());
+    connect(m_symbolSearch, &QLineEdit::textChanged, this, nameSymbol);
     addWidget(m_symbolSearch);
 
     m_subscribeButton = new QToolButton(this);
@@ -80,6 +91,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_subscribeButton->setAccessibleName("Show symbol chart");
     addWidget(m_subscribeButton);
     connect(m_subscribeButton, &QToolButton::clicked, this, &TopToolbar::subscribeRequested);
+    addSeparator();
 
     // A public Qt extension button represents only controls hidden by width.
     // QToolBar's embedded native extension cannot represent addWidget controls.
@@ -131,11 +143,9 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_tpoButton->setCheckable(true);
     m_tpoButton->setAutoExclusive(false);
 
-    // A text mark distinguishes volume profile from the TPO glyph at a glance.
-    m_volumeProfileButton = addIconButton(QString(), "Volume profile");
+    // An icon like every other mode (TB-5): bars on a price axis, unlike the framed TPO glyph.
+    m_volumeProfileButton = addIconButton(":/svg/volume_profile.svg", "Volume profile");
     m_volumeProfileButton->setObjectName("chartVolumeProfileButton");
-    m_volumeProfileButton->setText("VP");
-    m_volumeProfileButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
     m_volumeProfileButton->setAccessibleName("Volume profile layer");
     m_volumeProfileButton->setCheckable(true);
     m_volumeProfileButton->setAutoExclusive(false);
@@ -193,17 +203,15 @@ TopToolbar::TopToolbar(QWidget* parent)
             emit timeframeSelected(ms);
         }
     });
+    addSeparator();
 
     // Heatmap tick: Auto/Manual and the preset (S6c). Driven by setTickSelectorState.
-    auto *tickLabel = new QLabel("Tick", this);
-    tickLabel->setObjectName("chartTickLabel");
-    m_tickLabelAction = addWidget(tickLabel);
     m_tickModeCombo = new QComboBox(this);
     m_tickModeCombo->setObjectName("tickModeCombo");
     m_tickModeCombo->addItems({"Auto", "Manual"});
-    m_tickModeCombo->setFixedWidth(84);
+    m_tickModeCombo->setFixedWidth(80);
     m_tickModeCombo->setAccessibleName("Heatmap tick mode");
-    m_tickModeAction = addWidget(m_tickModeCombo);
+    m_tickModeAction = addCaptioned("Tick", "chartTickLabel", m_tickModeCombo);
     connect(m_tickModeCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
         sLog_App("ui: toolbar tick mode=" << (index == 1 ? "manual" : "auto"));
         emit tickModeRequested(index == 1);
@@ -211,7 +219,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_tickPresetCombo = new ElidedTickCombo(this);
     m_tickPresetCombo->setObjectName("tickPresetCombo");
     m_tickPresetCombo->setAccessibleName("Heatmap tick size");
-    m_tickPresetCombo->setFixedWidth(84);
+    m_tickPresetCombo->setFixedWidth(72);
     m_tickPresetAction = addWidget(m_tickPresetCombo);
     connect(m_tickPresetCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
         const qint64 units = m_tickPresetCombo->itemData(index).toLongLong();
@@ -224,13 +232,14 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_tickVeilLabel->setStyleSheet("QLabel { color: #F0B46A; padding-left: 4px; }");
     m_tickVeilAction = addWidget(m_tickVeilLabel);
     setTickSelectorState({});
+    addSeparator();
 
     m_chartTypeCombo = new QComboBox(this);
     m_chartTypeCombo->addItems({"Candle", "Hollow", "Line"});
     m_chartTypeCombo->setObjectName("chartTypeCombo");
     m_chartTypeCombo->setAccessibleName("Candle style");
     m_chartTypeCombo->setToolTip("Candle style");
-    m_chartTypeCombo->setFixedWidth(90);
+    m_chartTypeCombo->setFixedWidth(78);
     m_chartTypeAction = addWidget(m_chartTypeCombo);
     connect(m_chartTypeCombo, &QComboBox::currentTextChanged, this, &TopToolbar::chartTypeSelected);
 
@@ -242,38 +251,7 @@ TopToolbar::TopToolbar(QWidget* parent)
     m_paletteAction = addWidget(m_colorPresetCombo);
     connect(m_colorPresetCombo, &QComboBox::currentTextChanged, this, &TopToolbar::colorPresetSelected);
 
-    // TPO-only controls (renderer state; HeatmapChartControls keeps them in sync).
-    m_tpoSessionCombo = new QComboBox(this);
-    m_tpoSessionCombo->setObjectName("tpoSessionCombo");
-    m_tpoSessionCombo->setAccessibleName("TPO and volume profile session");
-    for (const auto &[name, id] : std::initializer_list<std::pair<const char *, int>>{
-             {"New York", 0}, {"London", 1}, {"Asia", 2}, {"Australia", 3}, {"24H", 4}, {"1W", 5}, {"1M", 6}})
-        m_tpoSessionCombo->addItem(name, id);
-    m_tpoSessionCombo->setFixedWidth(96);
-    m_tpoSessionCombo->setToolTip("TPO session (the volume profile follows it)");
-    m_tpoSessionAction = addWidget(m_tpoSessionCombo);
-    connect(m_tpoSessionCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
-        sLog_App("ui: toolbar tpo session=" << m_tpoSessionCombo->itemData(index).toInt());
-        emit tpoSessionSelected(m_tpoSessionCombo->itemData(index).toInt());
-    });
-    m_tpoLayoutCombo = new QComboBox(this);
-    m_tpoLayoutCombo->setObjectName("tpoLayoutCombo");
-    m_tpoLayoutCombo->setAccessibleName("TPO layout");
-    m_tpoLayoutCombo->addItem("Collapsed", "collapsed");
-    m_tpoLayoutCombo->addItem("Split", "split");
-    m_tpoLayoutCombo->setFixedWidth(96);
-    m_tpoLayoutCombo->setToolTip("TPO layout");
-    m_tpoLayoutAction = addWidget(m_tpoLayoutCombo);
-    connect(m_tpoLayoutCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
-        sLog_App("ui: toolbar tpo layout=" << m_tpoLayoutCombo->itemData(index).toString());
-        emit tpoLayoutSelected(m_tpoLayoutCombo->itemData(index).toString());
-    });
-
     addSeparator();
-
-    QLabel* liqLabel = new QLabel("Liq", this);
-    liqLabel->setStyleSheet("QLabel { color: #B6C2CF; padding-left: 4px; }");
-    m_liqLabelAction = addWidget(liqLabel);
 
     // Liquidity labels on/off (S7b) and their currency.
     m_labelsButton = new QToolButton(this);
@@ -309,37 +287,62 @@ TopToolbar::TopToolbar(QWidget* parent)
 
     // GPU renderer: the two-handle range filter (replaces threshold/sensitivity).
     m_rangeSlider = new LiquidityRangeSlider(this);
-    m_rangeSlider->setFixedSize(170, 22);
-    m_rangeAction = addWidget(m_rangeSlider);
+    m_rangeSlider->setFixedSize(120, 22);
+    m_rangeAction = addCaptioned("Liq", "chartLiquidityLabel", m_rangeSlider);
     connect(m_rangeSlider, &LiquidityRangeSlider::rangeEdited, this, [this](double low, double high, bool final) {
         refreshRangeLabel();
         emit liquidityRangeEdited(low, high, final);
     });
     m_rangeLabel = new QLabel(this);
     m_rangeLabel->setObjectName("liquidityRangeLabel");
-    m_rangeLabel->setStyleSheet("QLabel { color: #8FA3B8; padding-left: 4px; }");
+    m_rangeLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; }").arg(theme::text3().name()));
     m_rangeLabel->setMinimumWidth(72);
-    m_rangeLabelAction = addWidget(m_rangeLabel);
-
-    addSeparator();
-
-    m_indicatorsAction = addIconAction(":/svg/indicators.svg", "Indicators", "Indicators are not available on this chart yet");
-    m_indicatorsAction->setObjectName("chartIndicatorsAction");
-    m_indicatorsAction->setEnabled(false);
-    if (auto *button = findChild<QToolButton *>("chartIndicatorsButton")) {
-        button->setAccessibleDescription(m_indicatorsAction->toolTip());
-        button->setAttribute(Qt::WA_AlwaysShowToolTips);
+    // The readout belongs to the slider's slot: it hides and overflows with it.
+    if (auto *row = qobject_cast<QHBoxLayout *>(widgetForAction(m_rangeAction)->layout())) {
+        m_rangeLabel->setParent(widgetForAction(m_rangeAction));
+        row->addWidget(m_rangeLabel);
     }
+
+    // TPO-only controls (renderer state; HeatmapChartControls keeps them in sync).
+    m_tpoSessionCombo = new QComboBox(this);
+    m_tpoSessionCombo->setObjectName("tpoSessionCombo");
+    m_tpoSessionCombo->setAccessibleName("TPO and volume profile session");
+    for (const auto &[name, id] : std::initializer_list<std::pair<const char *, int>>{
+             {"New York", 0}, {"London", 1}, {"Asia", 2}, {"Australia", 3}, {"24H", 4}, {"1W", 5}, {"1M", 6}})
+        m_tpoSessionCombo->addItem(name, id);
+    m_tpoSessionCombo->setFixedWidth(96);
+    m_tpoSessionCombo->setToolTip("TPO session (the volume profile follows it)");
+    m_tpoSessionAction = addCaptioned("Session", "chartTpoSessionLabel", m_tpoSessionCombo);
+    connect(m_tpoSessionCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
+        sLog_App("ui: toolbar tpo session=" << m_tpoSessionCombo->itemData(index).toInt());
+        emit tpoSessionSelected(m_tpoSessionCombo->itemData(index).toInt());
+    });
+    m_tpoLayoutCombo = new QComboBox(this);
+    m_tpoLayoutCombo->setObjectName("tpoLayoutCombo");
+    m_tpoLayoutCombo->setAccessibleName("TPO layout");
+    m_tpoLayoutCombo->addItem("Collapsed", "collapsed");
+    m_tpoLayoutCombo->addItem("Split", "split");
+    m_tpoLayoutCombo->setFixedWidth(96);
+    m_tpoLayoutCombo->setToolTip("TPO layout");
+    m_tpoLayoutAction = addCaptioned("Layout", "chartTpoLayoutLabel", m_tpoLayoutCombo);
+    connect(m_tpoLayoutCombo, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
+        sLog_App("ui: toolbar tpo layout=" << m_tpoLayoutCombo->itemData(index).toString());
+        emit tpoLayoutSelected(m_tpoLayoutCombo->itemData(index).toString());
+    });
+
     m_layoutsAction = new QAction("Layouts", this);
     m_layoutsAction->setToolTip("Save, restore or reset a workspace layout");
     m_layoutsAction->setObjectName("chartLayoutsAction");
-
-    addSeparator();
 
     QAction* quickSearchAction = new QAction("Quick Search", this);
     quickSearchAction->setToolTip("Focus symbol search");
     quickSearchAction->setObjectName("chartQuickSearchAction");
     m_quickSearchAction = quickSearchAction;
+    // Actions are pinned right, after the stretch: a mode switch never moves them.
+    auto *spacer = new QWidget(this);
+    spacer->setObjectName("chartToolbarStretch");
+    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    m_spacerAction = addWidget(spacer);
     m_fullscreenAction = addIconAction(":/svg/full_screen.svg", "Fullscreen", "Toggle fullscreen (F11)");
     m_fullscreenAction->setObjectName("chartFullscreenAction");
     m_fullscreenAction->setCheckable(true);
@@ -358,18 +361,18 @@ TopToolbar::TopToolbar(QWidget* parent)
     buildControlsMenu();
     refreshGearCommands();
     m_inlineActions = actions();
+    m_pinnedFrom = int(m_inlineActions.indexOf(m_spacerAction));
+    m_inlineActions.removeAt(m_pinnedFrom);
     // Collapse labels together with their inputs, and preserve the original order.
     for (int i = 0; i < m_inlineActions.size(); ++i) {
         QList<QAction*> group{m_inlineActions[i]};
-        QAction *last = m_inlineActions[i] == m_tickLabelAction ? m_tickVeilAction
-                      : m_inlineActions[i] == m_liqLabelAction ? m_rangeLabelAction : nullptr;
+        if (i == m_pinnedFrom) m_pinnedGroup = int(m_inlineGroups.size());
+        QAction *last = m_inlineActions[i] == m_tickModeAction ? m_tickVeilAction
+                      : nullptr;
         if (last) while (group.back() != last && i + 1 < m_inlineActions.size()) group << m_inlineActions[++i];
         m_inlineGroups << group;
         for (auto *action : group) m_modeVisibility.insert(action, true);
     }
-    auto *spacer = new QWidget(this);
-    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    m_spacerAction = addWidget(spacer);
     m_overflowAction = addWidget(m_controlsButton);
     // Settings always occupies the far right; overflow sits immediately left.
     m_gearAction = addWidget(m_chartMenuButton);
@@ -437,7 +440,6 @@ void TopToolbar::buildControlsMenu() {
     m_labelsMenu = m_controlsMenu->addMenu("Liquidity labels");
     m_labelsMenu->setObjectName("controlsLabels");
     m_controlsMenu->addSeparator();
-    m_controlsMenu->addAction(m_indicatorsAction);
     m_layoutsMenu = m_controlsMenu->addMenu("Layouts");
     m_layoutsMenu->setObjectName("controlsLayouts");
     m_controlsMenu->addAction(m_quickSearchAction);
@@ -493,8 +495,8 @@ void TopToolbar::refreshControlsMenu() {
             entry->setEnabled(active && combo->isEnabled());
         }
     }
-    m_tickMenu->menuAction()->setEnabled(m_mode.heatmap && m_tickState.enabled);
-    m_tickMenu->menuAction()->setToolTip(!m_mode.heatmap ? QStringLiteral("Enable the heatmap layer to change its tick")
+    m_tickMenu->menuAction()->setEnabled(tickLayerOn() && m_tickState.enabled);
+    m_tickMenu->menuAction()->setToolTip(!tickLayerOn() ? QStringLiteral("Enable the heatmap or footprint layer to change its tick")
         : m_tickState.enabled ? m_tickState.indicator : m_tickState.disabledReason);
     m_tickMenu->clear();
     QAction *autoTick = m_tickMenu->addAction("Auto tick");
@@ -635,13 +637,15 @@ void TopToolbar::refreshOverflowMenu() {
         {m_tpoLayoutCombo, {"TPO layout", "controlsTpoLayout"}},
     };
     bool separator = false;
-    for (auto *inlineAction : m_inlineActions) {
+    for (int index = 0; index < m_inlineActions.size(); ++index) {
+        QAction *inlineAction = m_inlineActions[index];
+        if (index == m_pinnedFrom) separator = !m_overflowMenu->isEmpty();
         if (inlineAction->isSeparator()) {
             separator = !m_overflowMenu->isEmpty();
             continue;
         }
         if (!m_modeVisibility.value(inlineAction, true) || inlineAction->isVisible()) continue;
-        auto *widget = widgetForAction(inlineAction);
+        auto *widget = m_fieldEditors.value(widgetForAction(inlineAction), widgetForAction(inlineAction));
         // Labels and status annotations travel with their editor, not as commands.
         if (qobject_cast<QLabel *>(widget)) continue;
         auto separate = [&] {
@@ -663,7 +667,7 @@ void TopToolbar::refreshOverflowMenu() {
             else if (button == m_footprintButton) name = "controlsFootprint";
             else if (button == m_tpoButton) name = "controlsTpo";
             else if (button == m_volumeProfileButton) name = "controlsVolumeProfile";
-            else if (command != m_indicatorsAction && command != m_fullscreenAction) continue;
+            else if (command != m_fullscreenAction) continue;
             if (name) {
                 command = m_controlsMenu->findChild<QAction *>(name);
                 if (!command) continue;
@@ -680,8 +684,8 @@ void TopToolbar::refreshOverflowMenu() {
 
 void TopToolbar::refreshRangeLabel() {
     if (!m_rangeLabel || !m_rangeSlider) return;
-    const QString range = QString::number(m_rangeSlider->low(), 'g', 3) + QStringLiteral(" - ") +
-                          QString::number(m_rangeSlider->high(), 'g', 3) + QStringLiteral(" ") + m_baseAssetSymbol;
+    const QString range = LiquidityRangeSlider::amountText(m_rangeSlider->low()) + QStringLiteral(" \u2013 ") +
+                          LiquidityRangeSlider::amountText(m_rangeSlider->high()) + QStringLiteral(" ") + m_baseAssetSymbol;
     m_rangeLabel->setText(range);
     m_rangeLabel->setToolTip(QStringLiteral("Base-asset size per heatmap cell: %1").arg(range));
     if (m_overflowRangeLabel) {
@@ -860,7 +864,7 @@ void TopToolbar::fitControls() {
     // action changes post LayoutRequest too; unchanged inputs end that cycle.
     QVector<int> inputs{width(), layout()->contentsMargins().left(), layout()->contentsMargins().right(),
                         style()->pixelMetric(QStyle::PM_ToolBarItemSpacing), m_controlsButton->sizeHint().width(),
-                        m_chartMenuButton->sizeHint().width()};
+                        m_chartMenuButton->sizeHint().width(), int(tickLayerOn()), int(m_mode.candles)};
     for (QAction *action : m_inlineActions) {
         const auto *widget = widgetForAction(action);
         const QSize hint = widget ? widget->sizeHint().expandedTo(widget->minimumSize()).boundedTo(widget->maximumSize()) : QSize();
@@ -871,26 +875,71 @@ void TopToolbar::fitControls() {
     m_fitting = true;
     m_overflowAction->setVisible(false);
     for (auto *action : m_inlineActions) setInlineVisible(action, m_modeVisibility.value(action, true));
+    tidySeparators();
     layout()->invalidate();
-    if (QToolBar::sizeHint().width() > width()) {
+    const auto tooWide = [this] { return QToolBar::sizeHint().width() > width(); };
+    const auto showGroup = [this](int group, bool visible) {
+        for (auto *action : m_inlineGroups[group]) setInlineVisible(action, visible && m_modeVisibility.value(action, true));
+        tidySeparators();
+        layout()->invalidate();
+    };
+    if (tooWide()) {
         m_overflowAction->setVisible(true);
-        // Symbol and subscribe stay first; gear is outside the hideable list.
-        // Hide a suffix of the remaining groups and retain their menu order.
-        for (int i = m_inlineGroups.size() - 1; i >= 2 && QToolBar::sizeHint().width() > width(); --i) {
-            for (auto *action : m_inlineGroups[i]) setInlineVisible(action, false);
-            // Avoid an orphan trailing separator before the extension.
-            for (int j = i - 1; j >= 2; --j) {
-                auto *last = m_inlineGroups[j].back();
-                if (!last->isVisible()) continue;
-                if (last->isSeparator()) setInlineVisible(last, false);
-                break;
+        // Overflow order (TB-3): the pinned actions first, then the slots the
+        // current mode leaves disabled, then the rest from the right. Symbol
+        // and subscribe stay; the gear is outside the hideable list.
+        QVector<int> order;
+        const auto slot = [this](int i) {
+            QAction *first = m_inlineGroups[i].front();
+            return !first->isSeparator() && m_modeVisibility.value(first, true);
+        };
+        for (int pass = 0; pass < 3; ++pass)
+            for (int i = int(m_inlineGroups.size()) - 1; i >= 2; --i) {
+                if (!slot(i)) continue;
+                const bool pinned = i >= m_pinnedGroup;
+                const bool active = groupActive(i);
+                if ((pass == 0 && pinned) || (pass == 1 && !pinned && !active) || (pass == 2 && !pinned && active))
+                    order << i;
             }
-            layout()->invalidate();
+        int hidden = 0;
+        while (hidden < order.size() && tooWide()) showGroup(order[hidden++], false);
+        // No blank stretch beside the overflow: re-show the most important
+        // hidden slot that still fits. The last one hidden cannot fit.
+        for (int k = hidden - 2; k >= 0; --k) {
+            showGroup(order[k], true);
+            if (tooWide()) showGroup(order[k], false);
         }
     }
     layout()->activate();
     m_fitting = false;
     refreshOverflowMenu();
+}
+
+bool TopToolbar::groupActive(int group) const {
+    for (const QAction *action : m_inlineGroups[group]) {
+        if (action == m_tickModeAction && !tickLayerOn()) return false;
+        if (action == m_chartTypeAction && !m_mode.candles) return false;
+    }
+    return true;
+}
+
+void TopToolbar::tidySeparators() {
+    // One separator between two shown slots: never leading, trailing or doubled.
+    QAction *pending = nullptr;
+    bool content = false;
+    for (int i = 0; i < m_pinnedFrom; ++i) {
+        QAction *action = m_inlineActions[i];
+        if (action->isSeparator()) {
+            if (pending) setInlineVisible(pending, false);
+            pending = content ? action : nullptr;
+            setInlineVisible(action, false);
+            continue;
+        }
+        if (!action->isVisible()) continue;
+        if (pending) setInlineVisible(pending, true);
+        pending = nullptr;
+        content = true;
+    }
 }
 
 void TopToolbar::setFullscreen(bool fullscreen) {
@@ -901,11 +950,14 @@ void TopToolbar::setFullscreen(bool fullscreen) {
 
 TopToolbar::ControlVisibility TopToolbar::controlVisibility(const ModeState &mode) {
     ControlVisibility v;
-    v.tickSelector = mode.heatmap;
+    // Fixed slots (TB-3): tick and candle style keep their place in every mode
+    // and are disabled while their layers are off (tick: heatmap and footprint;
+    // style: candles), so nothing to their right moves.
+    v.tickSelector = true;
     // Appearance lives in the gear menu. Retain the selectors as model adapters
     // for existing callers, without consuming primary toolbar width.
     v.rangeSlider = mode.heatmap;
-    v.candleStyle = mode.candles;
+    v.candleStyle = true;
     v.tpoSession = mode.tpo || mode.volumeProfile;
     v.tpoLayout = mode.tpo;
     return v;
@@ -933,19 +985,55 @@ void TopToolbar::applyVisibility() {
         }
     };
     show(m_tickModeAction, v.tickSelector);
-    show(m_tickLabelAction, v.tickSelector);
     show(m_tickPresetAction, v.tickSelector);
-    show(m_tickVeilAction, v.tickSelector && m_tickState.enabled && !m_tickState.indicator.isEmpty());
+    show(m_tickVeilAction, tickLayerOn() && m_tickState.enabled && !m_tickState.indicator.isEmpty());
     show(m_paletteAction, v.palette);
-    show(m_liqLabelAction, v.rangeSlider);
     for (auto *a : {m_modeLabelAction, m_modeComboAction}) show(a, v.liquidity);
     show(m_labelsAction, v.labelsToggle);
     show(m_rangeAction, v.rangeSlider);
-    show(m_rangeLabelAction, v.rangeSlider);
     show(m_chartTypeAction, v.candleStyle);
     show(m_tpoSessionAction, v.tpoSession);
     show(m_tpoLayoutAction, v.tpoLayout);
+    applyEnabled();
     scheduleFit();
+}
+
+void TopToolbar::setChartAttached(bool attached) {
+    if (m_chartAttached == attached) return;
+    m_chartAttached = attached;
+    applyEnabled();
+}
+
+void TopToolbar::applyEnabled() {
+    // A slot whose layer is off stays in place, disabled, and says why.
+    if (!m_tickModeCombo || !m_tickPresetCombo || !m_chartTypeCombo || !m_tpoSessionCombo || !m_tpoLayoutCombo)
+        return; // still constructing
+    const bool tick = tickLayerOn() && m_tickState.enabled;
+    m_tickModeCombo->setEnabled(tick);
+    m_tickPresetCombo->setEnabled(tick && !m_tickState.offeredUnits.empty());
+    m_chartTypeCombo->setEnabled(m_chartAttached && m_mode.candles);
+    m_chartTypeCombo->setToolTip(!m_chartAttached ? QStringLiteral("No chart is attached")
+                                 : m_mode.candles ? QStringLiteral("Candle style")
+                                                  : QStringLiteral("Enable candles to change their style"));
+    m_tpoSessionCombo->setEnabled(m_chartAttached);
+    m_tpoLayoutCombo->setEnabled(m_chartAttached);
+    const auto &state = m_tickState;
+    if (!tickLayerOn() || !state.enabled) {
+        const QString reason = !tickLayerOn() ? QStringLiteral("Enable the heatmap or footprint layer to change its tick")
+                                               : state.disabledReason;
+        m_tickModeCombo->setToolTip(reason);
+        m_tickPresetCombo->setToolTip(reason);
+        return;
+    }
+    m_tickModeCombo->setToolTip(state.manual
+        ? QStringLiteral("Manual: the tick stays locked; zoom only scales rows. Remembered per symbol and timeframe.")
+        : QStringLiteral("Auto: the smallest preset whose rows are at least the minimum row height."));
+    QString tip = state.manual ? QStringLiteral("Locked tick %1. Presets: what some loaded data can build.")
+                                     .arg(tickText(state.manualUnits, state.priceScale, state.unit))
+                               : QStringLiteral("Drawn tick %1 (Auto). Pick a preset to lock it (Manual).")
+                                     .arg(tickText(state.drawnUnits, state.priceScale, state.unit));
+    if (!state.indicator.isEmpty()) tip += QStringLiteral("\n") + state.indicator;
+    m_tickPresetCombo->setToolTip(m_tickPresetCombo->currentText() + QStringLiteral("\n") + tip);
 }
 
 TopToolbar::ControlVisibility TopToolbar::shownControls() const {
@@ -1009,9 +1097,28 @@ QAction* TopToolbar::addIconAction(const QString& iconPath, const QString& text,
     button->setDefaultAction(action);
     button->setIconSize(iconSize());
     button->setToolButtonStyle(toolButtonStyle());
-    if (text == QLatin1String("Indicators")) button->setObjectName("chartIndicatorsButton");
     addWidget(button);
     return action;
+}
+
+QAction *TopToolbar::addCaptioned(const QString &caption, const char *name, QWidget *editor) {
+    // One slot for the caption and its editor (TB-6): they hide, overflow and
+    // disable together, and the caption sits closer to its editor than toolbar
+    // spacing. Micro size, dim text.
+    auto *field = new QWidget(this);
+    field->setObjectName(QStringLiteral("%1Field").arg(QLatin1String(name)));
+    auto *row = new QHBoxLayout(field);
+    row->setContentsMargins(0, 0, 0, 0);
+    row->setSpacing(kCaptionGap);
+    auto *label = new QLabel(caption, field);
+    label->setObjectName(name);
+    label->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 10px; }").arg(theme::text3().name()));
+    label->setBuddy(editor);
+    row->addWidget(label);
+    editor->setParent(field);
+    row->addWidget(editor);
+    m_fieldEditors.insert(field, editor);
+    return addWidget(field);
 }
 
 QToolButton* TopToolbar::addIconButton(const QString& iconPath, const QString& tooltip) {
@@ -1083,12 +1190,27 @@ void TopToolbar::setLayerToggleStates(bool heatmapEnabled,
     }
 }
 
+QString TopToolbar::fixedText(double value) {
+    // The amount grammar of LiquidityRangeSlider::amountText (fixed notation,
+    // thousands separators, never an exponent) without its 3-digit rounding and
+    // floor: a tick is exact, so it keeps up to 12 significant digits.
+    if (!std::isfinite(value) || value <= 0) return QStringLiteral("0");
+    if (value >= 1000 && std::abs(value - std::round(value)) < 1e-9)
+        return QLocale(QLocale::English, QLocale::UnitedStates).toString(std::round(value), 'f', 0);
+    const int decimals = std::clamp(11 - int(std::floor(std::log10(value))), 0, 12);
+    QString text = QString::number(value, 'f', decimals);
+    if (text.contains(QLatin1Char('.'))) {
+        while (text.endsWith(QLatin1Char('0'))) text.chop(1);
+        if (text.endsWith(QLatin1Char('.'))) text.chop(1);
+    }
+    return text;
+}
+
 QString TopToolbar::tickText(int64_t units, double priceScale, sentinel::PriceDisplayUnit unit) {
     if (units <= 0 || !(priceScale > 0)) return QStringLiteral("-");
     if (unit.scaled())
-        return QString::number(unit.toDisplay(double(units) / priceScale), 'g', 12) + QLatin1Char(' ') +
-               QLatin1String(unit.tag());
-    return QStringLiteral("$") + QString::number(double(units) / priceScale, 'g', 12);
+        return fixedText(unit.toDisplay(double(units) / priceScale)) + QLatin1Char(' ') + QLatin1String(unit.tag());
+    return QStringLiteral("$") + fixedText(double(units) / priceScale);
 }
 
 void TopToolbar::fillTickPresetCombo(QComboBox* combo, const TickSelectorState& state, const QString& emptyText) {
@@ -1126,25 +1248,8 @@ void TopToolbar::setTickSelectorState(const TickSelectorState& state) {
         m_tickModeCombo->setCurrentIndex(state.manual ? 1 : 0);
     }
     fillTickPresetCombo(m_tickPresetCombo, state, QStringLiteral("tick"));
-
-    m_tickModeCombo->setEnabled(state.enabled);
-    m_tickPresetCombo->setEnabled(state.enabled && !state.offeredUnits.empty());
-    applyVisibility(); // the veil label follows the indicator
-    if (!state.enabled) {
-        m_tickModeCombo->setToolTip(state.disabledReason);
-        m_tickPresetCombo->setToolTip(state.disabledReason);
-        return;
-    }
-    m_tickModeCombo->setToolTip(state.manual
-        ? QStringLiteral("Manual: the tick stays locked; zoom only scales rows. Remembered per symbol and timeframe.")
-        : QStringLiteral("Auto: the smallest preset whose rows are at least the minimum row height."));
-    QString tip = state.manual ? QStringLiteral("Locked tick %1. Presets: what some loaded data can build.")
-                                     .arg(tickText(state.manualUnits, state.priceScale, state.unit))
-                               : QStringLiteral("Drawn tick %1 (Auto). Pick a preset to lock it (Manual).")
-                                     .arg(tickText(state.drawnUnits, state.priceScale, state.unit));
-    if (!state.indicator.isEmpty()) tip += QStringLiteral("\n") + state.indicator;
-    m_tickPresetCombo->setToolTip(m_tickPresetCombo->currentText() + QStringLiteral("\n") + tip);
     m_tickVeilLabel->setToolTip(state.indicator);
+    applyVisibility(); // enabled state, tooltips and the veil label follow
 }
 
 void TopToolbar::setColorPreset(const QString& preset) {

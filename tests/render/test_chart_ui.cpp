@@ -28,6 +28,7 @@
 #include "themes/ThemeManager.hpp"
 #include "themes/WidgetToolTips.hpp"
 #include "themes/FontManager.hpp"
+#include "themes/ThemePalette.hpp"
 #include "SyntheticHmc2Fixture.hpp"
 #include <QAction>
 #include <QApplication>
@@ -68,10 +69,13 @@
 #include <QStyleOptionSlider>
 #include <QWidgetAction>
 #include <QPointer>
+#include <QRegularExpression>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <algorithm>
 #include <functional>
+#include <cmath>
+#include <optional>
 
 void qml_register_types_Sentinel_Charts();
 
@@ -278,19 +282,28 @@ TEST(ChartToolbar, ControlVisibilityRulesPerMode) {
     const std::vector<Case> cases{
         {"heatmap + candles", {true, false, false, false, true},
          {true, false, false, true, true, false, false, false}},
-        {"tpo", {false, false, true, false, true}, {false, false, false, false, true, true, true, false}},
+        {"tpo", {false, false, true, false, true}, {true, false, false, false, true, true, true, false}},
         {"volume profile", {false, false, false, true, false},
-         {false, false, false, false, false, true, false, false}},
+         {true, false, false, false, true, true, false, false}},
         {"footprint only", {false, true, false, false, false},
-         {false, false, false, false, false, false, false, false}},
+         {true, false, false, false, true, false, false, false}},
         {"heatmap + footprint, no candles", {true, true, false, false, false},
-         {true, false, false, true, false, false, false, false}},
+         {true, false, false, true, true, false, false, false}},
     };
     TopToolbar toolbar;
+    toolbar.setTickSelectorState({true, {}, false, 10, 0, {10, 20}, 100, {}});
     for (const auto &c : cases) {
         SCOPED_TRACE(c.what);
         EXPECT_EQ(TopToolbar::controlVisibility(c.mode), c.shown);
         toolbar.setModeState(c.mode);
+        // Fixed slots (TB-3): tick and candle style stay, disabled with a reason while their layer is off.
+        // The tick matters to the heatmap and to the footprint, which bins on it.
+        const bool tickOn = c.mode.heatmap || c.mode.footprint;
+        EXPECT_EQ(toolbar.tickModeCombo()->isEnabled(), tickOn);
+        EXPECT_EQ(toolbar.tickPresetCombo()->isEnabled(), tickOn);
+        EXPECT_EQ(toolbar.chartTypeCombo()->isEnabled(), c.mode.candles);
+        if (!tickOn) EXPECT_TRUE(toolbar.tickModeCombo()->toolTip().contains("Enable the heatmap or footprint layer"));
+        if (!c.mode.candles) EXPECT_TRUE(toolbar.chartTypeCombo()->toolTip().contains("Enable candles"));
         EXPECT_EQ(toolbar.shownControls(), c.shown) << "the toolbar applies the rules";
         EXPECT_EQ(toolbar.tpoSessionCombo()->isVisibleTo(&toolbar), c.shown.tpoSession);
         EXPECT_EQ(toolbar.rangeSlider()->isVisibleTo(&toolbar), c.shown.rangeSlider);
@@ -301,7 +314,7 @@ TEST(ChartToolbar, ControlVisibilityRulesPerMode) {
     }
 }
 
-TEST(ChartToolbar, NarrowChartRetainsPrimaryEntryPointsAndHonestUnavailableAction) {
+TEST(ChartToolbar, NarrowChartRetainsPrimaryEntryPoints) {
     TopToolbar toolbar;
     toolbar.resize(420, 42);
     toolbar.show();
@@ -310,14 +323,184 @@ TEST(ChartToolbar, NarrowChartRetainsPrimaryEntryPointsAndHonestUnavailableActio
     ASSERT_TRUE(toolbar.chartMenuButton()->isVisible());
     EXPECT_LT(toolbar.controlsButton()->geometry().right(), toolbar.width());
     EXPECT_LT(toolbar.chartMenuButton()->geometry().right(), toolbar.width());
-    auto *indicators = toolbar.findChild<QAction *>("chartIndicatorsAction");
-    ASSERT_TRUE(indicators);
-    EXPECT_FALSE(indicators->isEnabled());
-    EXPECT_TRUE(indicators->toolTip().contains("not available"));
-    const auto vp = toolbar.findChildren<QToolButton *>();
-    EXPECT_TRUE(std::any_of(vp.begin(), vp.end(), [](QToolButton *button) {
-        return button->text() == "VP" && button->toolTip() == "Volume profile";
-    }));
+}
+
+// TB-5: every mode is an icon, and one glyph means one thing across the toolbar
+// and its gear menu (the magnifier is only "Show symbol chart").
+TEST(ChartToolbar, ModesAreIconsAndEachGlyphHasOneMeaning) {
+    TopToolbar toolbar;
+    toolbar.resize(1920, 44);
+    toolbar.show();
+    QTest::qWait(20);
+    for (const char *name : {"chartHeatmapButton", "chartFootprintButton", "chartTpoButton", "chartVolumeProfileButton"}) {
+        auto *button = toolbar.findChild<QToolButton *>(name);
+        ASSERT_TRUE(button) << name;
+        EXPECT_FALSE(button->icon().isNull()) << name;
+        EXPECT_EQ(button->toolButtonStyle(), Qt::ToolButtonIconOnly) << name;
+        EXPECT_TRUE(button->text().isEmpty()) << name;
+    }
+    EXPECT_EQ(toolbar.findChild<QToolButton *>("chartVolumeProfileButton")->toolTip(), "Volume profile");
+    struct Glyph {
+        QObject *command; // a toolbar button and its menu entry share one command
+        QString name;
+        QImage image;
+    };
+    QList<Glyph> glyphs;
+    for (auto *button : toolbar.findChildren<QToolButton *>()) {
+        if (!button->isVisible() || button->icon().isNull()) continue;
+        QObject *command = button->defaultAction() ? static_cast<QObject *>(button->defaultAction()) : button;
+        glyphs.append({command, button->toolTip(), button->icon().pixmap(QSize(18, 18)).toImage()});
+    }
+    emit toolbar.chartMenu()->aboutToShow();
+    emit toolbar.controlsMenu()->aboutToShow();
+    for (auto *menu : {toolbar.chartMenu(), toolbar.controlsMenu()})
+        for (auto *action : menu->actions())
+            if (action->isVisible() && !action->icon().isNull())
+                glyphs.append({action, action->text(), action->icon().pixmap(QSize(18, 18)).toImage()});
+    ASSERT_GE(glyphs.size(), 7);
+    for (int i = 0; i < glyphs.size(); ++i)
+        for (int j = i + 1; j < glyphs.size(); ++j) {
+            if (glyphs[i].command == glyphs[j].command) continue;
+            EXPECT_NE(glyphs[i].image, glyphs[j].image)
+                << glyphs[i].name.toStdString() << " and " << glyphs[j].name.toStdString() << " share a glyph";
+        }
+}
+
+// B-8: a feature that does not exist has no toolbar, overflow or menu entry.
+TEST(ChartToolbar, IndicatorsStayHiddenUntilTheFeatureExists) {
+    TopToolbar toolbar;
+    toolbar.setModeState({true, true, true, true, true});
+    toolbar.show();
+    auto named = [](const QList<QAction *> &actions) {
+        return std::any_of(actions.begin(), actions.end(), [](QAction *action) {
+            return action->text() == "Indicators" || action->objectName().startsWith("chartIndicators");
+        });
+    };
+    EXPECT_FALSE(named(toolbar.findChildren<QAction *>()));
+    for (auto *button : toolbar.findChildren<QToolButton *>()) {
+        EXPECT_FALSE(button->objectName().startsWith("chartIndicators"));
+        EXPECT_FALSE(button->toolTip().contains("Indicators"));
+    }
+    emit toolbar.controlsMenu()->aboutToShow();
+    EXPECT_FALSE(named(toolbar.controlsMenu()->actions()));
+    toolbar.resize(220, 44);
+    QTest::qWait(20);
+    useOverflow(toolbar, [&](QMenu *menu) { EXPECT_FALSE(named(menu->actions())); });
+}
+
+// TB-7: the gear paints exactly its icon; no menu indicator is drawn into it.
+TEST(ChartToolbar, GearPaintsACleanGearWithoutAMenuIndicator) {
+    TopToolbar toolbar;
+    toolbar.resize(1600, 44);
+    toolbar.show();
+    QTest::qWait(20);
+    auto *gear = toolbar.chartMenuButton();
+    ASSERT_TRUE(gear->isVisible());
+    ASSERT_TRUE(gear->menu());
+    const QImage withMenu = gear->grab().toImage();
+    QMenu *menu = gear->menu();
+    gear->setMenu(nullptr); // the same button and icon without a menu: nothing but the gear
+    const QImage plain = gear->grab().toImage();
+    gear->setMenu(menu);
+    ASSERT_FALSE(plain.isNull());
+    EXPECT_EQ(withMenu, plain);
+}
+
+// TB-4 / B-2: the liquidity range reads "<0.0001 – 9.41 BTC", never in scientific
+// notation, in the label, its tooltip, the slider tooltip and the menu entry.
+TEST(ChartToolbar, LiquidityRangeTextHasNoExponentAndAFloor) {
+    const std::vector<std::pair<double, QString>> amounts{
+        {6.7e-08, "<0.0001"}, {0.0001, "0.0001"}, {0.000235, "0.000235"}, {0.0642, "0.0642"},
+        {0.2, "0.2"}, {9.41, "9.41"}, {20, "20"}, {999.4, "999"}, {12345.6, "12,346"}};
+    for (const auto &[value, text] : amounts) EXPECT_EQ(LiquidityRangeSlider::amountText(value), text) << value;
+    TopToolbar toolbar;
+    toolbar.setLiquidityRange(1e-9, 12, 6.7e-08, 9.41);
+    EXPECT_EQ(toolbar.rangeLabel()->text(), QStringLiteral("<0.0001 \u2013 9.41 BTC"));
+    emit toolbar.controlsMenu()->aboutToShow();
+    const QStringList surfaces{toolbar.rangeLabel()->toolTip(), toolbar.rangeSlider()->toolTip(),
+                               menuAction(toolbar.controlsMenu(), "controlsLiquidityRange")->text()};
+    for (const QString &text : surfaces) {
+        SCOPED_TRACE(text.toStdString());
+        EXPECT_FALSE(text.contains(QRegularExpression("\\de[-+]\\d")));
+        EXPECT_TRUE(text.contains("<0.0001"));
+    }
+}
+
+// TB-4: the slider's track and handles use the shared theme tokens.
+TEST(ChartToolbar, LiquiditySliderPaintsThemeColours) {
+    LiquidityRangeSlider slider;
+    slider.resize(170, 22);
+    slider.setDomain(0.01, 100);
+    slider.setValues(0.1, 10);
+    QImage image(slider.size(), QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    slider.render(&image);
+    const int cy = slider.height() / 2;
+    const int low = int(std::lround(slider.xOf(0.1))), high = int(std::lround(slider.xOf(10)));
+    EXPECT_EQ(image.pixelColor((int(slider.xOf(0.01)) + low - 6) / 2, cy), theme::textOff()) << "below the low handle";
+    EXPECT_EQ(image.pixelColor((high + 6 + slider.width() - 7) / 2, cy), theme::accent()) << "above the high handle";
+    EXPECT_EQ(image.pixelColor(low, cy), theme::text3()) << "an idle handle";
+    EXPECT_EQ(image.pixelColor(high, cy), theme::text3()) << "an idle handle";
+    TopToolbar toolbar;
+    toolbar.rangeLabel()->ensurePolished();
+    EXPECT_EQ(toolbar.rangeLabel()->palette().color(toolbar.rangeLabel()->foregroundRole()), theme::text3());
+}
+
+// TB-6: a combo whose value does not explain itself carries a dim micro-size
+// caption, bound to it (buddy, closer than toolbar spacing, hidden with it).
+TEST(ChartToolbar, CaptionsAreDimMicroLabelsBoundToTheirEditors) {
+    TopToolbar toolbar;
+    toolbar.setModeState({true, false, true, false, true});
+    toolbar.resize(3200, 44);
+    toolbar.show();
+    QTest::qWait(20);
+    const std::vector<std::pair<const char *, QWidget *>> captions{
+        {"chartTickLabel", toolbar.tickModeCombo()}, {"chartTpoSessionLabel", toolbar.tpoSessionCombo()},
+        {"chartTpoLayoutLabel", toolbar.tpoLayoutCombo()}, {"chartLiquidityLabel", toolbar.rangeSlider()}};
+    for (const auto &[name, editor] : captions) {
+        SCOPED_TRACE(name);
+        auto *label = toolbar.findChild<QLabel *>(name);
+        ASSERT_TRUE(label);
+        EXPECT_TRUE(label->isVisible());
+        EXPECT_EQ(label->buddy(), editor);
+        EXPECT_EQ(label->font().pixelSize(), 10);
+        EXPECT_EQ(label->palette().color(label->foregroundRole()), theme::text3());
+        const int gap = editor->mapTo(&toolbar, QPoint(0, 0)).x() - label->mapTo(&toolbar, QPoint(label->width(), 0)).x();
+        EXPECT_GE(gap, 0);
+        EXPECT_LE(gap, 4);
+    }
+    QList<QWidget *> buddies;
+    for (auto *label : toolbar.findChildren<QLabel *>()) if (label->buddy()) buddies << label->buddy();
+    EXPECT_FALSE(buddies.contains(toolbar.findChild<QComboBox *>("chartTimeframeCombo"))) << "1m explains itself";
+    EXPECT_FALSE(buddies.contains(toolbar.chartTypeCombo())) << "Candle explains itself";
+    toolbar.setModeState({true, false, false, false, true});
+    QTest::qWait(20);
+    EXPECT_FALSE(toolbar.findChild<QLabel *>("chartTpoSessionLabel")->isVisible());
+    EXPECT_FALSE(toolbar.findChild<QLabel *>("chartTpoLayoutLabel")->isVisible());
+}
+
+// The symbol field may clip a long symbol; its tooltip names it in full.
+TEST(ChartToolbar, SymbolFieldTooltipNamesTheFullSymbol) {
+    TopToolbar toolbar;
+    EXPECT_EQ(toolbar.symbolSearch()->toolTip(), "BTC-USD");
+    toolbar.symbolSearch()->setText("FARTCOIN-USD");
+    EXPECT_EQ(toolbar.symbolSearch()->toolTip(), "FARTCOIN-USD");
+    toolbar.symbolSearch()->clear();
+    EXPECT_EQ(toolbar.symbolSearch()->toolTip(), toolbar.symbolSearch()->placeholderText());
+}
+
+// Tick values read in fixed notation, never with an exponent.
+TEST(ChartToolbar, TickTextHasNoExponent) {
+    EXPECT_EQ(TopToolbar::tickText(1, 1e8), "$0.00000001");
+    EXPECT_EQ(TopToolbar::tickText(1, 1e5), "$0.00001");
+    EXPECT_EQ(TopToolbar::tickText(1, 100), "$0.01");
+    EXPECT_EQ(TopToolbar::tickText(15, 100), "$0.15");
+    EXPECT_EQ(TopToolbar::tickText(500, 100), "$5");
+    EXPECT_EQ(TopToolbar::tickText(10000, 100), "$100");
+    EXPECT_EQ(TopToolbar::tickText(250000, 100), "$2,500");
+    for (const int64_t units : {1, 3, 7, 25})
+        for (const double scale : {1e8, 1e10, 1e12})
+            EXPECT_FALSE(TopToolbar::tickText(units, scale).contains('e')) << units << "/" << scale;
 }
 
 TEST(ChartToolbar, WideChartNamesTickAndSeparatesAppearance) {
@@ -526,7 +709,8 @@ TEST(ChartToolbar, RealOverflowRestoresInlineControlsAcrossWidthModeAndFontChang
                     });
                 } else {
                     EXPECT_GE(width, 960);
-                    EXPECT_EQ(toolbar.tickModeCombo()->isVisible(), mode.heatmap);
+                    EXPECT_TRUE(toolbar.tickModeCombo()->isVisible());
+                    EXPECT_EQ(toolbar.tickModeCombo()->isEnabled(), mode.heatmap || mode.footprint);
                     EXPECT_EQ(toolbar.tpoSessionCombo()->isVisible(), mode.tpo || mode.volumeProfile);
                 }
                 const QRect buttonRect = toolbar.controlsButton()->geometry();
@@ -541,6 +725,110 @@ TEST(ChartToolbar, RealOverflowRestoresInlineControlsAcrossWidthModeAndFontChang
     toolbar.resize(1920, 48);
     QTest::qWait(30);
     EXPECT_FALSE(toolbar.controlsButton()->isVisible());
+}
+
+// TB-3: fixed slots in a fixed order. Switching modes moves nothing outside the
+// mode-specific slot, and the actions stay pinned right.
+TEST(ChartToolbar, ModeSwitchesNeverMoveTheSharedSlots) {
+    TopToolbar toolbar;
+    toolbar.setTickSelectorState({true, {}, false, 10, 0, {10, 20}, 100, {}});
+    toolbar.resize(3200, 44);
+    toolbar.show();
+    QToolButton *fullscreen = nullptr;
+    for (auto *button : toolbar.findChildren<QToolButton *>())
+        if (button->defaultAction() == toolbar.findChild<QAction *>("chartFullscreenAction")) fullscreen = button;
+    ASSERT_TRUE(fullscreen);
+    auto *timeframe = toolbar.findChild<QComboBox *>("chartTimeframeCombo");
+    const QList<QWidget *> shared{timeframe, toolbar.tickModeCombo(), toolbar.tickPresetCombo(),
+                                  toolbar.chartTypeCombo(), fullscreen, toolbar.chartMenuButton()};
+    auto x = [&](QWidget *w) { return w->mapTo(&toolbar, QPoint(0, 0)).x(); };
+    std::optional<QList<int>> first;
+    for (const Mode mode : {Mode{}, Mode{false, false, true, false, true}, Mode{false, true, false, false, true},
+                           Mode{false, false, false, true, false}, Mode{true, false, true, true, true},
+                           Mode{false, true, false, false, false}}) {
+        SCOPED_TRACE(::testing::Message() << "heatmap=" << mode.heatmap << " tpo=" << mode.tpo << " candles=" << mode.candles);
+        toolbar.setModeState(mode);
+        QTest::qWait(20);
+        ASSERT_FALSE(toolbar.controlsButton()->isVisible());
+        QList<int> at;
+        for (auto *w : shared) {
+            EXPECT_TRUE(w->isVisible());
+            at << x(w);
+        }
+        if (!first) first = at;
+        EXPECT_EQ(at, *first);
+        // symbol, modes, timeframe, tick, style, mode-specific, actions
+        EXPECT_LT(x(toolbar.subscribeButton()), x(toolbar.findChild<QToolButton *>("chartHeatmapButton")));
+        EXPECT_LT(x(toolbar.findChild<QToolButton *>("chartVolumeProfileButton")), x(timeframe));
+        EXPECT_LT(x(timeframe), x(toolbar.tickModeCombo()));
+        EXPECT_LT(x(toolbar.tickPresetCombo()), x(toolbar.chartTypeCombo()));
+        for (QWidget *specific : QList<QWidget *>{toolbar.rangeSlider(), toolbar.tpoSessionCombo(), toolbar.tpoLayoutCombo()})
+            if (specific->isVisible()) {
+                EXPECT_GT(x(specific), x(toolbar.chartTypeCombo()));
+                EXPECT_LT(x(specific), x(fullscreen));
+            }
+    }
+}
+
+// TB-3: at the default width the heatmap keeps its liquidity range inline, and a
+// hidden slot never sits behind the overflow beside a blank that would hold it.
+TEST(ChartToolbar, DefaultWidthKeepsTheLiquidityRangeAndLeavesNoBlankBesideOverflow) {
+    TopToolbar toolbar;
+    toolbar.setTickSelectorState({true, {}, false, 500, 0, {100, 500, 1000}, 100, {}});
+    toolbar.setLiquidityRange(1e-9, 12, 6.7e-08, 9.41);
+    toolbar.show();
+    toolbar.resize(3200, 44);
+    QTest::qWait(20);
+    const int unconstrained = toolbar.sizeHint().width();
+    toolbar.resize(1146, 44); // the brief's capture width (D1)
+    QTest::qWait(20);
+    EXPECT_TRUE(toolbar.rangeSlider()->isVisible()) << "full width needed=" << unconstrained;
+    EXPECT_TRUE(toolbar.rangeLabel()->isVisible());
+    QToolButton *fullscreen = nullptr;
+    for (auto *button : toolbar.findChildren<QToolButton *>())
+        if (button->defaultAction() == toolbar.findChild<QAction *>("chartFullscreenAction")) fullscreen = button;
+    ASSERT_TRUE(fullscreen);
+    auto *stretch = toolbar.findChild<QWidget *>("chartToolbarStretch");
+    ASSERT_TRUE(stretch);
+    // Narrowing until the large liquidity slot overflows refills the space with the smaller actions.
+    const int full = toolbar.sizeHint().width();
+    bool sawRangeHidden = false;
+    for (int width = full; width > 500 && !sawRangeHidden; width -= 3) {
+        toolbar.resize(width, 44);
+        QCoreApplication::processEvents();
+        if (toolbar.controlsButton()->isVisible() && !fullscreen->isVisible())
+            EXPECT_LT(stretch->width(), fullscreen->sizeHint().width() + 2 * toolbar.style()->pixelMetric(QStyle::PM_ToolBarItemSpacing))
+                << "width=" << width;
+        if (!toolbar.rangeSlider()->isVisible()) {
+            sawRangeHidden = true;
+            EXPECT_TRUE(fullscreen->isVisible()) << "width=" << width << ": the blank holds the action";
+        }
+    }
+    EXPECT_TRUE(sawRangeHidden);
+}
+
+// TB-3: current-mode controls outrank a slot the mode leaves disabled.
+TEST(ChartToolbar, OverflowHidesDisabledSlotsBeforeCurrentModeControls) {
+    TopToolbar toolbar;
+    toolbar.setTickSelectorState({true, {}, false, 10, 0, {10, 20}, 100, {}});
+    toolbar.setModeState({false, false, true, false, true}); // TPO with candles: the tick slot is disabled
+    toolbar.resize(3200, 44);
+    toolbar.show();
+    QTest::qWait(20);
+    ASSERT_TRUE(toolbar.tickModeCombo()->isVisible());
+    ASSERT_FALSE(toolbar.tickModeCombo()->isEnabled());
+    const int full = toolbar.sizeHint().width();
+    bool sawTickHidden = false;
+    for (int width = full; width > 400; width -= 3) {
+        toolbar.resize(width, 44);
+        QCoreApplication::processEvents();
+        if (!toolbar.tickModeCombo()->isVisible()) sawTickHidden = true;
+        if (!toolbar.tpoLayoutCombo()->isVisible() || !toolbar.tpoSessionCombo()->isVisible()) {
+            EXPECT_FALSE(toolbar.tickModeCombo()->isVisible()) << "width=" << width;
+            break;
+        }
+    }
+    EXPECT_TRUE(sawTickHidden);
 }
 
 TEST(ChartToolbar, OverflowAppearsOnlyBelowExactSizeHintBoundary) {
@@ -606,13 +894,15 @@ TEST(ChartToolbar, OpenOverflowEditorSurvivesFitChangesAndRebuildsAfterHide) {
 TEST(ChartToolbar, OneHiddenControlIsTheOnlyOverflowEntry) {
     TopToolbar toolbar;
     ASSERT_GT(widthForOneHiddenControl(toolbar), 0);
+    // The overflow button takes the room the pinned action would free, so the
+    // first slot to overflow is the liquidity range; the action refills its blank.
     useOverflow(toolbar, [&](QMenu *menu) {
-        EXPECT_EQ(menuEntries(menu), QStringList{"Fullscreen"});
+        EXPECT_EQ(menuEntries(menu), QStringList{"Liquidity range"});
         EXPECT_EQ(menu->actions().size(), 1);
-        EXPECT_EQ(menu->actions().first(), toolbar.findChild<QAction *>("chartFullscreenAction"));
     });
-    EXPECT_TRUE(toolbar.findChild<QToolButton *>("chartIndicatorsButton")->isVisible());
-    EXPECT_TRUE(toolbar.rangeSlider()->isVisible());
+    EXPECT_FALSE(toolbar.rangeSlider()->isVisible());
+    for (auto *button : toolbar.findChildren<QToolButton *>())
+        if (button->defaultAction() == toolbar.findChild<QAction *>("chartFullscreenAction")) EXPECT_TRUE(button->isVisible());
 }
 
 TEST(ChartToolbar, AllHiddenControlsKeepToolbarOrderAndSeparatorGroups) {
@@ -624,13 +914,11 @@ TEST(ChartToolbar, AllHiddenControlsKeepToolbarOrderAndSeparatorGroups) {
     toolbar.resize(220, 44);
     QTest::qWait(20);
     const QStringList expected{"Candles", "Heatmap", "Footprint", "TPO", "Volume profile", "|",
-        "Timeframe", "Heatmap tick mode", "Heatmap tick size", "Candle style",
-        "TPO / volume profile session", "TPO layout", "|", "Liquidity range", "|", "Indicators", "|", "Fullscreen"};
+        "Timeframe", "|", "Heatmap tick mode", "Heatmap tick size", "|", "Candle style", "|",
+        "Liquidity range", "TPO / volume profile session", "TPO layout", "|", "Fullscreen"};
     QSignalSpy heatmap(&toolbar, &TopToolbar::heatmapToggled);
     useOverflow(toolbar, [&](QMenu *menu) {
         EXPECT_EQ(menuEntries(menu), expected);
-        EXPECT_FALSE(menuAction(menu, "chartIndicatorsAction")->isEnabled());
-        EXPECT_TRUE(menuAction(menu, "chartIndicatorsAction")->toolTip().contains("not available"));
         auto *toggle = menuAction(menu, "controlsHeatmap");
         ASSERT_TRUE(toggle);
         EXPECT_TRUE(toggle->isCheckable());
@@ -655,16 +943,12 @@ TEST(ChartToolbar, WideningRestoresInlineControlAndRemovesOverflowEntryPerChart)
     wide.show();
     ASSERT_GT(widthForOneHiddenControl(narrow), 0);
     EXPECT_FALSE(wide.controlsButton()->isVisible());
-    auto *fullscreen = narrow.findChild<QAction *>("chartFullscreenAction");
-    QToolButton *button = nullptr;
-    for (auto *candidate : narrow.findChildren<QToolButton *>())
-        if (candidate->defaultAction() == fullscreen) button = candidate;
-    ASSERT_TRUE(button);
-    EXPECT_FALSE(button->isVisible());
-    EXPECT_EQ(menuEntries(narrow.controlsButton()->menu()), QStringList{"Fullscreen"});
+    auto *slider = narrow.rangeSlider();
+    EXPECT_FALSE(slider->isVisible());
+    EXPECT_EQ(menuEntries(narrow.controlsButton()->menu()), QStringList{"Liquidity range"});
     narrow.resize(1920, 44);
     QTest::qWait(20);
-    EXPECT_TRUE(button->isVisible());
+    EXPECT_TRUE(slider->isVisible());
     EXPECT_FALSE(narrow.controlsButton()->isVisible());
     EXPECT_TRUE(narrow.controlsButton()->menu()->isEmpty());
     EXPECT_FALSE(wide.controlsButton()->isVisible());
@@ -1639,7 +1923,7 @@ TEST_F(ChartControls, RangeSliderDragAppliesLiveAndPersistsOnRelease) {
     ASSERT_TRUE(model->apply({{"sensitivityMin", 0.2}, {"sensitivityMax", 20.0}}).isEmpty());
     EXPECT_DOUBLE_EQ(slider->low(), 0.2);
     EXPECT_DOUBLE_EQ(slider->high(), 20.0);
-    EXPECT_TRUE(toolbar->rangeLabel()->text().contains("0.2 - 20"));
+    EXPECT_TRUE(toolbar->rangeLabel()->text().contains(QStringLiteral("0.2 \u2013 20")));
 }
 
 // The low handle never passes the high one, and the ends always contain both.
@@ -2000,6 +2284,52 @@ TEST_F(ChartControls, ChartMenuRoundTripsTheLabelSettings) {
     EXPECT_FALSE(model->settings().showLabels);
     menuAction(menu, "chartMenuCurrencyAsset")->trigger();
     EXPECT_EQ(model->settings().labelCurrency, "asset");
+}
+
+// MENU-2: one gear entry opens the settings dialog (it was two names for one
+// dialog on different tabs).
+TEST_F(ChartControls, GearHasOneSettingsDialogEntry) {
+    QStringList opened;
+    HeatmapChartControls::MenuHooks hooks;
+    hooks.openSettings = [&](const QString &tab) { opened << tab; };
+    controls->setMenuHooks(hooks);
+    emit toolbar->chartMenu()->aboutToShow();
+    const auto entries = menuEntries(toolbar->chartMenu());
+    EXPECT_EQ(entries.filter(QRegularExpression("settings\\.\\.\\.$", QRegularExpression::CaseInsensitiveOption)),
+              QStringList{"Chart settings..."});
+    for (auto *action : toolbar->chartMenu()->actions())
+        if (!action->menu() && !action->isSeparator() && action->text().endsWith("settings...")) action->trigger();
+    EXPECT_EQ(opened, QStringList{"Chart"});
+}
+
+// MENU-4: each overlay switch sits in one group with its parameters, set apart
+// by a separator on both sides.
+TEST_F(ChartControls, GearGroupsEachOverlaySwitchWithItsParameters) {
+    controls->setMenuHooks({});
+    emit toolbar->chartMenu()->aboutToShow();
+    QList<QAction *> shown;
+    for (auto *action : toolbar->chartMenu()->actions()) if (action->isVisible()) shown << action;
+    auto at = [&](const QString &name) {
+        for (int i = 0; i < shown.size(); ++i)
+            if (shown[i]->objectName() == name || (shown[i]->menu() && shown[i]->menu()->objectName() == name)) return i;
+        ADD_FAILURE() << "no gear entry " << name.toStdString();
+        return -1;
+    };
+    const std::vector<std::pair<const char *, QStringList>> groups{
+        {"chartMenuTrades", {"chartMenuTradeSize"}},
+        {"chartMenuLadder", {"chartMenuLadderWidth"}},
+        {"chartMenuWallRadar", {"chartMenuWallMultiple"}},
+        {"chartMenuLabels", {"chartMenuCurrency", "chartMenuLabelSize"}}};
+    for (const auto &[toggle, parameters] : groups) {
+        SCOPED_TRACE(toggle);
+        const int i = at(toggle);
+        ASSERT_GT(i, 0);
+        EXPECT_TRUE(shown[i - 1]->isSeparator()) << "a group starts at its switch";
+        for (int k = 0; k < parameters.size(); ++k) EXPECT_EQ(at(parameters[k]), i + 1 + k);
+        const int end = i + 1 + int(parameters.size());
+        ASSERT_LT(end, shown.size());
+        EXPECT_TRUE(shown[end]->isSeparator()) << "the group ends after its parameters";
+    }
 }
 
 // One renderer, so the Labels toggle is always in the gear menu (it was
@@ -2369,7 +2699,8 @@ TEST_F(ChartLabels, ToolbarFollowsTheChartsLayers) {
     ugr->layers()->setTpoEnabled(true); // exclusive today: the heatmap goes off
     pump(300, [] { return false; });
     auto shown = toolbar->shownControls();
-    EXPECT_FALSE(shown.tickSelector);
+    EXPECT_TRUE(shown.tickSelector) << "a fixed slot (TB-3)";
+    EXPECT_FALSE(toolbar->tickModeCombo()->isEnabled()) << "disabled while the heatmap and the footprint are off";
     EXPECT_FALSE(shown.rangeSlider);
     EXPECT_FALSE(shown.palette);
     EXPECT_FALSE(shown.liquidity);

@@ -49,6 +49,8 @@ public:
     QLabel* tickVeilLabel() const { return m_tickVeilLabel; }
     // "$0.5"; in a scaled unit "0.01 x1M" (PEPE's 1e-8 tick).
     static QString tickText(int64_t units, double priceScale, sentinel::PriceDisplayUnit unit = {});
+    // A positive value in fixed notation with its significant digits (no exponent).
+    static QString fixedText(double value);
     // Fills a preset combo (the toolbar's or the settings dialog's): only offered
     // presets are selectable; a shown value no loaded data builds (a locked Manual
     // tick) is listed as the current item, marked unavailable and disabled; with
@@ -59,14 +61,20 @@ public:
                               bool tpoEnabled,
                               bool volumeProfileEnabled = false);
 
-    // The toolbar adapts to the chart's active layers (owner request 2026-10-02).
-    // controlVisibility() is the ONE place the rules live:
-    // - heatmap-only: tick and liquidity range;
+    // The toolbar adapts to the chart's active layers (owner request 2026-10-02)
+    // in fixed slots, in a fixed order (TB-3): symbol, modes, timeframe, tick,
+    // candle style, mode-specific, then the actions pinned right. controlVisibility()
+    // is the ONE place the rules live:
+    // - tick and candle style always keep their slot, so a mode switch moves
+    //   nothing to their right; the tick is disabled only while both the heatmap
+    //   and the footprint are off, candle style while candles are off;
+    // - liquidity range: heatmap is on;
     // - palette and label appearance: the gear menu, leaving the primary strip
     //   for navigation and data controls;
-    // - candle style: candles are on;
     // - TPO session: TPO or volume profile is on (the profile follows the TPO
     //   session); TPO layout: TPO is on.
+    // Overflow hides the pinned actions first, then disabled slots, then the rest
+    // from the right, and re-shows any hidden slot that fits the space left.
     struct ModeState {
         bool heatmap = true, footprint = false, tpo = false, volumeProfile = false, candles = true;
         bool operator==(const ModeState &) const = default;
@@ -83,6 +91,8 @@ public:
     // Controls available for the active mode, including those moved into overflow.
     ControlVisibility shownControls() const;
     bool candlesChecked() const;
+    // A chart renderer is attached (candle style and TPO combos act on it).
+    void setChartAttached(bool attached);
     void setCandlesChecked(bool checked); // no signal
 
     // Liquidity labels and the range filter (S7b). The model drives them; user
@@ -121,7 +131,6 @@ signals:
     void candlesToggled(bool enabled);
     void timeframeSelected(qlonglong timeframeMs);
     void chartTypeSelected(const QString& chartType);
-    void indicatorsRequested();
     void layoutsRequested();
     void settingsRequested();
     void liquidityRangeSettingsRequested();
@@ -151,7 +160,15 @@ private:
     void setInlineVisible(QAction *action, bool visible);
     QAction* addIconAction(const QString& iconPath, const QString& text, const QString& tooltip);
     QToolButton* addIconButton(const QString& iconPath, const QString& tooltip);
+    // A dim micro-size caption bound to its editor; returns the slot's action.
+    QAction *addCaptioned(const QString &caption, const char *name, QWidget *editor);
+    static constexpr int kCaptionGap = 3;
     void applyVisibility();
+    void applyEnabled();
+    // The tick matters while the heatmap or the footprint (which bins on it) is on.
+    bool tickLayerOn() const { return m_mode.heatmap || m_mode.footprint; }
+    void tidySeparators();
+    bool groupActive(int group) const;
     void buildControlsMenu();
     void refreshRangeLabel();
     void refreshControlsMenu();
@@ -196,21 +213,24 @@ private:
     QList<QAction*> m_inlineActions;
     QVector<QList<QAction*>> m_inlineGroups;
     QHash<QAction*, bool> m_modeVisibility;
+    QHash<QWidget*, QWidget*> m_fieldEditors; // captioned slot -> its editor
     QVector<int> m_fitInputs;
     bool m_fitPending = false;
+    bool m_chartAttached = true;
+    int m_pinnedFrom = 0;  // m_inlineActions index of the first right-pinned action
+    int m_pinnedGroup = 0; // m_inlineGroups index of the same
     bool m_fitting = false;
     bool m_gearRefreshPending = false;
     bool m_dispatchingEditorKey = false;
     QAction* m_rangeMenuAction = nullptr;
-    QAction* m_indicatorsAction = nullptr;
     QAction* m_layoutsAction = nullptr;
     QAction* m_fullscreenAction = nullptr;
     QString m_baseAssetSymbol = "BTC";
     ModeState m_mode;
     // Toolbar actions of the widgets above (a toolbar widget hides with its action).
-    QAction *m_tickLabelAction = nullptr, *m_tickModeAction = nullptr, *m_tickPresetAction = nullptr, *m_tickVeilAction = nullptr;
+    QAction *m_tickModeAction = nullptr, *m_tickPresetAction = nullptr, *m_tickVeilAction = nullptr;
     QAction *m_chartTypeAction = nullptr, *m_paletteAction = nullptr;
-    QAction *m_liqLabelAction = nullptr, *m_modeLabelAction = nullptr, *m_modeComboAction = nullptr;
-    QAction *m_labelsAction = nullptr, *m_rangeAction = nullptr, *m_rangeLabelAction = nullptr;
+    QAction *m_modeLabelAction = nullptr, *m_modeComboAction = nullptr;
+    QAction *m_labelsAction = nullptr, *m_rangeAction = nullptr;
     QAction *m_tpoSessionAction = nullptr, *m_tpoLayoutAction = nullptr;
 };
