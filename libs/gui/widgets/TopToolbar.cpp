@@ -487,8 +487,8 @@ void TopToolbar::refreshControlsMenu() {
             entry->setEnabled(active && combo->isEnabled());
         }
     }
-    m_tickMenu->menuAction()->setEnabled(m_mode.heatmap && m_tickState.enabled);
-    m_tickMenu->menuAction()->setToolTip(!m_mode.heatmap ? QStringLiteral("Enable the heatmap layer to change its tick")
+    m_tickMenu->menuAction()->setEnabled(tickLayerOn() && m_tickState.enabled);
+    m_tickMenu->menuAction()->setToolTip(!tickLayerOn() ? QStringLiteral("Enable the heatmap or footprint layer to change its tick")
         : m_tickState.enabled ? m_tickState.indicator : m_tickState.disabledReason);
     m_tickMenu->clear();
     QAction *autoTick = m_tickMenu->addAction("Auto tick");
@@ -856,7 +856,7 @@ void TopToolbar::fitControls() {
     // action changes post LayoutRequest too; unchanged inputs end that cycle.
     QVector<int> inputs{width(), layout()->contentsMargins().left(), layout()->contentsMargins().right(),
                         style()->pixelMetric(QStyle::PM_ToolBarItemSpacing), m_controlsButton->sizeHint().width(),
-                        m_chartMenuButton->sizeHint().width(), int(m_mode.heatmap), int(m_mode.candles)};
+                        m_chartMenuButton->sizeHint().width(), int(tickLayerOn()), int(m_mode.candles)};
     for (QAction *action : m_inlineActions) {
         const auto *widget = widgetForAction(action);
         const QSize hint = widget ? widget->sizeHint().expandedTo(widget->minimumSize()).boundedTo(widget->maximumSize()) : QSize();
@@ -909,7 +909,7 @@ void TopToolbar::fitControls() {
 
 bool TopToolbar::groupActive(int group) const {
     for (const QAction *action : m_inlineGroups[group]) {
-        if (action == m_tickModeAction && !m_mode.heatmap) return false;
+        if (action == m_tickModeAction && !tickLayerOn()) return false;
         if (action == m_chartTypeAction && !m_mode.candles) return false;
     }
     return true;
@@ -977,7 +977,7 @@ void TopToolbar::applyVisibility() {
     };
     show(m_tickModeAction, v.tickSelector);
     show(m_tickPresetAction, v.tickSelector);
-    show(m_tickVeilAction, m_mode.heatmap && m_tickState.enabled && !m_tickState.indicator.isEmpty());
+    show(m_tickVeilAction, tickLayerOn() && m_tickState.enabled && !m_tickState.indicator.isEmpty());
     show(m_paletteAction, v.palette);
     for (auto *a : {m_modeLabelAction, m_modeComboAction}) show(a, v.liquidity);
     show(m_labelsAction, v.labelsToggle);
@@ -999,7 +999,7 @@ void TopToolbar::applyEnabled() {
     // A slot whose layer is off stays in place, disabled, and says why.
     if (!m_tickModeCombo || !m_tickPresetCombo || !m_chartTypeCombo || !m_tpoSessionCombo || !m_tpoLayoutCombo)
         return; // still constructing
-    const bool tick = m_mode.heatmap && m_tickState.enabled;
+    const bool tick = tickLayerOn() && m_tickState.enabled;
     m_tickModeCombo->setEnabled(tick);
     m_tickPresetCombo->setEnabled(tick && !m_tickState.offeredUnits.empty());
     m_chartTypeCombo->setEnabled(m_chartAttached && m_mode.candles);
@@ -1009,8 +1009,8 @@ void TopToolbar::applyEnabled() {
     m_tpoSessionCombo->setEnabled(m_chartAttached);
     m_tpoLayoutCombo->setEnabled(m_chartAttached);
     const auto &state = m_tickState;
-    if (!m_mode.heatmap || !state.enabled) {
-        const QString reason = !m_mode.heatmap ? QStringLiteral("Enable the heatmap layer to change its tick")
+    if (!tickLayerOn() || !state.enabled) {
+        const QString reason = !tickLayerOn() ? QStringLiteral("Enable the heatmap or footprint layer to change its tick")
                                                : state.disabledReason;
         m_tickModeCombo->setToolTip(reason);
         m_tickPresetCombo->setToolTip(reason);

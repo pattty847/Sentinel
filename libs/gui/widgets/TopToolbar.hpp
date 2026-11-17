@@ -162,6 +162,8 @@ private:
     static constexpr int kCaptionGap = 3;
     void applyVisibility();
     void applyEnabled();
+    // The tick matters while the heatmap or the footprint (which bins on it) is on.
+    bool tickLayerOn() const { return m_mode.heatmap || m_mode.footprint; }
     void tidySeparators();
     bool groupActive(int group) const;
     void buildControlsMenu();

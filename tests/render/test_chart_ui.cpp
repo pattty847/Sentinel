@@ -297,10 +297,12 @@ TEST(ChartToolbar, ControlVisibilityRulesPerMode) {
         EXPECT_EQ(TopToolbar::controlVisibility(c.mode), c.shown);
         toolbar.setModeState(c.mode);
         // Fixed slots (TB-3): tick and candle style stay, disabled with a reason while their layer is off.
-        EXPECT_EQ(toolbar.tickModeCombo()->isEnabled(), c.mode.heatmap);
-        EXPECT_EQ(toolbar.tickPresetCombo()->isEnabled(), c.mode.heatmap);
+        // The tick matters to the heatmap and to the footprint, which bins on it.
+        const bool tickOn = c.mode.heatmap || c.mode.footprint;
+        EXPECT_EQ(toolbar.tickModeCombo()->isEnabled(), tickOn);
+        EXPECT_EQ(toolbar.tickPresetCombo()->isEnabled(), tickOn);
         EXPECT_EQ(toolbar.chartTypeCombo()->isEnabled(), c.mode.candles);
-        if (!c.mode.heatmap) EXPECT_TRUE(toolbar.tickModeCombo()->toolTip().contains("Enable the heatmap"));
+        if (!tickOn) EXPECT_TRUE(toolbar.tickModeCombo()->toolTip().contains("Enable the heatmap or footprint layer"));
         if (!c.mode.candles) EXPECT_TRUE(toolbar.chartTypeCombo()->toolTip().contains("Enable candles"));
         EXPECT_EQ(toolbar.shownControls(), c.shown) << "the toolbar applies the rules";
         EXPECT_EQ(toolbar.tpoSessionCombo()->isVisibleTo(&toolbar), c.shown.tpoSession);
@@ -684,7 +686,7 @@ TEST(ChartToolbar, RealOverflowRestoresInlineControlsAcrossWidthModeAndFontChang
                 } else {
                     EXPECT_GE(width, 960);
                     EXPECT_TRUE(toolbar.tickModeCombo()->isVisible());
-                    EXPECT_EQ(toolbar.tickModeCombo()->isEnabled(), mode.heatmap);
+                    EXPECT_EQ(toolbar.tickModeCombo()->isEnabled(), mode.heatmap || mode.footprint);
                     EXPECT_EQ(toolbar.tpoSessionCombo()->isVisible(), mode.tpo || mode.volumeProfile);
                 }
                 const QRect buttonRect = toolbar.controlsButton()->geometry();
