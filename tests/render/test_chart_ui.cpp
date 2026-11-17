@@ -38,6 +38,9 @@
 #include <QStandardItemModel>
 #include <QDoubleSpinBox>
 #include <QDir>
+#include <QDirIterator>
+#include <QFile>
+#include <QFileInfo>
 #include <QLabel>
 #include <QLineEdit>
 #include <QQmlProperty>
@@ -2829,6 +2832,42 @@ TEST_F(ChartLabels, DialogAndMenuSurviveTheRendererBeingDestroyed) {
     EXPECT_DOUBLE_EQ(model->settings().sensitivityMax, 2.0);
     dialog.refreshFromRenderer();
     dialog.close();
+}
+
+// Every icon in resources/svg is drawn somewhere (as ":/svg/<name>" in GUI code or
+// QML), and every .qrc under resources/ is built by CMake. A file nobody loads is
+// dead weight that reads like a live icon set.
+TEST(IconResources, EverySvgIsUsedAndEveryQrcIsBuilt) {
+    const QString root = QStringLiteral(SENTINEL_SOURCE_DIR);
+    auto readAll = [&](const QStringList& dirs, const QStringList& patterns) {
+        QString text;
+        for (const QString& dir : dirs) {
+            QDirIterator it(root + "/" + dir, patterns, QDir::Files, QDirIterator::Subdirectories);
+            while (it.hasNext()) {
+                QFile file(it.next());
+                if (file.open(QIODevice::ReadOnly)) text += QString::fromUtf8(file.readAll()) + '\n';
+            }
+        }
+        return text;
+    };
+    const QString code = readAll({"libs", "apps"}, {"*.cpp", "*.hpp", "*.h", "*.qml"});
+    ASSERT_TRUE(code.contains(":/svg/chevron_down.svg")) << "source scan found no GUI code";
+    QStringList unused;
+    for (const QString& name : QDir(root + "/resources/svg").entryList({"*.svg"}, QDir::Files)) {
+        if (!code.contains(":/svg/" + name)) unused << name;
+    }
+    EXPECT_TRUE(unused.isEmpty()) << "unused icons: " << qPrintable(unused.join(", "));
+    QFile top(root + "/CMakeLists.txt");
+    ASSERT_TRUE(top.open(QIODevice::ReadOnly));
+    const QString cmake = QString::fromUtf8(top.readAll()) +
+                          readAll({"libs", "apps", "tests", "cmake"}, {"CMakeLists.txt", "*.cmake"});
+    QStringList unbuilt;
+    QDirIterator qrc(root + "/resources", {"*.qrc"}, QDir::Files, QDirIterator::Subdirectories);
+    while (qrc.hasNext()) {
+        const QString name = QFileInfo(qrc.next()).fileName();
+        if (!cmake.contains(name)) unbuilt << name;
+    }
+    EXPECT_TRUE(unbuilt.isEmpty()) << "resource files no target builds: " << qPrintable(unbuilt.join(", "));
 }
 } // namespace
 

@@ -317,6 +317,7 @@ set_tests_properties(HeatmapLabelLayoutTests PROPERTIES LABELS "render;heatmap")
 add_executable(test_chart_ui test_chart_ui.cpp)
 target_include_directories(test_chart_ui PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_chart_ui PRIVATE sentinel_gui_lib sentinel_lab_lib GTest::gtest Qt6::Test Qt6::Widgets Qt6::Quick)
+target_compile_definitions(test_chart_ui PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME ChartUiTests COMMAND test_chart_ui)
 set_tests_properties(ChartUiTests PROPERTIES LABELS "render;heatmap;ui" TIMEOUT 300)
 
