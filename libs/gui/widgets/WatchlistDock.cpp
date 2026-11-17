@@ -300,6 +300,8 @@ void WatchlistDock::onRowActivated(const QModelIndex& index) {
         m_refusedSymbol.clear();
         m_refusalReason.clear();
         refreshRowState();
+    } else {
+        refreshFooter();
     }
     emit symbolSelected(symbol, asset);
 }
@@ -351,6 +353,12 @@ void WatchlistDock::refreshRowState() {
                           : active ? QString()
                           : isCrypto ? QStringLiteral("Availability unverified until selected") : QString());
     }
+    refreshFooter();
+}
+
+// Entry warnings are transient: any later successful action returns the footer to the one
+// lasting problem, a subscription refusal, or hides it.
+void WatchlistDock::refreshFooter() {
     if (!m_refusedSymbol.isEmpty())
         showProblem(m_refusalReason.isEmpty() ? QStringLiteral("%1 unavailable").arg(m_refusedSymbol) : m_refusalReason);
     else
@@ -408,9 +416,16 @@ void WatchlistDock::addPinnedSymbol() {
 void WatchlistDock::toggleSelectedPin() {
     const QString symbol = selectedSymbol();
     if (symbol.isEmpty() || m_presetCombo->currentIndex() >= 2) return;
-    if (m_pinned.contains(symbol)) m_pinned.removeAll(symbol);
-    else if (m_pinned.size() < 30) m_pinned.append(symbol);
+    if (m_pinned.contains(symbol)) {
+        m_pinned.removeAll(symbol);
+    } else if (m_pinned.size() < 30) {
+        m_pinned.append(symbol);
+    } else {
+        showProblem(QStringLiteral("Pinned list is full (30 pairs)"));
+        return;
+    }
     savePreferences();
+    refreshFooter();
     if (m_presetCombo->currentIndex() == 1) loadPreset(1);
     else updatePinButton();
 }

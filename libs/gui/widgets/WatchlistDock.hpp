@@ -52,6 +52,7 @@ private:
     void savePreferences();
     void showProblem(const QString& message);
     void clearProblem();
+    void refreshFooter();
     QString selectedSymbol() const;
 
     QComboBox* m_presetCombo = nullptr;

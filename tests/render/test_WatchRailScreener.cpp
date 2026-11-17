@@ -243,6 +243,49 @@ TEST(WatchRail, FooterSpeaksOnlyForAProblemOnOneWarningLine) {
     EXPECT_TRUE(status->isHidden());
 }
 
+TEST(WatchRail, EntryWarningsClearOnTheNextSuccessfulActionButRefusalsStay) {
+    QTemporaryDir settingsDir;
+    ASSERT_TRUE(settingsDir.isValid());
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
+    WatchlistDock dock;
+    dock.show();
+    auto* status = dock.findChild<QLabel*>("watchStatus");
+    auto* preset = dock.findChild<QComboBox*>("watchPreset");
+    auto* entry = dock.findChild<QLineEdit*>("watchSymbolEntry");
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    // A bad entry, then a successful stock-row activation.
+    preset->setCurrentText("Top Stocks");
+    entry->setText("not a pair");
+    dock.findChild<QToolButton*>("watchAdd")->click();
+    ASSERT_FALSE(status->isHidden());
+    QTest::mouseClick(tree->viewport(), Qt::LeftButton, Qt::NoModifier,
+                      tree->visualRect(tree->model()->index(0, 0)).center());
+    EXPECT_TRUE(status->isHidden());
+    EXPECT_TRUE(status->text().isEmpty());
+    // A full Pinned list, then an unpin from the Crypto preset.
+    auto add = [&](const QString& pair) {
+        entry->setText(pair);
+        dock.findChild<QToolButton*>("watchAdd")->click();
+    };
+    add("BTC-USD");
+    for (int i = 1; i < 30; ++i) add(QStringLiteral("P%1-USD").arg(i, 2, 10, QLatin1Char('0')));
+    preset->setCurrentText("Crypto");
+    dock.setChartSwitchState("SOL-USD", "", "ETH-USD", "Connection cap reached");
+    auto select = [&](const QString& symbol) {
+        for (int row = 0; row < tree->model()->rowCount(); ++row)
+            if (tree->model()->index(row, 0).data(WatchlistDock::TickerRole).toString() == symbol)
+                tree->setCurrentIndex(tree->model()->index(row, 0));
+    };
+    auto* pin = dock.findChild<QToolButton*>("watchPin");
+    select("DOGE-USD");
+    pin->click();
+    ASSERT_EQ(status->text(), "! Pinned list is full (30 pairs)");
+    select("BTC-USD");
+    pin->click(); // unpin from the Crypto preset
+    EXPECT_FALSE(status->text().contains("full"));
+    EXPECT_EQ(status->text(), "! Connection cap reached") << "the current refusal stays";
+}
+
 TEST(WatchRail, EmptyPinnedListSaysHowToAddAPair) {
     QTemporaryDir settingsDir;
     ASSERT_TRUE(settingsDir.isValid());
