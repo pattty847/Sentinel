@@ -8,6 +8,10 @@
 #include <gtest/gtest.h>
 #include <QJsonDocument>
 #include <QJsonArray>
+#include <QMap>
+#include <cmath>
+#include <functional>
+#include <limits>
 
 using namespace AgentApi;
 
@@ -652,7 +656,7 @@ TEST(AgentApiSchema, SettingsSchemaListsExactlyTheAcceptedKeysAndRoundTripsThem)
              "footprintDustNotional", "footprintNumbers", "showLadder", "ladderWidthPx", "showWallRadar", "wallMultiple"})
         EXPECT_TRUE(settings.contains(key)) << key;
     // Raised by another key's value at the defaults (labelMinPx 12, sensitivityMin 0.05), as their descriptions say.
-    const QStringList dependentMin{"labelMaxPx", "sensitivityMax"};
+    const QMap<QString, double> dependentMin{{"labelMaxPx", 12}, {"sensitivityMax", 0.1}};
     for (auto it = settings.begin(); it != settings.end(); ++it) {
         const QString key = it.key();
         const auto e = it->toObject();
@@ -676,7 +680,11 @@ TEST(AgentApiSchema, SettingsSchemaListsExactlyTheAcceptedKeysAndRoundTripsThem)
                 const auto atBound = postSetting(key, bound);
                 const auto beyond = postSetting(key, outside);
                 ASSERT_TRUE(atBound.has_value()) << end;
-                if (QLatin1String(end) == QLatin1String("min") && dependentMin.contains(key)) continue;
+                if (QLatin1String(end) == QLatin1String("min") && dependentMin.contains(key)) {
+                    EXPECT_EQ(atBound->toDouble(), dependentMin[key]);
+                    EXPECT_EQ(beyond.value_or(QJsonValue()).toDouble(), dependentMin[key]);
+                    continue;
+                }
                 EXPECT_EQ(atBound->toDouble(), bound) << end;
                 if (rejected) EXPECT_FALSE(beyond.has_value()) << end;
                 else EXPECT_EQ(beyond.value_or(QJsonValue()).toDouble(), bound) << end;
@@ -733,4 +741,116 @@ TEST(AgentApiSchema, LayersSchemaListsExactlyTheAcceptedKeys) {
         }
     }
     EXPECT_EQ(postControl("/api/v1/layers", {{"notALayer", true}}).code, "invalid_field");
+}
+
+// Independent of the definition table: each key's field is named here by hand. A valid
+// non-default value goes through the POST path and must change exactly that field
+// (plus the documented cross-key limits), so a wrong member pointer or a collateral write fails.
+TEST(AgentApiSchema, EachSettingKeyWritesOnlyItsOwnField) {
+    using S = heatmap::HeatmapChartSettings;
+    constexpr uint64_t MiB = 1ull << 20;
+    struct Case { const char* key; QJsonValue value; std::function<void(S&)> expect; };
+    const QJsonArray grad1{QJsonObject{{"position", 0}, {"color", "#111111"}}, QJsonObject{{"position", 1}, {"color", "#222222"}}};
+    const QJsonArray grad2{QJsonObject{{"position", 0}, {"color", "#333333"}}, QJsonObject{{"position", 1}, {"color", "#444444"}}};
+    const std::vector<Case> cases{
+        {"tickMode", "manual", [](S& s) { s.tickMode = heatmap::TickMode::Manual; }},
+        {"manualTick", 250, [](S& s) { s.manualTick = 250; }},
+        {"minRowPx", 3, [](S& s) { s.minRowPx = 3; }},
+        {"hysteresis", 0.5, [](S& s) { s.hysteresis = 0.5; }},
+        {"crossfadeMs", 300, [](S& s) { s.crossfadeMs = 300; }},
+        {"showBandEdges", true, [](S& s) { s.showBandEdges = true; }},
+        {"palettePreset", "Fire", [](S& s) { s.palettePreset = "Fire"; }},
+        {"bidGradient", grad1, [](S& s) { s.bidGradient = {{0, "#111111"}, {1, "#222222"}}; }},
+        {"askGradient", grad2, [](S& s) { s.askGradient = {{0, "#333333"}, {1, "#444444"}}; }},
+        {"sensitivityMin", 0.1, [](S& s) { s.sensitivityMin = 0.1; }},
+        {"sensitivityMax", 70, [](S& s) { s.sensitivityMax = 70; }},
+        {"opacity", 0.5, [](S& s) { s.opacity = 0.5; }},
+        {"smoothZoomOut", true, [](S& s) { s.smoothZoomOut = true; }},
+        {"gpuCapBytes", qint64(512 * MiB), [&](S& s) { s.gpuCapBytes = 512 * MiB; }},
+        {"uploadBudgetBytes", qint64(16 * MiB), [&](S& s) { s.uploadBudgetBytes = 16 * MiB; }},
+        {"prefetchTiles", 3, [](S& s) { s.prefetchTiles = 3; }},
+        {"liveMinIntervalMs", 1000, [](S& s) { s.liveMinIntervalMs = 1000; }},
+        {"showTelemetry", true, [](S& s) { s.showTelemetry = true; }},
+        {"showTrades", true, [](S& s) { s.showTrades = true; }},
+        {"tradesAboveCandles", false, [](S& s) { s.tradesAboveCandles = false; }},
+        {"tradeMinNotional", 1000, [](S& s) { s.tradeMinNotional = 1000; }},
+        {"bubblePlacement", "slot", [](S& s) { s.bubblePlacement = "slot"; }},
+        {"bubblesOverFootprint", "dim", [](S& s) { s.bubblesOverFootprint = "dim"; }},
+        {"paperPositionStyle", "band", [](S& s) { s.paperPositionStyle = "band"; }},
+        {"showLabels", false, [](S& s) { s.showLabels = false; }},
+        {"labelCurrency", "asset", [](S& s) { s.labelCurrency = "asset"; }},
+        {"labelMinPx", 10, [](S& s) { s.labelMinPx = 10; }},
+        {"labelMaxPx", 20, [](S& s) { s.labelMaxPx = 20; }},
+        {"candleUpColor", "#112233", [](S& s) { s.candleUpColor = "#112233"; }},
+        {"candleDownColor", "#445566", [](S& s) { s.candleDownColor = "#445566"; }},
+        {"candleWickColor", "#778899", [](S& s) { s.candleWickColor = "#778899"; }},
+        {"candleBodyOpacity", 0.5, [](S& s) { s.candleBodyOpacity = 0.5; }},
+        {"candleWickWidth", 2, [](S& s) { s.candleWickWidth = 2; }},
+        {"candleBodyFraction", 0.5, [](S& s) { s.candleBodyFraction = 0.5; }},
+        {"candleMaxBodyPx", 40, [](S& s) { s.candleMaxBodyPx = 40; }},
+        {"showVolumeBars", false, [](S& s) { s.showVolumeBars = false; }},
+        {"volumeBandPercent", 30, [](S& s) { s.volumeBandPercent = 30; }},
+        {"volumeOpacity", 0.8, [](S& s) { s.volumeOpacity = 0.8; }},
+        {"flowFooter", true, [](S& s) { s.flowFooter = true; }},
+        {"cvdStripPx", 96, [](S& s) { s.cvdStripPx = 96; }},
+        {"cvdReset", "utcDay", [](S& s) { s.cvdReset = "utcDay"; }},
+        {"cvdStyle", "area", [](S& s) { s.cvdStyle = "area"; }},
+        {"cvdFillAnchor", "edge", [](S& s) { s.cvdFillAnchor = "edge"; }},
+        {"footprintIntensity", "window", [](S& s) { s.footprintIntensity = "window"; }},
+        {"footprintCandle", "full", [](S& s) { s.footprintCandle = "full"; }},
+        {"footprintDustNotional", 100, [](S& s) { s.footprintDustNotional = 100; }},
+        {"footprintNumbers", false, [](S& s) { s.footprintNumbers = false; }},
+        {"showLadder", true, [](S& s) { s.showLadder = true; }},
+        {"ladderWidthPx", 180, [](S& s) { s.ladderWidthPx = 180; }},
+        {"showWallRadar", true, [](S& s) { s.showWallRadar = true; }},
+        {"wallMultiple", 6, [](S& s) { s.wallMultiple = 6; }},
+    };
+    // Documented cross-key limits: each also changes the named other field.
+    const std::vector<Case> crossKey{
+        {"labelMaxPx", 8, [](S& s) { s.labelMaxPx = s.labelMinPx; }},
+        {"sensitivityMax", 1e-9, [](S& s) { s.sensitivityMax = 2 * s.sensitivityMin; }},
+        {"gpuCapBytes", qint64(MiB), [&](S& s) { s.gpuCapBytes = MiB; s.uploadBudgetBytes = MiB; }},
+        {"manualTick", 300, [](S& s) { s.manualTick = 500; }}, // raised to the next 1/2/2.5/5 x 10^k preset
+    };
+    QStringList listed;
+    for (const auto& c : cases) listed << c.key;
+    listed.sort();
+    EXPECT_EQ(listed, schemaJson()["heatmapSettings"].toObject().keys()); // a new key needs a case here
+    for (const auto* list : {&cases, &crossKey}) {
+        for (const auto& c : *list) {
+            SCOPED_TRACE(c.key);
+            const auto valid = postControl("/api/v1/heatmap/settings", {{c.key, c.value}});
+            ASSERT_EQ(valid.status, 200) << valid.message.toStdString();
+            S actual;
+            ASSERT_TRUE(heatmap::applySettingsPatch(actual, valid.body.heatmapSettings).isEmpty());
+            S expected;
+            c.expect(expected);
+            EXPECT_FALSE(expected == S{}); // the case really changes something
+            EXPECT_TRUE(actual == expected) << QJsonDocument(heatmap::settingsJson(actual)).toJson().toStdString();
+        }
+    }
+}
+
+// Clamp outcomes for struct states no patch can produce; pinned as decisions of the table refactor.
+TEST(AgentApiSchema, ClampDecisionsForStatesAPatchCannotProduce) {
+    using S = heatmap::HeatmapChartSettings;
+    S dust;
+    dust.footprintDustNotional = -5;
+    heatmap::clampSettings(dust);
+    EXPECT_EQ(dust.footprintDustNotional, 0); // clamped to the table minimum (it was left negative before)
+    for (double bad : {std::nan(""), std::numeric_limits<double>::infinity()}) {
+        dust.footprintDustNotional = bad;
+        heatmap::clampSettings(dust);
+        EXPECT_EQ(dust.footprintDustNotional, 2500); // non-finite falls back to the default
+    }
+    S mode;
+    mode.tickMode = static_cast<heatmap::TickMode>(7);
+    ASSERT_TRUE(heatmap::applySettingsPatch(mode, {{"opacity", 0.5}}).isEmpty());
+    EXPECT_EQ(mode.tickMode, heatmap::TickMode::Auto); // as clampSettings alone always did (a patch used to give Manual)
+    S budgets;
+    budgets.gpuCapBytes = std::numeric_limits<uint64_t>::max();
+    budgets.uploadBudgetBytes = std::numeric_limits<uint64_t>::max();
+    ASSERT_TRUE(heatmap::applySettingsPatch(budgets, {{"opacity", 0.5}}).isEmpty());
+    EXPECT_EQ(budgets.gpuCapBytes, 4096ull << 20); // clamps high, as clampSettings alone did (a patch used to wrap to the minimum)
+    EXPECT_EQ(budgets.uploadBudgetBytes, 128ull << 20);
 }
