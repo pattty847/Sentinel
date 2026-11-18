@@ -63,12 +63,12 @@ const ChartFrame& FrameProducer::produce(const FrameInputs& inputs, ITickAuthori
     const QRectF& bounds = frame.surfaceBounds;
     const bool viewValid = vp.valid && inputs.timeframeMs > 0 && timeSpan > 0 && priceSpan > 0 && !bounds.isEmpty();
     frame_.drawHeatmap = frame.overlays.heatmap && viewValid;
-    // The footprint and the book ladder bin their rows on the drawn tick too: without the
-    // heatmap they still need the tick of the current symbol and view (a previous symbol's
-    // tick skips every footprint bar; a tick kept from a closer zoom gives the ladder more
-    // rows than it holds when zoomed out, and the strip withdraws).
-    const bool onPriceGrid = frame.overlays.heatmap || frame.overlays.footprint || frame.overlays.ladderPx > 0;
-    if (viewValid && onPriceGrid) {
+    // Every valid view chooses the tick, whatever layers are on: every layer and the
+    // axes map through the raster camera at it, and the zoom ladder aims at the tick the
+    // chooser predicts. A tick that only some layers keep current stays at the last
+    // chooser's zoom: the rest camera then clamps to one-pixel rows of it (a zoom out
+    // shows less than the stored view), and a later layer toggle jumps the chart.
+    if (viewValid) {
         const QPointF drag = vp.dragging ? vp.panVisualOffset : QPointF();
         const double dt = -drag.x() * timeSpan / bounds.width(), dp = drag.y() * priceSpan / bounds.height();
         ticks.chooseTickForView({double(vp.timeStart) + dt, double(vp.timeEnd) + dt, vp.minPrice + dp,

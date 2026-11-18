@@ -1887,6 +1887,79 @@ TEST_F(LadderShellGpu, TpoOnlyAtFifteenMinutesZoomedOutKeepsTheStrip) {
     EXPECT_TRUE(until([&] { return stripAtView(true); })) << "the strip at rest after the pinch: " << describe();
 }
 
+// TPO or volume profile as the primary field with the ladder off: no layer on the chart
+// bins on the drawn tick, yet the frame still chooses it for the view. A pinch out on 15m
+// rests on the stored span (with the tick kept from the close zoom the rest camera
+// clamped to 610 one-pixel $1 rows), and turning the ladder on afterwards changes
+// neither the drawn tick nor the vertical span (it used to choose the tick at that moment
+// and jump the chart).
+class LadderShellGpuPrimary : public LadderShellGpu, public testing::WithParamInterface<int> {};
+
+TEST_P(LadderShellGpuPrimary, WithEveryGridLayerOffAZoomOutRestsOnTheStoredSpan) {
+    const int field = GetParam();
+    heatmap::HeatmapChartSettings settings;
+    settings.showLabels = false;
+    ugr->setHeatmapChartSettings(settings, true); // Auto
+    ugr->layers()->setLadderEnabled(false);
+    const auto until = [&](const std::function<bool()> &ready, int ms = 15'000) {
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < ms) {
+            render(1);
+            if (image.isNull()) return false;
+            if (ready()) return true;
+            QTest::qWait(5);
+        }
+        return false;
+    };
+    const auto stored = [&] { return ugr->getViewState()->getMaxPrice() - ugr->getViewState()->getMinPrice(); };
+    const auto describe = [&] {
+        const auto cam = ugr->currentFrameContext().raster;
+        return "tick=" + std::to_string(cam.tick) + " committed=" + std::to_string(ugr->gpuHeatmapLayer()->tickPrice()) +
+               " free=" + std::to_string(cam.free) + " drawn=" + std::to_string(cam.drawnMaxPrice - cam.drawnMinPrice) +
+               " stored=" + std::to_string(stored()) + " widthDev=" + std::to_string(cam.widthDev);
+    };
+    // At rest on the stored span, at the committed tick.
+    const auto restOnView = [&] {
+        const auto cam = ugr->currentFrameContext().raster;
+        return cam.valid && !cam.free && cam.tick == ugr->gpuHeatmapLayer()->tickPrice() &&
+               std::abs(cam.drawnMaxPrice - cam.drawnMinPrice - stored()) <= 0.02 * stored();
+    };
+    ASSERT_TRUE(until(restOnView)) << "the first view: " << describe();
+    const int64_t viewLo = epoch + 2 * kHourMs;
+    ugr->view()->setTimeframe(int(minute));
+    ugr->view()->setViewport(viewLo, viewLo + 10 * minute, 100'000, 100'016);
+    ugr->layers()->setPrimaryField(0);
+    ugr->layers()->setLadderEnabled(false);
+    ASSERT_TRUE(until([&] { return restOnView() && ugr->gpuHeatmapLayer()->hasCurrentResolution(); }))
+        << "the close view on the heatmap: " << describe();
+    ugr->layers()->setPrimaryField(field);
+    ASSERT_FALSE(ugr->layers()->heatmapEnabled());
+    ASSERT_FALSE(ugr->layers()->footprintEnabled());
+    ASSERT_EQ(ugr->layers()->ladderWidthPx(), 0);
+    ugr->view()->setTimeframe(int(15 * minute));
+    ASSERT_TRUE(until([&] { return ugr->gpuHeatmapLayer()->hasCurrentResolution() && restOnView(); }))
+        << "the 15m view: " << describe();
+    for (int g = 0; g < 17; ++g) { // 16 -> about $6,900
+        ugr->view()->zoomContinuous(0.7, ugr->width() / 2, ugr->height() / 2);
+        render(1);
+    }
+    ASSERT_GT(stored(), 5000) << describe();
+    ugr->view()->endZoomGesture();
+    EXPECT_TRUE(until(restOnView)) << "the rest camera shows the stored span: " << describe();
+    const auto before = ugr->currentFrameContext().raster;
+    ugr->layers()->setLadderEnabled(true);
+    EXPECT_TRUE(until([&] { return ugr->currentFrameContext().raster.widthDev < before.widthDev && restOnView(); }))
+        << "the strip takes its width: " << describe();
+    const auto after = ugr->currentFrameContext().raster;
+    EXPECT_DOUBLE_EQ(after.tick, before.tick) << "the ladder toggle keeps the drawn tick";
+    EXPECT_NEAR(after.drawnMaxPrice - after.drawnMinPrice, before.drawnMaxPrice - before.drawnMinPrice,
+                0.01 * (before.drawnMaxPrice - before.drawnMinPrice))
+        << "the ladder toggle keeps the vertical span";
+}
+INSTANTIATE_TEST_SUITE_P(TpoAndVolumeProfile, LadderShellGpuPrimary, testing::Values(2, 3),
+                         [](const testing::TestParamInfo<int>& info) { return info.param == 2 ? "Tpo" : "VolumeProfile"; });
+
 // Short price labels (whole dollars at a wide price span) measure a price axis narrower
 // than the corner's P/L/M buttons: the column widens to hold them, inside the corner.
 TEST_F(LadderShellGpu, TheCornerButtonsFitInsideTheAxisColumnAtANarrowAxis) {

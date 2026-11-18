@@ -158,7 +158,7 @@ TEST_F(FrameProducerTest, FixedMappingPublicationAndSurfaceAnnouncements) {
     EXPECT_TRUE(produce().rasterChanged);
 }
 
-TEST_F(FrameProducerTest, ContinuousDragChoosesTickBeforeRasterAndHiddenSkipsChoice) {
+TEST_F(FrameProducerTest, ContinuousDragChoosesTickBeforeRasterAlsoWithTheHeatmapHidden) {
     controller.viewPtr()->handlePanStart({0, 0});
     controller.viewPtr()->handlePanMove({2.75, -1.25});
     inputs = capture();
@@ -171,50 +171,48 @@ TEST_F(FrameProducerTest, ContinuousDragChoosesTickBeforeRasterAndHiddenSkipsCho
     EXPECT_TRUE(published.current().viewportDragging);
     inputs.context.overlays.heatmap = false;
     inputs.context.overlays.footprint = false;
-    EXPECT_FALSE(produce().drawHeatmap);
-    EXPECT_EQ(ticks.chooses, 1);
+    EXPECT_FALSE(produce().drawHeatmap) << "a hidden heatmap draws nothing";
+    EXPECT_EQ(ticks.chooses, 2) << "but the frame still chooses the tick for the dragged view";
+    EXPECT_DOUBLE_EQ(ticks.chosen.timeLoMs, 972.5);
     EXPECT_EQ(ticks.reads, 2);
     EXPECT_EQ(ticks.notes, 2);
 }
 
-// The footprint bins its rows on the drawn tick too: with the heatmap hidden it still
-// needs the tick chosen for the current symbol and view, in the frame that draws it.
-TEST_F(FrameProducerTest, FootprintWithoutTheHeatmapStillChoosesTheTick) {
-    inputs.context.overlays.heatmap = false;
-    ticks.tick = 1;
-    ticks.tickAfterChoice = 4;
-    const auto frame = produce();
-    EXPECT_FALSE(frame.drawHeatmap);
-    EXPECT_EQ(ticks.chooses, 1);
-    EXPECT_DOUBLE_EQ(ticks.chosen.priceLo, 100);
-    EXPECT_DOUBLE_EQ(ticks.chosen.priceHi, 140);
-    EXPECT_DOUBLE_EQ(frame.context.raster.tick, 4) << "the raster uses this frame's choice";
-    inputs.context.overlays.footprint = false;
-    produce();
-    EXPECT_EQ(ticks.chooses, 1) << "no layer on the price grid: nothing chooses";
-    inputs.context.overlays.footprint = true;
-    inputs.context.viewport.valid = false;
-    produce();
-    EXPECT_EQ(ticks.chooses, 1) << "an invalid view chooses nothing";
-}
-
-// The book ladder bins on the drawn tick too. TPO as the primary field turns the heatmap
-// and the footprint off: with the ladder's strip on, the frame still chooses the tick for
-// the view, so a zoom out moves it on (a kept tick left the strip with more rows than it
-// holds). Without the strip nothing on the price grid needs it.
-TEST_F(FrameProducerTest, TheLadderStripChoosesTheTickWithOnlyTpoOn) {
-    inputs.context.overlays = {false, false, true, false, 64};
-    ticks.tick = 1;
-    ticks.tickAfterChoice = 4;
-    const auto frame = produce();
-    EXPECT_FALSE(frame.drawHeatmap);
-    EXPECT_EQ(ticks.chooses, 1);
-    EXPECT_DOUBLE_EQ(ticks.chosen.priceLo, 100);
-    EXPECT_DOUBLE_EQ(ticks.chosen.priceHi, 140);
-    EXPECT_DOUBLE_EQ(frame.context.raster.tick, 4) << "the raster uses this frame's choice";
-    inputs.context.overlays.ladderPx = 0;
-    produce();
-    EXPECT_EQ(ticks.chooses, 1) << "TPO alone: nothing chooses";
+// Every layer and the axes map through the raster camera at the drawn tick, and the zoom
+// ladder aims at the tick the chooser predicts: every valid view chooses it, whatever
+// layers are on. The footprint (W-0160) and the ladder strip (W-0177) bin on it; with TPO
+// or VP primary, or candles only, nothing else keeps it current, and a zoom out drew
+// one-pixel rows of the last chooser's tick (less than the stored view).
+TEST_F(FrameProducerTest, EveryValidViewChoosesTheTickWhateverLayersAreOn) {
+    using Overlays = FrameContext::OverlayActivationSet;
+    const struct {
+        const char* name;
+        Overlays overlays;
+    } cases[] = {
+        {"heatmap", {true, false, false, false, 0}},
+        {"footprint without the heatmap", {false, true, false, false, 0}},
+        {"TPO with the ladder strip", {false, false, true, false, 64}},
+        {"TPO only", {false, false, true, false, 0}},
+        {"volume profile only", {false, false, false, true, 0}},
+        {"candles only", {false, false, false, false, 0}},
+    };
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        inputs.context.overlays = c.overlays;
+        ticks = {};
+        ticks.tick = 1;
+        ticks.tickAfterChoice = 4;
+        const auto frame = produce();
+        EXPECT_EQ(frame.drawHeatmap, c.overlays.heatmap);
+        EXPECT_EQ(ticks.chooses, 1);
+        EXPECT_DOUBLE_EQ(ticks.chosen.priceLo, 100);
+        EXPECT_DOUBLE_EQ(ticks.chosen.priceHi, 140);
+        EXPECT_DOUBLE_EQ(frame.context.raster.tick, 4) << "the raster uses this frame's choice";
+        inputs.context.viewport.valid = false;
+        produce();
+        EXPECT_EQ(ticks.chooses, 1) << "an invalid view chooses nothing";
+        inputs.context.viewport.valid = true;
+    }
 }
 
 TEST_F(FrameProducerTest, InvalidCameraDoesNotChangeStepOrAnnounce) {
