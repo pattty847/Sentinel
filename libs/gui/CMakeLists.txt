@@ -259,6 +259,8 @@ add_library(sentinel_gui_lib ${GUI_SOURCES})
 add_library(sentinel_heatmap_gpu STATIC
     models/PriceUnits.hpp # display units: the heatmap tooltip and every widget share it
     models/PriceUnits.cpp
+    models/DisplayTime.hpp # the chart's display time zone: every chart time label shares it
+    models/DisplayTime.cpp
     render/heatmap/HeatmapBinGrid.hpp
     render/heatmap/HeatmapGpuSource.hpp
     render/heatmap/HeatmapGpuSource.cpp

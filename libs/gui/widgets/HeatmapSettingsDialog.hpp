@@ -113,6 +113,7 @@ private:
     // Chart (S7b labels: chart settings; candle style: renderer state)
     QCheckBox *m_showLabels = nullptr;
     void addFlowControls(QFormLayout*, QWidget*);
+    void addTimeZoneRow(QFormLayout*, QWidget*);
     void refreshFlowControls();
     void refreshBubbleStyle();
     std::string bubbleProduct() const;

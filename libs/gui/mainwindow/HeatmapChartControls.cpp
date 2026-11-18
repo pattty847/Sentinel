@@ -4,6 +4,7 @@
 #include "SentinelLogging.hpp"
 #include "UnifiedGridRenderer.h"
 #include "models/PriceUnits.hpp"
+#include "models/DisplayTime.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/HeatmapTelemetryDock.hpp"
@@ -26,6 +27,9 @@ HeatmapChartControls::HeatmapChartControls(heatmap::HeatmapSettingsModel *model,
     m_indicatorTimer->setInterval(kIndicatorMs);
     connect(m_indicatorTimer, &QTimer::timeout, this, &HeatmapChartControls::syncNow);
     connect(m_model, &heatmap::HeatmapSettingsModel::changed, this, &HeatmapChartControls::onModelChanged);
+    DisplayTime::instance().setZone(DisplayTime::parse(m_model->settings().timeZone));
+    // A system zone change in Local mode reaches the cached toolbar text too.
+    connect(&DisplayTime::instance(), &DisplayTime::zoneChanged, this, &HeatmapChartControls::scheduleSync);
     connect(&PriceUnits::instance(), &PriceUnits::unitChanged, this, &HeatmapChartControls::scheduleSync);
     // The Manual tick memory follows the chart's symbol and timeframe.
     m_model->setContextProvider([this] {
@@ -500,6 +504,7 @@ void HeatmapChartControls::syncTelemetryVisibility() {
 
 void HeatmapChartControls::onModelChanged(bool explicitManualTick) {
     const auto &s = m_model->settings();
+    DisplayTime::instance().setZone(DisplayTime::parse(s.timeZone)); // every chart time label re-labels at once
     if (m_sensitivityContextUpdating) {
         if (m_renderer && m_renderer->gpuHeatmapLayer()) {
             m_renderer->gpuHeatmapLayer()->setSettings(s);

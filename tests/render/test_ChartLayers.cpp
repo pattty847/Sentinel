@@ -1,3 +1,5 @@
+#include "models/DisplayTime.hpp"
+#include <QTimeZone>
 #include "chart/layers/ChartLayers.hpp"
 #include "themes/ThemePalette.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
@@ -1582,6 +1584,34 @@ TEST(CvdFeed, CoverageAndEachResetPeriodDetermineTheBaselineLabel) {
     chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::Visible, 4);
     EXPECT_STREQ(snapshot.label.data(), "CVD since view start");
     frame.raster.drawnStartMs = 86400000;
+    chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::UtcDay, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since UTC day");
+}
+
+// Local display zone: the "since" clock is local; the UTC-day reset title stays.
+TEST(CvdFeed, BaselineClockFollowsTheDisplayZone) {
+    auto series = footprintSeries();
+    auto frame = footprintFrame();
+    constexpr int64_t hour = 3600000;
+    auto record = series.bars[0]; series.bars.clear();
+    record.bar.startMs = 9 * hour; series.bars[9 * hour] = record;
+    frame.raster.drawnStartMs = 9 * hour; frame.raster.drawnEndMs = 9 * hour + 1000;
+    auto& time = DisplayTime::instance();
+    time.setLocalZone(QTimeZone("Asia/Kolkata"));
+    time.setZone(DisplayTime::Zone::Local);
+    chart::CvdSnapshot snapshot;
+    chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::UtcDay, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since 14:30 loaded");
+    record.bar.startMs = 86400000; series.bars[record.bar.startMs] = record;
+    frame.raster.drawnEndMs = 86401000;
+    chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::UtcDay, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since 1970-01-01 14:30 loaded");
+    series.coverage[0] = {0, 9 * hour, SentinelStreamClient::FlowStatus::Complete};
+    frame.raster.drawnStartMs = 86400000;
+    chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::UtcDay, 4);
+    EXPECT_STREQ(snapshot.label.data(), "CVD since UTC day");
+    time.setZone(DisplayTime::Zone::Utc);
+    time.setLocalZone(QTimeZone());
     chart::CvdFeed::build(snapshot, series, frame, chart::CvdReset::UtcDay, 4);
     EXPECT_STREQ(snapshot.label.data(), "CVD since UTC day");
 }

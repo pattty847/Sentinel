@@ -7,6 +7,7 @@
 #include "render/GridViewState.hpp"
 #include "chart/core/CvdHistory.hpp"
 #include "SentinelLogging.hpp"
+#include "models/DisplayTime.hpp"
 #include <QDateTime>
 #include <cstdio>
 namespace chart {
@@ -51,8 +52,9 @@ void baselineLabel(CvdSnapshot& out) {
     std::snprintf(out.label.data(), out.label.size(), "%s", label);
     const auto loaded = out.series.incompleteStart();
     if (out.reset == CvdReset::Visible || loaded < 0 || !out.series.count) return;
-    const auto at = QDateTime::fromMSecsSinceEpoch(loaded, Qt::UTC);
-    const auto last = QDateTime::fromMSecsSinceEpoch(out.series.points[size_t(out.series.count - 1)].timeMs, Qt::UTC);
+    // The display zone's clock; the reset boundary itself stays UTC-defined.
+    const auto at = DisplayTime::instance().at(loaded);
+    const auto last = DisplayTime::instance().at(out.series.points[size_t(out.series.count - 1)].timeMs);
     const auto text = at.toString(at.date() == last.date() ? QStringLiteral("HH:mm") : QStringLiteral("yyyy-MM-dd HH:mm")).toLatin1();
     // The shared atlas has no parentheses; keep its default texture unchanged.
     std::snprintf(out.label.data(), out.label.size(), "CVD since %s loaded", text.constData());
@@ -100,6 +102,7 @@ void CvdFeed::bind(ChartViewController& view, const PublishedFrame& published,
     });
     connect(view.viewPtr(), &GridViewState::viewportChanged, this, &CvdFeed::onFrameChanged);
     connect(view.viewPtr(), &GridViewState::panVisualOffsetChanged, this, &CvdFeed::onFrameChanged);
+    connect(&DisplayTime::instance(), &DisplayTime::zoneChanged, this, &CvdFeed::onFrameChanged);
     apply();
 }
 void CvdFeed::bindSource(IGridDataSource& source) {

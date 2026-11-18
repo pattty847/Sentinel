@@ -113,6 +113,7 @@ const std::vector<Def> &defs() {
         choice("bubblePlacement", &S::bubblePlacement, {"individual", "auto", "slot"}, "Trade bubbles at exchange time, per bar side at VWAP (slot), or chosen by column width (auto)."),
         choice("bubblesOverFootprint", &S::bubblesOverFootprint, {"over", "dim"}, "Keep trade bubbles at full opacity over footprint numbers, or dim them to 35%."),
         choice("paperPositionStyle", &S::paperPositionStyle, {"tag", "band"}, "Paper position as a compact PnL tag at the entry line, or a full-width entry-to-mark band."),
+        choice("timeZone", &S::timeZone, {"utc", "local"}, "Time zone of every chart time label: UTC, or this computer's local zone with its daylight-saving rules."),
         flag("showLabels", &S::showLabels, "Show liquidity sizes on heatmap cells where the text fits."),
         choice("labelCurrency", &S::labelCurrency, {"usd", "asset"}, "Liquidity labels as USD notional or base-asset size."),
         flag("labelCurrencySymbol", &S::labelCurrencySymbol, "Prefix USD liquidity labels with '$'."),

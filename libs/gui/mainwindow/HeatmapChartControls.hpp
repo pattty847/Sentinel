@@ -12,6 +12,7 @@
 // - the toolbar's mode (which controls the active layers show, TopToolbar::
 //   controlVisibility), the liquidity range slider and label options (S7b:
 //   per-symbol sensitivityMin/Max, showLabels, labelCurrency) and the TPO controls;
+// - the timeZone setting -> DisplayTime, the zone of every chart time label;
 // - the chart settings menu (the toolbar gear): one entry point for chart-level
 //   settings that exist (labels, label size, candle style, the settings dialog,
 //   screenshot, layouts, font). The host supplies the actions it owns (hooks).

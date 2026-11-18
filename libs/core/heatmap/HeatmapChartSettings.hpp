@@ -33,6 +33,7 @@ struct HeatmapChartSettings {
     std::string bubblePlacement = "individual";
     std::string bubblesOverFootprint = "over";
     std::string paperPositionStyle = "tag";
+    std::string timeZone = "utc"; // chart time labels: "utc" or "local" (DisplayTime)
     // Liquidity labels (S7b, owner decision 1/2): on every coloured cell where the
     // text fits at labelMinPx plus padding, growing to at most labelMaxPx; USD
     // (price x size) or the asset amount ("usd" or "asset").
