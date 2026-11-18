@@ -310,6 +310,14 @@ target_link_libraries(test_heatmap_plumbing PRIVATE sentinel_lab_lib GTest::gtes
 add_test(NAME HeatmapPlumbingTests COMMAND test_heatmap_plumbing)
 set_tests_properties(HeatmapPlumbingTests PROPERTIES LABELS "render;heatmap" TIMEOUT 30)
 
+# The production tick chooser over the synthetic recording: allocation rule and the
+# DISABLED_ changed-view benchmark. CPU only.
+add_executable(test_heatmap_tick_choice test_heatmap_tick_choice.cpp)
+target_include_directories(test_heatmap_tick_choice PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_heatmap_tick_choice PRIVATE sentinel_lab_lib GTest::gtest Qt6::Core)
+add_test(NAME HeatmapTickChoiceTests COMMAND test_heatmap_tick_choice)
+set_tests_properties(HeatmapTickChoiceTests PROPERTIES LABELS "render;heatmap" TIMEOUT 120)
+
 # Liquidity label layout (pure CPU, the bundled MSDF font) and label text.
 add_executable(test_heatmap_label_layout test_heatmap_label_layout.cpp)
 target_include_directories(test_heatmap_label_layout PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
