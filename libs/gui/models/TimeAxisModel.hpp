@@ -1,14 +1,16 @@
 #pragma once
 #include "AxisModel.hpp"
-#include <QDateTime>
-#include <QTimeZone>
 
 /**
  * TimeAxisModel - Calculates nice time tick marks
  * 
  * Specializes AxisModel for time data. Calculates "nice" time steps
  * like 1s, 5s, 15s, 30s, 1min, 5min, etc. and formats labels with
- * appropriate precision. Supports timezone configuration.
+ * appropriate precision.
+ *
+ * Labels and the grid's boundaries follow the chart's display time zone
+ * (DisplayTime): in Local mode a 1h tick lands on a local hour and a 1d tick on a
+ * local midnight. A zone change re-labels at once.
  * 
  * Uses TradingView-style adaptive formatting:
  * - Minimal labels (just numbers when context is clear)
@@ -16,19 +18,10 @@
  */
 class TimeAxisModel : public AxisModel {
     Q_OBJECT
-    Q_PROPERTY(QString timezone READ timezone WRITE setTimezone NOTIFY timezoneChanged)
-    
+
 public:
     explicit TimeAxisModel(QObject* parent = nullptr);
-    
-    // Timezone support
-    QString timezone() const;
-    void setTimezone(const QString& tzId);
-    
-signals:
-    void timezoneChanged();
-    
-public:
+
     // AxisModel interface
     void recalculateTicks() override;
     
@@ -53,9 +46,7 @@ private:
     
     // Predefined nice time steps
     static const std::vector<TimeStep> TIME_STEPS;
-    
-    // Timezone for display formatting (default UTC)
-    QTimeZone m_timezone = QTimeZone::utc();
+
     double m_effectiveStart = 0.0;
     double m_effectiveEnd = 0.0;
     double m_effectiveOffsetPx = 0.0;

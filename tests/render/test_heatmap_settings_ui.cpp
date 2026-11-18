@@ -17,6 +17,7 @@
 #include "lab/RhiBackend.hpp"
 #include "mainwindow/AgentApiCodec.hpp"
 #include "mainwindow/HeatmapChartControls.hpp"
+#include "models/DisplayTime.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapSettingsModel.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
@@ -2915,6 +2916,49 @@ TEST_F(HeatmapChartUi, TheToolbarNamesVeiledAvailability) {
     EXPECT_EQ(toolbar->tickVeilLabel()->toolTip(), indicator);
     EXPECT_TRUE(toolbar->tickPresetCombo()->toolTip().contains(indicator));
     EXPECT_EQ(controls->uiState()["toolbar"].toObject()["veiled"].toBool(), true);
+}
+
+// The Time zone setting re-labels the resolution notice at once, through the chart's
+// controls (no restart), and states the active zone; UTC returns the original text.
+TEST_F(HeatmapChartUi, TimeZoneSettingRelabelsTheResolutionNotice) {
+    gpuOn();
+    ASSERT_TRUE(settle()) << error.toStdString();
+    pick(100);
+    ugr->view()->setViewport(viewLo, viewHi, 100'400, 100'700); // veiled, as above
+    ASSERT_TRUE(settle()) << error.toStdString();
+    syncUi();
+    const QString utc = layer().resolutionIndicator();
+    ASSERT_TRUE(utc.contains(" UTC (")) << utc.toStdString();
+    DisplayTime::instance().setLocalZone(QTimeZone("Asia/Kolkata"));
+    ASSERT_TRUE(model->apply({{"timeZone", "local"}}).isEmpty());
+    syncUi();
+    const QString local = layer().resolutionIndicator();
+    EXPECT_TRUE(local.contains(" UTC+5:30 (")) << local.toStdString();
+    EXPECT_NE(local.section(" in ", 1), utc.section(" in ", 1)) << "the times are local";
+    EXPECT_EQ(toolbar->tickVeilLabel()->toolTip(), local);
+    ASSERT_TRUE(model->apply({{"timeZone", "utc"}}).isEmpty());
+    syncUi();
+    EXPECT_EQ(layer().resolutionIndicator(), utc);
+    DisplayTime::instance().setLocalZone(QTimeZone());
+}
+
+// The Chart tab's Time zone row writes the setting under plain names.
+TEST(HeatmapSettingsDialogLook, TimeZoneRowWritesTheSetting) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    auto *zone = child<QComboBox>(dialog, "timeZone");
+    ASSERT_TRUE(zone);
+    EXPECT_EQ(zone->currentData().toString(), "utc");
+    EXPECT_EQ(zone->itemText(zone->findData("local")), "Local");
+    EXPECT_TRUE(HeatmapSettingsDialog::tabKeys("Chart").contains("timeZone"));
+    zone->setCurrentIndex(zone->findData("local"));
+    EXPECT_EQ(model.settings().timeZone, "local");
+    EXPECT_EQ(t.reload().timeZone, "local");
+    ASSERT_TRUE(model.apply({{"timeZone", "utc"}}).isEmpty());
+    dialog.refreshFromModel();
+    EXPECT_EQ(zone->currentData().toString(), "utc");
+    EXPECT_FALSE(model.apply({{"timeZone", "America/New_York"}}).isEmpty());
 }
 
 // The dialog's tick actions are the toolbar's. A preset

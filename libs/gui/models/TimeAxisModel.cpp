@@ -1,5 +1,6 @@
 #include "TimeAxisModel.hpp"
 #include "../render/GridViewState.hpp"
+#include "DisplayTime.hpp"
 #include <QDebug>
 #include <cmath>
 #include <algorithm>
@@ -14,33 +15,8 @@ const std::vector<TimeAxisModel::TimeStep> TimeAxisModel::TIME_STEPS = {
 };
 
 TimeAxisModel::TimeAxisModel(QObject* parent)
-    : AxisModel(parent)
-    , m_timezone(QTimeZone::utc()) {
-}
-
-QString TimeAxisModel::timezone() const {
-    return QString::fromLatin1(m_timezone.id());
-}
-
-void TimeAxisModel::setTimezone(const QString& tzId) {
-    QTimeZone newTz;
-    if (tzId == "UTC" || tzId == "utc") {
-        newTz = QTimeZone::utc();
-    } else if (tzId == "EST" || tzId == "New York" || tzId == "America/New_York") {
-        newTz = QTimeZone("America/New_York");
-    } else if (tzId == "London" || tzId == "Europe/London") {
-        newTz = QTimeZone("Europe/London");
-    } else if (tzId == "Tokyo" || tzId == "Asia/Tokyo") {
-        newTz = QTimeZone("Asia/Tokyo");
-    } else {
-        newTz = QTimeZone(tzId.toLatin1());
-    }
-    
-    if (newTz.isValid() && newTz != m_timezone) {
-        m_timezone = newTz;
-        emit timezoneChanged();
-        recalculateTicks();
-    }
+    : AxisModel(parent) {
+    connect(&DisplayTime::instance(), &DisplayTime::zoneChanged, this, &TimeAxisModel::recalculateTicks);
 }
 
 void TimeAxisModel::recalculateTicks() {
@@ -102,9 +78,10 @@ void TimeAxisModel::calculateTicks() {
         }
     }
     m_lastNiceStepMs = step;
-    qint64 firstTick = (timeStart / step) * step;
-    for (qint64 timestamp = firstTick; timestamp <= timeEnd + step; timestamp += step) {
-        if (timestamp < timeStart - step) continue;
+    // Boundaries of the display zone's wall clock (UTC: multiples of the step).
+    const DisplayTime& zone = DisplayTime::instance();
+    for (qint64 timestamp = zone.nextBoundary(timeStart - step, step); timestamp <= timeEnd + step;
+         timestamp = zone.nextBoundary(timestamp, step)) {
         double screenX = valueToScreenPosition(static_cast<double>(timestamp));
         if (screenX >= 0 && screenX <= getViewportWidth()) {
             QString label = formatTimeLabel(timestamp, step);
@@ -174,7 +151,7 @@ qint64 TimeAxisModel::calculateNiceTimeStep(qint64 rangeMs, int targetTicks) con
 }
 
 QString TimeAxisModel::formatTimeLabel(qint64 timestampMs, qint64 stepMs) const {
-    QDateTime dateTime = QDateTime::fromMSecsSinceEpoch(timestampMs, m_timezone);
+    const QDateTime dateTime = DisplayTime::instance().at(timestampMs);
     if (stepMs < 100) {
         int ms = dateTime.time().msec();
         int second = dateTime.time().second();

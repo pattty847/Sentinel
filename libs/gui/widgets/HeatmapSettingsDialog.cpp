@@ -456,6 +456,7 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
     if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelCurrencySymbol", "labelMinPx", "labelMaxPx",
+                                "timeZone",
                                 "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleBodyFraction", "candleMaxBodyPx", "candleWickWidth", "showVolumeBars", "volumeBandPercent", "volumeOpacity", "footprintIntensity", "footprintCandle", "footprintNumbers",
                                 "footprintDustNotional", "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "cvdFillAnchor"};
     if (tab == "Tick") return {"tickMode", "manualTick", "minRowPx", "hysteresis"};
@@ -554,6 +555,7 @@ QPushButton *HeatmapSettingsDialog::resetButton(const QString &tab, QWidget *par
 QWidget *HeatmapSettingsDialog::buildChartTab() {
     auto *page = new QWidget(this);
     auto *form = new QFormLayout(page);
+    addTimeZoneRow(form, page);
     m_showLabels = new QCheckBox("Show liquidity labels on heatmap cells", page);
     m_showLabels->setObjectName("showLabels");
     form->addRow("Labels", m_showLabels);
@@ -1062,6 +1064,13 @@ void HeatmapSettingsDialog::addFlowControls(QFormLayout* form, QWidget* page) {
           "Auto fills to zero when crossed, or to the near plot edge for one-sign data. Edge also fills to zero when crossed. None draws the line only.");
     form->addRow(cvd);
 }
+void HeatmapSettingsDialog::addTimeZoneRow(QFormLayout* form, QWidget* page) {
+    auto* zone = new QComboBox(page); zone->setObjectName("timeZone");
+    zone->addItem("UTC", "utc"); zone->addItem("Local", "local");
+    form->addRow("Time zone", zone);
+    describe(form, zone, "Show every chart time in UTC or in this computer's local time zone. Candles and sessions still start at their UTC times.");
+    connect(zone, &QComboBox::currentIndexChanged, this, [this, zone] { apply({{"timeZone", zone->currentData().toString()}}); });
+}
 void HeatmapSettingsDialog::refreshFlowControls() {
     const auto values = heatmap::settingsJson(m_model->settings());
     for (const auto* key : {"footprintIntensity", "footprintCandle", "cvdReset", "cvdStyle", "cvdFillAnchor"}) {
@@ -1133,6 +1142,7 @@ void HeatmapSettingsDialog::refreshFromModel() {
     set(m_minRowPx, s.minRowPx);
     set(m_hysteresis, s.hysteresis);
     refreshFlowControls();
+    if (auto *zone = findChild<QComboBox *>("timeZone")) { const QSignalBlocker block(zone); zone->setCurrentIndex(std::max(0, zone->findData(QString::fromStdString(s.timeZone)))); }
     {
         const QSignalBlocker a(m_showLabels), b(m_labelCurrency);
         m_showLabels->setChecked(s.showLabels);
