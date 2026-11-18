@@ -183,6 +183,13 @@ TEST(ShellChrome, LiveMarketStateUsesPositiveInkOnlyWhileLive) {
     EXPECT_EQ(state->text(), "Stale");
     EXPECT_NE(state->palette().color(QPalette::WindowText), theme::positive());
     EXPECT_EQ(state->palette().color(QPalette::WindowText), QColor("#ffcc80"));
+
+    health.bookReceived("BTC-USD", QDateTime::currentMSecsSinceEpoch());
+    ASSERT_EQ(state->text(), "Live");
+    bar.setMarketHealth(nullptr);
+    EXPECT_EQ(state->text(), "Unavailable");
+    EXPECT_NE(state->palette().color(QPalette::WindowText), theme::positive());
+    EXPECT_EQ(state->palette().color(QPalette::WindowText), QColor("#b0b0b0"));
 }
 
 TEST(ShellChrome, BookAgeHasOneSpellingAndDomOnlyRepeatsAbnormalState) {

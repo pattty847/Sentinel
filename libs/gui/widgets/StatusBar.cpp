@@ -65,6 +65,7 @@ void StatusBar::refresh() {
     if (!m_health) {
         m_symbolLabel->setText("No symbol");
         m_stateLabel->setText("Unavailable");
+        m_stateLabel->setStyleSheet("color: #b0b0b0;");
         m_ageLabel->setText(bookAgeText(std::nullopt));
         return;
     }

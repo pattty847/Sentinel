@@ -1063,8 +1063,11 @@ void PaperTradingDock::onOrderUpdated(const trading::OrderUpdate& update) {
         m_orderLog->insertRow(row);
         m_orderLog->setItem(row, 0, new QTableWidgetItem(oid));
         m_orderIdToRow.insert(oid, row);
-        for (int c = 1; c < 6; ++c)
-            m_orderLog->setItem(row, c, new QTableWidgetItem(QString()));
+        for (int c = 1; c < 6; ++c) {
+            auto* item = new QTableWidgetItem(QString());
+            if (c >= 2 && c <= 4) item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            m_orderLog->setItem(row, c, item);
+        }
     }
     const bool isAlgo = !update.algoId.empty();
     const QColor rowColor = isAlgo ? QColor(20, 40, 60) : QColor(25, 25, 30);
@@ -1094,8 +1097,6 @@ void PaperTradingDock::onOrderUpdated(const trading::OrderUpdate& update) {
     m_orderLog->item(row, 1)->setText(QString::fromUtf8(trading::toString(update.side)));
     m_orderLog->item(row, 2)->setText(formatFixedTrimmed(update.qty, QLocale::c(), 8));
     m_orderLog->item(row, 3)->setText(formatFixedTrimmed(update.filledQty, QLocale::c(), 8));
-    for (int column = 2; column <= 4; ++column)
-        m_orderLog->item(row, column)->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
     const double logPrice = update.limitPrice > 0.0 ? update.limitPrice : update.avgPrice;
     m_orderLog->item(row, 4)->setData(Qt::UserRole, logPrice);
     m_orderLog->item(row, 4)->setText(shownPrice(m_symbol, logPrice));
