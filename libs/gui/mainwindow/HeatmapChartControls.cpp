@@ -28,6 +28,8 @@ HeatmapChartControls::HeatmapChartControls(heatmap::HeatmapSettingsModel *model,
     connect(m_indicatorTimer, &QTimer::timeout, this, &HeatmapChartControls::syncNow);
     connect(m_model, &heatmap::HeatmapSettingsModel::changed, this, &HeatmapChartControls::onModelChanged);
     DisplayTime::instance().setZone(DisplayTime::parse(m_model->settings().timeZone));
+    // A system zone change in Local mode reaches the cached toolbar text too.
+    connect(&DisplayTime::instance(), &DisplayTime::zoneChanged, this, &HeatmapChartControls::scheduleSync);
     connect(&PriceUnits::instance(), &PriceUnits::unitChanged, this, &HeatmapChartControls::scheduleSync);
     // The Manual tick memory follows the chart's symbol and timeframe.
     m_model->setContextProvider([this] {

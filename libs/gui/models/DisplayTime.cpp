@@ -79,10 +79,12 @@ DisplayTime::Segment DisplayTime::segmentAt(qint64 ms) const {
     segment.offsetSeconds = m_local.offsetFromUtc(utc);
     if (!m_local.hasTransitions()) return segment; // a fixed offset, or a backend without rules
     // previousTransition is strictly before its argument, and a backend may compare in
-    // whole seconds: ask one second later and accept the transition only if it is the
-    // one into this offset (else the segment starts at `ms`, which is still correct).
+    // whole seconds: ask one second later and accept the transition only if it is not
+    // after `ms` and leads into this offset (else the segment starts at `ms`, which is
+    // still correct). A later one can keep the offset (a DST relabel, Lisbon 1992).
     const auto previous = m_local.previousTransition(utc.addSecs(1));
-    segment.from = previous.atUtc.isValid() && previous.offsetFromUtc == segment.offsetSeconds
+    segment.from = previous.atUtc.isValid() && previous.atUtc.toMSecsSinceEpoch() <= ms &&
+                           previous.offsetFromUtc == segment.offsetSeconds
         ? previous.atUtc.toMSecsSinceEpoch() : ms;
     const auto next = m_local.nextTransition(utc);
     if (next.atUtc.isValid()) segment.to = next.atUtc.toMSecsSinceEpoch();

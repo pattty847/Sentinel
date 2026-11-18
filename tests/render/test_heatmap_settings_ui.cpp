@@ -2939,6 +2939,22 @@ TEST_F(HeatmapChartUi, TimeZoneSettingRelabelsTheResolutionNotice) {
     ASSERT_TRUE(model->apply({{"timeZone", "utc"}}).isEmpty());
     syncUi();
     EXPECT_EQ(layer().resolutionIndicator(), utc);
+    // A system zone change in Local mode reaches the cached toolbar text through the
+    // controls on its own (no settings change, no explicit sync).
+    static QByteArray system; // outlives the test even if an assertion returns early
+    system = "America/New_York";
+    DisplayTime::instance().setSystemZoneIdSource([] { return system; });
+    DisplayTime::instance().setLocalZone(QTimeZone()); // follow the (fake) system zone
+    ASSERT_TRUE(model->apply({{"timeZone", "local"}}).isEmpty());
+    syncUi();
+    ASSERT_TRUE(toolbar->tickVeilLabel()->toolTip().contains(" UTC-")) << toolbar->tickVeilLabel()->toolTip().toStdString();
+    system = "Asia/Kolkata";
+    ASSERT_TRUE(DisplayTime::instance().refreshSystemZone());
+    syncUi(); // pumps events only
+    EXPECT_TRUE(toolbar->tickVeilLabel()->toolTip().contains(" UTC+5:30 (")) << toolbar->tickVeilLabel()->toolTip().toStdString();
+    EXPECT_EQ(toolbar->tickVeilLabel()->toolTip(), layer().resolutionIndicator());
+    ASSERT_TRUE(model->apply({{"timeZone", "utc"}}).isEmpty());
+    DisplayTime::instance().setSystemZoneIdSource({});
     DisplayTime::instance().setLocalZone(QTimeZone());
 }
 

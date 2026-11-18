@@ -216,3 +216,17 @@ TEST_F(TimeAxisModelZone, LocalFollowsASystemZoneChange) {
     EXPECT_EQ(time.zoneLabel(utcMs(2026, 7, 1, 0)), "UTC+9") << "an injected zone wins";
     QObject::disconnect(counter);
 }
+
+// A transition that keeps the total offset (Lisbon 1992-09-27 01:00Z: summer time
+// becomes standard UTC+1) just after the query must not split the segment into
+// one-millisecond pieces: the next local hour is the transition instant itself.
+TEST(DisplayTimeZone, OffsetKeepingTransitionStillFindsTheHour) {
+    auto& time = DisplayTime::instance();
+    time.setLocalZone(QTimeZone("Europe/Lisbon"));
+    time.setZone(DisplayTime::Zone::Local);
+    const qint64 at = utcMs(1992, 9, 27, 1);
+    EXPECT_EQ(time.nextBoundary(at - 501, kHour), at);
+    EXPECT_EQ(time.zoneLabel(at - 501), "UTC+1");
+    time.setZone(DisplayTime::Zone::Utc);
+    time.setLocalZone(QTimeZone());
+}
