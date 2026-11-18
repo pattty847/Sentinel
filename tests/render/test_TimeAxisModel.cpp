@@ -280,7 +280,7 @@ TEST_F(TimeAxisModelZone, NinetyDaysUseWeeksAcrossTheWholeWidth) {
     EXPECT_LE(list.size(), 15u);
     expectSpread(list, width);
     expectCalendar(list, QTimeZone::utc(), Cal::Week);
-    EXPECT_EQ(labels(list), QStringList({"5 Jan", "12 Jan", "19 Jan", "26 Jan", "2 Feb", "9 Feb", "16 Feb", "23 Feb",
+    EXPECT_EQ(labels(list), QStringList({"5 Jan 2026", "12 Jan", "19 Jan", "26 Jan", "2 Feb", "9 Feb", "16 Feb", "23 Feb",
                                          "2 Mar", "9 Mar", "16 Mar", "23 Mar", "30 Mar"}));
 }
 
@@ -345,4 +345,96 @@ TEST_F(TimeAxisModelZone, TooManyTicksTakeALargerStepNotTheLeftmost) {
     EXPECT_LE(list.size(), 32u);
     EXPECT_GE(list.size(), 10u);
     expectSpread(list, width);
+}
+
+namespace {
+std::vector<AxisModel::TickSnapshot> freshTicks(GridViewState& view, qint64 from, qint64 to, double width) {
+    TimeAxisModel axis; // no step memory
+    axis.setViewportSize(width, 400.0);
+    axis.setGridViewState(&view);
+    view.setViewport(from, to, 100.0, 200.0);
+    std::vector<AxisModel::TickSnapshot> out;
+    axis.copyTicks(out);
+    return out;
+}
+} // namespace
+
+// A calendar step can miss a narrow window entirely (no Monday, no 1st): a smaller
+// step that fits takes over, with two ticks when the target allows.
+TEST_F(TimeAxisModelZone, NarrowWindowsKeepTicksOnScreen) {
+    const std::pair<qint64, qint64> cases[] = {
+        {utcMs(2026, 1, 6, 0), utcMs(2026, 1, 11, 0)},  // a week step: Mondays 5 and 12 Jan are outside
+        {utcMs(2026, 1, 2, 0), utcMs(2026, 1, 31, 0)},  // a month step: no 1st inside
+        {utcMs(2026, 4, 15, 0), utcMs(2026, 6, 30, 0)}, // a quarter step: only Jul 1, outside
+    };
+    for (const auto& [from, to] : cases) {
+        const auto list = freshTicks(view, from, to, 300); // 3 labels at 80 px: target 2
+        SCOPED_TRACE(labels(list).join(' ').toStdString());
+        EXPECT_GE(list.size(), 2u);
+        EXPECT_LE(list.size(), 32u);
+    }
+}
+
+// The year appears at least once: on the first label when no tick is a January or
+// a year change.
+TEST_F(TimeAxisModelZone, CalendarAxisNamesItsYearOnce) {
+    const auto months = freshTicks(view, utcMs(2026, 2, 1, 0), utcMs(2026, 11, 30, 0), 1200);
+    SCOPED_TRACE(labels(months).join(' ').toStdString());
+    ASSERT_GE(months.size(), 3u);
+    EXPECT_EQ(months.front().label, "Feb 2026");
+    EXPECT_EQ(labels(months).filter("2026").size(), 1);
+    EXPECT_EQ(months[1].label, "Mar");
+}
+
+// Past the 100-year step the series continues (200, 500, 1000 ... years) on
+// anchored years, so even 4,000 years fit without the leftmost-32 cut.
+TEST_F(TimeAxisModelZone, MillenniaStayWithinCapacityAndAnchored) {
+    view.setMaxSpans(4100.0 * 365.25 * kDay, 1e9);
+    const auto list = freshTicks(view, utcMs(2000, 1, 1, 0), utcMs(6000, 1, 1, 0), 1200);
+    SCOPED_TRACE(labels(list).join(' ').toStdString());
+    EXPECT_LE(list.size(), 15u);
+    expectSpread(list, 1200);
+    for (const auto& t : list) {
+        const QDate d = QDateTime::fromMSecsSinceEpoch(qint64(t.value), QTimeZone::UTC).date();
+        EXPECT_EQ(d.year() % 500, 0);
+        EXPECT_EQ(d.dayOfYear(), 1);
+    }
+}
+
+// A date the zone skipped entirely (Apia jumped from 29 to 31 Dec 2011) is not a
+// boundary: the 2-day period starts on the next date that exists.
+TEST(DisplayTimeZone, SkippedDateMovesToTheNextExistingDate) {
+    auto& time = DisplayTime::instance();
+    const QTimeZone apia("Pacific/Apia");
+    time.setLocalZone(apia);
+    time.setZone(DisplayTime::Zone::Local);
+    ASSERT_EQ(QDate(2011, 12, 30).toJulianDay() % 2, 0);
+    ASSERT_FALSE(QDate(2011, 12, 30).startOfDay(apia).isValid());
+    const qint64 after = QDateTime(QDate(2011, 12, 29), QTime(12, 0), apia).toMSecsSinceEpoch();
+    EXPECT_EQ(time.nextCalendarBoundary(after, DisplayTime::Calendar::Days, 2),
+              QDate(2011, 12, 31).startOfDay(apia).toMSecsSinceEpoch());
+    time.setZone(DisplayTime::Zone::Utc);
+    time.setLocalZone(QTimeZone());
+}
+
+// A range oscillating around a calendar switch point keeps its step.
+TEST_F(TimeAxisModelZone, CalendarStepsHoldAroundTheSwitchPoint) {
+    width = 1200; // target 14: one week is the step at 98 days
+    const qint64 from = utcMs(2026, 1, 1, 0);
+    const auto gapDays = [](const std::vector<AxisModel::TickSnapshot>& list) {
+        return list.size() < 2 ? qint64(0) : qint64(list[1].value - list[0].value) / kDay;
+    };
+    EXPECT_EQ(gapDays(ticks(from, from + 97 * kDay + kDay / 2)), 7);
+    EXPECT_EQ(gapDays(ticks(from, from + 98 * kDay + kDay / 2)), 7) << "held";
+    EXPECT_EQ(gapDays(ticks(from, from + 97 * kDay + kDay / 2)), 7);
+    view.setViewport(from, from + 98 * kDay + kDay / 2, 100.0, 200.0);
+    TimeAxisModel other; // first sees 98.5 days: two weeks
+    other.setViewportSize(width, 400.0);
+    other.setGridViewState(&view);
+    std::vector<AxisModel::TickSnapshot> list;
+    other.copyTicks(list);
+    EXPECT_EQ(gapDays(list), 14);
+    view.setViewport(from, from + 97 * kDay + kDay / 2, 100.0, 200.0);
+    other.copyTicks(list);
+    EXPECT_EQ(gapDays(list), 14) << "held";
 }

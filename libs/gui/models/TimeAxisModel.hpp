@@ -1,6 +1,7 @@
 #pragma once
 #include "AxisModel.hpp"
 #include "DisplayTime.hpp"
+#include <optional>
 
 /**
  * TimeAxisModel - Calculates nice time tick marks
@@ -15,9 +16,12 @@
  *
  * Above one day the steps are calendar periods (2 days, 1 and 2 weeks, 1 and 3
  * months, 1 to 100 years) on local midnights of the display zone, chosen as the
- * smallest that keeps ticks at least the label gap apart. Ticks never exceed the
- * model's label capacity: a step that would make more takes the next larger step,
- * so the axis is never cut to its leftmost ticks.
+ * smallest that keeps ticks at least the label gap apart, held in a band around
+ * each switch point. Ticks never exceed the model's label capacity: a step that
+ * would make more takes the next larger step (years continue 200, 500, 1000 ...),
+ * so the axis is never cut to its leftmost ticks; a step with no tick on screen
+ * (or one, for a calendar step) takes a smaller one. A calendar axis names its
+ * year at least once, on the first label when no other label has it.
  * 
  * Uses TradingView-style adaptive formatting:
  * - Minimal labels (just numbers when context is clear)
@@ -53,13 +57,16 @@ private:
         DisplayTime::Calendar unit;
         int count;
     };
-    static const CalendarStep* calendarStep(qint64 stepMs);
+    static std::optional<CalendarStep> calendarStep(qint64 stepMs);
     static qint64 largerStep(qint64 stepMs);
+    static qint64 smallerStep(qint64 stepMs);
     static qint64 nextTick(qint64 afterMs, qint64 stepMs);
-    bool ticksFit(qint64 stepMs, qint64 timeStart, qint64 timeEnd) const;
+    int countTicks(qint64 stepMs, qint64 timeStart, qint64 timeEnd) const;
+    qint64 fitStep(qint64 step, qint64 timeStart, qint64 timeEnd, int targetTicks) const;
     qint64 calculateNiceTimeStep(qint64 rangeMs, int targetTicks) const;
     QString formatTimeLabel(qint64 timestampMs, qint64 stepMs) const;
-    static QString formatCalendarLabel(qint64 timestampMs, qint64 previousMs, const CalendarStep& step);
+    static QString formatCalendarLabel(qint64 timestampMs, qint64 previousMs, const CalendarStep& step,
+                                       bool withYear, bool* hasYear);
     bool updateEffectiveViewport();
     
     // Predefined nice time steps

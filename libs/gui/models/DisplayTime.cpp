@@ -18,7 +18,7 @@ QDate periodStartOnOrAfter(QDate d, DisplayTime::Calendar unit, int count) {
         const QDate monday = d.addDays((8 - d.dayOfWeek()) % 7); // Julian day % 7 == 0
         return monday.addDays(7 * ((count - floorMod(monday.toJulianDay() / 7, count)) % count));
     }
-    case DisplayTime::Calendar::Months: {
+    case DisplayTime::Calendar::Months: { // years before 1 CE are not anchored exactly; no market data there
         const QDate first = d.day() == 1 ? d : QDate(d.year(), d.month(), 1).addMonths(1);
         const qint64 month = qint64(first.year()) * 12 + first.month() - 1;
         return first.addMonths(int((count - floorMod(month, count)) % count));
@@ -126,10 +126,15 @@ qint64 DisplayTime::nextCalendarBoundary(qint64 afterMs, Calendar unit, int coun
     if (afterMs > kBoundaryLimitMs || afterMs < -kBoundaryLimitMs) return std::numeric_limits<qint64>::max();
     const QTimeZone zone = m_zone == Zone::Utc ? QTimeZone::utc() : m_local;
     QDate date = at(afterMs).date();
-    for (int tries = 0; tries < 4; ++tries) {
-        const QDate start = periodStartOnOrAfter(date, unit, count);
-        // startOfDay: the first instant of that date, also where a DST change skips midnight.
-        const qint64 ms = start.startOfDay(zone).toMSecsSinceEpoch();
+    for (int tries = 0; tries < 8; ++tries) {
+        QDate start = periodStartOnOrAfter(date, unit, count);
+        // startOfDay: the first instant of that date, also where a DST change skips
+        // midnight. A date the zone skipped entirely (Pacific/Apia 2011-12-30) has
+        // none: the period starts on the next date that exists.
+        QDateTime begin = start.startOfDay(zone);
+        for (int skipped = 0; skipped < 3 && !begin.isValid(); ++skipped) begin = (start = start.addDays(1)).startOfDay(zone);
+        if (!begin.isValid()) return std::numeric_limits<qint64>::max();
+        const qint64 ms = begin.toMSecsSinceEpoch();
         if (ms > afterMs) return ms;
         date = start.addDays(1);
     }
