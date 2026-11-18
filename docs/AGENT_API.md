@@ -193,10 +193,12 @@ outside the viewport. `tpoSession` uses the configured `tpo.tpoSessionType` and
 resets at its session open; accumulation continues until the next open, including
 outside session hours. Only these two modes, while the strip or footer is enabled, extend
 flow requests and retention to the earliest visible flow bar's reset boundary,
-within the existing 8,192-bar limit. Panning or zooming inside a fully loaded reset
+within the existing 8,194-bar limit. Panning or zooming inside a fully loaded reset
 period preserves its baseline. Until history reaches the boundary, or when the
-cap excludes it, the label says “CVD since HH:MM loaded” (with a UTC date across
-days). Complete coverage of earlier empty buckets counts as loaded. Each visible
+cap excludes it, the label says “CVD since HH:MM loaded” (with a date across
+days); the time and date use the display zone (UTC or Local), while the reset
+boundary stays UTC-defined. Complete coverage of earlier empty buckets counts as
+loaded. Each visible
 reset period tracks its own loaded start; any truncated period makes the label explicit.
 With both strip and footer disabled, or in `visible` mode, CVD keeps the usual viewport history window.
 

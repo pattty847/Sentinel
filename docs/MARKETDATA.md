@@ -466,9 +466,9 @@ libs/core/marketdata/
 
 ## Transport security (TLS / WSS)
 
-The internal stream server (`SentinelStreamServer`) serves only `wss://` (default `wss://127.0.0.1:8080`): every session is TLS, and the server will not start without a loadable certificate and private key (`tls.cert_file` / `tls.key_file`, defaulting to `certs/sentinel-server.crt` and `.key`). The stream is encrypted, and the client can verify the server.
+The internal stream server (`SentinelStreamServer`) serves only `wss://` (default `wss://127.0.0.1:8080`): every session is TLS, and the stream listener will not start without a loadable certificate and private key (`tls.cert_file` / `tls.key_file`, defaulting to `certs/sentinel-server.crt` and `.key`). A listener failure is logged while the server process continues recording. The stream is encrypted; a loadable client CA file enables certificate-chain verification, but the client does not install a hostname-verification callback.
 
-**Encrypted:** `server_config`, `heatmap_slice`, l2 snapshots/updates, `market_trades`, candle and TPO history, `trade_command`, `order_update`, `position_update`, and control messages (e.g. `subscribe`).
+**Encrypted:** `server_config`, binary heatmap chunks and raw live tails, l2 snapshots/updates, `market_trades`, candle and TPO history, `trade_command`, `order_update`, `position_update`, and control messages (e.g. `subscribe`).
 
 **Live order-book grid:** Each server `snapshot` carries `tick_size` for that product and
 `book_status` (`ready`, `unavailable`, `metadata_unavailable`, `invalid_tick`,
@@ -494,7 +494,7 @@ retains raw price levels only inside the live book's band, sums all quantities i
 and adjusts the bucket total when one raw level changes or is deleted. The wire carries these bucket
 totals; the GUI replica applies them as absolute quantities.
 
-**Handshake:** TCP connect → TLS 1.3 ClientHello/ServerHello (server uses self-signed EC cert with SANs for localhost/127.0.0.1) → TLS Finished → HTTP WebSocket upgrade → JSON subscribe/server_config/heatmap_slice.
+**Handshake:** TCP connect → TLS 1.3 ClientHello/ServerHello (the supplied scripts generate a self-signed EC cert with SANs for localhost/127.0.0.1) → TLS Finished → HTTP WebSocket upgrade → WebSocket stream messages (`subscribe`, `server_config`, binary heatmap chunks and raw live tails).
 
 **Certificates:** Generate with `certs/gen-certs.ps1` (Windows) or `certs/gen-certs.sh` (Linux/macOS). Outputs `certs/sentinel-server.crt` and `certs/sentinel-server.key` (gitignored). Configure in `server_config.yaml` under `tls.cert_file` / `tls.key_file` and in `client_config.yaml` under `client.server.ca_file`. If `ca_file` is missing or invalid, the client falls back to `verify_none` with a log warning (acceptable for local dev only).
 
