@@ -75,7 +75,9 @@ void StatusBar::refresh() {
     m_stateLabel->setToolTip(s.reason);
     const bool degraded = s.state == MarketHealth::State::Stale || s.state == MarketHealth::State::HistoryPartial || s.state == MarketHealth::State::Unavailable;
     const bool disconnected = s.state == MarketHealth::State::Disconnected || s.state == MarketHealth::State::Reconnecting;
-    m_stateLabel->setStyleSheet(QString("color: %1;").arg(disconnected ? "#e57373" : degraded ? "#ffcc80" : "#b0b0b0"));
+    m_stateLabel->setStyleSheet(QString("color: %1;").arg(
+        s.state == MarketHealth::State::Live ? theme::positive().name()
+        : disconnected ? "#e57373" : degraded ? "#ffcc80" : "#b0b0b0"));
     m_ageLabel->setText(bookAgeText(s.bookAgeMs));
 }
 void StatusBar::showEvent(QShowEvent* event) { QWidget::showEvent(event); refresh(); if (m_health) m_ageTimer.start(); }

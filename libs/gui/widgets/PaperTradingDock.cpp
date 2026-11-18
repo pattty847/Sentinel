@@ -47,20 +47,23 @@ namespace {
 const QColor kText2("#B6C2CF");
 const QColor kSmallSellText("#FF8C82");
 
+QString formatFixedTrimmed(double value, QLocale displayLocale, int decimals, int minimumDecimals = 0) {
+    displayLocale.setNumberOptions(displayLocale.numberOptions() & ~QLocale::OmitGroupSeparator);
+    QString out = displayLocale.toString(value, 'f', decimals);
+    const QString decimal = displayLocale.decimalPoint();
+    while (out.contains(decimal) && out.endsWith('0') && out.size() - out.indexOf(decimal) - 1 > minimumDecimals)
+        out.chop(1);
+    if (out.endsWith(decimal)) out.chop(1);
+    return out;
+}
+
 class TicketSpinBox final : public QDoubleSpinBox {
 public:
     explicit TicketSpinBox(QWidget* parent) : QDoubleSpinBox(parent) {}
     void setMinimumDisplayDecimals(int count) { m_minimumDisplayDecimals = count; update(); }
 protected:
     QString textFromValue(double value) const override {
-        QLocale displayLocale = locale();
-        displayLocale.setNumberOptions(displayLocale.numberOptions() & ~QLocale::OmitGroupSeparator);
-        QString out = displayLocale.toString(value, 'f', decimals());
-        const QString decimal = displayLocale.decimalPoint();
-        while (out.contains(decimal) && out.endsWith('0') && out.size() - out.indexOf(decimal) - 1 > m_minimumDisplayDecimals)
-            out.chop(1);
-        if (out.endsWith(decimal)) out.chop(1);
-        return out;
+        return formatFixedTrimmed(value, locale(), decimals(), m_minimumDisplayDecimals);
     }
 private:
     int m_minimumDisplayDecimals = 0;
@@ -418,8 +421,10 @@ void PaperTradingDock::buildManualTab(QWidget* parent) {
     m_orderLog->setHorizontalHeaderLabels({
         QStringLiteral("ID"), QStringLiteral("Side"), QStringLiteral("Qty"),
         QStringLiteral("Fill"), QStringLiteral("Price"), QStringLiteral("Status")});
-    m_orderLog->horizontalHeader()->setStretchLastSection(true);
-    m_orderLog->horizontalHeader()->setDefaultSectionSize(55);
+    auto* orderHeader = m_orderLog->horizontalHeader();
+    for (int column = 0; column < 5; ++column)
+        orderHeader->setSectionResizeMode(column, QHeaderView::ResizeToContents);
+    orderHeader->setSectionResizeMode(5, QHeaderView::Stretch);
     m_orderLog->verticalHeader()->setMinimumSectionSize(22);
     m_orderLog->verticalHeader()->setMaximumSectionSize(22);
     m_orderLog->verticalHeader()->setDefaultSectionSize(22);
@@ -1087,8 +1092,10 @@ void PaperTradingDock::onOrderUpdated(const trading::OrderUpdate& update) {
         }
     }
     m_orderLog->item(row, 1)->setText(QString::fromUtf8(trading::toString(update.side)));
-    m_orderLog->item(row, 2)->setText(QString::number(update.qty, 'f', 8));
-    m_orderLog->item(row, 3)->setText(QString::number(update.filledQty, 'f', 8));
+    m_orderLog->item(row, 2)->setText(formatFixedTrimmed(update.qty, QLocale::c(), 8));
+    m_orderLog->item(row, 3)->setText(formatFixedTrimmed(update.filledQty, QLocale::c(), 8));
+    for (int column = 2; column <= 4; ++column)
+        m_orderLog->item(row, column)->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
     const double logPrice = update.limitPrice > 0.0 ? update.limitPrice : update.avgPrice;
     m_orderLog->item(row, 4)->setData(Qt::UserRole, logPrice);
     m_orderLog->item(row, 4)->setText(shownPrice(m_symbol, logPrice));
