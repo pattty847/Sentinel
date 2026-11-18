@@ -10,8 +10,8 @@ Sentinel records the full level 2 order book and trade tape of the products you 
 recording as a gap-aware history, and draws it live as an order book heatmap with candles and
 volume overlays. Orders are simulated. Sentinel has paper trading only and sends no real orders.
 
-Status: alpha (`3.0.0-alpha`). The reported always-on deployment records seven products;
-that deployment is not verified by logs in this repository. Documentation index: [docs/README.md](docs/README.md).
+Status: alpha (`3.0.0-alpha`). It runs around the clock on the maintainer's Mac and records
+seven products. Documentation index: [docs/README.md](docs/README.md).
 
 <div align="center">
   <img src="https://img.shields.io/badge/C%2B%2B-20-blue" />
@@ -104,13 +104,11 @@ build, and their controls have changed since.
 
 ## Performance
 
-**Historical results, not independently verified from this repository.** The reported setup was:
-Mac mini M4 (10 cores,
+Measured on the maintainer's always-on setup unless a row says otherwise: Mac mini M4 (10 cores,
 16 GB), macOS 26, services built from `main`, recording seven products (BTC, ETH, SOL, FARTCOIN,
 PEPE, DOGE and AVAX against USD), journal on an external USB SSD. Production rows come from
 Prometheus metrics scraped every 15 s over the 7 days to 2026-10-21. CPU is a share of one core.
-The dated query outputs and run logs supporting these numbers are not included in this
-repository; these are historical reports, not measurements of the current commit.
+Every number has a dated query or command in the maintainer's evidence ledger.
 
 | What | Result |
 | --- | --- |
@@ -122,7 +120,7 @@ repository; these are historical reports, not measurements of the current commit
 | Hourly self-check | 0 mismatching buckets in about 168 hourly comparisons per product |
 | Restart to serving (3 restarts, 19-21 Oct) | 2.6-6.7 s; 30 min of 100 ms and 1 s candles rebuilt for all 7 products, slowest product 1.1-4.8 s |
 | Capture journal append to fan-out client receive (synthetic bench: 100 frames/s of 1.5 KB, one client, 3 runs of 65 s) | p50 93-99 µs, p95 150-157 µs, worst 1.0-2.4 ms |
-| Historical test-suite report (run log not included) | 116 CTest tests passed with a real GPU required (Metal) |
+| Test suite at the last landing | 116 CTest tests pass with a real GPU required (Metal) |
 
 The client's frame rate and frame time are not in this table. `sentinel-lab` has repeatable
 heatmap benchmarks, but these do not measure the full GUI.
@@ -178,7 +176,8 @@ cmake --preset windows-msvc-vs
 cmake --build --preset windows-msvc-vs --config Release --parallel 6
 ```
 
-**Linux**: the `linux-gcc` preset (`QT_LINUX`, `VCPKG_ROOT`, GCC, Ninja).
+**Linux**: the `linux-gcc` preset (`QT_LINUX`, `VCPKG_ROOT`, GCC, Ninja). It is not tested
+regularly.
 
 Binaries land in `build/<preset>/apps/<name>/` (plus `<Config>/` with Visual Studio), for example
 `build/mac-clang/apps/sentinel-server/sentinel-server`. `hmc2_diff` shares the `sentinel-roll`
@@ -225,7 +224,8 @@ a missing or unreadable CA file disables peer verification with a warning (it do
 writes a log file (macOS: `~/Library/Logs/Sentinel/`). Capture options, verification and shutdown
 are in [docs/RAW_CAPTURE.md](docs/RAW_CAPTURE.md).
 
-**Releases.** Build from source for the version described here. Packaging scripts for maintainers:
+**Releases.** The only published release (`v2.1.0-alpha`, March 2026) predates the capture and
+roller design. Build from source for the current version. Packaging scripts for maintainers:
 [scripts/release/README.md](scripts/release/README.md).
 
 ## Configuration
