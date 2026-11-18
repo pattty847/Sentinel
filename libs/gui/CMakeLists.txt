@@ -128,6 +128,7 @@ set(GRID_CORE_SOURCES
     render/CandlestickOverlayItem.cpp
     render/ITimeAxisMappingProvider.hpp
     render/AxisLayout.hpp
+    render/AxisLabelFit.hpp
     render/AxisLayout.cpp
     render/AxisTextService.hpp
     render/AxisTextService.cpp
