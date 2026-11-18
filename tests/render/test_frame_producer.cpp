@@ -198,6 +198,25 @@ TEST_F(FrameProducerTest, FootprintWithoutTheHeatmapStillChoosesTheTick) {
     EXPECT_EQ(ticks.chooses, 1) << "an invalid view chooses nothing";
 }
 
+// The book ladder bins on the drawn tick too. TPO as the primary field turns the heatmap
+// and the footprint off: with the ladder's strip on, the frame still chooses the tick for
+// the view, so a zoom out moves it on (a kept tick left the strip with more rows than it
+// holds). Without the strip nothing on the price grid needs it.
+TEST_F(FrameProducerTest, TheLadderStripChoosesTheTickWithOnlyTpoOn) {
+    inputs.context.overlays = {false, false, true, false, 64};
+    ticks.tick = 1;
+    ticks.tickAfterChoice = 4;
+    const auto frame = produce();
+    EXPECT_FALSE(frame.drawHeatmap);
+    EXPECT_EQ(ticks.chooses, 1);
+    EXPECT_DOUBLE_EQ(ticks.chosen.priceLo, 100);
+    EXPECT_DOUBLE_EQ(ticks.chosen.priceHi, 140);
+    EXPECT_DOUBLE_EQ(frame.context.raster.tick, 4) << "the raster uses this frame's choice";
+    inputs.context.overlays.ladderPx = 0;
+    produce();
+    EXPECT_EQ(ticks.chooses, 1) << "TPO alone: nothing chooses";
+}
+
 TEST_F(FrameProducerTest, InvalidCameraDoesNotChangeStepOrAnnounce) {
     produce();
     inputs.camera.raster = {};

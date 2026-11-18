@@ -63,9 +63,12 @@ const ChartFrame& FrameProducer::produce(const FrameInputs& inputs, ITickAuthori
     const QRectF& bounds = frame.surfaceBounds;
     const bool viewValid = vp.valid && inputs.timeframeMs > 0 && timeSpan > 0 && priceSpan > 0 && !bounds.isEmpty();
     frame_.drawHeatmap = frame.overlays.heatmap && viewValid;
-    // The footprint bins its rows on the drawn tick too: without the heatmap it still needs
-    // the tick of the current symbol and view (a previous symbol's tick skips every bar).
-    if (viewValid && (frame.overlays.heatmap || frame.overlays.footprint)) {
+    // The footprint and the book ladder bin their rows on the drawn tick too: without the
+    // heatmap they still need the tick of the current symbol and view (a previous symbol's
+    // tick skips every footprint bar; a tick kept from a closer zoom gives the ladder more
+    // rows than it holds when zoomed out, and the strip withdraws).
+    const bool onPriceGrid = frame.overlays.heatmap || frame.overlays.footprint || frame.overlays.ladderPx > 0;
+    if (viewValid && onPriceGrid) {
         const QPointF drag = vp.dragging ? vp.panVisualOffset : QPointF();
         const double dt = -drag.x() * timeSpan / bounds.width(), dp = drag.y() * priceSpan / bounds.height();
         ticks.chooseTickForView({double(vp.timeStart) + dt, double(vp.timeEnd) + dt, vp.minPrice + dp,
