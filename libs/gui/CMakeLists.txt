@@ -10,6 +10,8 @@ set(GRID_CORE_SOURCES
     TradeInputManager.cpp
     config/AgentHostMode.cpp
     config/AgentHostMode.hpp
+    config/TooltipHelp.cpp
+    config/TooltipHelp.hpp
     config/GuiConfigStore.cpp
     config/GuiConfigStore.hpp
 

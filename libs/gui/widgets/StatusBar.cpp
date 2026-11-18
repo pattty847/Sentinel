@@ -1,4 +1,5 @@
 #include "StatusBar.hpp"
+#include "../config/TooltipHelp.hpp"
 #include "BookAgeText.hpp"
 #include "Version.hpp"
 #include "../themes/ThemePalette.hpp"
@@ -18,7 +19,7 @@ StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
     m_stateLabel->setObjectName("marketState");
     m_ageLabel = new QLabel(bookAgeText(std::nullopt), this);
     m_ageLabel->setObjectName("marketBookAge");
-    m_ageLabel->setToolTip("Time since the last accepted book message. A quiet market is not necessarily stale.");
+    TooltipHelp::instance().setToolTip(m_ageLabel, {}, "Time since the last accepted book message. A quiet market is not necessarily stale.");
     m_messageLabel = new QLabel(this);
     m_messageLabel->setObjectName("marketMessage");
     m_messageLabel->setTextFormat(Qt::PlainText);

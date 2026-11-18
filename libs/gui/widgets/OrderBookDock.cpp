@@ -1,4 +1,5 @@
 #include "OrderBookDock.hpp"
+#include "../config/TooltipHelp.hpp"
 #include "TableChrome.hpp"
 #include "BookAgeText.hpp"
 #include "LeanGaugeWidget.hpp"
@@ -476,7 +477,7 @@ QHBoxLayout* OrderBookDock::buildHeading()
     m_recenter->setObjectName("domRecenter");
     m_recenter->setAccessibleName("Recenter and follow the market");
     m_recenter->setCheckable(true);
-    m_recenter->setToolTip("Follow the market: on keeps the market centred. Scrolling turns it off and pins the price "
+    TooltipHelp::instance().setToolTip(m_recenter, QStringLiteral("Follow"), "Follow the market: on keeps the market centred. Scrolling turns it off and pins the price "
                            "ladder; click to recenter and follow again.");
     connect(m_recenter, &QPushButton::clicked, this, &OrderBookDock::recenter);
     m_cumulative = new QToolButton(m_contentWidget);
@@ -484,7 +485,7 @@ QHBoxLayout* OrderBookDock::buildHeading()
     m_cumulative->setObjectName("domCumulative");
     m_cumulative->setAccessibleName("Cumulative size");
     m_cumulative->setCheckable(true);
-    m_cumulative->setToolTip("Cumulative size: Bid and Ask show size summed from the touch outward.\n"
+    TooltipHelp::instance().setToolTip(m_cumulative, QStringLiteral("Cumulative size"), "Cumulative size: Bid and Ask show size summed from the touch outward.\n"
                              "Off: per-row size, with a faint cumulative depth line inside the bars.");
     connect(m_cumulative, &QToolButton::toggled, this, &OrderBookDock::setCumulative);
     m_pulse = new QToolButton(m_contentWidget);
@@ -492,7 +493,7 @@ QHBoxLayout* OrderBookDock::buildHeading()
     m_pulse->setObjectName("domPulse");
     m_pulse->setAccessibleName("Liquidity Pulse");
     m_pulse->setCheckable(true);
-    m_pulse->setToolTip("Liquidity Pulse: each book change flashes as what it was.\n"
+    TooltipHelp::instance().setToolTip(m_pulse, QStringLiteral("Pulse"), "Liquidity Pulse: each book change flashes as what it was.\n"
                         "Bright segment +size: added. Grey dashed outline -size: pulled (cancelled).\n"
                         "Row flash ×size in the aggressor's colour: eaten by trades.\n"
                         "Changes under 5% of the side's largest visible level are not flashed.");
@@ -510,7 +511,7 @@ void OrderBookDock::buildLadder(QVBoxLayout* layout)
     m_table->setObjectName("domLadder");
     m_table->setModel(m_model);
     m_table->setAccessibleName("Order book price ladder");
-    m_table->setToolTip("2,001 contiguous price buckets. Scroll to inspect; Recenter / follow moves the window to the market.");
+    TooltipHelp::instance().setToolTip(m_table, QStringLiteral("Order book price ladder"), "2,001 contiguous price buckets. Scroll to inspect; Recenter / follow moves the window to the market.");
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSelectionMode(QAbstractItemView::NoSelection);
     m_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -604,7 +605,7 @@ void OrderBookDock::buildLean(QHBoxLayout* heading, QVBoxLayout* layout)
     m_lean->setText("Lean");
     m_lean->setAccessibleName("Lean Gauge");
     m_lean->setCheckable(true);
-    m_lean->setToolTip(QStringLiteral("Book imbalance, depth and two minute history; shows from %1 px dock width.").arg(LeanWidth));
+    TooltipHelp::instance().setToolTip(m_lean, QStringLiteral("Lean"), QStringLiteral("Book imbalance, depth and two minute history; shows from %1 px dock width.").arg(LeanWidth));
     heading->insertWidget(2, m_lean);
     m_heading = heading;
     m_leanStrip = new LeanGaugeWidget(m_leanGauge, m_contentWidget);
@@ -877,7 +878,7 @@ void OrderBookDock::updateGroupButton()
                       .arg(QString::number(m_linkTick, 'g', 12))
             : QStringLiteral("Linked: no heatmap tick yet; the nearest offered size is used.");
     else tip += QStringLiteral("Fixed.");
-    m_grouping->setToolTip(tip + QStringLiteral("\nClick to choose Auto, Link to heatmap, or a fixed size; "
+    TooltipHelp::instance().setToolTip(m_grouping, QStringLiteral("Row grouping"), tip + QStringLiteral("\nClick to choose Auto, Link to heatmap, or a fixed size; "
                                                 "the row size is shown beside. The spread is the server's, whatever the row size."));
     if (m_groupNative > 0) sLog_App("DOM grouping mode=" << int(m_groupMode) << " group=" << group << " size=" << size);
 }
@@ -892,7 +893,7 @@ void OrderBookDock::updateLeanVisibility()
     const bool hiddenByWidth = m_lean->isChecked() && !visible;
     if (m_lean->property("hiddenByWidth").toBool() == hiddenByWidth) return;
     m_lean->setProperty("hiddenByWidth", hiddenByWidth);
-    m_lean->setToolTip(hiddenByWidth
+    TooltipHelp::instance().setToolTip(m_lean, QStringLiteral("Lean"), hiddenByWidth
         ? QStringLiteral("Lean Gauge: on, hidden at this width; it shows from %1 px dock width.").arg(LeanWidth)
         : QStringLiteral("Book imbalance, depth and two minute history; shows from %1 px dock width.").arg(LeanWidth));
     m_lean->style()->unpolish(m_lean);
@@ -1150,7 +1151,7 @@ void OrderBookDock::refreshDisplay()
     refreshBook();
     if (m_dirty) {
         m_recenter->setChecked(m_follow);
-        m_table->horizontalHeader()->setToolTip(m_model->executionSummary());
+        TooltipHelp::instance().setToolTip(m_table->horizontalHeader(), {}, m_model->executionSummary());
         fitColumns();
         // New rows must establish the scroll range before the first follow
         // operation; regular ticks reuse that layout.

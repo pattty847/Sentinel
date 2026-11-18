@@ -1,4 +1,5 @@
 #include "DomModel.hpp"
+#include "../config/TooltipHelp.hpp"
 #include "DomGrouping.hpp"
 #include "PriceUnits.hpp"
 #include "../themes/ThemePalette.hpp"
@@ -37,6 +38,10 @@ QString DomFreshness::text(qint64 nowMs) const
 
 DomModel::DomModel(QObject* parent) : QAbstractTableModel(parent)
 {
+    connect(&TooltipHelp::instance(), &TooltipHelp::changed, this, [this] {
+        emit headerDataChanged(Qt::Horizontal, 0, Columns - 1);
+        if (m_ready) emit dataChanged(index(0, 0), index(Rows - 1, Columns - 1), {Qt::ToolTipRole});
+    });
     // A unit decided after the first rows were shown (the book snapshot decides it).
     connect(&PriceUnits::instance(), &PriceUnits::unitChanged, this, [this](const QString& symbol) {
         if (symbol != m_symbol) return;
@@ -250,11 +255,13 @@ QVariant DomModel::headerData(int section, Qt::Orientation orientation, int role
     if (orientation != Qt::Horizontal || section < 0 || section >= Columns) return {};
     if (role == Qt::TextAlignmentRole) return int(Qt::AlignRight | Qt::AlignVCenter);
     if (role == Qt::ToolTipRole) {
-        if (section >= Buys) return executionSummary();
-        if (section == Price) return QString("Price in %1: each row's lower edge; rows of %2, server tick %3")
-            .arg(quoteUnit(), shownPrice(m_tick, m_tick), shownPrice(m_nativeTick, m_nativeTick));
-        return QString("Resting %1 size in %2%3").arg(section == Bid ? "bid" : "ask", m_base,
-            m_cumulative ? QStringLiteral(", cumulative from the touch outward") : QString());
+        const auto& help = TooltipHelp::instance();
+        const QString name = headerData(section, orientation, Qt::DisplayRole).toString();
+        if (section >= Buys) return help.text(name, executionSummary());
+        if (section == Price) return help.text(name, QString("Price in %1: each row's lower edge; rows of %2, server tick %3")
+            .arg(quoteUnit(), shownPrice(m_tick, m_tick), shownPrice(m_nativeTick, m_nativeTick)));
+        return help.text(name, QString("Resting %1 size in %2%3").arg(section == Bid ? "bid" : "ask", m_base,
+            m_cumulative ? QStringLiteral(", cumulative from the touch outward") : QString()));
     }
     if (role != Qt::DisplayRole) return {};
     switch (section) {
@@ -302,13 +309,16 @@ QVariant DomModel::data(const QModelIndex& index, int role) const
     if (role == Qt::ToolTipRole) {
         const QString volumes = QStringLiteral("Bought %1 · Sold %2 · Δ %3 %4")
             .arg(fullSizeText(row.buys), fullSizeText(row.sells), fullSizeText(delta), m_base);
-        if (col >= Buys) return QStringLiteral("%1\n%2").arg(volumes, executionSummary());
-        if (col == Price) return QStringLiteral("%1 · aggregated price bucket, not an exchange spread\n%2\n%3")
-            .arg(data(index, BestSideRole).toString(), volumes, executionSummary());
+        const auto& help = TooltipHelp::instance();
+        if (col >= Buys) return help.text(volumes, QStringLiteral("%1\n%2").arg(volumes, executionSummary()));
+        if (col == Price) return help.text(volumes, QStringLiteral("%1 · aggregated price bucket, not an exchange spread\n%2\n%3")
+            .arg(data(index, BestSideRole).toString(), volumes, executionSummary()));
         const bool bid = col == Bid;
-        return QStringLiteral("%1 %2 resting %3\n%4 %2 cumulative from the touch\n%5")
+        return help.text(QStringLiteral("%1 %2 · Σ %3")
+            .arg(fullSizeText(bid ? row.bid : row.ask), m_base, fullSizeText(bid ? row.cumBid : row.cumAsk)),
+            QStringLiteral("%1 %2 resting %3\n%4 %2 cumulative from the touch\n%5")
             .arg(fullSizeText(bid ? row.bid : row.ask), m_base, bid ? "bid" : "ask",
-                 fullSizeText(bid ? row.cumBid : row.cumAsk), executionSummary());
+                 fullSizeText(bid ? row.cumBid : row.cumAsk), executionSummary()));
     }
     if (role != Qt::DisplayRole) return {};
     return cachedText(index.row(), col);

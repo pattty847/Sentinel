@@ -337,7 +337,7 @@ add_test(NAME TradeBubbleHistoryTests COMMAND test_trade_bubble_history)
 set_tests_properties(TradeBubbleHistoryTests PROPERTIES LABELS "render")
 
 # W1a: retained DOM buckets, complete ingestion, visibility/follow and freshness.
-add_executable(test_dom test_dom.cpp)
+add_executable(test_dom test_dom.cpp test_tooltip_help.cpp)
 target_include_directories(test_dom PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_dom PRIVATE sentinel_gui_lib GTest::gtest Qt6::Test Qt6::Widgets)
 add_test(NAME DomTests COMMAND test_dom)

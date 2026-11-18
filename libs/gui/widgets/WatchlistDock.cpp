@@ -1,4 +1,5 @@
 #include "WatchlistDock.hpp"
+#include "../config/TooltipHelp.hpp"
 #include "TableChrome.hpp"
 #include "EmptyState.hpp"
 #include "../themes/ThemePalette.hpp"
@@ -63,6 +64,7 @@ WatchlistDock::WatchlistDock(QWidget* parent)
     : DockablePanel("WatchlistDock", "Watchlist", parent)
     , m_tree(new WatchTreeView(m_contentWidget))
     , m_model(new QStandardItemModel(this)) {
+    connect(&TooltipHelp::instance(), &TooltipHelp::changed, this, &WatchlistDock::refreshRowState);
     initPresets();
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
     settings.beginGroup(kSettingsGroup);
@@ -347,11 +349,13 @@ void WatchlistDock::refreshRowState() {
         }
         item->setForeground(QBrush(QColor(pending ? "#e6c07b" : refused ? "#ef8178"
                                          : active ? theme::text().name() : unavailable ? "#777" : "#e0e0e0")));
-        item->setToolTip(pending ? QStringLiteral("Waiting for chart confirmation")
+        const QString shortTip = pending ? QStringLiteral("Pending") : refused ? QStringLiteral("Refused")
+            : unavailable ? QStringLiteral("Unavailable") : active || !isCrypto ? QString() : QStringLiteral("Unverified");
+        item->setToolTip(TooltipHelp::instance().text(shortTip, pending ? QStringLiteral("Waiting for chart confirmation")
                           : refused ? m_refusalReason
                           : unavailable ? QStringLiteral("Not in the current market catalog")
                           : active ? QString()
-                          : isCrypto ? QStringLiteral("Availability unverified until selected") : QString());
+                          : isCrypto ? QStringLiteral("Availability unverified until selected") : QString()));
     }
     refreshFooter();
 }
