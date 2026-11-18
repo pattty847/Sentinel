@@ -1,4 +1,5 @@
 #include "models/DomModel.hpp"
+#include "config/TooltipHelp.hpp"
 #include "models/DomGrouping.hpp"
 #include "mainwindow/AgentApiSnapshots.hpp"
 #include "themes/DarkTheme.hpp"
@@ -82,6 +83,11 @@ constexpr bool kMallocCounted = false;
 #endif
 
 namespace {
+struct LearningMode {
+    bool previous = TooltipHelp::instance().explanatory();
+    LearningMode() { TooltipHelp::instance().setExplanatory(true); }
+    ~LearningMode() { TooltipHelp::instance().setExplanatory(previous); }
+};
 Trade trade(double price, AggressorSide side, double size = 1) {
     return {std::chrono::system_clock::now(), "BTC-USD", "", side, price, size};
 }
@@ -101,6 +107,7 @@ int rowAt(DomModel& model, qint64 key) {
 double vol(DomModel& model, int row, int col) { return model.index(row, col).data(DomModel::QuantityRole).toDouble(); }
 
 TEST(DomModel, SameBucketUniqueBestAskStableEmptyRowsAndAlignment) {
+    LearningMode learning;
     LiveOrderBook book;
     book.initialize(0, 400, 0.1);
     apply(book, {{true, 200, 4}, {false, 200, 7}, {false, 200.2, 2}});
@@ -158,6 +165,7 @@ TEST(DomModel, EmptyBookAndUnchangedPublicationDoNotInventRowsOrChurn) {
 }
 
 TEST(DomModel, TradesAreVolumeOverTheTrailingMinuteByTradeTimeUnknownNeverSells) {
+    LearningMode learning;
     const qint64 now = 1'800'000'000'000;
     DomTradeWindow trades;
     for (int i = 0; i < 3; ++i) trades.ingest(tradeAt(now - 10000, 200, AggressorSide::Buy, .5));
@@ -502,6 +510,7 @@ TEST(DomModel, CumulativeSumsFromTheTouchOutwardIncludingLevelsBeyondAPinnedWind
 }
 
 TEST(DomModel, SizesShowThreeSignificantDigitsWithoutFloatNoise) {
+    LearningMode learning;
     EXPECT_EQ(DomModel::sizeText(.634), ".634");
     EXPECT_EQ(DomModel::sizeText(5.8712), "5.87");
     EXPECT_EQ(DomModel::sizeText(13.64), "13.6");
@@ -1175,6 +1184,7 @@ struct DomDock : testing::Test {
 };
 
 TEST_F(DomDock, NarrowLadderFitsWithoutScrollingAndRestoresExecutionColumns) {
+    LearningMode learning;
     show();
     for (int width : {650, 260, 200, 180, 650}) {
         dock.resize(width, 600);
@@ -1262,6 +1272,7 @@ TEST(DomDelegate, HeatmapRampPriceDigitsAndSizeTextTint) {
 }
 
 TEST_F(DomDock, HiddenIngestsAllTradesButDoesNoModelOrReplicaReadWork) {
+    LearningMode learning;
     QSignalSpy changed(model, &QAbstractItemModel::dataChanged);
     QSignalSpy reset(model, &QAbstractItemModel::modelReset);
     QSignalSpy inserted(model, &QAbstractItemModel::rowsInserted);
@@ -1436,6 +1447,7 @@ TEST_F(DomDock, TabVisibilityStopsPublicationWithoutLosingEvents) {
 }
 
 TEST_F(DomDock, SymbolChangeWhileHiddenClearsOldRowsAndCountsOnShow) {
+    LearningMode learning;
     source.update({{true, 200, 1}, {false, 200.1, 1}});
     source.send(trade(200, AggressorSide::Buy));
     show();
@@ -1938,6 +1950,7 @@ TEST_F(DomDock, LeanStripAndChartsKeepTheBaseLayoutAt320) {
 }
 
 TEST_F(DomDock, NarrowDockMovesSigmaAndFollowIntoTheMetaMenuAndMarksLeanHidden) {
+    LearningMode learning;
     const QString previousStyle = qApp->styleSheet();
     qApp->setStyleSheet(DarkTheme{}.stylesheet());
     source.update({{true, 200, 1}, {true, 199.9, 2}, {false, 200.1, 1}});
@@ -2655,6 +2668,7 @@ TEST(DomGroup, GroupedPublishAndStepAllocateNothingAfterWarmUp) {
 }
 
 TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
+    LearningMode learning;
     qint64 clock = 1000;
     dock.setPulseClock([&] { return clock; });
     source.update({{true, 200, 1}, {true, 199.9, 2}, {false, 200.1, 1}});
@@ -2719,6 +2733,53 @@ TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
     tick();
     EXPECT_EQ(dock.grouping(), OrderBookDock::Grouping::Auto);
     EXPECT_EQ(button->text(), "Auto ▾");
+}
+
+TEST_F(DomDock, QuietGroupingKeepsEveryLinkFallbackState) {
+    auto& help = TooltipHelp::instance();
+    help.setExplanatory(false);
+    source.update({{true, 200, 1}, {false, 200.1, 1}});
+    show();
+    auto* timer = dock.findChild<QTimer*>("domPublishTimer");
+    timer->stop();
+    auto* button = dock.findChild<QToolButton*>("domGrouping");
+    const QString suffix = "\nClick to choose Auto, Link to heatmap, or a fixed size; "
+                           "the row size is shown beside. The spread is the server's, whatever the row size.";
+    const auto check = [&](const QString& shortForm, const QString& longForm) {
+        flushEvents();
+        QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection);
+        EXPECT_EQ(button->toolTip(), shortForm);
+        EXPECT_FALSE(button->toolTip().contains('\n'));
+        help.setExplanatory(true);
+        EXPECT_EQ(button->toolTip().toUtf8(), ("Row grouping. " + longForm + suffix).toUtf8());
+        help.setExplanatory(false);
+        EXPECT_EQ(button->toolTip(), shortForm);
+    };
+    check("Row grouping", "Fixed.");
+    dock.setGrouping(OrderBookDock::Grouping::Link);
+    dock.setHeatmapTick(0, 100, true);
+    check("Row grouping · Linked: no heatmap tick yet",
+          "Linked: no heatmap tick yet; the nearest offered size is used.");
+    dock.setHeatmapTick(15, 100, true);
+    check("Row grouping · Linked: tick 0.15 is not a server-tick multiple",
+          "Linked: the heatmap tick 0.15 is not a whole multiple of the server tick "
+          "(heatmap layer off?); the nearest offered size is used.");
+    dock.setHeatmapTick(16, 100, true); // Same fallback group; the live tick must still refresh.
+    check("Row grouping · Linked: tick 0.16 is not a server-tick multiple",
+          "Linked: the heatmap tick 0.16 is not a whole multiple of the server tick "
+          "(heatmap layer off?); the nearest offered size is used.");
+    dock.setHeatmapTick(100, 0.5, true);
+    check("Row grouping · Linked: ticks cannot be compared exactly",
+          "Linked: the heatmap tick 200 (price scale 0.5) and the server tick 0.1 cannot be "
+          "compared exactly (a server tick with more than 9 decimals or a price scale "
+          "above 1e+09); the nearest offered size is used.");
+    dock.setHeatmapTick(20'000'000'000, 100, true);
+    check("Row grouping · Linked: tick 200000000 exceeds book; one row",
+          "Linked: the heatmap tick 200000000 is coarser than the whole book (5001 server ticks): one row.");
+    dock.setHeatmapTick(100, 100, true);
+    check("Row grouping", "Linked to the heatmap tick.");
+    dock.setGrouping(OrderBookDock::Grouping::Auto);
+    check("Row grouping", "Auto: the smallest size at which 60% of the 20 rows each side of the touch hold size; changes after 0.75 s.");
 }
 
 TEST(DomModel, AdaptiveDigitsFollowSigmaAndTheHeldDropWithoutMarketEvents) {
@@ -2794,6 +2855,7 @@ TEST_F(DomDock, SizeFormatIsOneSettingInTheDockMenuAndPersists) {
 }
 
 TEST_F(DomDock, RowSizeIsSaidOnceSoATooltipNeverContradictsTheLabel) {
+    LearningMode learning;
     // B-13: "Rows 1 USD" beside a tooltip still reading "Row size 2 (20 server ticks)".
     source.update({{true, 200, 1}, {false, 200.1, 1}});
     dock.setGrouping(OrderBookDock::Grouping::Fixed, 2.0);
@@ -2898,6 +2960,7 @@ TEST_F(DomDock, HeadingRestylesOnlyWhenCompactModeFlips) {
 }
 
 TEST_F(DomDock, HeadingButtonsKeepTheirWholeTextFrom180To650) {
+    LearningMode learning;
     const QString previousStyle = qApp->styleSheet();
     qApp->setStyleSheet(DarkTheme{}.stylesheet());
     source.update({{true, 200, 1}, {false, 200.1, 1}});

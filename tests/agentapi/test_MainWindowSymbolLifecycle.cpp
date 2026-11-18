@@ -1,6 +1,7 @@
 #include "MainWindowGpu.h"
 #include "../render/BookTopFixture.hpp"
 #include "config/GuiConfigStore.hpp"
+#include "config/TooltipHelp.hpp"
 #include "config/AgentHostMode.hpp"
 #include "datasources/IGridDataSource.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
@@ -302,6 +303,9 @@ TEST(ChartAgentPin, StoredDrawnAndCompletedRevisionStaySeparate) {
 }
 
 TEST(MainWindowHealthIntegration, AckRefusalSupersedeTimeoutAndReconnectAgreeAcrossConsumers) {
+    const bool previousHelp = TooltipHelp::instance().explanatory();
+    const auto restoreHelp = qScopeGuard([previousHelp] { TooltipHelp::instance().setExplanatory(previousHelp); });
+    TooltipHelp::instance().setExplanatory(true); // These assertions cover explanatory refusal details.
     MainWindowGPU window;
     auto* source = dynamic_cast<RemoteGridDataSource*>(ServiceLocator::dataSource());
     ASSERT_TRUE(source);
@@ -593,6 +597,9 @@ TEST(MainWindowHealthIntegration, LocalHostPolicyRefusalClearsOptimisticRailPend
     QString error;
     ASSERT_TRUE(AgentHostMode::activate(host.path(), {}, &error)) << error.toStdString();
     AgentHostMode::setSymbolAllowlist({"BTC-USD"});
+    const bool previousHelp = TooltipHelp::instance().explanatory();
+    const auto restoreHelp = qScopeGuard([previousHelp] { TooltipHelp::instance().setExplanatory(previousHelp); });
+    TooltipHelp::instance().setExplanatory(true); // These assertions cover explanatory refusal details.
     MainWindowGPU window;
     auto* source = dynamic_cast<RemoteGridDataSource*>(ServiceLocator::dataSource());
     ASSERT_TRUE(source);
@@ -685,7 +692,7 @@ TEST(MainWindowMenus, ToolsAndLayoutsCarryOnlyWorkingCommands) {
         EXPECT_TRUE(action->isEnabled()) << action->text().toStdString();
         commands << action->text();
     }
-    EXPECT_EQ(commands, QStringList({"Open &SEC Filing Viewer", "Font Settings..."}));
+    EXPECT_EQ(commands, QStringList({"Open &SEC Filing Viewer", "Show explanatory tooltips", "Font Settings..."}));
     ASSERT_FALSE(layouts->actions().isEmpty());
     EXPECT_FALSE(layouts->actions().last()->isSeparator());
 }

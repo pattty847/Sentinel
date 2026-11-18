@@ -194,7 +194,8 @@ TEST(WatchRail, HoverHighlightsTheRowAndTooltipStaysBesideIt) {
     const auto pixels = tree->viewport()->grab().toImage();
     EXPECT_EQ(pixels.pixelColor(first.right() - 6, first.center().y()), QColor("#20252B"));
     EXPECT_TRUE(tree->model()->index(0, 0).data(Qt::ToolTipRole).toString().isEmpty());
-    dock.setChartSwitchState("BTC-USD", "ETH-USD");
+    // Quiet mode keeps refusal data; a pending marker alone has no tooltip.
+    dock.setChartSwitchState("BTC-USD", {}, "ETH-USD", "Not in the current market catalog");
     const QRect tipRow = tree->visualRect(tree->model()->index(1, 0));
     const QPoint oddSample(tipRow.right() - 6, tipRow.center().y());
     const QColor restingOdd = tree->viewport()->grab().toImage().pixelColor(oddSample);

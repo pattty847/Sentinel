@@ -56,6 +56,19 @@ use that wire tick unchanged for chart book-top lines, the Agent API and the DOM
 server-configured. The server sums raw price levels in each live tick bucket, including BTC-USD;
 recorded HMC2 grids are independent of this live-book setting.
 
+## Explanatory tooltips
+
+Tools → Show explanatory tooltips is an app-level learning mode, off by default.
+It persists as `ui/showExplanatoryTooltips` in the `Sentinel/SentinelGUI` QSettings
+store, alongside `ui/fontFamily`, using the app's default settings format (including
+isolated agent-host settings). Changes apply immediately to existing docks.
+Off keeps compact DOM values, current grouping fallback reasons, Lean's hidden-width
+reason, and watchlist refusal reasons. It suppresses tooltips that only repeat a
+visible label or marker; other controls keep their name. On preserves the explanatory text. This currently
+covers DOM rows and controls, watchlist rows and the status bar's book age. Chart
+Settings help popovers and chart-canvas tooltips are independent. The Agent API
+currently exposes chart settings, not app-level UI preferences.
+
 ## Example snippets
 
 **Server (`config/server_config.yaml` or `.server_config.yaml`):**

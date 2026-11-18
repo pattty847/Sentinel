@@ -1,4 +1,5 @@
 #include "MenuBuilder.h"
+#include "../config/TooltipHelp.hpp"
 #include <QDockWidget>
 #include <QKeySequence>
 #include <QAction>
@@ -99,6 +100,13 @@ void MenuBuilder::buildToolsMenu(const Callbacks& callbacks) {
         }
     });
 
+
+    auto& help = TooltipHelp::instance();
+    auto* helpAction = m_toolsMenu->addAction("Show explanatory tooltips");
+    helpAction->setCheckable(true);
+    helpAction->setChecked(help.explanatory());
+    QObject::connect(helpAction, &QAction::toggled, &help, &TooltipHelp::setExplanatory);
+    QObject::connect(&help, &TooltipHelp::changed, helpAction, &QAction::setChecked);
 
     QAction* fontAction = m_toolsMenu->addAction("Font Settings...");
     QObject::connect(fontAction, &QAction::triggered, [callbacks]() {
