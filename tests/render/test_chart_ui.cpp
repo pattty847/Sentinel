@@ -1840,35 +1840,51 @@ TEST_F(LadderShellGpu, TpoOnlyAtFifteenMinutesZoomedOutKeepsTheStrip) {
     ugr->layers()->setPrimaryField(2);
     ASSERT_FALSE(ugr->layers()->heatmapEnabled());
     ASSERT_FALSE(ugr->layers()->footprintEnabled());
-    ugr->view()->setTimeframe(int(15 * minute));
-    const auto frames = [&](int n) {
-        for (int i = 0; i < n; ++i) {
-            QTest::qWait(16);
+    // Bounded waits on what is observable (timeframe data, the committed tick, the ladder
+    // bars), rendering a frame per turn: a loaded host only takes longer.
+    const auto until = [&](const std::function<bool()> &ready, int ms = 15'000) {
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < ms) {
             render(1);
+            if (image.isNull()) return false;
+            if (ready()) return true;
+            QTest::qWait(5);
         }
+        return false;
     };
-    frames(20);
     const auto describe = [&] {
         const auto cam = ugr->currentFrameContext().raster;
         const auto *v = ugr->getViewState();
-        return "tick=" + std::to_string(cam.tick) + " drawn=" + std::to_string(cam.drawnMaxPrice - cam.drawnMinPrice) +
-               " stored=" + std::to_string(v->getMaxPrice() - v->getMinPrice());
+        return "tick=" + std::to_string(cam.tick) + " committed=" + std::to_string(ugr->gpuHeatmapLayer()->tickPrice()) +
+               " drawn=" + std::to_string(cam.drawnMaxPrice - cam.drawnMinPrice) +
+               " stored=" + std::to_string(v->getMaxPrice() - v->getMinPrice()) + " bars=" + std::to_string(barPixels());
     };
+    ugr->view()->setTimeframe(int(15 * minute));
+    ASSERT_TRUE(until([&] { return ugr->gpuHeatmapLayer()->hasCurrentResolution(); }))
+        << "the 15m resolution never arrived: " << describe();
+    // The strip draws on a snapshot of the drawn tick (the layer's committed one).
+    const auto stripOnDrawnTick = [&] {
+        return ugr->currentFrameContext().raster.tick == ugr->gpuHeatmapLayer()->tickPrice() && barPixels() > 0;
+    };
+    ASSERT_TRUE(until(stripOnDrawnTick)) << "the strip on 15m: " << describe();
     for (int g = 0; g < 17; ++g) { // 16 -> about $6,900
         ugr->view()->zoomContinuous(0.7, ugr->width() / 2, ugr->height() / 2);
-        frames(2);
+        render(1);
     }
-    frames(4); // the pinch is held
     const double stored = ugr->getViewState()->getMaxPrice() - ugr->getViewState()->getMinPrice();
     ASSERT_GT(stored, 5000) << describe();
-    EXPECT_GT(barPixels(), 0) << "the strip during the pinch: " << describe();
+    // The strip at the zoomed-out view: the drawn camera shows the stored span (not a
+    // camera fallen back to the kept tick's rows) and the strip draws on it.
+    const auto stripAtView = [&](bool rest) {
+        const auto cam = ugr->currentFrameContext().raster;
+        const double now = ugr->getViewState()->getMaxPrice() - ugr->getViewState()->getMinPrice();
+        return (!rest || !cam.free) && std::abs(cam.drawnMaxPrice - cam.drawnMinPrice - now) <= 0.02 * now &&
+               stripOnDrawnTick();
+    };
+    EXPECT_TRUE(until([&] { return stripAtView(false); })) << "the strip during the pinch: " << describe(); // held
     ugr->view()->endZoomGesture();
-    frames(40);
-    const auto cam = ugr->currentFrameContext().raster;
-    const double now = ugr->getViewState()->getMaxPrice() - ugr->getViewState()->getMinPrice();
-    EXPECT_FALSE(cam.free);
-    EXPECT_NEAR(cam.drawnMaxPrice - cam.drawnMinPrice, now, 0.02 * now) << "the rest camera shows the view: " << describe();
-    EXPECT_GT(barPixels(), 0) << "the strip after the pinch: " << describe();
+    EXPECT_TRUE(until([&] { return stripAtView(true); })) << "the strip at rest after the pinch: " << describe();
 }
 
 // Short price labels (whole dollars at a wide price span) measure a price axis narrower
