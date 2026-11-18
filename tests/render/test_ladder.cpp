@@ -9,6 +9,7 @@
 #include "chart/shell/LadderBinding.hpp"
 #include "chart/shell/LayerVisibility.hpp"
 #include "chart/core/ChartFrame.hpp"
+#include "chart/core/FrameProducer.hpp"
 #include "chart/core/PublishedFrame.hpp"
 #include "marketdata/model/TradeData.h"
 #include "render/ChartTextRenderer.hpp"
@@ -385,6 +386,69 @@ TEST(LadderFeed, AWindowOfMoreBinsThanRowsIsTooWide) {
     const auto& s = rig.rows(*replica);
     EXPECT_FALSE(s.valid);
     EXPECT_STREQ(rig.feed.lastReason(), "wide");
+}
+
+// The owner's case through the frame producer: TPO as the primary field (heatmap and
+// footprint off), the 15m timeframe, ladder on, zoomed out with a pinch to a $400 window
+// of ETH-like prices. The drawn tick was last chosen at a close zoom ($0.05). The frame
+// must choose the tick for this view: with the kept tick the pinch's continuous camera
+// has 8000 rows, more than a snapshot holds, and the strip withdraws ("wide").
+namespace {
+struct KeptTick final : chart::ITickAuthority {
+    double tick = 0.05, chosenTick = 1.0;
+    int chooses = 0;
+    void chooseTickForView(const heatmap::gpu::ViewWindow&) override { ++chooses, tick = chosenTick; }
+    double tickPrice() const override { return tick; }
+    void noteRaster(int, int, double) override {}
+};
+} // namespace
+
+TEST(LadderFeed, TpoOnlyAtFifteenMinutesZoomedOutKeepsTheStrip) {
+    constexpr int64_t tf = 15 * 60'000, t0 = 1'795'000'000'000 / tf * tf;
+    chart::FrameInputs inputs;
+    auto& context = inputs.context;
+    context.overlays = {false, false, true, false, 72};
+    context.rightGutterPx = 72;
+    context.itemBounds = context.surfaceBounds = QRectF(0, 0, 640, 320);
+    context.surfaceDpr = 1;
+    context.viewport.valid = true;
+    context.viewport.timeStart = t0 - 96 * tf;
+    context.viewport.timeEnd = t0;
+    context.viewport.minPrice = 1800;
+    context.viewport.maxPrice = 2200;
+    inputs.timeframeMs = tf;
+    auto& raster = inputs.camera.raster;
+    raster.timeStart = context.viewport.timeStart;
+    raster.timeEnd = context.viewport.timeEnd;
+    raster.minPrice = context.viewport.minPrice;
+    raster.maxPrice = context.viewport.maxPrice;
+    raster.tfMs = double(tf);
+    raster.itemWidthLogical = 640;
+    raster.itemHeightLogical = 320;
+    inputs.camera.glide.gesture = inputs.camera.glide.gesturePrice = true; // a pinch: the continuous camera
+    chart::FrameProducer producer;
+    chart::PublishedFrame published;
+    KeptTick ticks;
+    const auto& frame = producer.produce(inputs, ticks, published);
+    ASSERT_TRUE(frame.context.raster.valid);
+    EXPECT_EQ(ticks.chooses, 1) << "the strip is on the price grid: the frame chooses the tick";
+
+    Rig rig;
+    rig.frame = published.current();
+    rig.feed.setEnabled(true);
+    std::vector<BookLevelUpdate> levels;
+    for (int i = 0; i < 100; ++i) {
+        levels.push_back({true, 1999.99 - 2.0 * i, 1.0});
+        levels.push_back({false, 2000.01 + 2.0 * i, 1.0});
+    }
+    auto replica = book(1200, 2400, 0.01, levels);
+    rig.feed.publish(*replica);
+    rig.feed.publishRows();
+    EXPECT_STRNE(rig.feed.lastReason(), "wide");
+    rig.layer.sync(frame);
+    EXPECT_TRUE(rig.layer.current().valid) << "reason=" << rig.feed.lastReason();
+    EXPECT_TRUE(rig.layer.drawing()) << "the strip keeps drawing at the zoomed-out view; reason="
+                                     << rig.feed.lastReason() << " tick=" << frame.context.raster.tick;
 }
 
 // ------------------------------------------------- (8) allocation and geometry

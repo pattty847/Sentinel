@@ -1816,6 +1816,61 @@ TEST_F(LadderShellGpu, BarsDrawInTheStripOnTheChartRows) {
     EXPECT_EQ(barPixels(), 0) << "no BTC rows survive the symbol switch";
 }
 
+// TPO as the primary field turns the heatmap and the footprint off. With the ladder on,
+// the frame still chooses the drawn tick (the ladder bins on it): a pinch out on 15m keeps
+// the strip and the rest camera follows the stored view. With the tick kept from the
+// close zoom ($1 rows) the pinch drew more rows than a ladder snapshot holds and the
+// strip vanished, and the rest camera could not show more than 610 one-pixel rows.
+TEST_F(LadderShellGpu, TpoOnlyAtFifteenMinutesZoomedOutKeepsTheStrip) {
+    heatmap::HeatmapChartSettings settings;
+    settings.showLabels = false;
+    settings.sensitivityMin = 1000;
+    settings.sensitivityMax = 2000;
+    ugr->setHeatmapChartSettings(settings, true); // Auto
+    LiveOrderBook book("BTC-USD");
+    book.initialize(90'000, 110'000, 0.01);
+    std::vector<BookLevelUpdate> levels;
+    for (int i = 0; i < 200; ++i) {
+        levels.push_back({true, 100'003.0 - 25.0 * i, 1.0 + i % 3});
+        levels.push_back({false, 100'008.0 + 25.0 * i, 1.0 + i % 4});
+    }
+    book.applyUpdates(levels, std::chrono::system_clock::now(), nullptr);
+    ugr->setLiveBook(book);
+    ASSERT_TRUE(waitForBars()) << "the ladder never drew " << error.toStdString();
+    ugr->layers()->setPrimaryField(2);
+    ASSERT_FALSE(ugr->layers()->heatmapEnabled());
+    ASSERT_FALSE(ugr->layers()->footprintEnabled());
+    ugr->view()->setTimeframe(int(15 * minute));
+    const auto frames = [&](int n) {
+        for (int i = 0; i < n; ++i) {
+            QTest::qWait(16);
+            render(1);
+        }
+    };
+    frames(20);
+    const auto describe = [&] {
+        const auto cam = ugr->currentFrameContext().raster;
+        const auto *v = ugr->getViewState();
+        return "tick=" + std::to_string(cam.tick) + " drawn=" + std::to_string(cam.drawnMaxPrice - cam.drawnMinPrice) +
+               " stored=" + std::to_string(v->getMaxPrice() - v->getMinPrice());
+    };
+    for (int g = 0; g < 17; ++g) { // 16 -> about $6,900
+        ugr->view()->zoomContinuous(0.7, ugr->width() / 2, ugr->height() / 2);
+        frames(2);
+    }
+    frames(4); // the pinch is held
+    const double stored = ugr->getViewState()->getMaxPrice() - ugr->getViewState()->getMinPrice();
+    ASSERT_GT(stored, 5000) << describe();
+    EXPECT_GT(barPixels(), 0) << "the strip during the pinch: " << describe();
+    ugr->view()->endZoomGesture();
+    frames(40);
+    const auto cam = ugr->currentFrameContext().raster;
+    const double now = ugr->getViewState()->getMaxPrice() - ugr->getViewState()->getMinPrice();
+    EXPECT_FALSE(cam.free);
+    EXPECT_NEAR(cam.drawnMaxPrice - cam.drawnMinPrice, now, 0.02 * now) << "the rest camera shows the view: " << describe();
+    EXPECT_GT(barPixels(), 0) << "the strip after the pinch: " << describe();
+}
+
 // Short price labels (whole dollars at a wide price span) measure a price axis narrower
 // than the corner's P/L/M buttons: the column widens to hold them, inside the corner.
 TEST_F(LadderShellGpu, TheCornerButtonsFitInsideTheAxisColumnAtANarrowAxis) {
