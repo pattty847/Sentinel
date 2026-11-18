@@ -152,8 +152,9 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/RAW_CAPTURE.md](doc
 
 ## Build from source
 
-Dependencies come from vcpkg (`VCPKG_ROOT`) and an installed Qt 6; the platform presets below read the Qt path
-from an environment variable.
+Most C++ dependencies come from vcpkg (`VCPKG_ROOT`); install Qt 6 separately. The platform
+presets below read the Qt path from an environment variable. CMake fetches GoogleTest 1.14.0
+for the tests.
 
 **macOS** (primary platform):
 
