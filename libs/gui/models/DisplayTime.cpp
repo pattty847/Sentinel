@@ -8,6 +8,24 @@ qint64 floorDiv(qint64 a, qint64 b) {
     const qint64 q = a / b;
     return (a % b != 0 && (a < 0) != (b < 0)) ? q - 1 : q;
 }
+qint64 floorMod(qint64 a, qint64 b) { return a - floorDiv(a, b) * b; }
+// The first date on or after `d` that starts a period of `count` units.
+QDate periodStartOnOrAfter(QDate d, DisplayTime::Calendar unit, int count) {
+    switch (unit) {
+    case DisplayTime::Calendar::Days:
+        return d.addDays((count - floorMod(d.toJulianDay(), count)) % count);
+    case DisplayTime::Calendar::Weeks: {
+        const QDate monday = d.addDays((8 - d.dayOfWeek()) % 7); // Julian day % 7 == 0
+        return monday.addDays(7 * ((count - floorMod(monday.toJulianDay() / 7, count)) % count));
+    }
+    case DisplayTime::Calendar::Months: {
+        const QDate first = d.day() == 1 ? d : QDate(d.year(), d.month(), 1).addMonths(1);
+        const qint64 month = qint64(first.year()) * 12 + first.month() - 1;
+        return first.addMonths(int((count - floorMod(month, count)) % count));
+    }
+    }
+    return d;
+}
 } // namespace
 
 DisplayTime& DisplayTime::instance() {
@@ -101,6 +119,21 @@ QString DisplayTime::zoneLabel(qint64 ms) const {
     QString label = QStringLiteral("UTC") + (offset < 0 ? QLatin1Char('-') : QLatin1Char('+')) + QString::number(minutes / 60);
     if (minutes % 60) label += QStringLiteral(":%1").arg(minutes % 60, 2, 10, QLatin1Char('0'));
     return label;
+}
+
+qint64 DisplayTime::nextCalendarBoundary(qint64 afterMs, Calendar unit, int count) const {
+    if (count <= 0) return afterMs + 1;
+    if (afterMs > kBoundaryLimitMs || afterMs < -kBoundaryLimitMs) return std::numeric_limits<qint64>::max();
+    const QTimeZone zone = m_zone == Zone::Utc ? QTimeZone::utc() : m_local;
+    QDate date = at(afterMs).date();
+    for (int tries = 0; tries < 4; ++tries) {
+        const QDate start = periodStartOnOrAfter(date, unit, count);
+        // startOfDay: the first instant of that date, also where a DST change skips midnight.
+        const qint64 ms = start.startOfDay(zone).toMSecsSinceEpoch();
+        if (ms > afterMs) return ms;
+        date = start.addDays(1);
+    }
+    return std::numeric_limits<qint64>::max();
 }
 
 QString DisplayTime::rangeText(qint64 startMs, qint64 endMs, const QString& pattern) const {

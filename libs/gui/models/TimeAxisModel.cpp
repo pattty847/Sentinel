@@ -4,6 +4,7 @@
 #include <QDebug>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 const std::vector<TimeAxisModel::TimeStep> TimeAxisModel::TIME_STEPS = {
     {25, "25ms"}, {50, "50ms"}, {100, "100ms"}, {250, "250ms"}, {500, "500ms"},
@@ -13,6 +14,51 @@ const std::vector<TimeAxisModel::TimeStep> TimeAxisModel::TIME_STEPS = {
     {7200000, "2h"}, {14400000, "4h"}, {21600000, "6h"}, {43200000, "12h"},
     {86400000, "1d"}
 };
+
+namespace {
+constexpr qint64 kDayMs = 86400000;
+constexpr qint64 kYearMs = 31556952000; // 365.2425 days
+} // namespace
+using Calendar = DisplayTime::Calendar;
+const std::vector<TimeAxisModel::CalendarStep> TimeAxisModel::CALENDAR_STEPS = {
+    {2 * kDayMs, Calendar::Days, 2},       {7 * kDayMs, Calendar::Weeks, 1},
+    {14 * kDayMs, Calendar::Weeks, 2},     {kYearMs / 12, Calendar::Months, 1},
+    {kYearMs / 4, Calendar::Months, 3},    {kYearMs, Calendar::Months, 12},
+    {2 * kYearMs, Calendar::Months, 24},   {5 * kYearMs, Calendar::Months, 60},
+    {10 * kYearMs, Calendar::Months, 120}, {20 * kYearMs, Calendar::Months, 240},
+    {50 * kYearMs, Calendar::Months, 600}, {100 * kYearMs, Calendar::Months, 1200},
+};
+
+const TimeAxisModel::CalendarStep* TimeAxisModel::calendarStep(qint64 stepMs) {
+    for (const auto& step : CALENDAR_STEPS)
+        if (step.nominalMs == stepMs) return &step;
+    return nullptr;
+}
+
+qint64 TimeAxisModel::largerStep(qint64 stepMs) {
+    for (const auto& step : TIME_STEPS)
+        if (step.milliseconds > stepMs) return step.milliseconds;
+    for (const auto& step : CALENDAR_STEPS)
+        if (step.nominalMs > stepMs) return step.nominalMs;
+    return stepMs;
+}
+
+qint64 TimeAxisModel::nextTick(qint64 afterMs, qint64 stepMs) {
+    const DisplayTime& zone = DisplayTime::instance();
+    if (const auto* step = calendarStep(stepMs)) return zone.nextCalendarBoundary(afterMs, step->unit, step->count);
+    return zone.nextBoundary(afterMs, stepMs);
+}
+
+// Whether the on-screen ticks of `stepMs` fit the label capacity (stops counting
+// as soon as they do not).
+bool TimeAxisModel::ticksFit(qint64 stepMs, qint64 timeStart, qint64 timeEnd) const {
+    int count = 0;
+    for (qint64 t = nextTick(timeStart - stepMs, stepMs); t <= timeEnd + stepMs; t = nextTick(t, stepMs)) {
+        const double x = valueToScreenPosition(static_cast<double>(t));
+        if (x >= 0 && x <= getViewportWidth() && ++count > m_labelCapacity) return false;
+    }
+    return true;
+}
 
 TimeAxisModel::TimeAxisModel(QObject* parent)
     : AxisModel(parent) {
@@ -77,15 +123,20 @@ void TimeAxisModel::calculateTicks() {
             step = m_lastNiceStepMs;
         }
     }
+    // More ticks than the axis holds: the next larger step, never the leftmost ticks.
+    for (int larger = 0; larger < 64 && !ticksFit(step, timeStart, timeEnd); ++larger) step = largerStep(step);
     m_lastNiceStepMs = step;
-    // Boundaries of the display zone's wall clock (UTC: multiples of the step).
-    const DisplayTime& zone = DisplayTime::instance();
-    for (qint64 timestamp = zone.nextBoundary(timeStart - step, step); timestamp <= timeEnd + step;
-         timestamp = zone.nextBoundary(timestamp, step)) {
+    // Boundaries of the display zone's wall clock (UTC: multiples of the step), or
+    // its calendar periods above one day.
+    const CalendarStep* calendar = calendarStep(step);
+    qint64 previous = std::numeric_limits<qint64>::min();
+    for (qint64 timestamp = nextTick(timeStart - step, step); timestamp <= timeEnd + step;
+         timestamp = nextTick(timestamp, step)) {
         double screenX = valueToScreenPosition(static_cast<double>(timestamp));
         if (screenX >= 0 && screenX <= getViewportWidth()) {
-            QString label = formatTimeLabel(timestamp, step);
+            QString label = calendar ? formatCalendarLabel(timestamp, previous, *calendar) : formatTimeLabel(timestamp, step);
             addTick(static_cast<double>(timestamp), screenX, label, true);
+            previous = timestamp;
         }
     }
     
@@ -132,6 +183,13 @@ qint64 TimeAxisModel::calculateNiceTimeStep(qint64 rangeMs, int targetTicks) con
     if (rangeMs <= 0 || targetTicks <= 0) return 1000; // Default 1 second
     
     qint64 rawStep = rangeMs / targetTicks;
+    // Above a day: the smallest calendar step at least the raw step, so labels keep
+    // their gap (the steps are 2x apart or more).
+    if (rawStep > TIME_STEPS.back().milliseconds) {
+        for (const auto& step : CALENDAR_STEPS)
+            if (step.nominalMs >= rawStep) return step.nominalMs;
+        return CALENDAR_STEPS.back().nominalMs;
+    }
     auto it = std::lower_bound(TIME_STEPS.begin(), TIME_STEPS.end(), rawStep,
         [](const TimeStep& step, qint64 value) {
             return step.milliseconds < value;
@@ -180,4 +238,17 @@ QString TimeAxisModel::formatTimeLabel(qint64 timestampMs, qint64 stepMs) const 
         if (ms == 0) return dateTime.toString(":ss");
         return QString(".%1").arg(ms, 3, 10, QChar('0'));
     }
+}
+
+// Calendar steps keep the date-label style: "d MMM" for days and weeks (with the
+// year when it changes from the previous label), "MMM" for months with the year
+// on January, and the year alone for year steps.
+QString TimeAxisModel::formatCalendarLabel(qint64 timestampMs, qint64 previousMs, const CalendarStep& step) {
+    const DisplayTime& zone = DisplayTime::instance();
+    const QDateTime at = zone.at(timestampMs);
+    if (step.unit == Calendar::Months)
+        return at.toString(step.count >= 12 || at.date().month() == 1 ? QStringLiteral("yyyy") : QStringLiteral("MMM"));
+    const bool newYear = previousMs != std::numeric_limits<qint64>::min() &&
+                         zone.at(previousMs).date().year() != at.date().year();
+    return at.toString(newYear ? QStringLiteral("d MMM yyyy") : QStringLiteral("d MMM"));
 }

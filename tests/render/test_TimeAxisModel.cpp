@@ -11,6 +11,8 @@
 #include <QDateTime>
 #include <QTimeZone>
 
+#include <algorithm>
+#include <string>
 #include <vector>
 
 namespace {
@@ -33,7 +35,7 @@ protected:
     }
     // 880 px: 11 labels at 80 px, so a 10-step range picks that step.
     std::vector<AxisModel::TickSnapshot> ticks(qint64 from, qint64 to) {
-        axis.setViewportSize(880.0, 400.0);
+        axis.setViewportSize(width, 400.0);
         axis.setGridViewState(&view);
         view.setViewport(from, to, 100.0, 200.0);
         return current();
@@ -56,6 +58,7 @@ protected:
             EXPECT_EQ(sinceMidnight % stepMs, 0) << wall.toString(Qt::ISODate).toStdString();
         }
     }
+    double width = 880.0;
     GridViewState view;
     TimeAxisModel axis;
 };
@@ -234,4 +237,112 @@ TEST(DisplayTimeZone, OffsetKeepingTransitionStillFindsTheHour) {
     EXPECT_EQ(DisplayTime::segmentStart(at + 10, 3600, at, 7200), at + 10) << "a transition into another offset";
     time.setZone(DisplayTime::Zone::Utc);
     time.setLocalZone(QTimeZone());
+}
+
+// Zoomed far out (W-0187): steps above one day keep the count near the target, on
+// calendar boundaries of the display zone, and the labels span the whole width.
+namespace {
+enum class Cal { TwoDays, Week, TwoWeeks, Month, Quarter, Year };
+// Every tick is the calendar boundary `cal` at local midnight in `zone`.
+void expectCalendar(const std::vector<AxisModel::TickSnapshot>& list, const QTimeZone& zone, Cal cal) {
+    ASSERT_GE(list.size(), 3u);
+    for (const auto& t : list) {
+        const auto wall = QDateTime::fromMSecsSinceEpoch(qint64(t.value), zone);
+        const QDate d = wall.date();
+        SCOPED_TRACE(wall.toString(Qt::ISODate).toStdString() + " " + t.label.toStdString());
+        EXPECT_EQ(wall.time(), QTime(0, 0));
+        switch (cal) {
+        case Cal::TwoDays: EXPECT_EQ(d.toJulianDay() % 2, 0); break;
+        case Cal::Week: EXPECT_EQ(d.dayOfWeek(), 1); break;
+        case Cal::TwoWeeks: EXPECT_EQ(d.dayOfWeek(), 1); EXPECT_EQ((d.toJulianDay() / 7) % 2, 0); break;
+        case Cal::Month: EXPECT_EQ(d.day(), 1); break;
+        case Cal::Quarter: EXPECT_EQ(d.day(), 1); EXPECT_EQ((d.month() - 1) % 3, 0); break;
+        case Cal::Year: EXPECT_EQ(d.day(), 1); EXPECT_EQ(d.month(), 1); break;
+        }
+    }
+}
+// Labelled ticks reach both ends: the first and last within one step of the edges.
+void expectSpread(const std::vector<AxisModel::TickSnapshot>& list, double width) {
+    ASSERT_GE(list.size(), 3u);
+    double gap = 0;
+    for (size_t i = 1; i < list.size(); ++i) gap = std::max(gap, list[i].position - list[i - 1].position);
+    EXPECT_LE(list.front().position, gap) << "first label within one step of the left edge";
+    EXPECT_GE(list.back().position, width - gap) << "last label within one step of the right edge";
+    for (const auto& t : list) EXPECT_FALSE(t.label.isEmpty());
+}
+} // namespace
+
+TEST_F(TimeAxisModelZone, NinetyDaysUseWeeksAcrossTheWholeWidth) {
+    width = 1200; // 15 labels at 80 px: target 14
+    const auto list = ticks(utcMs(2026, 1, 1, 0), utcMs(2026, 4, 1, 0));
+    SCOPED_TRACE(labels(list).join(' ').toStdString());
+    EXPECT_GE(list.size(), 7u);
+    EXPECT_LE(list.size(), 15u);
+    expectSpread(list, width);
+    expectCalendar(list, QTimeZone::utc(), Cal::Week);
+    EXPECT_EQ(labels(list), QStringList({"5 Jan", "12 Jan", "19 Jan", "26 Jan", "2 Feb", "9 Feb", "16 Feb", "23 Feb",
+                                         "2 Mar", "9 Mar", "16 Mar", "23 Mar", "30 Mar"}));
+}
+
+TEST_F(TimeAxisModelZone, TwoYearsUseQuartersAcrossTheWholeWidth) {
+    width = 1200;
+    const auto list = ticks(utcMs(2025, 1, 1, 0), utcMs(2027, 1, 1, 0));
+    SCOPED_TRACE(labels(list).join(' ').toStdString());
+    EXPECT_GE(list.size(), 4u);
+    EXPECT_LE(list.size(), 15u);
+    expectSpread(list, width);
+    expectCalendar(list, QTimeZone::utc(), Cal::Quarter);
+    EXPECT_EQ(labels(list), QStringList({"2025", "Apr", "Jul", "Oct", "2026", "Apr", "Jul", "Oct", "2027"}));
+}
+
+TEST_F(TimeAxisModelZone, CalendarStepsLandOnLocalBoundariesInEveryZone) {
+    width = 1200; // target 14: range = 14 x (a raw step between two steps)
+    struct Case { Cal cal; qint64 rangeMs; };
+    const Case cases[] = {{Cal::TwoDays, 21 * kDay}, {Cal::Week, 70 * kDay}, {Cal::TwoWeeks, 140 * kDay},
+                          {Cal::Month, 280 * kDay}, {Cal::Quarter, 840 * kDay}, {Cal::Year, 2800 * kDay}};
+    for (const char* name : {"UTC", "America/New_York", "Asia/Kolkata"}) {
+        const QTimeZone zone = QByteArray(name) == "UTC" ? QTimeZone::utc() : QTimeZone(name);
+        if (QByteArray(name) == "UTC") DisplayTime::instance().setZone(DisplayTime::Zone::Utc);
+        else local(name);
+        // Starts that put the 2026 New York spring-forward and fall-back inside each view.
+        for (const qint64 start : {utcMs(2026, 2, 20, 0), utcMs(2026, 10, 15, 0)})
+            for (const auto& c : cases) {
+                SCOPED_TRACE(std::string(name) + " case " + std::to_string(int(c.cal)));
+                TimeAxisModel fresh; // no step memory from the previous case
+                fresh.setViewportSize(width, 400.0);
+                fresh.setGridViewState(&view);
+                view.setViewport(start - c.rangeMs / 2, start + c.rangeMs / 2, 100.0, 200.0);
+                std::vector<AxisModel::TickSnapshot> list;
+                fresh.copyTicks(list);
+                expectCalendar(list, zone, c.cal);
+                expectSpread(list, width);
+            }
+    }
+}
+
+TEST_F(TimeAxisModelZone, PanningLessThanAStepKeepsTheTickInstants) {
+    width = 1200;
+    local("America/New_York");
+    for (const qint64 range : {21 * kDay, 70 * kDay, 280 * kDay}) {
+        SCOPED_TRACE(range / kDay);
+        const qint64 from = utcMs(2026, 2, 1, 7);
+        const auto before = ticks(from, from + range);
+        const auto after = ticks(from + range / 40, from + range / 40 + range); // < 0.4 step
+        std::vector<double> a, b;
+        for (const auto& t : before) if (t.value >= from + range / 40) a.push_back(t.value);
+        for (const auto& t : after) if (t.value <= from + range) b.push_back(t.value);
+        EXPECT_EQ(a, b);
+        EXPECT_GE(a.size(), 3u);
+    }
+}
+
+// More ticks than the axis holds (a very wide window): a larger step, never the
+// leftmost 32 only.
+TEST_F(TimeAxisModelZone, TooManyTicksTakeALargerStepNotTheLeftmost) {
+    width = 4000; // 50 labels at 80 px: an hour step over 49 h makes 50 ticks
+    const auto list = ticks(utcMs(2026, 3, 1, 0), utcMs(2026, 3, 3, 1));
+    SCOPED_TRACE(labels(list).join(' ').toStdString());
+    EXPECT_LE(list.size(), 32u);
+    EXPECT_GE(list.size(), 10u);
+    expectSpread(list, width);
 }

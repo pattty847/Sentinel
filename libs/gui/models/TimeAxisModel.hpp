@@ -1,5 +1,6 @@
 #pragma once
 #include "AxisModel.hpp"
+#include "DisplayTime.hpp"
 
 /**
  * TimeAxisModel - Calculates nice time tick marks
@@ -11,6 +12,12 @@
  * Labels and the grid's boundaries follow the chart's display time zone
  * (DisplayTime): in Local mode a 1h tick lands on a local hour and a 1d tick on a
  * local midnight. A zone change re-labels at once.
+ *
+ * Above one day the steps are calendar periods (2 days, 1 and 2 weeks, 1 and 3
+ * months, 1 to 100 years) on local midnights of the display zone, chosen as the
+ * smallest that keeps ticks at least the label gap apart. Ticks never exceed the
+ * model's label capacity: a step that would make more takes the next larger step,
+ * so the axis is never cut to its leftmost ticks.
  * 
  * Uses TradingView-style adaptive formatting:
  * - Minimal labels (just numbers when context is clear)
@@ -40,12 +47,24 @@ private:
         TimeStep(qint64 ms, const QString& desc) : milliseconds(ms), description(desc) {}
     };
     
+    // A calendar step (above one day): its nominal length selects and identifies it.
+    struct CalendarStep {
+        qint64 nominalMs;
+        DisplayTime::Calendar unit;
+        int count;
+    };
+    static const CalendarStep* calendarStep(qint64 stepMs);
+    static qint64 largerStep(qint64 stepMs);
+    static qint64 nextTick(qint64 afterMs, qint64 stepMs);
+    bool ticksFit(qint64 stepMs, qint64 timeStart, qint64 timeEnd) const;
     qint64 calculateNiceTimeStep(qint64 rangeMs, int targetTicks) const;
     QString formatTimeLabel(qint64 timestampMs, qint64 stepMs) const;
+    static QString formatCalendarLabel(qint64 timestampMs, qint64 previousMs, const CalendarStep& step);
     bool updateEffectiveViewport();
     
     // Predefined nice time steps
     static const std::vector<TimeStep> TIME_STEPS;
+    static const std::vector<CalendarStep> CALENDAR_STEPS;
 
     double m_effectiveStart = 0.0;
     double m_effectiveEnd = 0.0;
