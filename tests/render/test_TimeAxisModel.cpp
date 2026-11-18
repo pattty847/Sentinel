@@ -5,6 +5,7 @@
 #include "models/DisplayTime.hpp"
 #include "models/TimeAxisModel.hpp"
 #include "render/GridViewState.hpp"
+#include "render/AxisLabelFit.hpp"
 
 #include <gtest/gtest.h>
 
@@ -280,7 +281,7 @@ TEST_F(TimeAxisModelZone, NinetyDaysUseWeeksAcrossTheWholeWidth) {
     EXPECT_LE(list.size(), 15u);
     expectSpread(list, width);
     expectCalendar(list, QTimeZone::utc(), Cal::Week);
-    EXPECT_EQ(labels(list), QStringList({"5 Jan 2026", "12 Jan", "19 Jan", "26 Jan", "2 Feb", "9 Feb", "16 Feb", "23 Feb",
+    EXPECT_EQ(labels(list), QStringList({"5 Jan", "12 Jan 2026", "19 Jan", "26 Jan", "2 Feb", "9 Feb", "16 Feb", "23 Feb",
                                          "2 Mar", "9 Mar", "16 Mar", "23 Mar", "30 Mar"}));
 }
 
@@ -381,9 +382,24 @@ TEST_F(TimeAxisModelZone, CalendarAxisNamesItsYearOnce) {
     const auto months = freshTicks(view, utcMs(2026, 2, 1, 0), utcMs(2026, 11, 30, 0), 1200);
     SCOPED_TRACE(labels(months).join(' ').toStdString());
     ASSERT_GE(months.size(), 3u);
-    EXPECT_EQ(months.front().label, "Feb 2026");
+    // February sits at x = 0: centred, its text would be clipped and not drawn, so
+    // the year goes on March, the first label drawn whole.
+    EXPECT_EQ(months.front().label, "Feb");
+    EXPECT_EQ(months[1].label, "Mar 2026");
     EXPECT_EQ(labels(months).filter("2026").size(), 1);
-    EXPECT_EQ(months[1].label, "Mar");
+}
+
+// A January label clipped at the right edge does not count as naming the year.
+TEST_F(TimeAxisModelZone, ClippedJanuaryDoesNotCountAsTheYear) {
+    const auto months = freshTicks(view, utcMs(2026, 2, 20, 0), utcMs(2027, 1, 1, 6), 1200);
+    SCOPED_TRACE(labels(months).join(' ').toStdString());
+    ASSERT_GE(months.size(), 3u);
+    EXPECT_EQ(months.back().label, "2027");
+    EXPECT_FALSE(AxisLabelFit::centredFits(months.back().position, 4, 0, 1200)) << "January is at the edge";
+    int drawnWithYear = 0;
+    for (const auto& t : months)
+        if (t.label.contains("2026") && AxisLabelFit::centredFits(t.position, int(t.label.size()), 0, 1200)) ++drawnWithYear;
+    EXPECT_EQ(drawnWithYear, 1);
 }
 
 // Past the 100-year step the series continues (200, 500, 1000 ... years) on

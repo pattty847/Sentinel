@@ -1,4 +1,5 @@
 #include "AxisTextService.hpp"
+#include "AxisLabelFit.hpp"
 
 #include "models/AxisModel.hpp"
 #include "SentinelLogging.hpp"
@@ -370,8 +371,7 @@ void AxisTextService::submitAxisText(ChartTextRenderer& renderer,
         if (!ChartTextLayout::measureRunRect(atlas, run, runRect)) {
             continue;
         }
-        if (runRect.left() < timeSafeRect.left() ||
-            runRect.right() > timeSafeRect.right()) {
+        if (!AxisLabelFit::inside(runRect.left(), runRect.right(), timeSafeRect.left(), timeSafeRect.right())) {
             continue;
         }
         renderer.submitRun(run, ChartTextRenderer::Priority::High);

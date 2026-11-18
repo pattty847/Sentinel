@@ -1,6 +1,7 @@
 #include "TimeAxisModel.hpp"
 #include "../render/GridViewState.hpp"
 #include "DisplayTime.hpp"
+#include "../render/AxisLabelFit.hpp"
 #include <QDebug>
 #include <cmath>
 #include <algorithm>
@@ -187,7 +188,7 @@ void TimeAxisModel::calculateTicks() {
     // Boundaries of the display zone's wall clock (UTC: multiples of the step), or
     // its calendar periods above one day.
     const auto calendar = calendarStep(step);
-    qint64 previous = std::numeric_limits<qint64>::min(), first = previous;
+    qint64 previous = std::numeric_limits<qint64>::min();
     bool yearShown = false;
     int generated = 0;
     for (qint64 timestamp = nextTick(timeStart - step, step); timestamp <= timeEnd + step && generated <= m_labelCapacity;
@@ -197,16 +198,22 @@ void TimeAxisModel::calculateTicks() {
             bool hasYear = false;
             QString label = calendar ? formatCalendarLabel(timestamp, previous, *calendar, false, &hasYear)
                                      : formatTimeLabel(timestamp, step);
+            // Only a label the axis draws counts (AxisTextService skips a clipped one).
+            yearShown = yearShown || (hasYear && AxisLabelFit::centredFits(screenX, int(label.size()), 0.0, getViewportWidth()));
             addTick(static_cast<double>(timestamp), screenX, label, true);
-            yearShown = yearShown || hasYear;
-            if (first == std::numeric_limits<qint64>::min()) first = timestamp;
             previous = timestamp;
             ++generated;
         }
     }
-    // A calendar axis always names its year once: on the first label when no other has it.
-    if (calendar && !yearShown && first != std::numeric_limits<qint64>::min() && !m_ticks.empty())
-        m_ticks.front().label = formatCalendarLabel(first, std::numeric_limits<qint64>::min(), *calendar, true, nullptr);
+    // A calendar axis always names its year once: on the first label that is drawn
+    // with it, when no drawn label has it.
+    for (int i = 0; calendar && !yearShown && i < m_tickWriteIndex; ++i) {
+        auto& tick = m_ticks[size_t(i)];
+        const QString withYear = formatCalendarLabel(qint64(tick.value), std::numeric_limits<qint64>::min(), *calendar, true, nullptr);
+        if (!AxisLabelFit::centredFits(tick.position, int(withYear.size()), 0.0, getViewportWidth())) continue;
+        tick.label = withYear;
+        yearShown = true;
+    }
     
     //qDebug() << "TimeAxisModel: Generated" << m_ticks.size() 
     //         << "time ticks for range" << timeRange << "ms, step=" << step << "ms";
