@@ -349,8 +349,8 @@ void WatchlistDock::refreshRowState() {
         }
         item->setForeground(QBrush(QColor(pending ? "#e6c07b" : refused ? "#ef8178"
                                          : active ? theme::text().name() : unavailable ? "#777" : "#e0e0e0")));
-        const QString shortTip = pending ? QStringLiteral("Pending") : refused ? QStringLiteral("Refused")
-            : unavailable ? QStringLiteral("Unavailable") : active || !isCrypto ? QString() : QStringLiteral("Unverified");
+        // Markers already identify the state; a refusal reason is live data, not help.
+        const QString shortTip = !pending && refused ? m_refusalReason : QString();
         item->setToolTip(TooltipHelp::instance().text(shortTip, pending ? QStringLiteral("Waiting for chart confirmation")
                           : refused ? m_refusalReason
                           : unavailable ? QStringLiteral("Not in the current market catalog")

@@ -2735,6 +2735,53 @@ TEST_F(DomDock, GroupingMenuFixedPersistsAndLinkFollowsTheHeatmapTick) {
     EXPECT_EQ(button->text(), "Auto ▾");
 }
 
+TEST_F(DomDock, QuietGroupingKeepsEveryLinkFallbackState) {
+    auto& help = TooltipHelp::instance();
+    help.setExplanatory(false);
+    source.update({{true, 200, 1}, {false, 200.1, 1}});
+    show();
+    auto* timer = dock.findChild<QTimer*>("domPublishTimer");
+    timer->stop();
+    auto* button = dock.findChild<QToolButton*>("domGrouping");
+    const QString suffix = "\nClick to choose Auto, Link to heatmap, or a fixed size; "
+                           "the row size is shown beside. The spread is the server's, whatever the row size.";
+    const auto check = [&](const QString& shortForm, const QString& longForm) {
+        flushEvents();
+        QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection);
+        EXPECT_EQ(button->toolTip(), shortForm);
+        EXPECT_FALSE(button->toolTip().contains('\n'));
+        help.setExplanatory(true);
+        EXPECT_EQ(button->toolTip().toUtf8(), ("Row grouping. " + longForm + suffix).toUtf8());
+        help.setExplanatory(false);
+        EXPECT_EQ(button->toolTip(), shortForm);
+    };
+    check("Row grouping", "Fixed.");
+    dock.setGrouping(OrderBookDock::Grouping::Link);
+    dock.setHeatmapTick(0, 100, true);
+    check("Row grouping · Linked: no heatmap tick yet",
+          "Linked: no heatmap tick yet; the nearest offered size is used.");
+    dock.setHeatmapTick(15, 100, true);
+    check("Row grouping · Linked: tick 0.15 is not a server-tick multiple",
+          "Linked: the heatmap tick 0.15 is not a whole multiple of the server tick "
+          "(heatmap layer off?); the nearest offered size is used.");
+    dock.setHeatmapTick(16, 100, true); // Same fallback group; the live tick must still refresh.
+    check("Row grouping · Linked: tick 0.16 is not a server-tick multiple",
+          "Linked: the heatmap tick 0.16 is not a whole multiple of the server tick "
+          "(heatmap layer off?); the nearest offered size is used.");
+    dock.setHeatmapTick(100, 0.5, true);
+    check("Row grouping · Linked: ticks cannot be compared exactly",
+          "Linked: the heatmap tick 200 (price scale 0.5) and the server tick 0.1 cannot be "
+          "compared exactly (a server tick with more than 9 decimals or a price scale "
+          "above 1e+09); the nearest offered size is used.");
+    dock.setHeatmapTick(20'000'000'000, 100, true);
+    check("Row grouping · Linked: tick 200000000 exceeds book; one row",
+          "Linked: the heatmap tick 200000000 is coarser than the whole book (5001 server ticks): one row.");
+    dock.setHeatmapTick(100, 100, true);
+    check("Row grouping", "Linked to the heatmap tick.");
+    dock.setGrouping(OrderBookDock::Grouping::Auto);
+    check("Row grouping", "Auto: the smallest size at which 60% of the 20 rows each side of the touch hold size; changes after 0.75 s.");
+}
+
 TEST(DomModel, AdaptiveDigitsFollowSigmaAndTheHeldDropWithoutMarketEvents) {
     // Codex F1: Σ and the 2 s drop back must reach the cells with no further book change.
     LiveOrderBook book;

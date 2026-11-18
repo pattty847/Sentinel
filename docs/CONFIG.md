@@ -62,8 +62,9 @@ Tools → Show explanatory tooltips is an app-level learning mode, off by defaul
 It persists as `ui/showExplanatoryTooltips` in the `Sentinel/SentinelGUI` QSettings
 store, alongside `ui/fontFamily`, using the app's default settings format (including
 isolated agent-host settings). Changes apply immediately to existing docks.
-Off shows compact DOM values and control names, watchlist availability states, and
-no redundant book-age tooltip; on preserves the explanatory text. This currently
+Off keeps compact DOM values, current grouping fallback reasons, Lean's hidden-width
+reason, and watchlist refusal reasons. It suppresses tooltips that only repeat a
+visible label or marker; other controls keep their name. On preserves the explanatory text. This currently
 covers DOM rows and controls, watchlist rows and the status bar's book age. Chart
 Settings help popovers and chart-canvas tooltips are independent. The Agent API
 currently exposes chart settings, not app-level UI preferences.

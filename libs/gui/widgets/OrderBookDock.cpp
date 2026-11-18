@@ -477,7 +477,7 @@ QHBoxLayout* OrderBookDock::buildHeading()
     m_recenter->setObjectName("domRecenter");
     m_recenter->setAccessibleName("Recenter and follow the market");
     m_recenter->setCheckable(true);
-    TooltipHelp::instance().setToolTip(m_recenter, QStringLiteral("Follow"), "Follow the market: on keeps the market centred. Scrolling turns it off and pins the price "
+    TooltipHelp::instance().setToolTip(m_recenter, {}, "Follow the market: on keeps the market centred. Scrolling turns it off and pins the price "
                            "ladder; click to recenter and follow again.");
     connect(m_recenter, &QPushButton::clicked, this, &OrderBookDock::recenter);
     m_cumulative = new QToolButton(m_contentWidget);
@@ -493,7 +493,7 @@ QHBoxLayout* OrderBookDock::buildHeading()
     m_pulse->setObjectName("domPulse");
     m_pulse->setAccessibleName("Liquidity Pulse");
     m_pulse->setCheckable(true);
-    TooltipHelp::instance().setToolTip(m_pulse, QStringLiteral("Pulse"), "Liquidity Pulse: each book change flashes as what it was.\n"
+    TooltipHelp::instance().setToolTip(m_pulse, {}, "Liquidity Pulse: each book change flashes as what it was.\n"
                         "Bright segment +size: added. Grey dashed outline -size: pulled (cancelled).\n"
                         "Row flash ×size in the aggressor's colour: eaten by trades.\n"
                         "Changes under 5% of the side's largest visible level are not flashed.");
@@ -605,7 +605,7 @@ void OrderBookDock::buildLean(QHBoxLayout* heading, QVBoxLayout* layout)
     m_lean->setText("Lean");
     m_lean->setAccessibleName("Lean Gauge");
     m_lean->setCheckable(true);
-    TooltipHelp::instance().setToolTip(m_lean, QStringLiteral("Lean"), QStringLiteral("Book imbalance, depth and two minute history; shows from %1 px dock width.").arg(LeanWidth));
+    TooltipHelp::instance().setToolTip(m_lean, {}, QStringLiteral("Book imbalance, depth and two minute history; shows from %1 px dock width.").arg(LeanWidth));
     heading->insertWidget(2, m_lean);
     m_heading = heading;
     m_leanStrip = new LeanGaugeWidget(m_leanGauge, m_contentWidget);
@@ -878,7 +878,28 @@ void OrderBookDock::updateGroupButton()
                       .arg(QString::number(m_linkTick, 'g', 12))
             : QStringLiteral("Linked: no heatmap tick yet; the nearest offered size is used.");
     else tip += QStringLiteral("Fixed.");
-    TooltipHelp::instance().setToolTip(m_grouping, QStringLiteral("Row grouping"), tip + QStringLiteral("\nClick to choose Auto, Link to heatmap, or a fixed size; "
+    // Keep the current fallback reason even when general explanations are off.
+    QString shortTip = QStringLiteral("Row grouping");
+    if (m_groupMode == Grouping::Link && !m_linkExact) {
+        const QString linkedTick = QString::number(m_linkTick, 'g', 12);
+        switch (m_linkFallback) {
+        case dom::LinkGroup::Fallback::NoTick:
+            shortTip += QStringLiteral(" · Linked: no heatmap tick yet");
+            break;
+        case dom::LinkGroup::Fallback::NotMultiple:
+            shortTip += QStringLiteral(" · Linked: tick %1 is not a server-tick multiple").arg(linkedTick);
+            break;
+        case dom::LinkGroup::Fallback::Unsupported:
+            shortTip += QStringLiteral(" · Linked: ticks cannot be compared exactly");
+            break;
+        case dom::LinkGroup::Fallback::WholeBook:
+            shortTip += QStringLiteral(" · Linked: tick %1 exceeds book; one row").arg(linkedTick);
+            break;
+        case dom::LinkGroup::Fallback::None:
+            break;
+        }
+    }
+    TooltipHelp::instance().setToolTip(m_grouping, shortTip, tip + QStringLiteral("\nClick to choose Auto, Link to heatmap, or a fixed size; "
                                                 "the row size is shown beside. The spread is the server's, whatever the row size."));
     if (m_groupNative > 0) sLog_App("DOM grouping mode=" << int(m_groupMode) << " group=" << group << " size=" << size);
 }
@@ -893,7 +914,8 @@ void OrderBookDock::updateLeanVisibility()
     const bool hiddenByWidth = m_lean->isChecked() && !visible;
     if (m_lean->property("hiddenByWidth").toBool() == hiddenByWidth) return;
     m_lean->setProperty("hiddenByWidth", hiddenByWidth);
-    TooltipHelp::instance().setToolTip(m_lean, QStringLiteral("Lean"), hiddenByWidth
+    TooltipHelp::instance().setToolTip(m_lean,
+        hiddenByWidth ? QStringLiteral("Lean · hidden below %1 px").arg(LeanWidth) : QString(), hiddenByWidth
         ? QStringLiteral("Lean Gauge: on, hidden at this width; it shows from %1 px dock width.").arg(LeanWidth)
         : QStringLiteral("Book imbalance, depth and two minute history; shows from %1 px dock width.").arg(LeanWidth));
     m_lean->style()->unpolish(m_lean);

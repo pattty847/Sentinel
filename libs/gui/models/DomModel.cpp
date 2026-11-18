@@ -256,11 +256,10 @@ QVariant DomModel::headerData(int section, Qt::Orientation orientation, int role
     if (role == Qt::TextAlignmentRole) return int(Qt::AlignRight | Qt::AlignVCenter);
     if (role == Qt::ToolTipRole) {
         const auto& help = TooltipHelp::instance();
-        const QString name = headerData(section, orientation, Qt::DisplayRole).toString();
-        if (section >= Buys) return help.text(name, executionSummary());
-        if (section == Price) return help.text(name, QString("Price in %1: each row's lower edge; rows of %2, server tick %3")
+        if (section >= Buys) return help.text({}, executionSummary());
+        if (section == Price) return help.text({}, QString("Price in %1: each row's lower edge; rows of %2, server tick %3")
             .arg(quoteUnit(), shownPrice(m_tick, m_tick), shownPrice(m_nativeTick, m_nativeTick)));
-        return help.text(name, QString("Resting %1 size in %2%3").arg(section == Bid ? "bid" : "ask", m_base,
+        return help.text({}, QString("Resting %1 size in %2%3").arg(section == Bid ? "bid" : "ask", m_base,
             m_cumulative ? QStringLiteral(", cumulative from the touch outward") : QString()));
     }
     if (role != Qt::DisplayRole) return {};

@@ -105,6 +105,7 @@ TEST_F(TooltipHelpTest, DomValuesStayShortAndLearningRestoresOriginalBytes) {
 
 TEST_F(TooltipHelpTest, ExistingDockControlsAndModelRefreshWithoutMarketData) {
     OrderBookDock dock;
+    dock.resize(650, 600);
     dock.show(); // DomTests uses Qt's offscreen platform, never a native window.
     QCoreApplication::processEvents();
     StatusBar status;
@@ -119,8 +120,8 @@ TEST_F(TooltipHelpTest, ExistingDockControlsAndModelRefreshWithoutMarketData) {
     model->publish(book, {}, true);
     QSignalSpy rows(model, &QAbstractItemModel::dataChanged);
     QSignalSpy headers(model, &QAbstractItemModel::headerDataChanged);
-    const QList<QPair<QString, QString>> controls{{"domPulse", "Pulse"}, {"domLean", "Lean"},
-        {"domCumulative", "Cumulative size"}, {"domRecenter", "Follow"}, {"domGrouping", "Row grouping"}};
+    const QList<QPair<QString, QString>> controls{{"domPulse", ""}, {"domLean", ""},
+        {"domCumulative", "Cumulative size"}, {"domRecenter", ""}, {"domGrouping", "Row grouping"}};
     for (const auto& [name, shortForm] : controls) {
         auto* widget = dock.findChild<QWidget*>(name);
         ASSERT_NE(widget, nullptr);
@@ -146,7 +147,38 @@ TEST_F(TooltipHelpTest, ExistingDockControlsAndModelRefreshWithoutMarketData) {
     for (const auto& [name, shortForm] : controls)
         EXPECT_EQ(dock.findChild<QWidget*>(name)->toolTip(), shortForm);
     EXPECT_TRUE(age->toolTip().isEmpty());
-    EXPECT_EQ(model->headerData(DomModel::Bid, Qt::Horizontal, Qt::ToolTipRole).toString(), "Bid");
+    for (int column = 0; column < DomModel::Columns; ++column)
+        EXPECT_TRUE(model->headerData(column, Qt::Horizontal, Qt::ToolTipRole).toString().isEmpty());
+}
+
+TEST_F(TooltipHelpTest, LeanKeepsHiddenWidthStateButSuppressesItsVisibleName) {
+    OrderBookDock dock;
+    dock.resize(650, 600);
+    dock.show();
+    QCoreApplication::processEvents();
+    auto* lean = dock.findChild<QToolButton*>("domLean");
+    ASSERT_NE(lean, nullptr);
+    lean->setChecked(true);
+    auto& help = TooltipHelp::instance();
+    const auto check = [&](const QString& shortForm, const QString& longForm) {
+        EXPECT_EQ(lean->toolTip(), shortForm);
+        help.setExplanatory(true);
+        EXPECT_EQ(lean->toolTip().toUtf8(), longForm.toUtf8());
+        help.setExplanatory(false);
+        EXPECT_EQ(lean->toolTip(), shortForm);
+    };
+    const QString normal = "Book imbalance, depth and two minute history; shows from 280 px dock width.";
+    check({}, normal);
+    dock.resize(260, 600);
+    QCoreApplication::processEvents();
+    check("Lean · hidden below 280 px", "Lean Gauge: on, hidden at this width; it shows from 280 px dock width.");
+    lean->setChecked(false);
+    check({}, normal);
+    lean->setChecked(true);
+    check("Lean · hidden below 280 px", "Lean Gauge: on, hidden at this width; it shows from 280 px dock width.");
+    dock.resize(650, 600);
+    QCoreApplication::processEvents();
+    check({}, normal);
 }
 
 TEST_F(TooltipHelpTest, WatchlistStatesRefreshAndActiveRowStaysSilent) {
@@ -164,15 +196,17 @@ TEST_F(TooltipHelpTest, WatchlistStatesRefreshAndActiveRowStaysSilent) {
         help.setExplanatory(false);
         EXPECT_EQ(index.data(Qt::ToolTipRole).toString(), shortForm);
     };
-    check("Unverified", "Availability unverified until selected");
+    check({}, "Availability unverified until selected");
     dock.setChartSwitchState({}, symbol);
-    check("Pending", "Waiting for chart confirmation");
+    check({}, "Waiting for chart confirmation");
     const QString reason = "The server refused this symbol because it is absent from the catalog.";
     dock.setChartSwitchState({}, {}, symbol, reason);
-    check("Refused", reason);
+    check(reason, reason);
+    dock.setChartSwitchState({}, {}, symbol, {});
+    check({}, {}); // A marker without a reason has nothing to add.
     dock.setChartSwitchState({}, {});
     dock.setCryptoAvailability({}, true);
-    check("Unavailable", "Not in the current market catalog");
+    check({}, "Not in the current market catalog");
     dock.setCryptoAvailability({symbol}, true);
     dock.setChartSwitchState(symbol, {});
     check({}, {});
