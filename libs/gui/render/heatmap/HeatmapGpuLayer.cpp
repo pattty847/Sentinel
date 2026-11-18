@@ -20,7 +20,6 @@ QString money(double price, sentinel::PriceDisplayUnit unit = {}) {
     if (unit.scaled()) return QString::number(unit.toDisplay(price), 'g', 12) + QLatin1Char(' ') + QLatin1String(unit.tag());
     return QStringLiteral("$") + QString::number(price, 'g', 12);
 }
-QString shownTime(int64_t ms) { return DisplayTime::instance().format(ms, QStringLiteral("MM-dd HH:mm")); }
 QString utcSeconds(int64_t ms) {
     return ms ? QDateTime::fromMSecsSinceEpoch(ms, QTimeZone::UTC).toString(QStringLiteral("HH:mm:ss")) : QString();
 }
@@ -850,10 +849,10 @@ QString HeatmapGpuLayer::resolutionIndicator() const {
     }
     const double scale = priceScale();
     const auto unit = PriceUnits::instance().unitFor(QString::fromStdString(symbol_));
-    return QStringLiteral("Resolution: %1 unavailable at %2-%3 in %4 to %5 %6 (no source builds it there). "
+    return QStringLiteral("Resolution: %1 unavailable at %2-%3 in %4 (no source builds it there). "
                           "Veiled, not coarsened.")
         .arg(money(fromUnits(tickUnits_, scale), unit), money(fromUnits(lo, scale), unit), money(fromUnits(hi, scale), unit),
-             shownTime(start), shownTime(end), DisplayTime::instance().zoneLabel(end));
+             DisplayTime::instance().rangeText(start, end, QStringLiteral("MM-dd HH:mm")));
 }
 
 QJsonObject HeatmapGpuLayer::state() const {

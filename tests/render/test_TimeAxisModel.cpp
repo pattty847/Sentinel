@@ -24,6 +24,7 @@ class TimeAxisModelZone : public ::testing::Test {
 protected:
     void TearDown() override {
         DisplayTime::instance().setZone(DisplayTime::Zone::Utc);
+        DisplayTime::instance().setSystemZoneIdSource({});
         DisplayTime::instance().setLocalZone(QTimeZone());
     }
     static void local(const char* zone) {
@@ -161,4 +162,57 @@ TEST(DisplayTimeZone, LabelsStateTheActiveZone) {
     time.setLocalZone(QTimeZone());
     EXPECT_EQ(DisplayTime::parse("local"), DisplayTime::Zone::Local);
     EXPECT_EQ(DisplayTime::parse("utc"), DisplayTime::Zone::Utc);
+}
+
+// A range across a daylight-saving change states each end's own offset, so two
+// different instants never print alike; within one offset (and in UTC) one suffix.
+TEST(DisplayTimeZone, RangeAcrossAChangeStatesBothOffsets) {
+    auto& time = DisplayTime::instance();
+    const QString pattern = "MM-dd HH:mm";
+    const qint64 fallFrom = utcMs(2026, 11, 1, 5), fallTo = utcMs(2026, 11, 1, 6);
+    const qint64 springFrom = utcMs(2026, 3, 8, 6), springTo = utcMs(2026, 3, 8, 7);
+    EXPECT_EQ(time.rangeText(fallFrom, fallTo, pattern), "11-01 05:00 to 11-01 06:00 UTC"); // the former UTC text
+    time.setLocalZone(QTimeZone("America/New_York"));
+    time.setZone(DisplayTime::Zone::Local);
+    EXPECT_EQ(time.rangeText(fallFrom, fallTo, pattern), "11-01 01:00 UTC-4 to 11-01 01:00 UTC-5");
+    EXPECT_EQ(time.rangeText(springFrom, springTo, pattern), "03-08 01:00 UTC-5 to 03-08 03:00 UTC-4");
+    EXPECT_EQ(time.rangeText(utcMs(2026, 7, 1, 12), utcMs(2026, 7, 1, 14), pattern), "07-01 08:00 to 07-01 10:00 UTC-4");
+    time.setZone(DisplayTime::Zone::Utc);
+    time.setLocalZone(QTimeZone());
+    EXPECT_EQ(time.rangeText(springFrom, springTo, pattern), "03-08 06:00 to 03-08 07:00 UTC");
+}
+
+// Local mode follows the computer's zone without a restart: a changed system zone
+// re-labels the axis, an unchanged one emits nothing, selecting Local re-reads it,
+// and an injected zone wins over the system one.
+TEST_F(TimeAxisModelZone, LocalFollowsASystemZoneChange) {
+    auto& time = DisplayTime::instance();
+    QByteArray system = "America/New_York";
+    time.setSystemZoneIdSource([&system] { return system; });
+    time.setLocalZone(QTimeZone()); // follow the (fake) system zone
+    time.setZone(DisplayTime::Zone::Local);
+    int changes = 0;
+    const auto counter = QObject::connect(&time, &DisplayTime::zoneChanged, [&changes] { ++changes; });
+    const auto newYork = ticks(utcMs(2026, 7, 1, 2), utcMs(2026, 7, 1, 12));
+    EXPECT_TRUE(labels(newYork).contains("1 Jul")) << labels(newYork).join(' ').toStdString(); // 04:00Z
+    EXPECT_FALSE(time.refreshSystemZone());
+    EXPECT_EQ(changes, 0) << "no change emits nothing";
+    system = "America/Los_Angeles";
+    EXPECT_TRUE(time.refreshSystemZone());
+    EXPECT_EQ(changes, 1);
+    const auto losAngeles = current();
+    EXPECT_TRUE(labels(losAngeles).contains("1 Jul")) << labels(losAngeles).join(' ').toStdString();
+    for (const auto& t : losAngeles)
+        if (t.label == "1 Jul") EXPECT_EQ(qint64(t.value), utcMs(2026, 7, 1, 7)) << "Los Angeles midnight";
+    time.setZone(DisplayTime::Zone::Utc);
+    system = "Asia/Kolkata"; // changed while UTC is shown
+    time.setZone(DisplayTime::Zone::Local);
+    EXPECT_EQ(time.zoneLabel(utcMs(2026, 7, 1, 0)), "UTC+5:30") << "selecting Local re-reads the system zone";
+    time.setLocalZone(QTimeZone("Asia/Tokyo"));
+    changes = 0;
+    system = "Europe/London";
+    EXPECT_FALSE(time.refreshSystemZone());
+    EXPECT_EQ(changes, 0);
+    EXPECT_EQ(time.zoneLabel(utcMs(2026, 7, 1, 0)), "UTC+9") << "an injected zone wins";
+    QObject::disconnect(counter);
 }

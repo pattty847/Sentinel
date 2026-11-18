@@ -1,5 +1,7 @@
 #include "DisplayTime.hpp"
+#include <QCoreApplication>
 #include <cstdlib>
+#include <utility>
 
 namespace {
 qint64 floorDiv(qint64 a, qint64 b) {
@@ -13,21 +15,55 @@ DisplayTime& DisplayTime::instance() {
     return time;
 }
 
-DisplayTime::DisplayTime() : m_local(QTimeZone::systemTimeZone()) {}
+DisplayTime::DisplayTime() : m_systemZoneId([] { return QTimeZone::systemTimeZoneId(); }) {
+    adoptSystemZone();
+    m_systemPoll.setInterval(1000);
+    connect(&m_systemPoll, &QTimer::timeout, this, &DisplayTime::refreshSystemZone);
+}
 
 void DisplayTime::setZone(Zone zone) {
     if (m_zone == zone) return;
     m_zone = zone;
+    if (m_zone == Zone::Local) adoptSystemZone(); // the zone the computer has now
     m_cacheValid = false;
+    // Only Local mode reads the system zone, so only Local mode watches it.
+    if (m_zone == Zone::Utc) m_systemPoll.stop();
+    else if (auto *app = QCoreApplication::instance()) { // no timers without an event loop (plain unit tests)
+        if (!m_quitHooked) m_quitHooked = bool(connect(app, &QCoreApplication::aboutToQuit, &m_systemPoll, &QTimer::stop));
+        m_systemPoll.start();
+    }
     emit zoneChanged();
 }
 
 void DisplayTime::setLocalZone(const QTimeZone& zone) {
-    const QTimeZone next = zone.isValid() ? zone : QTimeZone::systemTimeZone();
-    if (next == m_local) return;
-    m_local = next;
+    const QTimeZone before = m_local;
+    m_injected = zone.isValid();
+    if (m_injected) m_local = zone;
+    else { m_systemId.clear(); adoptSystemZone(); }
+    if (m_local == before) return;
     m_cacheValid = false;
     if (m_zone == Zone::Local) emit zoneChanged();
+}
+
+void DisplayTime::setSystemZoneIdSource(std::function<QByteArray()> source) {
+    m_systemZoneId = source ? std::move(source) : [] { return QTimeZone::systemTimeZoneId(); };
+}
+
+bool DisplayTime::adoptSystemZone() {
+    if (m_injected) return false;
+    const QByteArray id = m_systemZoneId();
+    if (id == m_systemId && m_local.isValid()) return false;
+    m_systemId = id;
+    const QTimeZone zone(id);
+    m_local = zone.isValid() ? zone : QTimeZone::systemTimeZone();
+    m_cacheValid = false;
+    return true;
+}
+
+bool DisplayTime::refreshSystemZone() {
+    if (!adoptSystemZone()) return false;
+    if (m_zone == Zone::Local) emit zoneChanged();
+    return true;
 }
 
 QDateTime DisplayTime::at(qint64 ms) const {
@@ -42,10 +78,12 @@ DisplayTime::Segment DisplayTime::segmentAt(qint64 ms) const {
     Segment segment;
     segment.offsetSeconds = m_local.offsetFromUtc(utc);
     if (!m_local.hasTransitions()) return segment; // a fixed offset, or a backend without rules
-    // previousTransition is strictly before its argument: one millisecond later
-    // includes a transition at exactly `ms`.
-    const auto previous = m_local.previousTransition(utc.addMSecs(1));
-    if (previous.atUtc.isValid()) segment.from = previous.atUtc.toMSecsSinceEpoch();
+    // previousTransition is strictly before its argument, and a backend may compare in
+    // whole seconds: ask one second later and accept the transition only if it is the
+    // one into this offset (else the segment starts at `ms`, which is still correct).
+    const auto previous = m_local.previousTransition(utc.addSecs(1));
+    segment.from = previous.atUtc.isValid() && previous.offsetFromUtc == segment.offsetSeconds
+        ? previous.atUtc.toMSecsSinceEpoch() : ms;
     const auto next = m_local.nextTransition(utc);
     if (next.atUtc.isValid()) segment.to = next.atUtc.toMSecsSinceEpoch();
     if (ms < segment.from || ms >= segment.to) return {ms, ms + 1, segment.offsetSeconds}; // inconsistent rules: no cache
@@ -64,8 +102,16 @@ QString DisplayTime::zoneLabel(qint64 ms) const {
     return label;
 }
 
+QString DisplayTime::rangeText(qint64 startMs, qint64 endMs, const QString& pattern) const {
+    const QString start = format(startMs, pattern), end = format(endMs, pattern);
+    if (offsetSeconds(startMs) == offsetSeconds(endMs))
+        return start + QStringLiteral(" to ") + end + QLatin1Char(' ') + zoneLabel(endMs);
+    return start + QLatin1Char(' ') + zoneLabel(startMs) + QStringLiteral(" to ") + end + QLatin1Char(' ') + zoneLabel(endMs);
+}
+
 qint64 DisplayTime::nextBoundary(qint64 afterMs, qint64 stepMs) const {
     if (stepMs <= 0) return afterMs + 1;
+    if (afterMs > kBoundaryLimitMs || afterMs < -kBoundaryLimitMs || stepMs > kBoundaryLimitMs) return std::numeric_limits<qint64>::max();
     qint64 from = afterMs + 1;
     // Within one offset segment the boundaries are k * step - offset; a candidate past
     // the segment's end belongs to the next offset, so start again there.
