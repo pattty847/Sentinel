@@ -83,9 +83,8 @@ DisplayTime::Segment DisplayTime::segmentAt(qint64 ms) const {
     // after `ms` and leads into this offset (else the segment starts at `ms`, which is
     // still correct). A later one can keep the offset (a DST relabel, Lisbon 1992).
     const auto previous = m_local.previousTransition(utc.addSecs(1));
-    segment.from = previous.atUtc.isValid() && previous.atUtc.toMSecsSinceEpoch() <= ms &&
-                           previous.offsetFromUtc == segment.offsetSeconds
-        ? previous.atUtc.toMSecsSinceEpoch() : ms;
+    segment.from = previous.atUtc.isValid()
+        ? segmentStart(ms, segment.offsetSeconds, previous.atUtc.toMSecsSinceEpoch(), previous.offsetFromUtc) : ms;
     const auto next = m_local.nextTransition(utc);
     if (next.atUtc.isValid()) segment.to = next.atUtc.toMSecsSinceEpoch();
     if (ms < segment.from || ms >= segment.to) return {ms, ms + 1, segment.offsetSeconds}; // inconsistent rules: no cache

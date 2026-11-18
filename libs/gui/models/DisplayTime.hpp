@@ -64,6 +64,12 @@ public:
     // daylight-saving change and in 30- or 45-minute offset zones. In UTC mode it is
     // the next multiple of `stepMs` since the epoch.
     qint64 nextBoundary(qint64 afterMs, qint64 stepMs) const;
+    // Where the offset segment holding `ms` starts, given the transition a backend
+    // reported as previous: that transition only if it is not after `ms` and leads
+    // into `offsetSeconds`; else `ms` itself (always correct, just not cached wider).
+    static qint64 segmentStart(qint64 ms, int offsetSeconds, qint64 previousMs, int previousOffsetSeconds) {
+        return previousMs <= ms && previousOffsetSeconds == offsetSeconds ? previousMs : ms;
+    }
 
 signals:
     void zoneChanged();

@@ -227,6 +227,11 @@ TEST(DisplayTimeZone, OffsetKeepingTransitionStillFindsTheHour) {
     const qint64 at = utcMs(1992, 9, 27, 1);
     EXPECT_EQ(time.nextBoundary(at - 501, kHour), at);
     EXPECT_EQ(time.zoneLabel(at - 501), "UTC+1");
+    // The rule itself (a millisecond-precision backend reports this transition as the
+    // "previous" one for a query one second later; macOS does not report it at all).
+    EXPECT_EQ(DisplayTime::segmentStart(at - 500, 3600, at, 3600), at - 500) << "a later transition is not the start";
+    EXPECT_EQ(DisplayTime::segmentStart(at + 10, 3600, at, 3600), at);
+    EXPECT_EQ(DisplayTime::segmentStart(at + 10, 3600, at, 7200), at + 10) << "a transition into another offset";
     time.setZone(DisplayTime::Zone::Utc);
     time.setLocalZone(QTimeZone());
 }
