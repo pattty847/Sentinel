@@ -18,6 +18,7 @@
 #include <QMainWindow>
 #include "widgets/StatusBar.hpp"
 #include "widgets/BookAgeText.hpp"
+#include "themes/ThemePalette.hpp"
 #include "widgets/HeatmapTelemetryDock.hpp"
 #include "datasources/RemoteGridDataSource.hpp"
 #include <QDateTime>
@@ -161,6 +162,34 @@ TEST(ShellChrome, StatusFieldsRemainOneLeftClusterAtWideSizes) {
     const auto dividers = bar.findChildren<QFrame*>("statusSeparator");
     ASSERT_EQ(dividers.size(), 2);
     for (auto* divider : dividers) EXPECT_EQ(divider->width(), 1);
+}
+
+TEST(ShellChrome, LiveMarketStateUsesPositiveInkOnlyWhileLive) {
+    MarketHealth health;
+    StatusBar bar;
+    bar.show();
+    bar.setMarketHealth(&health);
+    health.setActiveSymbol("BTC-USD");
+    health.setTransport(MarketHealth::Transport::Connected);
+    health.subscriptionRequested("BTC-USD");
+    health.subscriptionAcknowledged("BTC-USD");
+    health.bookReceived("BTC-USD", QDateTime::currentMSecsSinceEpoch());
+    auto* state = bar.findChild<QLabel*>("marketState");
+    ASSERT_NE(state, nullptr);
+    EXPECT_EQ(state->text(), "Live");
+    EXPECT_EQ(state->palette().color(QPalette::WindowText), theme::positive());
+
+    health.bookStale("BTC-USD");
+    EXPECT_EQ(state->text(), "Stale");
+    EXPECT_NE(state->palette().color(QPalette::WindowText), theme::positive());
+    EXPECT_EQ(state->palette().color(QPalette::WindowText), QColor("#ffcc80"));
+
+    health.bookReceived("BTC-USD", QDateTime::currentMSecsSinceEpoch());
+    ASSERT_EQ(state->text(), "Live");
+    bar.setMarketHealth(nullptr);
+    EXPECT_EQ(state->text(), "Unavailable");
+    EXPECT_NE(state->palette().color(QPalette::WindowText), theme::positive());
+    EXPECT_EQ(state->palette().color(QPalette::WindowText), QColor("#b0b0b0"));
 }
 
 TEST(ShellChrome, BookAgeHasOneSpellingAndDomOnlyRepeatsAbnormalState) {

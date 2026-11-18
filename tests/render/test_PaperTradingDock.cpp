@@ -551,6 +551,37 @@ QStringList rows(QTableWidget* log) {
     return out;
 }
 
+TEST(PaperPolish, OrderHistoryFitsFilledNumbersAtDefaultDockWidth) {
+    PriceUnits::instance().clearForTest();
+    PaperTradingDock dock;
+    dock.resize(600, 700);
+    dock.setSymbol("BTC-USD");
+    dock.show();
+    auto filled = order("ord-1", trading::OrderStatus::Filled);
+    filled.qty = 10.0;
+    filled.filledQty = 10.0;
+    filled.limitPrice = 1725.50;
+    dock.onOrderUpdated(filled);
+    QCoreApplication::processEvents();
+
+    auto* log = dock.findChild<QTableWidget*>("paperOrderLog");
+    ASSERT_NE(log, nullptr);
+    ASSERT_EQ(log->rowCount(), 1);
+    EXPECT_EQ(log->item(0, 2)->text(), "10");
+    EXPECT_EQ(log->item(0, 3)->text(), "10");
+    EXPECT_EQ(log->item(0, 4)->text(), "$1,725.50");
+    for (int column = 0; column < 5; ++column)
+        EXPECT_EQ(log->horizontalHeader()->sectionResizeMode(column), QHeaderView::ResizeToContents);
+    EXPECT_EQ(log->horizontalHeader()->sectionResizeMode(5), QHeaderView::Stretch);
+    for (int column : {2, 3, 4}) {
+        const auto* item = log->item(0, column);
+        EXPECT_EQ(item->textAlignment(), Qt::AlignRight | Qt::AlignVCenter);
+        EXPECT_GE(log->columnWidth(column), log->fontMetrics().horizontalAdvance(item->text()) + 8)
+            << "column " << column << " clips " << item->text().toStdString();
+    }
+    EXPECT_GT(log->columnWidth(5), 0);
+}
+
 QMessageBox* flattenPrompt() {
     for (auto* w : QApplication::topLevelWidgets()) {
         auto* box = qobject_cast<QMessageBox*>(w);
