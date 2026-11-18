@@ -7,7 +7,12 @@
 // - Source ids are data (ChunkCodec kChunkSources). Nothing here branches on them.
 // - Tick selection over the summary reuses the slice-T policy in
 //   HeatmapResolution.hpp (autoTickUnitsIf, manualPresetUnits).
-// Pure functions and value types; any thread; no Qt.
+// - The tick checks (unbuildableRows, buildsInView, autoTickUnits) run on the
+//   render path for every changed view: their TickScratch overloads reuse the
+//   caller's buffers and allocate nothing once those have grown. The overloads
+//   without one allocate (cold callers and tests).
+// Pure functions and value types; any thread; no Qt (a TickScratch is used by
+// one thread at a time).
 #include "HeatmapResolution.hpp"
 #include "HeatmapTiles.hpp"
 #include <compare>
@@ -105,6 +110,13 @@ void mergeResolution(ResolutionSummary &into, const ResolutionSummary &from);
 // bins). Rows no source covers (outside the book, holes) are not counted: they
 // veil at every tick, so they never block a tick. Limited to [lo, end).
 std::vector<PriceRange> unbuildableRows(const ColumnResolution &column, int64_t tickUnits, PriceRange rows);
+// Reusable buffers of the tick checks; the result of the overload below lives in
+// `unbuildable` until the next call with the same scratch.
+struct TickScratch {
+    std::vector<PriceRange> data, covered, whole, needed, unbuildable;
+};
+const std::vector<PriceRange> &unbuildableRows(const ColumnResolution &column, int64_t tickUnits, PriceRange rows,
+                                               TickScratch &scratch);
 struct VeiledRange {
     int64_t startMs = 0, endMs = 0; // consecutive columns with the same rows
     PriceRange price;
@@ -120,10 +132,15 @@ std::vector<VeiledRange> veiledRanges(const ResolutionSummary &summary, int64_t 
 // price range (owner decision 1: judged on the rows in view).
 bool buildsInView(const ResolutionSummary &summary, int64_t tickUnits, double timeLoMs, double timeHiMs,
                   double priceLo, double priceHi);
+bool buildsInView(const ResolutionSummary &summary, int64_t tickUnits, double timeLoMs, double timeHiMs,
+                  double priceLo, double priceHi, TickScratch &scratch);
 // Auto tick over the summary: autoTickUnitsIf (slice-T hysteresis) restricted to
 // presets that buildsInView. heightPx is physical pixels. 0 when nothing builds.
 int64_t autoTickUnits(const ResolutionSummary &summary, int64_t currentUnits, double timeLoMs, double timeHiMs,
                       double priceLo, double priceHi, double heightPx, const AutoTickParams &params = {});
+int64_t autoTickUnits(const ResolutionSummary &summary, int64_t currentUnits, double timeLoMs, double timeHiMs,
+                      double priceLo, double priceHi, double heightPx, const AutoTickParams &params,
+                      TickScratch &scratch);
 // Manual presets (<= maxUnits): every preset some loaded column of some source
 // with coverage can build (spec rule 4, option B).
 std::vector<int64_t> manualPresetUnits(const ResolutionSummary &summary, int64_t maxUnits);

@@ -170,6 +170,32 @@ void report(const char *scenario, const char *motion, const char *mode, const ch
 }
 } // namespace
 
+// The render path's rule with the real tick authority: once the scratch has grown,
+// a changed view (pan, price zoom inside the hysteresis band) allocates nothing.
+// The tick stays put, so no proposal is queued (a tick change posts one event).
+TEST(HeatmapTickChoice, ChangedViewsAllocateNothingAfterWarmUp) {
+    for (const auto &scenario : kScenarios) {
+        auto views = panViews(scenario, 100);
+        const auto zoom = zoomViews(scenario, 60, 1.001);
+        views.insert(views.end(), zoom.begin(), zoom.end());
+        LoadedLayer loaded(scenario.tfMs, views);
+        ASSERT_TRUE(loaded.settle()) << scenario.name;
+        for (const auto &v : views) loaded.layer.chooseTickForView(v); // warm-up: the scratch grows
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 200);   // the startup tick commits
+        const int64_t tick = loaded.layer.tickUnits();
+        ASSERT_GT(tick, 0) << scenario.name;
+        size_t allocations = 0, bytes = 0;
+        for (const auto &v : views) {
+            const auto sample = timedChoice(loaded.layer, v);
+            allocations += sample.allocations, bytes += sample.bytes;
+            ASSERT_EQ(loaded.layer.predictTickUnits(v), tick) << scenario.name;
+        }
+        EXPECT_EQ(allocations, 0u) << scenario.name << ": " << bytes << " bytes over " << views.size() << " views";
+        std::printf("%s: %zu allocations over %zu changed views, tick %lld\n", scenario.name, allocations,
+                    views.size(), (long long)tick);
+    }
+}
+
 // Per changed view (miss: the view differs from the last frame's) and per repeated
 // view (hit: the TickKey cache), Auto then Manual, for a pan and a price zoom.
 TEST(HeatmapTickChoice, DISABLED_ChangedViewCost) {
