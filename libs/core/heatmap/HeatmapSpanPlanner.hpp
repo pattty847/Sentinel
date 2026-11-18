@@ -10,7 +10,8 @@
 // - The tick checks (unbuildableRows, buildsInView, autoTickUnits) run on the
 //   render path for every changed view: their TickScratch overloads reuse the
 //   caller's buffers and allocate nothing once those have grown. The overloads
-//   without one allocate (cold callers and tests).
+//   without one allocate: tests and one-off GUI-thread queries only, never a
+//   per-frame path.
 // Pure functions and value types; any thread; no Qt (a TickScratch is used by
 // one thread at a time).
 #include "HeatmapResolution.hpp"

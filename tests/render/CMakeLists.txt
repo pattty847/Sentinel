@@ -314,7 +314,7 @@ set_tests_properties(HeatmapPlumbingTests PROPERTIES LABELS "render;heatmap" TIM
 # DISABLED_ changed-view benchmark. CPU only.
 add_executable(test_heatmap_tick_choice test_heatmap_tick_choice.cpp)
 target_include_directories(test_heatmap_tick_choice PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
-target_link_libraries(test_heatmap_tick_choice PRIVATE sentinel_lab_lib GTest::gtest Qt6::Core)
+target_link_libraries(test_heatmap_tick_choice PRIVATE sentinel_lab_lib GTest::gtest Qt6::Gui Qt6::Quick)
 add_test(NAME HeatmapTickChoiceTests COMMAND test_heatmap_tick_choice)
 set_tests_properties(HeatmapTickChoiceTests PROPERTIES LABELS "render;heatmap" TIMEOUT 120)
 

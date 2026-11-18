@@ -236,8 +236,10 @@ TEST(HeatmapSpanPlanner, GridChangeSummaryMatchesTheBinningOracle) {
 }
 
 // The tick-eligibility algorithm as it was before the reusable scratch buffers
-// (HeatmapSpanPlanner.cpp at 800d29a7): a fresh vector per step. The scratch path
-// must choose exactly what it chose for every input.
+// (HeatmapSpanPlanner.cpp at 800d29a7): a fresh vector per step. The function bodies
+// are that code with three edits: calls qualified with reference:: or recording::,
+// the Ranges alias declared here, and inView inlined into buildsInView. The scratch
+// path must choose exactly what it chose for every input.
 namespace reference {
 using Ranges = std::vector<PriceRange>;
 Ranges unite(Ranges ranges) {

@@ -1,14 +1,17 @@
 // The production tick chooser (HeatmapGpuLayer::chooseTickForView, with the real
 // HeatmapSourceController behind it) over the synthetic HMC2 recording: its cost per
 // changed view (the DISABLED_ benchmark, run alone through the build queue) and its
-// allocation rule on the render path (CONTRIBUTING.md "Hot paths").
+// allocation rule on the render path (CONTRIBUTING.md "Hot paths"), for the main
+// chart's layer and for the lab's LabItem (its updatePaintNode, called directly: no
+// window, so no scene graph renders the node).
 //
 // Benchmark: test_heatmap_tick_choice --gtest_also_run_disabled_tests
 //            --gtest_filter='HeatmapTickChoice.DISABLED_*'
 #include "SyntheticHmc2Fixture.hpp"
 #include "lab/LabData.hpp"
+#include "lab/LabItem.hpp"
 #include "render/heatmap/HeatmapGpuLayer.hpp"
-#include <QCoreApplication>
+#include <QGuiApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <gtest/gtest.h>
@@ -196,6 +199,61 @@ TEST(HeatmapTickChoice, ChangedViewsAllocateNothingAfterWarmUp) {
     }
 }
 
+// The lab chart chooses its tick in LabItem::updatePaintNode (GUI thread blocked):
+// after warm-up a changed view allocates nothing there either. The first call
+// creates the node; later calls only refill its frame.
+class LabProbe : public lab::LabItem {
+public:
+    QSGNode *paint(QSGNode *old) { return updatePaintNode(old, nullptr); }
+};
+TEST(HeatmapTickChoice, LabItemChangedViewsAllocateNothingAfterWarmUp) {
+    const auto &scenario = kScenarios[0];
+    auto views = panViews(scenario, 100);
+    const auto zoom = zoomViews(scenario, 60, 1.001);
+    views.insert(views.end(), zoom.begin(), zoom.end());
+    LabProbe item;
+    item.setSize({1500, 800});
+    item.setInitialView(extent(views));
+    item.loadReal(int(kDays * 24));
+    QElapsedTimer total;
+    total.start();
+    QSGNode *node = nullptr;
+    auto loaded = [&] {
+        const auto snapshot = item.snapshot();
+        size_t n = 0;
+        if (snapshot && snapshot->tfMs == scenario.tfMs)
+            for (const auto &c : snapshot->resolution.columns)
+                if (double(c.startMs) >= extent(views).timeLoMs - double(minute) &&
+                    double(c.startMs) < extent(views).timeHiMs)
+                    for (const auto &source : c.sources)
+                        if (source.state == heatmap::BucketState::Present) { ++n; break; }
+        const auto e = extent(views);
+        return n >= size_t(std::ceil(e.timeHiMs / double(minute)) - std::floor(e.timeLoMs / double(minute)));
+    };
+    while (!(loaded() && item.tickUnits() > 0) && total.elapsed() < 60'000) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        node = item.paint(node);
+    }
+    ASSERT_TRUE(loaded() && item.tickUnits() > 0);
+    for (const auto &v : views) item.setView(v), node = item.paint(node); // warm-up: the scratch grows
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+    const int64_t tick = item.tickUnits();
+    size_t allocations = 0, bytes = 0;
+    for (const auto &v : views) {
+        item.setView(v); // posts the view to the controller (allocates; not the render path)
+        gAllocations = gBytes = 0;
+        gCount = true;
+        node = item.paint(node);
+        gCount = false;
+        allocations += gAllocations, bytes += gBytes;
+        ASSERT_EQ(item.tickUnits(), tick);
+    }
+    EXPECT_EQ(allocations, 0u) << bytes << " bytes over " << views.size() << " views";
+    std::printf("lab item: %zu allocations over %zu changed views, tick %lld\n", allocations, views.size(),
+                (long long)tick);
+    delete node;
+}
+
 // Per changed view (miss: the view differs from the last frame's) and per repeated
 // view (hit: the TickKey cache), Auto then Manual, for a pan and a price zoom.
 TEST(HeatmapTickChoice, DISABLED_ChangedViewCost) {
@@ -239,9 +297,12 @@ TEST(HeatmapTickChoice, DISABLED_ChangedViewCost) {
 }
 
 int main(int argc, char **argv) {
-    QCoreApplication app(argc, argv);
-    ::testing::InitGoogleTest(&argc, argv);
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
+    // The recording outlives the application: LabData shuts down (and its transport
+    // stops polling availability) when the application is destroyed.
     QTemporaryDir fixture;
+    QGuiApplication app(argc, argv);
+    ::testing::InitGoogleTest(&argc, argv);
     writeRecording(fixture, kDays * 24 * 60);
     lab::LabData::configure(fixture.path().toStdString(), epoch + kDays * 24 * kHourMs);
     return RUN_ALL_TESTS();
