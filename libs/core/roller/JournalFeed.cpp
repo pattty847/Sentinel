@@ -1,3 +1,5 @@
+// Journal lifecycle and one-tick-per-record ordering are shared. Coinbase payload
+// parsing and version-1 state bytes remain unchanged; Kalshi owns integer state.
 #include "JournalFeed.hpp"
 #include <cmath>
 #include "marketdata/dispatch/BookParser.hpp"
@@ -36,12 +38,17 @@ JournalBook JournalBook::fromState(const nlohmann::json& j) {
     return b;
 }
 nlohmann::json JournalFeed::exportState() const {
-    return {{"version",1},{"product",product_},{"run",run_},{"connection",connection_},
+    nlohmann::json state = {{"version",1},{"product",product_},{"run",run_},{"connection",connection_},
         {"lastLocal",lastLocal_},{"sequence",sequence_ ? nlohmann::json(*sequence_) : nlohmann::json()},
         {"anchored",anchored_}};
+    if (venue_ == Venue::Kalshi) {
+        state["version"] = 2; state["venue"] = "kalshi"; state["kalshi"] = kalshi_.exportState();
+    }
+    return state;
 }
 void JournalFeed::importState(const nlohmann::json& j) {
-    if (j.at("version") != 1 || j.at("product") != product_)
+    const bool kalshi = j.at("version") == 2 && j.at("venue") == "kalshi";
+    if ((!kalshi && j.at("version") != 1) || j.at("product") != product_)
         throw std::runtime_error("feed anchor version/product mismatch");
     auto run = j.at("run").get<std::string>();
     const auto connection = j.at("connection").get<uint64_t>();
@@ -51,6 +58,11 @@ void JournalFeed::importState(const nlohmann::json& j) {
     if (!j.at("sequence").is_null()) sequence = j.at("sequence").get<uint64_t>();
     if (run.empty() || run.size() > 256 || local <= 0 || (sequence && *sequence >= INT64_MAX))
         throw std::runtime_error("invalid feed anchor");
+    auto decoder = kalshi ? KalshiDecoder::fromState(j.at("kalshi")) : KalshiDecoder{};
+    if (kalshi && (sequence || anchored != decoder.valid()))
+        throw std::runtime_error("invalid Kalshi feed anchor");
+    venue_ = kalshi ? Venue::Kalshi : Venue::Coinbase;
+    kalshi_ = std::move(decoder);
     run_ = std::move(run); connection_ = connection; lastLocal_ = local;
     sequence_ = sequence; anchored_ = anchored;
 }
@@ -93,34 +105,11 @@ void JournalFeed::collectTrades(const nlohmann::json& j, int64_t local) {
 }
 void JournalFeed::invalid(int64_t local, const std::string& reason) {
     anchored_ = false;
+    kalshi_.invalidate();
     if (onInvalid) onInvalid(local, reason);
 }
-void JournalFeed::apply(const JournalRecord& input) {
+void JournalFeed::applyCoinbase(const JournalRecord& input, int64_t local) {
     const auto& r = input.record;
-    const auto local = r.time.systemNs / 1'000'000;
-    using capture::Kind;
-    if (input.gapBefore || run_ != input.pos.run || connection_ != r.connection) {
-        invalid(lastLocal_ ? lastLocal_ : local, "journal boundary"); sequence_.reset();
-        run_ = input.pos.run; connection_ = r.connection;
-        if (onConnectionChange) onConnectionChange();
-    }
-    if (r.kind == Kind::TransportUp) {
-        invalid(local, "transport up"); sequence_.reset();
-        if (onConnectionChange) onConnectionChange();
-        if (onConnection) onConnection(true);
-    } else if (r.kind == Kind::TransportDown || r.kind == Kind::CaptureStopped) {
-        invalid(local, "transport down/stop");
-        if (onConnectionChange) onConnectionChange();
-        if (onConnection) onConnection(false);
-    } else if (r.kind == Kind::BookInvalidated || r.kind == Kind::ResyncRequested) {
-        const auto j = nlohmann::json::parse(r.payload);
-        const auto product = j.value("product", "");
-        if (product.empty() || product == product_) invalid(local, j.value("reason", "journal invalidation"));
-    } else if (r.kind == Kind::FrameReference) {
-        // V2 receipts certify foreign sequence ranges, but never supply book state.
-        const auto j = nlohmann::json::parse(r.payload);
-        if (j.value("sequence_gaps", uint64_t{0})) invalid(local, "journal routing sequence gap");
-    } else if (r.kind == Kind::Frame) {
         try {
             const auto j = nlohmann::json::parse(r.payload);
             // Trade consumers track seen occurrences independently of
@@ -190,6 +179,66 @@ void JournalFeed::apply(const JournalRecord& input) {
             }
         } catch (const nlohmann::json::exception&) { invalid(local, "malformed journal JSON"); }
           catch (const std::runtime_error& e) { invalid(local, e.what()); }
+}
+void JournalFeed::applyKalshi(const std::string& payload, int64_t local) {
+    KalshiDecoder::Result out;
+    try {
+        out = kalshi_.apply(nlohmann::json::parse(payload), product_, local);
+    } catch (const nlohmann::json::exception&) {
+        invalid(local, "malformed Kalshi journal JSON"); return;
+    } catch (const std::runtime_error& e) {
+        invalid(local, e.what()); return;
+    }
+    // Keep consumer failures fatal, as on the Coinbase path.
+    try {
+        using Kind = KalshiDecoder::Result::Kind;
+        if (out.kind == Kind::Snapshot) {
+            if (onSnapshot) onSnapshot(out.envelopeMs, local, std::move(out.levels));
+            anchored_ = true;
+        } else if (out.kind == Kind::Update) {
+            if (onUpdates) onUpdates(out.envelopeMs, local, std::move(out.levels));
+        } else if (out.kind == Kind::Trade && onTrade) {
+            onTrade(*out.trade);
+        }
+    } catch (const std::exception& e) { throw std::logic_error(e.what()); }
+}
+void JournalFeed::apply(const JournalRecord& input) {
+    const auto& r = input.record;
+    const auto local = r.time.systemNs / 1'000'000;
+    using capture::Kind;
+    // JournalReader copies only the validated header venue into this reserved
+    // metadata tag. Payload contents never choose the decoder.
+    const auto venue = input.metadata.contains("_journal_venue")
+        ? venueFromHeader(nlohmann::json{{"venue", input.metadata.at("_journal_venue")}})
+        : Venue::Coinbase;
+    if (venue != venue_) {
+        if (!run_.empty()) invalid(lastLocal_ ? lastLocal_ : local, "journal venue changed");
+        sequence_.reset(); kalshi_.reset(); venue_ = venue;
+    }
+    if (input.gapBefore || run_ != input.pos.run || connection_ != r.connection) {
+        invalid(lastLocal_ ? lastLocal_ : local, "journal boundary"); sequence_.reset(); kalshi_.reset();
+        run_ = input.pos.run; connection_ = r.connection;
+        if (onConnectionChange) onConnectionChange();
+    }
+    if (r.kind == Kind::TransportUp) {
+        invalid(local, "transport up"); sequence_.reset(); kalshi_.reset();
+        if (onConnectionChange) onConnectionChange();
+        if (onConnection) onConnection(true);
+    } else if (r.kind == Kind::TransportDown || r.kind == Kind::CaptureStopped) {
+        invalid(local, "transport down/stop");
+        if (onConnectionChange) onConnectionChange();
+        if (onConnection) onConnection(false);
+    } else if (r.kind == Kind::BookInvalidated || r.kind == Kind::ResyncRequested) {
+        const auto j = nlohmann::json::parse(r.payload);
+        const auto product = j.value("product", "");
+        if (product.empty() || product == product_) invalid(local, j.value("reason", "journal invalidation"));
+    } else if (r.kind == Kind::FrameReference) {
+        // V2 receipts certify foreign sequence ranges, but never supply book state.
+        const auto j = nlohmann::json::parse(r.payload);
+        if (j.value("sequence_gaps", uint64_t{0})) invalid(local, "journal routing sequence gap");
+    } else if (r.kind == Kind::Frame) {
+        if (venue_ == Venue::Kalshi) applyKalshi(r.payload, local);
+        else applyCoinbase(input, local);
     }
     // Exactly one tick for every journal record, including receipts/lifecycle.
     if (onTick) onTick(local);

@@ -42,3 +42,15 @@ target_link_libraries(candle_startup_bench PRIVATE sentinel_core Qt6::Core Qt6::
 # Read-only incident replay; run explicitly with a scratch report path, never in ctest.
 add_executable(one_sided_replay one_sided_replay.cpp)
 target_link_libraries(one_sided_replay PRIVATE sentinel_core Qt6::Core)
+
+add_executable(test_coinbase_feed_state test_coinbase_feed_state.cpp)
+target_link_libraries(test_coinbase_feed_state PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+target_compile_definitions(test_coinbase_feed_state PRIVATE COINBASE_STATE_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+add_test(NAME CoinbaseFeedStateTests COMMAND test_coinbase_feed_state)
+set_tests_properties(CoinbaseFeedStateTests PROPERTIES LABELS "roller" TIMEOUT 120)
+
+add_executable(test_kalshi_feed test_kalshi_feed.cpp)
+target_link_libraries(test_kalshi_feed PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+target_compile_definitions(test_kalshi_feed PRIVATE KALSHI_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+add_test(NAME KalshiFeedTests COMMAND test_kalshi_feed)
+set_tests_properties(KalshiFeedTests PROPERTIES LABELS "roller" TIMEOUT 120)

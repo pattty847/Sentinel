@@ -1,0 +1,1699 @@
+[
+ {
+  "type": "subscribed",
+  "id": 1,
+  "msg": {
+   "channel": "orderbook_delta",
+   "sid": 1
+  },
+  "sending_ts_ms": 1792860039012
+ },
+ {
+  "type": "subscribed",
+  "id": 2,
+  "msg": {
+   "channel": "ticker",
+   "sid": 2
+  },
+  "sending_ts_ms": 1792860039012
+ },
+ {
+  "type": "orderbook_snapshot",
+  "sid": 1,
+  "seq": 1,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "yes_dollars_fp": [
+    [
+     "0.0100",
+     "3404.24"
+    ],
+    [
+     "0.0200",
+     "648.97"
+    ],
+    [
+     "0.0300",
+     "18001.00"
+    ],
+    [
+     "0.0400",
+     "2251.00"
+    ],
+    [
+     "0.0500",
+     "11.00"
+    ],
+    [
+     "0.0600",
+     "1296.00"
+    ],
+    [
+     "0.0700",
+     "11.00"
+    ],
+    [
+     "0.0800",
+     "3020.25"
+    ],
+    [
+     "0.0900",
+     "112.00"
+    ],
+    [
+     "0.1000",
+     "2.00"
+    ],
+    [
+     "0.1100",
+     "293.00"
+    ],
+    [
+     "0.1200",
+     "1.00"
+    ],
+    [
+     "0.1300",
+     "1.00"
+    ],
+    [
+     "0.1400",
+     "1.00"
+    ],
+    [
+     "0.1500",
+     "1001.14"
+    ],
+    [
+     "0.1600",
+     "1496.00"
+    ],
+    [
+     "0.1700",
+     "1.00"
+    ],
+    [
+     "0.1800",
+     "1.00"
+    ],
+    [
+     "0.1900",
+     "5.00"
+    ],
+    [
+     "0.2000",
+     "338.00"
+    ],
+    [
+     "0.2700",
+     "4.00"
+    ],
+    [
+     "0.2800",
+     "369.36"
+    ],
+    [
+     "0.3000",
+     "1533.16"
+    ],
+    [
+     "0.3300",
+     "267.00"
+    ],
+    [
+     "0.4000",
+     "879.90"
+    ],
+    [
+     "0.4100",
+     "307.80"
+    ],
+    [
+     "0.4200",
+     "366.00"
+    ],
+    [
+     "0.4900",
+     "391.00"
+    ],
+    [
+     "0.5100",
+     "586.60"
+    ],
+    [
+     "0.5400",
+     "138.00"
+    ],
+    [
+     "0.5500",
+     "1.00"
+    ],
+    [
+     "0.5600",
+     "30.00"
+    ],
+    [
+     "0.5700",
+     "141.00"
+    ],
+    [
+     "0.5900",
+     "2.00"
+    ],
+    [
+     "0.6100",
+     "1.63"
+    ],
+    [
+     "0.6200",
+     "1.61"
+    ],
+    [
+     "0.6300",
+     "5.28"
+    ],
+    [
+     "0.6400",
+     "2001.56"
+    ],
+    [
+     "0.6500",
+     "101.53"
+    ],
+    [
+     "0.6600",
+     "1.51"
+    ],
+    [
+     "0.6700",
+     "1.49"
+    ],
+    [
+     "0.6800",
+     "1.47"
+    ],
+    [
+     "0.6900",
+     "3.44"
+    ],
+    [
+     "0.7000",
+     "251.42"
+    ],
+    [
+     "0.7100",
+     "1.40"
+    ],
+    [
+     "0.7200",
+     "3001.63"
+    ],
+    [
+     "0.7300",
+     "5.59"
+    ],
+    [
+     "0.7400",
+     "201.36"
+    ],
+    [
+     "0.7500",
+     "234.66"
+    ],
+    [
+     "0.7600",
+     "200.01"
+    ],
+    [
+     "0.7700",
+     "200.00"
+    ],
+    [
+     "0.7800",
+     "20.00"
+    ],
+    [
+     "0.8000",
+     "4010.00"
+    ],
+    [
+     "0.8100",
+     "44010.00"
+    ],
+    [
+     "0.8200",
+     "10.00"
+    ],
+    [
+     "0.8300",
+     "14.64"
+    ],
+    [
+     "0.8400",
+     "2199.20"
+    ],
+    [
+     "0.8500",
+     "1525.01"
+    ],
+    [
+     "0.8600",
+     "23164.01"
+    ],
+    [
+     "0.8700",
+     "20840.01"
+    ],
+    [
+     "0.8800",
+     "11809.58"
+    ],
+    [
+     "0.8900",
+     "8595.93"
+    ],
+    [
+     "0.9000",
+     "8973.41"
+    ],
+    [
+     "0.9100",
+     "16519.45"
+    ],
+    [
+     "0.9200",
+     "23834.04"
+    ],
+    [
+     "0.9300",
+     "46173.46"
+    ]
+   ],
+   "no_dollars_fp": [
+    [
+     "0.0100",
+     "15790.63"
+    ],
+    [
+     "0.0200",
+     "30187.40"
+    ],
+    [
+     "0.0300",
+     "13413.69"
+    ],
+    [
+     "0.0400",
+     "18746.38"
+    ],
+    [
+     "0.0500",
+     "65510.05"
+    ],
+    [
+     "0.0600",
+     "61238.39"
+    ]
+   ]
+  },
+  "sending_ts_ms": 1792860039012
+ },
+ {
+  "type": "orderbook_snapshot",
+  "sid": 1,
+  "seq": 2,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "yes_dollars_fp": [
+    [
+     "0.0100",
+     "41151.00"
+    ],
+    [
+     "0.0200",
+     "274.60"
+    ],
+    [
+     "0.0300",
+     "32003.66"
+    ],
+    [
+     "0.0400",
+     "26376.25"
+    ],
+    [
+     "0.0500",
+     "4539.00"
+    ],
+    [
+     "0.0600",
+     "52.00"
+    ],
+    [
+     "0.0800",
+     "150.00"
+    ],
+    [
+     "0.0900",
+     "51.00"
+    ],
+    [
+     "0.1000",
+     "280.00"
+    ],
+    [
+     "0.1100",
+     "232.00"
+    ],
+    [
+     "0.1200",
+     "66.00"
+    ],
+    [
+     "0.1300",
+     "1233.00"
+    ],
+    [
+     "0.1400",
+     "1568.00"
+    ],
+    [
+     "0.1500",
+     "119.00"
+    ],
+    [
+     "0.1600",
+     "9968.00"
+    ],
+    [
+     "0.1800",
+     "9837.00"
+    ],
+    [
+     "0.1900",
+     "6413.00"
+    ],
+    [
+     "0.2000",
+     "3060.00"
+    ],
+    [
+     "0.2100",
+     "1.00"
+    ],
+    [
+     "0.2300",
+     "24.27"
+    ],
+    [
+     "0.3700",
+     "100.00"
+    ],
+    [
+     "0.3800",
+     "2120.10"
+    ],
+    [
+     "0.3900",
+     "14698.08"
+    ],
+    [
+     "0.4000",
+     "4497.66"
+    ]
+   ],
+   "no_dollars_fp": [
+    [
+     "0.0100",
+     "44338.87"
+    ],
+    [
+     "0.0200",
+     "30825.00"
+    ],
+    [
+     "0.0300",
+     "28145.66"
+    ],
+    [
+     "0.0400",
+     "1087.50"
+    ],
+    [
+     "0.0500",
+     "53.00"
+    ],
+    [
+     "0.0600",
+     "333.00"
+    ],
+    [
+     "0.0700",
+     "1.00"
+    ],
+    [
+     "0.0800",
+     "699.00"
+    ],
+    [
+     "0.1000",
+     "100.50"
+    ],
+    [
+     "0.1100",
+     "1420.00"
+    ],
+    [
+     "0.1500",
+     "66.00"
+    ],
+    [
+     "0.1600",
+     "210.00"
+    ],
+    [
+     "0.1900",
+     "100.00"
+    ],
+    [
+     "0.2100",
+     "38.61"
+    ],
+    [
+     "0.2500",
+     "1640.88"
+    ],
+    [
+     "0.2600",
+     "4846.00"
+    ],
+    [
+     "0.2800",
+     "103.13"
+    ],
+    [
+     "0.2900",
+     "2.18"
+    ],
+    [
+     "0.3300",
+     "3.00"
+    ],
+    [
+     "0.3800",
+     "9590.00"
+    ],
+    [
+     "0.3900",
+     "6032.00"
+    ],
+    [
+     "0.4200",
+     "468.00"
+    ],
+    [
+     "0.4800",
+     "9510.00"
+    ],
+    [
+     "0.4900",
+     "5.43"
+    ],
+    [
+     "0.5000",
+     "28.42"
+    ],
+    [
+     "0.5100",
+     "51.00"
+    ],
+    [
+     "0.5300",
+     "6.00"
+    ],
+    [
+     "0.5500",
+     "0.01"
+    ],
+    [
+     "0.5600",
+     "0.10"
+    ],
+    [
+     "0.5700",
+     "493.10"
+    ],
+    [
+     "0.5800",
+     "5001.72"
+    ],
+    [
+     "0.5900",
+     "4602.20"
+    ]
+   ]
+  },
+  "sending_ts_ms": 1792860039012
+ },
+ {
+  "type": "subscribed",
+  "id": 3,
+  "msg": {
+   "channel": "trade",
+   "sid": 3
+  },
+  "sending_ts_ms": 1792860039012
+ },
+ {
+  "type": "subscribed",
+  "id": 4,
+  "msg": {
+   "channel": "market_lifecycle_v2",
+   "sid": 4
+  },
+  "sending_ts_ms": 1792860039012
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 3,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.7500",
+   "delta_fp": "-10.66",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.021Z",
+   "ts_ms": 1792860039021
+  },
+  "sending_ts_ms": 1792860039024
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 4,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.0300",
+   "delta_fp": "-33.33",
+   "side": "no",
+   "ts": "2026-10-24T16:40:39.023Z",
+   "ts_ms": 1792860039023
+  },
+  "sending_ts_ms": 1792860039029
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 5,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.9000",
+   "delta_fp": "500.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.026Z",
+   "ts_ms": 1792860039026
+  },
+  "sending_ts_ms": 1792860039031
+ },
+ {
+  "type": "ok",
+  "id": 10,
+  "msg": [
+   {
+    "channel": "orderbook_delta",
+    "sid": 1
+   },
+   {
+    "channel": "ticker",
+    "sid": 2
+   },
+   {
+    "channel": "trade",
+    "sid": 3
+   },
+   {
+    "channel": "market_lifecycle_v2",
+    "sid": 4
+   }
+  ],
+  "sending_ts_ms": 1792860039057
+ },
+ {
+  "type": "error",
+  "id": 12,
+  "msg": {
+   "code": 8,
+   "msg": "Unknown channel name"
+  },
+  "sending_ts_ms": 1792860039057
+ },
+ {
+  "type": "ok",
+  "id": 11,
+  "sid": 1,
+  "seq": 6,
+  "msg": {
+   "market_tickers": [
+    "KXATPMATCH-26OCT24COBMUS-MUS",
+    "KXSUPERLIGGAME-26OCT24SAMAMS-AMS"
+   ]
+  },
+  "sending_ts_ms": 1792860039057
+ },
+ {
+  "type": "trade",
+  "sid": 3,
+  "seq": 1,
+  "msg": {
+   "trade_id": "0724d5ed-9161-914a-a0cf-264e833f0323",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "yes_price_dollars": "0.9300",
+   "no_price_dollars": "0.0700",
+   "count_fp": "12.93",
+   "taker_side": "no",
+   "taker_outcome_side": "no",
+   "taker_book_side": "ask",
+   "is_block_trade": false,
+   "ts": 1792860039,
+   "ts_ms": 1792860039060
+  },
+  "sending_ts_ms": 1792860039066
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 7,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.9300",
+   "delta_fp": "-12.93",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.06Z",
+   "ts_ms": 1792860039060
+  },
+  "sending_ts_ms": 1792860039066
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 8,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.9300",
+   "delta_fp": "-1119.75",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.061Z",
+   "ts_ms": 1792860039061
+  },
+  "sending_ts_ms": 1792860039069
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 9,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.9300",
+   "delta_fp": "-956.79",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.061Z",
+   "ts_ms": 1792860039061
+  },
+  "sending_ts_ms": 1792860039069
+ },
+ {
+  "type": "trade",
+  "sid": 3,
+  "seq": 2,
+  "msg": {
+   "trade_id": "0724d5ed-9161-b0fa-85ce-7b3c6ef126db",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "yes_price_dollars": "0.9300",
+   "no_price_dollars": "0.0700",
+   "count_fp": "1119.75",
+   "taker_side": "no",
+   "taker_outcome_side": "no",
+   "taker_book_side": "ask",
+   "is_block_trade": false,
+   "ts": 1792860039,
+   "ts_ms": 1792860039061
+  },
+  "sending_ts_ms": 1792860039069
+ },
+ {
+  "type": "trade",
+  "sid": 3,
+  "seq": 3,
+  "msg": {
+   "trade_id": "0724d5ed-9161-b6ed-a706-752dd1c8b610",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "yes_price_dollars": "0.9300",
+   "no_price_dollars": "0.0700",
+   "count_fp": "956.79",
+   "taker_side": "no",
+   "taker_outcome_side": "no",
+   "taker_book_side": "ask",
+   "is_block_trade": false,
+   "ts": 1792860039,
+   "ts_ms": 1792860039061
+  },
+  "sending_ts_ms": 1792860039069
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 10,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.9300",
+   "delta_fp": "-362.05",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.151Z",
+   "ts_ms": 1792860039151
+  },
+  "sending_ts_ms": 1792860039155
+ },
+ {
+  "type": "trade",
+  "sid": 3,
+  "seq": 4,
+  "msg": {
+   "trade_id": "0724d5ed-9161-aba1-f5d9-9245bbdde0ec",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "yes_price_dollars": "0.9300",
+   "no_price_dollars": "0.0700",
+   "count_fp": "362.05",
+   "taker_side": "no",
+   "taker_outcome_side": "no",
+   "taker_book_side": "ask",
+   "is_block_trade": false,
+   "ts": 1792860039,
+   "ts_ms": 1792860039151
+  },
+  "sending_ts_ms": 1792860039155
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 11,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.8400",
+   "delta_fp": "1000.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.182Z",
+   "ts_ms": 1792860039182
+  },
+  "sending_ts_ms": 1792860039187
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 12,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.7200",
+   "delta_fp": "-1000.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.183Z",
+   "ts_ms": 1792860039183
+  },
+  "sending_ts_ms": 1792860039187
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 13,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.8400",
+   "delta_fp": "2000.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.221Z",
+   "ts_ms": 1792860039221
+  },
+  "sending_ts_ms": 1792860039227
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 14,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.8100",
+   "delta_fp": "-6000.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.23Z",
+   "ts_ms": 1792860039230
+  },
+  "sending_ts_ms": 1792860039235
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 15,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.8400",
+   "delta_fp": "6000.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.237Z",
+   "ts_ms": 1792860039237
+  },
+  "sending_ts_ms": 1792860039240
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 16,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.0600",
+   "delta_fp": "-7.41",
+   "side": "no",
+   "ts": "2026-10-24T16:40:39.24Z",
+   "ts_ms": 1792860039240
+  },
+  "sending_ts_ms": 1792860039245
+ },
+ {
+  "type": "trade",
+  "sid": 3,
+  "seq": 5,
+  "msg": {
+   "trade_id": "0724d5ec-f6b9-86e4-7d7a-e0569dfe4851",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "yes_price_dollars": "0.9400",
+   "no_price_dollars": "0.0600",
+   "count_fp": "7.41",
+   "taker_side": "yes",
+   "taker_outcome_side": "yes",
+   "taker_book_side": "bid",
+   "is_block_trade": false,
+   "ts": 1792860039,
+   "ts_ms": 1792860039240
+  },
+  "sending_ts_ms": 1792860039245
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 17,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.9200",
+   "delta_fp": "291.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.249Z",
+   "ts_ms": 1792860039249
+  },
+  "sending_ts_ms": 1792860039255
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 18,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.0600",
+   "delta_fp": "7.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:39.317Z",
+   "ts_ms": 1792860039317
+  },
+  "sending_ts_ms": 1792860039321
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 19,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.9300",
+   "delta_fp": "-164.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.477Z",
+   "ts_ms": 1792860039477
+  },
+  "sending_ts_ms": 1792860039480
+ },
+ {
+  "type": "trade",
+  "sid": 3,
+  "seq": 6,
+  "msg": {
+   "trade_id": "0724d5ed-9161-92bd-8345-8b1be816dcf4",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "yes_price_dollars": "0.9300",
+   "no_price_dollars": "0.0700",
+   "count_fp": "164.00",
+   "taker_side": "no",
+   "taker_outcome_side": "no",
+   "taker_book_side": "ask",
+   "is_block_trade": false,
+   "ts": 1792860039,
+   "ts_ms": 1792860039477
+  },
+  "sending_ts_ms": 1792860039480
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 20,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.5800",
+   "delta_fp": "6.26",
+   "side": "no",
+   "ts": "2026-10-24T16:40:39.543Z",
+   "ts_ms": 1792860039543
+  },
+  "sending_ts_ms": 1792860039549
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 21,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.5900",
+   "delta_fp": "-2089.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:39.59Z",
+   "ts_ms": 1792860039590
+  },
+  "sending_ts_ms": 1792860039595
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 22,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.5800",
+   "delta_fp": "-2089.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:39.59Z",
+   "ts_ms": 1792860039590
+  },
+  "sending_ts_ms": 1792860039595
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 23,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.4900",
+   "delta_fp": "145.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:39.629Z",
+   "ts_ms": 1792860039629
+  },
+  "sending_ts_ms": 1792860039633
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 24,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.5000",
+   "delta_fp": "146.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:39.63Z",
+   "ts_ms": 1792860039630
+  },
+  "sending_ts_ms": 1792860039635
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 25,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.5800",
+   "delta_fp": "2089.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:39.773Z",
+   "ts_ms": 1792860039773
+  },
+  "sending_ts_ms": 1792860039778
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 26,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.5700",
+   "delta_fp": "2089.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:39.777Z",
+   "ts_ms": 1792860039777
+  },
+  "sending_ts_ms": 1792860039785
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 27,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.0200",
+   "delta_fp": "50.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:39.861Z",
+   "ts_ms": 1792860039861
+  },
+  "sending_ts_ms": 1792860039863
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 28,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.8900",
+   "delta_fp": "-1.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.885Z",
+   "ts_ms": 1792860039885
+  },
+  "sending_ts_ms": 1792860039888
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 29,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.9000",
+   "delta_fp": "1.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.885Z",
+   "ts_ms": 1792860039885
+  },
+  "sending_ts_ms": 1792860039888
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 30,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.8300",
+   "delta_fp": "2.40",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:39.906Z",
+   "ts_ms": 1792860039906
+  },
+  "sending_ts_ms": 1792860039912
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 31,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.9100",
+   "delta_fp": "-1.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:40Z",
+   "ts_ms": 1792860040000
+  },
+  "sending_ts_ms": 1792860040004
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 32,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.1900",
+   "delta_fp": "-98.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:40Z",
+   "ts_ms": 1792860040000
+  },
+  "sending_ts_ms": 1792860040005
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 33,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.4800",
+   "delta_fp": "-98.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:40Z",
+   "ts_ms": 1792860040000
+  },
+  "sending_ts_ms": 1792860040005
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 34,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.1900",
+   "delta_fp": "-315.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:40Z",
+   "ts_ms": 1792860040000
+  },
+  "sending_ts_ms": 1792860040005
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 35,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.4800",
+   "delta_fp": "-305.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:40Z",
+   "ts_ms": 1792860040000
+  },
+  "sending_ts_ms": 1792860040005
+ },
+ {
+  "type": "ticker",
+  "sid": 2,
+  "msg": {
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "price_dollars": "0.9300",
+   "yes_bid_dollars": "0.9300",
+   "yes_ask_dollars": "0.9400",
+   "volume_fp": "4150529.92",
+   "open_interest_fp": "2067601.40",
+   "dollar_volume": 2075264,
+   "dollar_open_interest": 1033800,
+   "yes_bid_size_fp": "43557.94",
+   "yes_ask_size_fp": "61237.98",
+   "last_trade_size_fp": "164.00",
+   "ts": 1792860039,
+   "ts_ms": 1792860039477,
+   "time": "2026-10-24T16:40:39.477Z"
+  },
+  "sending_ts_ms": 1792860040013
+ },
+ {
+  "type": "ticker",
+  "sid": 2,
+  "msg": {
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "price_dollars": "0.4100",
+   "yes_bid_dollars": "0.4000",
+   "yes_ask_dollars": "0.4100",
+   "volume_fp": "112030.86",
+   "open_interest_fp": "86483.98",
+   "dollar_volume": 56015,
+   "dollar_open_interest": 43241,
+   "yes_bid_size_fp": "4497.66",
+   "yes_ask_size_fp": "2513.20",
+   "last_trade_size_fp": "0.66",
+   "ts": 1792860039,
+   "ts_ms": 1792860039590,
+   "time": "2026-10-24T16:40:39.59Z"
+  },
+  "sending_ts_ms": 1792860040013
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 36,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.2000",
+   "delta_fp": "-3000.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:40.025Z",
+   "ts_ms": 1792860040025
+  },
+  "sending_ts_ms": 1792860040031
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 37,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.1900",
+   "delta_fp": "3000.00",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:40.061Z",
+   "ts_ms": 1792860040061
+  },
+  "sending_ts_ms": 1792860040067
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 38,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.0600",
+   "delta_fp": "-1.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:40.077Z",
+   "ts_ms": 1792860040077
+  },
+  "sending_ts_ms": 1792860040083
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 39,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.0600",
+   "delta_fp": "-2.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:40.094Z",
+   "ts_ms": 1792860040094
+  },
+  "sending_ts_ms": 1792860040099
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 40,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.9300",
+   "delta_fp": "-0.17",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:40.292Z",
+   "ts_ms": 1792860040292
+  },
+  "sending_ts_ms": 1792860040297
+ },
+ {
+  "type": "trade",
+  "sid": 3,
+  "seq": 7,
+  "msg": {
+   "trade_id": "0724d5ed-a101-9dd5-a3df-fe2a1047bd64",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "yes_price_dollars": "0.9300",
+   "no_price_dollars": "0.0700",
+   "count_fp": "0.17",
+   "taker_side": "no",
+   "taker_outcome_side": "no",
+   "taker_book_side": "ask",
+   "is_block_trade": false,
+   "ts": 1792860040,
+   "ts_ms": 1792860040292
+  },
+  "sending_ts_ms": 1792860040297
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 41,
+  "msg": {
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "price_dollars": "0.1100",
+   "delta_fp": "-1420.00",
+   "side": "no",
+   "ts": "2026-10-24T16:40:40.323Z",
+   "ts_ms": 1792860040323
+  },
+  "sending_ts_ms": 1792860040329
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 42,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.9300",
+   "delta_fp": "-33.99",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:40.496Z",
+   "ts_ms": 1792860040496
+  },
+  "sending_ts_ms": 1792860040500
+ },
+ {
+  "type": "orderbook_delta",
+  "sid": 1,
+  "seq": 43,
+  "msg": {
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "price_dollars": "0.9300",
+   "delta_fp": "-512.57",
+   "side": "yes",
+   "ts": "2026-10-24T16:40:40.496Z",
+   "ts_ms": 1792860040496
+  },
+  "sending_ts_ms": 1792860040500
+ },
+ {
+  "type": "trade",
+  "sid": 3,
+  "seq": 8,
+  "msg": {
+   "trade_id": "0724d5ed-a101-9275-7863-e592ede1a550",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "yes_price_dollars": "0.9300",
+   "no_price_dollars": "0.0700",
+   "count_fp": "33.99",
+   "taker_side": "no",
+   "taker_outcome_side": "no",
+   "taker_book_side": "ask",
+   "is_block_trade": false,
+   "ts": 1792860040,
+   "ts_ms": 1792860040496
+  },
+  "sending_ts_ms": 1792860040500
+ },
+ {
+  "type": "trade",
+  "sid": 3,
+  "seq": 9,
+  "msg": {
+   "trade_id": "0724d5ed-a101-9426-570b-4981540581c9",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "yes_price_dollars": "0.9300",
+   "no_price_dollars": "0.0700",
+   "count_fp": "512.57",
+   "taker_side": "no",
+   "taker_outcome_side": "no",
+   "taker_book_side": "ask",
+   "is_block_trade": false,
+   "ts": 1792860040,
+   "ts_ms": 1792860040496
+  },
+  "sending_ts_ms": 1792860040501
+ },
+ {
+  "type": "trade",
+  "sid": 3,
+  "seq": 10,
+  "msg": {
+   "trade_id": "0724d5ed-a101-bfae-d96b-578145a6d045",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "yes_price_dollars": "0.9300",
+   "no_price_dollars": "0.0700",
+   "count_fp": "228.80",
+   "taker_side": "no",
+   "taker_outcome_side": "no",
+   "taker_book_side": "ask",
+   "is_block_trade": false,
+   "ts": 1792860040,
+   "ts_ms": 1792860040984
+  },
+  "sending_ts_ms": 1792860040988
+ },
+ {
+  "type": "ticker",
+  "sid": 2,
+  "msg": {
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "price_dollars": "0.9300",
+   "yes_bid_dollars": "0.9300",
+   "yes_ask_dollars": "0.9400",
+   "volume_fp": "4152080.98",
+   "open_interest_fp": "2066050.34",
+   "dollar_volume": 2076040,
+   "dollar_open_interest": 1033025,
+   "yes_bid_size_fp": "42782.41",
+   "yes_ask_size_fp": "61234.98",
+   "last_trade_size_fp": "228.80",
+   "ts": 1792860040,
+   "ts_ms": 1792860040984,
+   "time": "2026-10-24T16:40:40.984Z"
+  },
+  "sending_ts_ms": 1792860041012
+ },
+ {
+  "type": "ticker",
+  "sid": 2,
+  "msg": {
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "price_dollars": "0.4100",
+   "yes_bid_dollars": "0.4000",
+   "yes_ask_dollars": "0.4100",
+   "volume_fp": "112030.86",
+   "open_interest_fp": "86483.98",
+   "dollar_volume": 56015,
+   "dollar_open_interest": 43241,
+   "yes_bid_size_fp": "3401.44",
+   "yes_ask_size_fp": "8460.48",
+   "last_trade_size_fp": "0.66",
+   "ts": 1792860040,
+   "ts_ms": 1792860040813,
+   "time": "2026-10-24T16:40:40.813Z"
+  },
+  "sending_ts_ms": 1792860041012
+ },
+ {
+  "type": "ticker",
+  "sid": 2,
+  "msg": {
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "price_dollars": "0.9300",
+   "yes_bid_dollars": "0.9300",
+   "yes_ask_dollars": "0.9400",
+   "volume_fp": "4153485.22",
+   "open_interest_fp": "2065137.62",
+   "dollar_volume": 2076742,
+   "dollar_open_interest": 1032568,
+   "yes_bid_size_fp": "42203.17",
+   "yes_ask_size_fp": "70817.10",
+   "last_trade_size_fp": "366.11",
+   "ts": 1792860041,
+   "ts_ms": 1792860041956,
+   "time": "2026-10-24T16:40:41.956Z"
+  },
+  "sending_ts_ms": 1792860042012
+ },
+ {
+  "type": "ticker",
+  "sid": 2,
+  "msg": {
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "price_dollars": "0.4000",
+   "yes_bid_dollars": "0.4000",
+   "yes_ask_dollars": "0.4100",
+   "volume_fp": "112290.26",
+   "open_interest_fp": "86483.98",
+   "dollar_volume": 56145,
+   "dollar_open_interest": 43241,
+   "yes_bid_size_fp": "3360.74",
+   "yes_ask_size_fp": "10549.48",
+   "last_trade_size_fp": "29.70",
+   "ts": 1792860041,
+   "ts_ms": 1792860041774,
+   "time": "2026-10-24T16:40:41.774Z"
+  },
+  "sending_ts_ms": 1792860042012
+ },
+ {
+  "type": "market_lifecycle_v2",
+  "sid": 4,
+  "seq": 1,
+  "msg": {
+   "market_ticker": "KXNCAAF1QSPREAD-26OCT24WVUTCU-TCU11",
+   "settled_ts": 1792860042,
+   "event_type": "settled"
+  },
+  "sending_ts_ms": 1792860042361
+ },
+ {
+  "type": "market_lifecycle_v2",
+  "sid": 4,
+  "seq": 2,
+  "msg": {
+   "market_ticker": "KXNCAAF1QSPREAD-26OCT24WVUTCU-TCU8",
+   "settled_ts": 1792860042,
+   "event_type": "settled"
+  },
+  "sending_ts_ms": 1792860042361
+ },
+ {
+  "type": "market_lifecycle_v2",
+  "sid": 4,
+  "seq": 3,
+  "msg": {
+   "market_ticker": "KXNCAAF1QSPREAD-26OCT24WVUTCU-TCU7",
+   "settled_ts": 1792860042,
+   "event_type": "settled"
+  },
+  "sending_ts_ms": 1792860042361
+ },
+ {
+  "type": "market_lifecycle_v2",
+  "sid": 4,
+  "seq": 4,
+  "msg": {
+   "market_ticker": "KXNCAAF1QSPREAD-26OCT24WVUTCU-TCU4",
+   "settled_ts": 1792860042,
+   "event_type": "settled"
+  },
+  "sending_ts_ms": 1792860042361
+ },
+ {
+  "type": "market_lifecycle_v2",
+  "sid": 4,
+  "seq": 5,
+  "msg": {
+   "market_ticker": "KXNCAAF1QSPREAD-26OCT24WVUTCU-WVU3",
+   "settled_ts": 1792860042,
+   "event_type": "settled"
+  },
+  "sending_ts_ms": 1792860042361
+ },
+ {
+  "type": "market_lifecycle_v2",
+  "sid": 4,
+  "seq": 6,
+  "msg": {
+   "market_ticker": "KXNCAAF1QSPREAD-26OCT24WVUTCU-WVU8",
+   "settled_ts": 1792860042,
+   "event_type": "settled"
+  },
+  "sending_ts_ms": 1792860042361
+ },
+ {
+  "type": "ticker",
+  "sid": 2,
+  "msg": {
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "price_dollars": "0.9300",
+   "yes_bid_dollars": "0.9300",
+   "yes_ask_dollars": "0.9400",
+   "volume_fp": "4163872.50",
+   "open_interest_fp": "2054750.34",
+   "dollar_volume": 2081936,
+   "dollar_open_interest": 1027375,
+   "yes_bid_size_fp": "37009.53",
+   "yes_ask_size_fp": "70817.10",
+   "last_trade_size_fp": "23.42",
+   "ts": 1792860042,
+   "ts_ms": 1792860042758,
+   "time": "2026-10-24T16:40:42.758Z"
+  },
+  "sending_ts_ms": 1792860043012
+ },
+ {
+  "type": "ticker",
+  "sid": 2,
+  "msg": {
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "price_dollars": "0.4000",
+   "yes_bid_dollars": "0.4000",
+   "yes_ask_dollars": "0.4100",
+   "volume_fp": "112290.26",
+   "open_interest_fp": "86483.98",
+   "dollar_volume": 56145,
+   "dollar_open_interest": 43241,
+   "yes_bid_size_fp": "3360.74",
+   "yes_ask_size_fp": "10553.55",
+   "last_trade_size_fp": "29.70",
+   "ts": 1792860042,
+   "ts_ms": 1792860042904,
+   "time": "2026-10-24T16:40:42.904Z"
+  },
+  "sending_ts_ms": 1792860043012
+ },
+ {
+  "type": "ticker",
+  "sid": 2,
+  "msg": {
+   "market_id": "01a16b11-c6ec-791f-9774-a5ff97fad7a1",
+   "market_ticker": "KXATPMATCH-26OCT24COBMUS-MUS",
+   "price_dollars": "0.9400",
+   "yes_bid_dollars": "0.9300",
+   "yes_ask_dollars": "0.9400",
+   "volume_fp": "4164284.38",
+   "open_interest_fp": "2054968.18",
+   "dollar_volume": 2082142,
+   "dollar_open_interest": 1027484,
+   "yes_bid_size_fp": "36961.02",
+   "yes_ask_size_fp": "70659.67",
+   "last_trade_size_fp": "3.43",
+   "ts": 1792860043,
+   "ts_ms": 1792860043910,
+   "time": "2026-10-24T16:40:43.91Z"
+  },
+  "sending_ts_ms": 1792860044012
+ },
+ {
+  "type": "ticker",
+  "sid": 2,
+  "msg": {
+   "market_id": "01a156b7-12f4-78e9-8970-78d05f1cfc24",
+   "market_ticker": "KXSUPERLIGGAME-26OCT24SAMAMS-AMS",
+   "price_dollars": "0.4000",
+   "yes_bid_dollars": "0.4000",
+   "yes_ask_dollars": "0.4100",
+   "volume_fp": "112290.26",
+   "open_interest_fp": "86483.98",
+   "dollar_volume": 56145,
+   "dollar_open_interest": 43241,
+   "yes_bid_size_fp": "3260.74",
+   "yes_ask_size_fp": "10553.55",
+   "last_trade_size_fp": "29.70",
+   "ts": 1792860043,
+   "ts_ms": 1792860043866,
+   "time": "2026-10-24T16:40:43.866Z"
+  },
+  "sending_ts_ms": 1792860044012
+ }
+]
