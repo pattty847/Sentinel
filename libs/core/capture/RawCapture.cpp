@@ -1,3 +1,7 @@
+// Keep Coinbase header serialization byte-identical: venue is absent, and
+// the existing field values and ordered JSON serialization remain unchanged.
+// Coinbase writer metadata is opaque, as at base; only readers require its
+// product schema. Kalshi writers validate their instrument before creating files.
 #include "RawCapture.hpp"
 #include "CaptureRouting.hpp"
 #include "SentinelLogging.hpp"
@@ -230,11 +234,18 @@ nlohmann::json headerFrom(QFile& file) {
     const auto run = header.at("run_id").get<std::string>();
     if (run.empty() || run.size() > 128) fail("invalid run id");
     const auto& product = header.at("product_metadata");
-    validateSymbol(product.at("product_id").get<std::string>());
-    if (!product.at("quote_increment").is_string() || !product.at("base_increment").is_string())
-        fail("increments must be strings");
+    const auto spec = InstrumentSpec::fromHeader(header);
+    if (spec.venue == Venue::Kalshi) {
+        const auto channels = header.find("channels");
+        if (channels == header.end() || !channels->is_array() || channels->empty() ||
+            std::any_of(channels->begin(), channels->end(), [](const auto& channel) {
+                return !channel.is_string() || channel.template get_ref<const std::string&>().empty();
+            }))
+            fail("invalid Kalshi channels");
+    }
     if (header.at("products") != nlohmann::json::array({product.at("product_id")})) fail("product metadata/subscription mismatch");
     if (version == 2) {
+        if (spec.venue != Venue::Coinbase) fail("v2 routing requires Coinbase");
         const auto products = header.at("connection_products").get<std::vector<std::string>>();
         if (products.size() < 2 || products.size() > MaxProducts || !std::is_sorted(products.begin(), products.end()) ||
             std::adjacent_find(products.begin(), products.end()) != products.end() ||
@@ -257,9 +268,8 @@ Stamp Stamp::now() {
     return {std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count(),
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()};
 }
-void validateSymbol(const std::string& symbol) {
-    if (symbol.empty() || symbol.size() > 40 || symbol.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-") != std::string::npos)
-        fail("invalid symbol");
+void validateSymbol(const std::string& symbol, Venue venue) {
+    validateInstrumentId(symbol, venue);
 }
 
 QString validateRoot(const QString& root) {
@@ -315,7 +325,13 @@ Writer::Writer(WriterConfig config, nlohmann::json metadata, bool legacyV2)
     const bool multi = m_metadata.contains("connection_products") || m_metadata.contains("routing");
     if (multi != legacyV2) fail(legacyV2 ? "v2 fixture needs connection products" :
                                            "multi-product (RAWL2 v2) capture writing was removed");
-    validateSymbol(m_config.symbol);
+    const auto venue = venueFromHeader(m_metadata);
+    validateSymbol(m_config.symbol, venue);
+    if (venue == Venue::Kalshi) {
+        const auto spec = InstrumentSpec::fromHeader(m_metadata);
+        if (spec.id != m_config.symbol) fail("product metadata/subscription mismatch");
+        if (multi) fail("v2 routing requires Coinbase");
+    }
     m_config.root = validateRoot(m_config.root);
     if (m_config.blockBytes == 0 || m_config.blockBytes > MaxRecordBytes || m_config.blockInterval.count() < 1 ||
         m_config.blockInterval > std::chrono::seconds(60) || m_config.compressionLevel < 1 || m_config.compressionLevel > 19)
@@ -327,7 +343,9 @@ Writer::Writer(WriterConfig config, nlohmann::json metadata, bool legacyV2)
         m_metadata["run_started_system_ns"] = now.systemNs;
     }
     m_metadata["products"] = nlohmann::json::array({m_config.symbol});
-    m_metadata["channels"] = {"level2", "market_trades", "heartbeats"};
+    m_metadata["channels"] = venue == Venue::Kalshi
+        ? nlohmann::json::array({"orderbook_delta", "trade", "ticker", "market_lifecycle_v2"})
+        : nlohmann::json::array({"level2", "market_trades", "heartbeats"});
     m_metadata["config"] = {{"root", m_config.root.toStdString()}, {"block_bytes", m_config.blockBytes},
         {"block_ms", m_config.blockInterval.count()}, {"fsync_blocks", m_config.fsyncBlocks},
         {"zstd_level", m_config.compressionLevel}};

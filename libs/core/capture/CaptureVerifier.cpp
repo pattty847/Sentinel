@@ -1,3 +1,5 @@
+// Header validation is shared with RawCapture. Semantic replay is Coinbase-only;
+// report unsupported venues explicitly instead of interpreting their payloads.
 #include "CaptureVerifier.hpp"
 #include "CaptureRouting.hpp"
 #include <QDirIterator>
@@ -860,6 +862,8 @@ VerificationReport verifyFiles(const FileRange& files, const std::map<std::strin
         haveNext = cursor.next(next);
         try {
             const auto header = readHeader(file.path);
+            if (venueFromHeader(header) == Venue::Kalshi)
+                throw std::runtime_error("Kalshi capture replay is not supported");
             const auto& thisRun = file.run;
             const auto segment = file.segment;
             const auto firstBlock = header.at("first_block_ordinal").get<uint64_t>();

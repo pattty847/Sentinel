@@ -1,4 +1,7 @@
 #pragma once
+// Venue identity belongs to the header. Coinbase omits venue and retains its
+// exact existing bytes; Kalshi metadata is defined by InstrumentSpec.
+#include "InstrumentSpec.hpp"
 
 #include <QFile>
 #include <QString>
@@ -81,7 +84,7 @@ struct WriterStats {
 // In particular an absent /Volumes/T7 must never fall back to the system disk.
 QString validateRoot(const QString& root);
 QString prepareDirectory(const QString& directory); // validate, create, fsync new directory entries
-void validateSymbol(const std::string& symbol);
+void validateSymbol(const std::string& symbol, Venue venue = Venue::Coinbase);
 // Frozen v2 frame identity used for routing and range digests (v2 verification
 // and the test-only v2 fixture writer); not an on-disk record.
 // Unknown/control/malformed envelopes are broadcast, never discarded.

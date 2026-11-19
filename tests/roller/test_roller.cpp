@@ -84,6 +84,29 @@ TEST(Roller, GridsAndClamping) {
     EXPECT_DOUBLE_EQ(native.nearTick,.03); EXPECT_DOUBLE_EQ(native.deepTick,.12);
     m["quote_increment"]="bad"; EXPECT_THROW(deriveGrid(m,100),std::runtime_error);
 }
+TEST(Roller, KalshiHeaderInventoryAndExplicitPayloadError) {
+    for (const auto& symbol : {std::string("KXNBAGAME-26NOV18PHIORL-") + std::string(25, 'A'), std::string("KXTEST-1.5")}) {
+        QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); ASSERT_TRUE(temp.isValid());
+        capture::WriterConfig cfg; cfg.root = temp.path(); cfg.symbol = symbol; cfg.fsyncBlocks = 0;
+        const json meta = {{"venue", "kalshi"}, {"product_metadata", {{"product_id", symbol}}},
+            {"instrument", {{"price_min", "0.0000"}, {"price_max", "1.0000"}, {"size_increment", "0.01"},
+                {"price_ranges", json::array({{{"start", "0.0000"}, {"end", "1.0000"}, {"step", "0.0100"}}})}}}};
+        capture::Writer writer(cfg, meta);
+        writer.append(record(0, capture::Kind::CaptureStarted, "{}"));
+        writer.append(record(1, capture::Kind::Frame, R"({"type":"orderbook_delta","msg":{"price":"0.5600","delta":"86.65"}})"));
+        writer.close();
+        JournalReader reader(temp.path().toStdString(), symbol);
+        ASSERT_EQ(reader.files().size(), 1); EXPECT_EQ(reader.files()[0].header.at("venue"), "kalshi");
+        EXPECT_EQ(reader.files()[0].header.at("instrument"), meta.at("instrument"));
+        JournalRecord r; ASSERT_TRUE(reader.next(r)); EXPECT_EQ(r.record.kind, capture::Kind::CaptureStarted);
+        const auto unsupported = [](auto&& operation) {
+            try { operation(); FAIL() << "Kalshi decoding silently succeeded"; }
+            catch (const std::runtime_error& e) { EXPECT_STREQ(e.what(), "Kalshi journal payload decoding is not supported"); }
+        };
+        unsupported([&] { reader.next(r); });
+        unsupported([&] { reader.anchor(Epoch + 100); });
+    }
+}
 TEST(Roller, ReaderVersionsPositionsAndOpenPolling) {
     QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString();
     fixture(root/"v1",2,false);

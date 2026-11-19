@@ -640,6 +640,74 @@ that the v1 header peek stops before the L2 body. Targeted mutation checks disab
 these behaviors and must fail their regressions; every restored source is touched
 and rebuilt before proceeding.
 
+### Venue and instrument header contract
+
+An absent `venue` means Coinbase. The only accepted explicit value is
+`"venue":"kalshi"`; null, empty strings, `"coinbase"` and unknown names are
+rejected. Coinbase writers omit the field and keep the existing header fields,
+ordering and serialization bytes. Framing, CRCs, record kinds and indexes are
+unchanged. RAWL2 v2 routing remains Coinbase-only.
+
+`product_metadata.product_id` identifies the file's product and must equal the
+single entry in `products`. Coinbase readers retain their existing required
+string `quote_increment` and `base_increment` fields. The Coinbase writer keeps
+metadata opaque and validates only the configured symbol, as before; it can
+write synthetic metadata that those readers will reject. Its symbol rule is
+1..40 characters from `[A-Z0-9-]`. Kalshi permits 1..64 characters from `[A-Z0-9.-]`, with no
+leading `.` or `..` anywhere. Neither rule permits a path separator. The symbol
+is the directory component in the path above.
+
+Kalshi headers require this top-level `instrument` object; Coinbase increment
+fields are not required. Values below are an illustrative two-band specification,
+not defaults to apply to other markets:
+
+```json
+{
+  "venue": "kalshi",
+  "product_metadata": {"product_id": "KXNBAGAME-26NOV18PHIORL-ORL"},
+  "products": ["KXNBAGAME-26NOV18PHIORL-ORL"],
+  "channels": ["orderbook_delta", "trade", "ticker", "market_lifecycle_v2"],
+  "instrument": {
+    "price_min": "0.0000",
+    "price_max": "1.0000",
+    "price_ranges": [
+      {"start": "0.0000", "end": "0.5000", "step": "0.0100"},
+      {"start": "0.5000", "end": "1.0000", "step": "0.0010"}
+    ],
+    "size_increment": "0.01"
+  }
+}
+```
+
+Instrument decimals are nonnegative plain decimal **strings**, up to 80
+characters, with digits before and after an optional decimal point. Signs,
+exponents, whitespace, nonfinite values and JSON numbers are rejected. Validation
+compares exact decimal values without floating-point rounding, preserving the
+original strings. Kalshi bounds satisfy `0 <= price_min < price_max <= 1`.
+Size increment and every band step must be positive. `price_ranges` is a nonempty
+array; each band has `start < end`, lies within the bounds and starts at or after
+the preceding band's end. Adjacent endpoints and gaps are permitted; this
+metadata does not define endpoint tick selection or grid construction.
+`price_level_structure` may be retained in product metadata as provenance; the
+explicit bands are the shared instrument description.
+
+Writers derive `channels` from venue: Coinbase keeps
+`["level2","market_trades","heartbeats"]`; Kalshi uses the four channels shown
+above, in that order, by default. Kalshi readers require only a nonempty array
+of nonempty strings, so a truthful header may name a different subscription
+set or order. Coinbase header checks remain unchanged.
+`InstrumentSpec::fromHeader` exposes venue, ID, optional price bounds, tick bands
+and size increment. Coinbase has unspecified bounds and one
+unbounded band from `quote_increment`; its strings retain historical header
+validation rules.
+
+Raw framing readers can inventory and round-trip Kalshi journals. Semantic
+capture verification reports `Kalshi capture replay is not supported`. The
+roller's journal reader accepts the header and lifecycle records, but throws
+`Kalshi journal payload decoding is not supported` on a payload frame or an
+anchor search. Kalshi payload decoding and grids are not implemented yet; these
+errors prevent a successful-looking replay that discarded the data.
+
 ## launchd arguments (review/deploy separately)
 
 The arguments did not change for per-product connections: the new defaults

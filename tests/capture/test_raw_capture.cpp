@@ -74,6 +74,206 @@ struct CaptureTest : testing::Test {
     WriterConfig config;
     void SetUp() override { ASSERT_TRUE(dir.isValid()); config.root = dir.path(); config.fsyncBlocks = 0; }
 };
+// All venue fixtures are synthetic and live only under QTemporaryDir.
+nlohmann::json kalshiMetadata(const std::string& symbol) {
+    return {{"venue", "kalshi"}, {"product_metadata", {{"product_id", symbol}}},
+        {"instrument", {{"price_min", "0.0000"}, {"price_max", "1.0000"},
+            {"size_increment", "0.01"}, {"price_ranges", nlohmann::json::array({
+                {{"start", "0.0000"}, {"end", "0.5000"}, {"step", "0.0100"}},
+                {{"start", "0.5000"}, {"end", "1.0000"}, {"step", "0.0010"}}})}}}};
+}
+// Header-only file with independently rebuilt length/CRC, so a malformed
+// schema reaches reader validation instead of failing the framing checksum.
+void saveHeader(const QString& path, const nlohmann::json& header, char version = 1) {
+    const auto body = header.dump();
+    QByteArray bytes("RAWL2\r\n\1", 8);
+    bytes[7] = version;
+    for (const uint32_t value : {uint32_t(body.size()), sentinel::crc32(body.data(), body.size())})
+        for (int i = 0; i < 4; ++i) bytes.append(char(value >> (8 * i)));
+    bytes.append(body.data(), body.size()); save(path, bytes);
+}
+TEST_F(CaptureTest, KalshiExactRoundTripAndInstrument) {
+    const std::string longTicker = "KXNBAGAME-26NOV18PHIORL-" + std::string(25, 'A');
+    ASSERT_EQ(longTicker.size(), 49);
+    for (const auto& symbol : {longTicker, std::string("KXTEST-1.5"), std::string(64, 'A')}) {
+        config.symbol = symbol;
+        const auto meta = kalshiMetadata(symbol);
+        const std::vector<Record> input = {
+            record(Kind::CaptureStarted, 0), record(Kind::TransportUp, 1),
+            record(Kind::Frame, 2, " \n{\"type\":\"orderbook_delta\",\"msg\":{\"price\":\"0.5600\",\"delta\":\"86.65\"}}\t"),
+            record(Kind::CaptureStopped, 3)};
+        Writer writer(config, meta);
+        for (const auto& r : input) writer.append(r);
+        writer.close();
+        std::vector<Record> output;
+        const auto result = scan(writer.currentPath(), [&](const Record& r) { output.push_back(r); });
+        EXPECT_EQ(input, output); EXPECT_TRUE(result.indexed);
+        if (symbol.size() == 49) RecordProperty("kalshi_header", result.header.dump());
+        EXPECT_EQ(result.header.at("venue"), "kalshi");
+        EXPECT_EQ(result.header.at("instrument"), meta.at("instrument"));
+        EXPECT_EQ(result.header.at("channels"), nlohmann::json::array({"orderbook_delta", "trade", "ticker", "market_lifecycle_v2"}));
+        const auto spec = sentinel::InstrumentSpec::fromHeader(result.header);
+        EXPECT_EQ(spec.venue, sentinel::Venue::Kalshi); EXPECT_EQ(spec.id, symbol);
+        ASSERT_TRUE(spec.priceBounds); EXPECT_EQ(spec.priceBounds->min, "0.0000"); EXPECT_EQ(spec.priceBounds->max, "1.0000");
+        ASSERT_EQ(spec.tickBands.size(), 2); ASSERT_TRUE(spec.tickBands[1].bounds);
+        EXPECT_EQ(spec.tickBands[1].bounds->min, "0.5000"); EXPECT_EQ(spec.tickBands[1].bounds->max, "1.0000");
+        EXPECT_EQ(spec.tickBands[1].step, "0.0010"); EXPECT_EQ(spec.sizeIncrement, "0.01");
+        const auto report = verify(writer.currentPath());
+        EXPECT_FALSE(report.ok); EXPECT_NE(report.json.dump().find("Kalshi capture replay is not supported"), std::string::npos);
+    }
+}
+TEST_F(CaptureTest, CoinbaseHeaderGoldenBytes) {
+    Writer writer(config, metadata()); writer.append(record(Kind::Frame, 0)); writer.close();
+    const auto bytes = contents(writer.currentPath());
+    const auto header = readHeader(writer.currentPath());
+    const auto length = uint32_t(uint8_t(bytes[8])) | uint32_t(uint8_t(bytes[9])) << 8 |
+        uint32_t(uint8_t(bytes[10])) << 16 | uint32_t(uint8_t(bytes[11])) << 24;
+    auto actual = bytes.mid(16, length).toStdString();
+    // Mask exactly the random temp root, random run UUID and wall-clock run start.
+    // Opening clocks come from our deterministic record and are NOT masked.
+    const auto mask = [&](const std::string& from, const std::string& to) {
+        const auto pos = actual.find(from); ASSERT_NE(pos, std::string::npos);
+        ASSERT_EQ(actual.find(from, pos + from.size()), std::string::npos);
+        actual.replace(pos, from.size(), to);
+    };
+    mask(header.at("config").at("root").dump(), "\"<ROOT>\"");
+    mask(header.at("run_id").dump(), "\"<UUID>\"");
+    mask(header.at("run_started_system_ns").dump(), "0");
+    EXPECT_EQ(actual, R"({"channels":["level2","market_trades","heartbeats"],"config":{"block_bytes":1048576,"block_ms":1000,"fsync_blocks":0,"root":"<ROOT>","zstd_level":3},"first_block_ordinal":0,"format_version":1,"opened_steady_ns":1000000000000,"opened_system_ns":1790726400000000000,"product_metadata":{"base_increment":"0.00000001","product_id":"BTC-USD","quote_increment":"0.01"},"products":["BTC-USD"],"run_id":"<UUID>","run_started_system_ns":0,"segment":0,"tool_version":"offline-fixture"})");
+    EXPECT_EQ(bytes.first(8), QByteArray("RAWL2\r\n\1", 8));
+    const auto spec = sentinel::InstrumentSpec::fromHeader(header);
+    EXPECT_EQ(spec.venue, sentinel::Venue::Coinbase); EXPECT_FALSE(spec.priceBounds);
+    ASSERT_EQ(spec.tickBands.size(), 1); EXPECT_EQ(spec.tickBands[0].step, "0.01");
+    EXPECT_EQ(spec.sizeIncrement, "0.00000001");
+}
+TEST_F(CaptureTest, CoinbaseWriterPreservesMetadataAgnosticConstruction) {
+    // The writer accepts opaque metadata at base. Reader schema validation is
+    // intentionally stricter; these synthetic headers need not be readable.
+    for (const auto& meta : std::vector<nlohmann::json>{
+            nlohmann::json::object(), {{"tool_version", "opaque-metadata"}}, nullptr,
+            {{"product_metadata", nullptr}}, {{"product_metadata", "opaque"}},
+            {{"product_metadata", {{"product_id", "OTHER"}}}},
+            {{"product_metadata", {{"product_id", "BTC-USD"}, {"quote_increment", 1}}}}}) {
+        SCOPED_TRACE(meta.dump());
+        EXPECT_NO_THROW({
+            Writer writer(config, meta);
+            writer.append(record(Kind::Frame, 0, "opaque"));
+            writer.close();
+            EXPECT_TRUE(QFileInfo::exists(writer.currentPath()));
+        });
+    }
+    // Missing metadata must not mask the base symbol/config runtime_error.
+    auto bad = config; bad.symbol = "BTC.USD";
+    EXPECT_THROW(Writer(bad, nlohmann::json::object()), std::runtime_error);
+    bad = config; bad.blockBytes = 0;
+    EXPECT_THROW(Writer(bad, nlohmann::json::object()), std::runtime_error);
+}
+TEST_F(CaptureTest, CoinbaseWriterKeepsStrictSymbolRules) {
+    for (const auto& symbol : {std::string("BTC.USD"), std::string(41, 'A')}) {
+        config.symbol = symbol; auto meta = metadata(); meta["product_metadata"]["product_id"] = symbol;
+        EXPECT_THROW(Writer(config, meta), std::runtime_error) << symbol;
+    }
+    EXPECT_TRUE(paths(config.root).empty());
+}
+TEST_F(CaptureTest, VenueAndSymbolRejectedByWriterAndReader) {
+    Writer good(config, kalshiMetadata(config.symbol)); good.append(record(Kind::Frame, 0)); good.close();
+    const auto header = readHeader(good.currentPath());
+    const auto check = [&](const nlohmann::json& bad, const std::string& symbol) {
+        auto cfg = config; cfg.symbol = symbol;
+        EXPECT_THROW(Writer(cfg, bad), std::exception) << bad.dump();
+        saveHeader(dir.path() + "/bad.rawl2", bad);
+        EXPECT_THROW(readHeader(dir.path() + "/bad.rawl2"), std::exception) << bad.dump();
+    };
+    for (const auto& venue : {nlohmann::json("unknown"), nlohmann::json("coinbase"), nlohmann::json(""), nlohmann::json(nullptr), nlohmann::json(7)}) {
+        auto bad = header; bad["venue"] = venue;
+        // Also valid Coinbase metadata: silently defaulting an unknown venue
+        // must not accidentally fail only because Coinbase increments are absent.
+        bad["product_metadata"]["quote_increment"] = "0.01";
+        bad["product_metadata"]["base_increment"] = "0.01";
+        check(bad, config.symbol);
+    }
+    for (const auto& symbol : {std::string("../x"), std::string(".hidden"), std::string("A..B"), std::string("A/B"),
+                              std::string("A\\B"), std::string("lowercase"), std::string(65, 'A'), std::string()}) {
+        auto bad = header; bad["product_metadata"]["product_id"] = symbol; bad["products"] = {symbol}; check(bad, symbol);
+    }
+}
+TEST_F(CaptureTest, MalformedKalshiInstrumentRejectedByWriterAndReader) {
+    Writer good(config, kalshiMetadata(config.symbol)); good.append(record(Kind::Frame, 0)); good.close();
+    const auto header = readHeader(good.currentPath());
+    const auto check = [&](const nlohmann::json& bad) {
+        EXPECT_THROW(Writer(config, bad), std::exception) << bad.dump();
+        saveHeader(dir.path() + "/bad.rawl2", bad);
+        EXPECT_THROW(readHeader(dir.path() + "/bad.rawl2"), std::exception) << bad.dump();
+    };
+    auto bad = header; bad.erase("instrument"); check(bad);
+    bad = header; bad["instrument"] = "bad"; check(bad);
+    for (const auto* field : {"price_min", "price_max", "size_increment", "price_ranges"}) {
+        bad = header; bad["instrument"].erase(field); check(bad);
+    }
+    for (const auto& value : {nlohmann::json("nan"), nlohmann::json("1e-2"), nlohmann::json("-0.01"),
+         nlohmann::json("+0.01"), nlohmann::json(" 0.01"), nlohmann::json("0.01 "),
+         nlohmann::json(".01"), nlohmann::json("1."), nlohmann::json(""), nlohmann::json("0.0.1"), nlohmann::json(0.01)}) {
+        bad = header; bad["instrument"]["price_ranges"][0]["step"] = value; check(bad);
+    }
+    for (const auto* field : {"start", "end", "step"}) {
+        bad = header; bad["instrument"]["price_ranges"][0].erase(field); check(bad);
+    }
+    bad = header; bad["instrument"]["price_ranges"] = nlohmann::json::array(); check(bad);
+    bad = header; bad["instrument"]["price_ranges"][0]["step"] = "0.0000"; check(bad);
+    bad = header; bad["instrument"]["size_increment"] = "0.00"; check(bad);
+    bad = header; bad["instrument"]["price_ranges"][1]["start"] = "0.499999999999999999999"; check(bad);
+    bad = header; bad["instrument"]["price_ranges"][1]["end"] = "1.000000000000000000001"; check(bad);
+    bad = header; bad["instrument"]["price_min"] = "0.01"; check(bad);
+    bad = header; bad["instrument"]["price_max"] = "1.01"; check(bad);
+    bad = header; bad["instrument"]["price_max"] = "0.0000"; check(bad);
+    bad = header; bad["instrument"]["price_ranges"][0]["end"] = "0.0000"; check(bad);
+    bad = header; std::swap(bad["instrument"]["price_ranges"][0], bad["instrument"]["price_ranges"][1]); check(bad);
+    // Adjacent bounds with different decimal scales compare exactly; gaps are allowed.
+    auto valid = header; valid["instrument"]["price_ranges"][1]["start"] = "0000.50000";
+    EXPECT_NO_THROW(Writer(config, valid));
+    valid["instrument"]["price_ranges"][1]["start"] = "0.6000";
+    EXPECT_NO_THROW(Writer(config, valid));
+}
+TEST_F(CaptureTest, KalshiReaderChecksChannelsAndProductIdentity) {
+    Writer good(config, kalshiMetadata(config.symbol)); good.append(record(Kind::Frame, 0)); good.close();
+    const auto header = readHeader(good.currentPath());
+    for (const auto& channels : std::vector<nlohmann::json>{
+            {"trade"}, {"ticker", "orderbook_delta"}, {"future_channel"},
+            {"level2", "market_trades", "heartbeats"}}) {
+        auto changed = header; changed["channels"] = channels;
+        saveHeader(dir.path() + "/channels.rawl2", changed);
+        EXPECT_EQ(readHeader(dir.path() + "/channels.rawl2").at("channels"), channels);
+    }
+    for (const auto& channels : std::vector<nlohmann::json>{
+            nullptr, nlohmann::json::array(), "trade", nlohmann::json::object(),
+            {""}, {"trade", ""}, {"trade", 7}, {"trade", nullptr}}) {
+        auto bad = header; bad["channels"] = channels;
+        saveHeader(dir.path() + "/bad.rawl2", bad);
+        EXPECT_THROW(readHeader(dir.path() + "/bad.rawl2"), std::exception) << channels.dump();
+    }
+    auto bad = header; bad.erase("channels");
+    saveHeader(dir.path() + "/bad.rawl2", bad);
+    EXPECT_THROW(readHeader(dir.path() + "/bad.rawl2"), std::exception);
+    bad = header; bad["products"] = {"OTHER"}; saveHeader(dir.path() + "/bad.rawl2", bad);
+    EXPECT_THROW(readHeader(dir.path() + "/bad.rawl2"), std::exception);
+    bad = header; bad["product_metadata"]["product_id"] = "OTHER";
+    EXPECT_THROW(Writer(config, bad), std::runtime_error);
+}
+TEST_F(CaptureTest, KalshiVenueRejectedOnV2Header) {
+    Writer writer(config, kalshiMetadata(config.symbol));
+    writer.append(record(Kind::Frame, 0)); writer.close();
+    auto header = readHeader(writer.currentPath());
+    header["format_version"] = 2;
+    header["connection_products"] = {"BTC-USD", "ETH-USD"};
+    header["routing"] = RoutingId;
+    saveHeader(dir.path() + "/v2.rawl2", header, 2);
+    try {
+        readHeader(dir.path() + "/v2.rawl2");
+        FAIL() << "Kalshi accepted with Coinbase v2 routing";
+    } catch (const std::runtime_error& e) {
+        EXPECT_STREQ(e.what(), "RAWL2: v2 routing requires Coinbase");
+    }
+}
 TEST_F(CaptureTest, ExactBytesAndClocksRoundTripIncludingWhitespaceNulAndInvalidJson) {
     config.fsyncBlocks = 1;
     auto records = fixture();
