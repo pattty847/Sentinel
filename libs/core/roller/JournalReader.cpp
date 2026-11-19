@@ -1,3 +1,5 @@
+// Inventory accepts all RAWL2 venues; replay must fail explicitly until a venue
+// decoder exists. Never pass Kalshi frames to the Coinbase JournalFeed.
 #include "JournalReader.hpp"
 #include "SentinelLogging.hpp"
 #include "metrics/MetricsRegistry.hpp"
@@ -69,7 +71,9 @@ void registerJournalMetrics(metrics::MetricsRegistry& registry, const std::strin
 }
 JournalReader::JournalReader(std::filesystem::path root, std::string product, std::optional<JournalPos> start)
     : product_(std::move(product)), start_(std::move(start)) {
-    capture::validateSymbol(product_);
+    // Validate the safe union before using a directory name; readHeader then
+    // enforces the actual venue rules for every file.
+    capture::validateSymbol(product_, Venue::Kalshi);
     if (std::filesystem::is_directory(root / product_)) root /= product_;
     for (const auto& e : std::filesystem::recursive_directory_iterator(root)) {
         if (!e.is_regular_file() || e.path().extension() != ".rawl2") continue;
@@ -144,6 +148,8 @@ bool JournalReader::next(JournalRecord& out) {
             });
         capture::Record record;
         if (reader_->next(record)) {
+            if (record.kind == capture::Kind::Frame && venueFromHeader(f.header) == Venue::Kalshi)
+                throw std::runtime_error("Kalshi journal payload decoding is not supported");
             const auto& scan = reader_->result();
             JournalPos pos{product_, f.header.at("run_id"), scan.recordOrdinal, scan.recordIndex};
             if (start_) {
@@ -180,6 +186,8 @@ std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs) const {
     // File opening times can regress. Walk journal order backwards, never binary
     // search wall time; then choose the last qualifying snapshot in that segment.
     for (auto f = files_.rbegin(); f != files_.rend(); ++f) {
+        if (venueFromHeader(f->header) == Venue::Kalshi)
+            throw std::runtime_error("Kalshi journal payload decoding is not supported");
         if (f->header.at("opened_system_ns").get<int64_t>() / 1'000'000 > receiveMs) continue;
         capture::RecordReader reader(QString::fromStdString(f->path.string()), !f->superseded, {},
             [&](const capture::BlockIndex& block, const char* reason) {
