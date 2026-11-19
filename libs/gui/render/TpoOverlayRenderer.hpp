@@ -4,6 +4,7 @@
 
 #include "ChartTextPrimitives.hpp"
 #include "TpoProfileModel.hpp"
+#include "chart/core/ChartTextRule.hpp"
 
 #include <QByteArray>
 #include <QRectF>
@@ -22,12 +23,22 @@ class QSGNode;
 class QSGOpacityNode;
 class QSGTransformNode;
 class TpoRootNode;
+// A TPO row's letter baseline (local px) for a cap centre `capMid` px above it: from the row's
+// snapped edges on a device pixel at rest (snapY), from its continuous edges while the price
+// scale is free, so the letter keeps its place in its cell either way.
+double tpoLetterBaseline(double rowTop, double rowHeight, double capMid, bool snapY, double dpr);
 
 /*
  * TpoOverlayRenderer
  *
  * Market profile (TPO) overlay. Draws one profile per retained session as
  * coloured letter cells (vertex-colour quads) with MSDF letters on top.
+ * Letters follow the chart text rule (chart/core/ChartTextRule.hpp): all sessions show
+ * letters or none, decided once per frame; below the smallest cell that fits a letter
+ * at the rule's size with its padding, the coloured profile stays without letters. The
+ * style's letter width stays TPO's largest letter (chart::tpoLetterPx); each row's
+ * baseline sits on a device pixel measured from the row's snapped top. A new grid or
+ * session layout (clearSessions) or a hidden overlay forgets the decision.
  *
  *   Split:     each period's letters stay in its own time column
  *              [sessionStart + p*period, +period), aligned with candles.
@@ -76,6 +87,8 @@ public:
     Style style() const;
 
     void onRootRebuilt();
+    // Render thread, before render(): the chart text rule for the letters.
+    void setTextRule(const chart::ChartTextRule& rule) { m_textRule = rule; }
 
     // World -> screen uses the published frame camera; DPR and per-axis snapping also
     // participate in the cached layout. No integer time-bound conversion.
@@ -115,6 +128,7 @@ private:
         tpo::StyleModel look;
         double sessionPx = 0.0;  // session width; only when level lines reach the session
         bool text = false;
+        double textPx = 0.0;
         bool operator==(const LayoutKey&) const = default;
     };
 
@@ -183,6 +197,9 @@ private:
                         int64_t topAbs, float textFontPx);
     void appendGlyph(std::vector<ChartGlyphInstance>& out, const ChartTextAtlas& atlas,
                      char letter, float cx, float cy, float scale) const;
+    // A period letter at a baseline already on a device pixel; its pen snapped to one too.
+    void appendLetter(std::vector<ChartGlyphInstance>& out, const ChartTextAtlas& atlas,
+                      char letter, double cx, double baseline, double scale, double dpr) const;
 
     // GUI -> render handoff.
     mutable std::mutex m_pendingMutex;
@@ -209,4 +226,6 @@ private:
     QRectF m_clipRect;
     GroupKey m_groupKey;
     int m_group = 1;
+    chart::ChartTextRule m_textRule;
+    chart::ChartTextFit m_textFit;
 };

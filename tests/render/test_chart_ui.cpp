@@ -66,6 +66,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QSpinBox>
+#include <QGroupBox>
 #include <QShortcut>
 #include <QSignalSpy>
 #include <QPushButton>
@@ -2319,8 +2320,8 @@ TEST_F(ChartControls, CompleteKeyboardMenuSharesPersistedLabelsAndRebuiltLayoutH
             auto *sizes = toolbar->chartMenu()->findChild<QMenu *>("chartMenuLabelSize");
             clickSubmenuEntry(labels, sizes, sizes->actions().last());
         });
-        EXPECT_EQ(t.reload().labelMinPx, model->settings().labelMinPx);
-        EXPECT_EQ(t.reload().labelMaxPx, model->settings().labelMaxPx);
+        EXPECT_EQ(t.reload().textMinPx, model->settings().textMinPx);
+        EXPECT_EQ(t.reload().textMaxPx, model->settings().textMaxPx);
     }
     toolbar->resize(1920, 44);
     QTest::qWait(20);
@@ -2396,34 +2397,34 @@ TEST_F(ChartControls, ChartMenuRoundTripsTheLabelSettings) {
     // The menu shows the model (labels on, USD, the small size by default).
     EXPECT_TRUE(menuAction(menu, "chartMenuLabels")->isChecked());
     EXPECT_TRUE(menuAction(menu, "chartMenuCurrencyUsd")->isChecked());
-    EXPECT_TRUE(menuAction(menu, "chartMenuLabelSizePreset", 0)->isChecked());
-    // Labels off, asset currency, the medium size: model and store.
+    EXPECT_TRUE(menuAction(menu, "chartMenuLabelSizePreset", 1)->isChecked()) << "the default 13-18 px";
+    // Labels off, asset currency, the large size: model and store.
     menuAction(menu, "chartMenuLabels")->trigger();
     emit menu->aboutToShow();
     EXPECT_FALSE(menuAction(menu, "chartMenuLabels")->isChecked());
     menuAction(menu, "chartMenuCurrencyAsset")->trigger();
-    menuAction(menu, "chartMenuLabelSizePreset", 1)->trigger();
+    menuAction(menu, "chartMenuLabelSizePreset", 2)->trigger();
     const auto &s = model->settings();
     EXPECT_FALSE(s.showLabels);
     EXPECT_EQ(s.labelCurrency, "asset");
-    EXPECT_EQ(s.labelMinPx, 14);
-    EXPECT_EQ(s.labelMaxPx, 18);
+    EXPECT_EQ(s.textMinPx, 16);
+    EXPECT_EQ(s.textMaxPx, 22);
     const auto saved = t.reload();
     EXPECT_FALSE(saved.showLabels);
     EXPECT_EQ(saved.labelCurrency, "asset");
-    EXPECT_EQ(saved.labelMaxPx, 18);
+    EXPECT_EQ(saved.textMaxPx, 22);
     // The toolbar shows them.
     EXPECT_FALSE(toolbar->labelsButton()->isChecked());
     EXPECT_EQ(toolbar->liquidityModeCombo()->currentText(), "Asset");
 
     // The other way: an API-style patch shows in the menu and the toolbar.
-    ASSERT_TRUE(model->apply({{"showLabels", true}, {"labelCurrency", "usd"}, {"labelMinPx", 12.0}, {"labelMaxPx", 15.0}})
+    ASSERT_TRUE(model->apply({{"showLabels", true}, {"labelCurrency", "usd"}, {"textMinPx", 13.0}, {"textMaxPx", 18.0}})
                     .isEmpty());
     emit menu->aboutToShow();
     EXPECT_TRUE(menuAction(menu, "chartMenuLabels")->isChecked());
     EXPECT_TRUE(menuAction(menu, "chartMenuCurrencyUsd")->isChecked());
     EXPECT_FALSE(menuAction(menu, "chartMenuCurrencyAsset")->isChecked());
-    EXPECT_TRUE(menuAction(menu, "chartMenuLabelSizePreset", 0)->isChecked());
+    EXPECT_TRUE(menuAction(menu, "chartMenuLabelSizePreset", 1)->isChecked());
     EXPECT_TRUE(toolbar->labelsButton()->isChecked());
     EXPECT_EQ(toolbar->liquidityModeCombo()->currentText(), "USD");
     // Appearance edits now live in the gear, reachable at narrow widths.
@@ -2514,8 +2515,8 @@ TEST_F(ChartControls, DialogChartTabRoundTrip) {
     EXPECT_EQ(dialog.tabs()->tabText(0), "Chart");
     auto *show = dialog.findChild<QCheckBox *>("showLabels");
     auto *currency = dialog.findChild<QComboBox *>("labelCurrency");
-    auto *minPx = dialog.findChild<QDoubleSpinBox *>("labelMinPx");
-    auto *maxPx = dialog.findChild<QDoubleSpinBox *>("labelMaxPx");
+    auto *minPx = dialog.findChild<QSpinBox *>("textMinPx");
+    auto *maxPx = dialog.findChild<QSpinBox *>("textMaxPx");
     ASSERT_TRUE(show && currency && minPx && maxPx);
     EXPECT_TRUE(show->isChecked());
     EXPECT_EQ(currency->currentData().toString(), "usd");
@@ -2525,20 +2526,31 @@ TEST_F(ChartControls, DialogChartTabRoundTrip) {
     minPx->setValue(16);
     EXPECT_FALSE(model->settings().showLabels);
     EXPECT_EQ(model->settings().labelCurrency, "asset");
-    EXPECT_EQ(model->settings().labelMinPx, 16);
-    EXPECT_EQ(model->settings().labelMaxPx, 20);
-    EXPECT_EQ(t.reload().labelMinPx, 16);
-    ASSERT_TRUE(model->apply({{"showLabels", true}, {"labelMaxPx", 24.0}}).isEmpty());
+    EXPECT_EQ(model->settings().textMinPx, 16);
+    EXPECT_EQ(model->settings().textMaxPx, 20);
+    EXPECT_EQ(t.reload().textMinPx, 16);
+    ASSERT_TRUE(model->apply({{"showLabels", true}, {"textMaxPx", 24}}).isEmpty());
     EXPECT_TRUE(show->isChecked());
     EXPECT_EQ(maxPx->value(), 24);
     // A minimum above the maximum moves the maximum with it (never invalid).
     minPx->setValue(22);
     maxPx->setValue(18);
-    EXPECT_LE(model->settings().labelMinPx, model->settings().labelMaxPx);
+    EXPECT_LE(model->settings().textMinPx, model->settings().textMaxPx);
+    // The padding edits its own key; the three sit in the Advanced group.
+    auto *padPx = dialog.findChild<QSpinBox *>("textPadPx");
+    ASSERT_TRUE(padPx);
+    padPx->setValue(4);
+    EXPECT_EQ(model->settings().textPadPx, 4);
+    auto *advanced = dialog.findChild<QGroupBox *>("textRuleGroup");
+    ASSERT_TRUE(advanced);
+    EXPECT_EQ(advanced->title(), "Advanced");
+    for (QWidget *w : {static_cast<QWidget *>(minPx), static_cast<QWidget *>(maxPx), static_cast<QWidget *>(padPx)})
+        EXPECT_TRUE(advanced->isAncestorOf(w));
     // Reset Chart restores the defaults.
     dialog.findChild<QPushButton *>("resetChart")->click();
-    EXPECT_EQ(model->settings().labelMinPx, 12);
-    EXPECT_EQ(model->settings().labelMaxPx, 15);
+    EXPECT_EQ(model->settings().textMinPx, 13);
+    EXPECT_EQ(model->settings().textMaxPx, 18);
+    EXPECT_EQ(model->settings().textPadPx, 2);
     EXPECT_EQ(model->settings().labelCurrency, "usd");
 }
 
@@ -2546,11 +2558,16 @@ TEST_F(ChartControls, DialogChartTabRoundTrip) {
 TEST_F(ChartControls, LabelSettingsAreValidated) {
     EXPECT_FALSE(model->apply({{"labelCurrency", "eur"}}).isEmpty());
     EXPECT_FALSE(model->apply({{"showLabels", 1}}).isEmpty());
-    ASSERT_TRUE(model->apply({{"labelMinPx", 2.0}, {"labelMaxPx", 99.0}}).isEmpty());
-    EXPECT_EQ(model->settings().labelMinPx, 8);  // clamped
-    EXPECT_EQ(model->settings().labelMaxPx, 32);
-    ASSERT_TRUE(model->apply({{"labelMinPx", 20.0}, {"labelMaxPx", 10.0}}).isEmpty());
-    EXPECT_LE(model->settings().labelMinPx, model->settings().labelMaxPx);
+    // The chart text rule: whole pixels, clamped to its limits, the largest never below the smallest.
+    ASSERT_TRUE(model->apply({{"textMinPx", 2}, {"textMaxPx", 99}, {"textPadPx", -3}}).isEmpty());
+    EXPECT_EQ(model->settings().textMinPx, 10); // clamped
+    EXPECT_EQ(model->settings().textMaxPx, 32);
+    EXPECT_EQ(model->settings().textPadPx, 0);
+    ASSERT_TRUE(model->apply({{"textMinPx", 20}, {"textMaxPx", 14}, {"textPadPx", 30}}).isEmpty());
+    EXPECT_EQ(model->settings().textMinPx, 20);
+    EXPECT_EQ(model->settings().textMaxPx, 20);
+    EXPECT_EQ(model->settings().textPadPx, 8);
+    EXPECT_FALSE(model->apply({{"textMinPx", 13.5}}).isEmpty()) << "whole pixels only";
 }
 
 // ------------------------------------------------------------- GPU chart
@@ -2649,8 +2666,9 @@ TEST_F(ChartLabels, LabelsDrawOnColouredCellsAtTheDrawnTick) {
     EXPECT_EQ(labels->key.tickUnits, 100);
     EXPECT_EQ(labels->key.tfMs, minute);
     const auto &stats = ugr->gpuLabelLayout().stats();
-    EXPECT_GE(stats.sizePx, 12.0);
-    EXPECT_LE(stats.sizePx, 15.0);
+    EXPECT_GE(stats.sizePx, 13.0);
+    EXPECT_LE(stats.sizePx, 18.0);
+    EXPECT_EQ(stats.sizePx, std::floor(stats.sizePx)) << "whole logical pixels";
     // About the visible $1 x 1m cells (10 x 16), all coloured in the fixture's near band.
     EXPECT_GE(stats.labels, 100u);
     EXPECT_LE(stats.labels, 11u * 17u);
@@ -2706,7 +2724,7 @@ TEST_F(ChartLabels, WallBadgesRemainWhenCellLabelsToggle) {
     ugr->layers()->setWallRadarEnabled(true);
     ugr->setLiveBook(book);
     zoomIn();
-    // One $1.00M wall badge (bin 100'005, 10x the near-touch median) in each label state.
+    // One $1M wall badge (bin 100'005, 10x the near-touch median) in each label state.
     QString last; // the newest badge probe line, for a failure message
     const auto badge = [&](bool expectedLabels) {
         return pump(20'000, [&] {
@@ -2716,7 +2734,7 @@ TEST_F(ChartLabels, WallBadgesRemainWhenCellLabelsToggle) {
                 return false;
             }
             for (const auto &line : probes)
-                if (line.contains(QLatin1String(" rows=1 ")) && line.contains(QLatin1String(" pills=0 glyphs=6 ")))
+                if (line.contains(QLatin1String(" rows=1 ")) && line.contains(QLatin1String(" pills=0 glyphs=3 ")))
                     return true;
             probes.clear();
             return false;

@@ -288,6 +288,13 @@ set_tests_properties(HeatmapCellQueryTests PROPERTIES LABELS "render;heatmap")
 add_executable(heatmap_cell_query_bench heatmap_cell_query_bench.cpp)
 target_link_libraries(heatmap_cell_query_bench PRIVATE sentinel_heatmap_gpu)
 
+# Footprint numbers per changed frame (no GPU, not a ctest): footprint_labels_bench.
+add_executable(footprint_labels_bench footprint_labels_bench.cpp)
+set_target_properties(footprint_labels_bench PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(footprint_labels_bench PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_compile_definitions(footprint_labels_bench PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(footprint_labels_bench PRIVATE sentinel_gui_lib)
+
 # compile only CPU sources, link QtCore (no GPU required).
 add_executable(test_heatmap_source_controller
     test_heatmap_source_controller.cpp
@@ -482,6 +489,12 @@ set_target_properties(test_cvd_series PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC
 target_include_directories(test_cvd_series PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_cvd_series PRIVATE GTest::gtest_main)
 add_test(NAME CvdSeriesTests COMMAND test_cvd_series)
+
+add_executable(test_chart_text_rule test_chart_text_rule.cpp)
+set_target_properties(test_chart_text_rule PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_include_directories(test_chart_text_rule PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
+target_link_libraries(test_chart_text_rule PRIVATE GTest::gtest_main)
+add_test(NAME ChartTextRuleTests COMMAND test_chart_text_rule)
 
 add_executable(test_flow_footer_policy test_flow_footer_policy.cpp)
 set_target_properties(test_flow_footer_policy PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)

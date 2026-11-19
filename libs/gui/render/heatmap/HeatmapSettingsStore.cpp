@@ -117,8 +117,10 @@ const std::vector<Def> &defs() {
         flag("showLabels", &S::showLabels, "Show liquidity sizes on heatmap cells where the text fits."),
         choice("labelCurrency", &S::labelCurrency, {"usd", "asset"}, "Liquidity labels as USD notional or base-asset size."),
         flag("labelCurrencySymbol", &S::labelCurrencySymbol, "Prefix USD liquidity labels with '$'."),
-        number("labelMinPx", &S::labelMinPx, 8, 24, "Smallest liquidity label text in pixels; labels that cannot fit are hidden."),
-        number("labelMaxPx", &S::labelMaxPx, 8, 32, "Largest liquidity label text in pixels; never below labelMinPx."),
+        // Chart text rule (chart/core/ChartTextRule.hpp): heatmap labels, footprint numbers, TPO letters.
+        integer("textMinPx", &S::textMinPx, 10, 24, "Smallest chart cell text in logical pixels; a layer whose text does not fit at this size shows none."),
+        integer("textMaxPx", &S::textMaxPx, 10, 32, "Largest chart cell text in logical pixels; text grows with its cell up to this size (never below textMinPx)."),
+        integer("textPadPx", &S::textPadPx, 0, 8, "Space kept free around chart cell text on each side, in logical pixels."),
         color("candleUpColor", &S::candleUpColor, "Colour of candles that close at or above their open."),
         color("candleDownColor", &S::candleDownColor, "Colour of candles that close below their open."),
         color("candleWickColor", &S::candleWickColor, "Wick colour; auto follows each candle's body colour.", {"auto"}),
@@ -225,7 +227,7 @@ void clampSettings(HeatmapChartSettings &s) {
     s.manualTick = presetAtLeast(double(s.manualTick), 1);
     if (s.sensitivityMax <= s.sensitivityMin) s.sensitivityMax = s.sensitivityMin * 2;
     s.uploadBudgetBytes = std::min(s.uploadBudgetBytes, s.gpuCapBytes);
-    s.labelMaxPx = std::max(s.labelMaxPx, s.labelMinPx);
+    s.textMaxPx = std::max(s.textMaxPx, s.textMinPx);
 }
 HeatmapChartSettings chartDefaults(const ClientHeatmapConfig &c) {
     HeatmapChartSettings s;

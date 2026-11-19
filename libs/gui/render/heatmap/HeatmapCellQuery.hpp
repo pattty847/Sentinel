@@ -3,6 +3,7 @@
 #include "heatmap/TimeComposer.hpp"
 #include "heatmap/DrawPieces.hpp"
 #include "HeatmapWalls.hpp"
+#include "chart/core/ChartNumberFormat.hpp"
 #include <QPointer>
 #include <array>
 #include <list>
@@ -28,15 +29,15 @@ struct LabelRequest {
             outputScale.floor == o.outputScale.floor && outputScale.codesPerOctave == o.outputScale.codesPerOctave;
     }
 };
-// Label text: at most three significant digits with k/M/B/T, trailing zeros
-// dropped, "$" for USD; the asset amount is the number only ("$11k", "$1.24M",
-// "$1.2M", "12.5"; owner 2026-10-02). Empty for a value <= 0 or not finite.
-void formatLabelAmount(std::array<char, 48> &out, double value, bool usd);
 struct LabelCell {
     uint32_t word = tiles::cellWord(tiles::kCellNoData);
     double value = 0; // exact dominant-side value of the winning source
-    std::array<char, 48> usd{}, asset{};
+    // Label text per chart::NumberForm (chart::formatChartNumber): the USD notional with
+    // '$' ("$11k", "$1.24M") and the asset amount ("12.5"). Empty for a value <= 0.
+    char usd[chart::kNumberForms][24]{}, asset[chart::kNumberForms][24]{};
 };
+// Fills a valid cell's label text from its value and its row's mid price.
+void formatLabelCell(LabelCell &cell, double midPrice);
 struct LabelCells {
     LabelRequest key;
     tiles::TileGrid grid;

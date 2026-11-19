@@ -175,17 +175,19 @@ struct BadgeRig {
 TEST(LadderBadges, FormatsMoneyInFixedBuffers) {
     char b[chart::kBadgeChars];
     const auto money = [&](double v) { return std::string(b, size_t(chart::formatMoney(v, b))); };
-    EXPECT_EQ(money(0), "$0.00");
-    EXPECT_EQ(money(0.5), "$0.50");
+    // The chart number format with '$' (formatChartNumber), as heatmap labels print USD.
+    EXPECT_EQ(money(0), "$0");
+    EXPECT_EQ(money(0.5), "$0.5");
     EXPECT_EQ(money(61.26), "$61.3");
     EXPECT_EQ(money(999), "$999");
-    EXPECT_EQ(money(999.6), "$1.00k");
+    EXPECT_EQ(money(999.6), "$1k");
     EXPECT_EQ(money(12'345), "$12.3k");
-    EXPECT_EQ(money(999'900), "$1.00M");
+    EXPECT_EQ(money(999'900), "$1M");
     EXPECT_EQ(money(1'070'000), "$1.07M");
-    EXPECT_EQ(money(2.1e9), "$2.10B");
-    EXPECT_EQ(money(5e12), "$999B+");
-    EXPECT_EQ(money(std::nan("")), "$0.00");
+    EXPECT_EQ(money(2.1e9), "$2.1B");
+    EXPECT_EQ(money(5e12), "$5T");
+    EXPECT_EQ(money(5e15), ">$999T");
+    EXPECT_EQ(money(std::nan("")), "$0");
 }
 
 // ------------------------------------------------------------ (16) layout
@@ -685,8 +687,8 @@ TEST(LadderBadges, EdgePillsStackAskNearestTheEdgeAndFollowTheCurrentWindow) {
     EXPECT_DOUBLE_EQ(p[2].rect.top(), 320 - kEdgeInsetPx - kPillH);
     EXPECT_EQ(p[3].colour, BadgePill::Bid);
     EXPECT_DOUBLE_EQ(p[3].rect.top(), 320 - kEdgeInsetPx - 2 * kPillH - kPillGapPx);
-    EXPECT_EQ(text(p[0]), "$6.00k  +$10.0");
-    EXPECT_EQ(text(p[2]), "$2.40k  -$10.0");
+    EXPECT_EQ(text(p[0]), "$6k  +$10");
+    EXPECT_EQ(text(p[2]), "$2.4k  -$10");
     EXPECT_TRUE(p[2].hollow);
     {
         // A scaled display unit (x1K here) shows the distance in it; the notional stays USD.
@@ -697,7 +699,18 @@ TEST(LadderBadges, EdgePillsStackAskNearestTheEdgeAndFollowTheCurrentWindow) {
         scaled.candidate(S::kBid, S::kAbove, 115, 40);
         scaled.post();
         ASSERT_FALSE(scaled.pills().empty());
-        EXPECT_EQ(text(scaled.pills()[0]), "$6.00k  +10.0k x1K");
+        EXPECT_EQ(text(scaled.pills()[0]), "$6k  +10k x1K");
+    }
+    {
+        // A scaled distance below 0.001 keeps its '<' and gains no '$' (no leading '$' dropped).
+        BadgeRig tiny(camera(90, 110));
+        tiny.snapshot();
+        tiny.layer.mailbox().back().priceExponent = 3;
+        tiny.candidate(S::kAsk, S::kAbove, 110.0000001, 50);
+        tiny.candidate(S::kBid, S::kAbove, 115, 40);
+        tiny.post();
+        ASSERT_FALSE(tiny.pills().empty());
+        EXPECT_EQ(text(tiny.pills()[0]), "$5.5k  +<0.001 x1K");
     }
     for (const auto& pill : p) EXPECT_DOUBLE_EQ(pill.rect.right(), 640 - chart::kBadgeInsetPx);
     // Three filled pills (6 + 3) and one capped (6 + 18 outline).
@@ -712,7 +725,7 @@ TEST(LadderBadges, EdgePillsStackAskNearestTheEdgeAndFollowTheCurrentWindow) {
     EXPECT_EQ(rig.pills()[0].arrow, 1);
     EXPECT_EQ(rig.pills()[1].arrow, -1);
     EXPECT_EQ(rig.pills()[2].arrow, -1);
-    EXPECT_EQ(text(rig.pills()[2]).substr(0, 8), "$1.70k  ") << "the bid below (85 x 20), not the on-screen 115";
+    EXPECT_EQ(text(rig.pills()[2]).substr(0, 7), "$1.7k  ") << "the bid below (85 x 20), not the on-screen 115";
 
     // An on-screen candidate with no rival on its side draws no pill at all.
     rig.snapshot();
@@ -732,15 +745,15 @@ TEST(LadderBadges, AnEdgePillDimsItsDistance) {
     rig.wall(100, S::kBid, 10);
     rig.post();
     ASSERT_EQ(rig.pills().size(), 3u);
-    ASSERT_EQ(text(rig.pills()[0]), "$6.00k  +$10.0");
-    ASSERT_EQ(text(rig.pills()[1]), "$1.70k  -$5.00");
+    ASSERT_EQ(text(rig.pills()[0]), "$6k  +$10");
+    ASSERT_EQ(text(rig.pills()[1]), "$1.7k  -$5");
     const auto& glyphs = rig.layer.badges().glyphs();
     std::string colours;
     for (const auto& glyph : glyphs) {
         const QRgb c = glyph.color.rgba();
         colours += c == chart::kDistanceText ? 'd' : c == chart::kAskText ? 'a' : c == chart::kBidText ? 'b' : '?';
     }
-    EXPECT_EQ(colours, "aaaaaadddddd" "bbbbbbdddddd" "bbbbbb") << "row badges are never dimmed";
+    EXPECT_EQ(colours, "aaadddd" "bbbbbddd" "bbbbbb") << "row badges are never dimmed";
     const auto luma = [](QRgb c) { return 0.2126 * qRed(c) + 0.7152 * qGreen(c) + 0.0722 * qBlue(c); };
     EXPECT_LT(luma(chart::kDistanceText), luma(chart::kAskText));
     EXPECT_LT(luma(chart::kDistanceText), luma(chart::kBidText));
@@ -977,7 +990,7 @@ TEST(LadderBadgesGpu, WarmedFramesAllocateNothingThroughEndFrame) {
         return false;
     };
     EXPECT_TRUE(has("$999k") || has("$998k")) << "below a million";
-    EXPECT_TRUE(has("$1.00M"));
+    EXPECT_TRUE(has("$1M"));
     for (const auto& label : seen) {
         if (label.find("  +") == std::string::npos && label.find("  -") == std::string::npos)
             EXPECT_EQ(label.find(' '), std::string::npos);

@@ -1,5 +1,5 @@
 #include "chart/layers/CvdLayer.hpp"
-#include "chart/core/FlowNumberFormat.hpp"
+#include "chart/core/ChartNumberFormat.hpp"
 #include "chart/core/ChartFrame.hpp"
 #include "chart/shell/ChartLookSettings.hpp"
 #include "render/ChartTextRenderer.hpp"

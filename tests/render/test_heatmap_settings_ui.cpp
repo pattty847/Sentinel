@@ -1105,6 +1105,47 @@ TEST(TpoPixelGeometry, MinimumCellIsOneDevicePixelAtFractionalDpr) {
     }
 }
 
+// TPO letters: the renderer decides with chart::tpoLetterFit and sizes with tpoLetterPx (the
+// style's width, floored, capped by the cell's fit, never below the rule's smallest).
+TEST(TpoLetters, LetterDecisionAndSize) {
+    const chart::ChartTextRule rule;
+    const double advance = 0.6;
+    auto fit = chart::tpoLetterFit({}, {16, 20, 1, rule}, advance, true);
+    ASSERT_TRUE(fit.on);
+    EXPECT_EQ(fit.sizePx, 15) << "row 20 - 2 x 2 - 1 spare";
+    EXPECT_EQ(chart::tpoLetterPx(fit, rule, 14.6), 14);
+    EXPECT_EQ(chart::tpoLetterPx(fit, rule, 30), 15);
+    EXPECT_FALSE(chart::tpoLetterFit(fit, {16, 20, 1, rule}, advance, false).on) << "no atlas or letters hidden";
+    EXPECT_FALSE(chart::tpoLetterFit({}, {16, 17.5, 1, rule}, advance, true).on) << "turning on needs 18 px rows";
+    EXPECT_TRUE(chart::tpoLetterFit(fit, {16, 17, 1, rule}, advance, true).on) << "drawn letters stay at 17 px";
+}
+
+// The letter baseline keeps its place in its row: on a device pixel from the snapped row at
+// rest; continuous with the row while the price scale is free (translation and scaling).
+TEST(TpoLetters, BaselineMovesWithItsRow) {
+    const double capMid = -4.3;
+    for (const double dpr : {1.0, 2.0}) {
+        SCOPED_TRACE(dpr);
+        // Free: translation and scaling keep baseline - row centre fixed, no stepping.
+        for (double top = 10; top < 12; top += 0.037)
+            for (const double h : {17.0, 17.3, 18.9, 21.37})
+                ASSERT_NEAR(tpoLetterBaseline(top, h, capMid, false, dpr) - (top + h * 0.5), -capMid, 1e-9) << top << " " << h;
+        // At rest: on a device pixel, at a constant offset from the snapped row top for one height.
+        std::set<long> offsets;
+        for (double top = 10; top < 12; top += 0.037) {
+            const double b = tpoLetterBaseline(top, 18.9, capMid, true, dpr);
+            ASSERT_NEAR(b * dpr, std::round(b * dpr), 1e-9);
+            const double snappedTop = std::round(top * dpr) / dpr;
+            offsets.insert(std::lround((b - snappedTop) * dpr));
+        }
+        EXPECT_LE(offsets.size(), 2u) << "the snapped row's own height step only";
+        // Return to rest: the snapped baseline is within half a device pixel of the free one.
+        for (double top = 10; top < 12; top += 0.037)
+            ASSERT_LE(std::abs(tpoLetterBaseline(top, 18.9, capMid, true, dpr) - tpoLetterBaseline(top, 18.9, capMid, false, dpr)),
+                      1.0 / dpr + 1e-9);
+    }
+}
+
 // Tags follow the newest session that is on screen, at its level prices under
 // the current camera: panning to an older session moves the tags to it, and a
 // price zoom moves them with the prices (no stale line pixels).

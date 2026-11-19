@@ -155,7 +155,7 @@ void ChartTextLayer::submitOverlayLabels(const ChartFrame& frame, LayerNodeConte
         occlusion_[count++] = box;
     }
     heatmap_.submitLabels(frame, context, {occlusion_.data(), count});
-    footprint_.submitLabels(frame, context, inset);
+    footprint_.submitLabels(frame, context, inset, heatmap_.textRule());
     submitEmptyLabels(frame, context);
 }
 

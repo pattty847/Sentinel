@@ -34,13 +34,16 @@ struct HeatmapChartSettings {
     std::string bubblesOverFootprint = "over";
     std::string paperPositionStyle = "tag";
     std::string timeZone = "utc"; // chart time labels: "utc" or "local" (DisplayTime)
-    // Liquidity labels (S7b, owner decision 1/2): on every coloured cell where the
-    // text fits at labelMinPx plus padding, growing to at most labelMaxPx; USD
-    // (price x size) or the asset amount ("usd" or "asset").
+    // Liquidity labels (S7b, owner decision 1/2): on every coloured cell, all or none per
+    // frame by the chart text rule below; USD (price x size) or the asset amount
+    // ("usd" or "asset").
     bool showLabels = true;
     std::string labelCurrency = "usd";
     bool labelCurrencySymbol = false; // USD cell labels omit '$' by default
-    double labelMinPx = 12, labelMaxPx = 15;
+    // The chart text rule (chart::ChartTextRule) for heatmap labels, footprint numbers and
+    // TPO letters: text grows with its cell from textMinPx to textMaxPx (logical px) and
+    // needs textPadPx on each side, or the layer draws none.
+    int textMinPx = 13, textMaxPx = 18, textPadPx = 2;
     std::string candleUpColor = "#2EBD85", candleDownColor = "#F6465D";
     std::string candleWickColor = "auto"; // auto follows each candle's body color
     double candleBodyOpacity = 1;

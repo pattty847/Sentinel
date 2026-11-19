@@ -1,4 +1,5 @@
 #include "chart/layers/TradeLayers.hpp"
+#include "chart/layers/HeatmapLayer.hpp"
 #include "chart/core/ChartFrame.hpp"
 #include "render/CandlePixelGeometry.hpp"
 #include <cmath>
@@ -49,6 +50,7 @@ QString VolumeProfileLayer::emptyStateText(const ChartFrame& frame) const {
 void TpoLayer::updateNodes(const ChartFrame& snapshot, LayerNodeContext& context) {
     const auto& frame = snapshot.context;
     const auto snap = candle_pixels::axisSnap(frame.raster);
+    renderer.setTextRule(text_ ? text_->textRule() : ChartTextRule{});
     renderer.render(context.window, content(snapshot, context), frame.overlays.tpo, context.atlas, context.atlasReady,
                     frame.raster, frame.surfaceDpr, snap.x, snap.y, frame.surfaceBounds);
 }

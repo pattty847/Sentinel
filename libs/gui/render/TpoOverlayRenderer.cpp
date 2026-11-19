@@ -39,12 +39,6 @@ constexpr double kMaxCollapsedCellW = 16.0;
 constexpr double kMinRowPx = 3.0;
 // Collapsed profiles use at most this share of their session's width.
 constexpr double kCollapsedSessionFill = 0.96;
-// Letter font size relative to the cell; the glyph advance must fit the width.
-constexpr double kFontPerCellH = 0.80;
-constexpr double kAdvanceFill = 0.78;  // the glyph advance may use this share of the cell width
-// Letters fade in between these font sizes (px).
-constexpr double kTextHiddenPx = 7.0;
-constexpr double kTextFullPx = 10.0;
 
 const QColor kDarkText(18, 22, 28);
 // Tag chips: horizontal padding and the gap to the plot's right edge (px).
@@ -174,6 +168,7 @@ void TpoOverlayRenderer::clearSessions() {
         dropSessionNodes(session);
     }
     m_sessions.clear();
+    m_textFit = {}; // a new grid (symbol, tick) or session layout decides its letters afresh
 }
 
 void TpoOverlayRenderer::applyUploads(std::vector<PendingUpload>& uploads, int maxSessions) {
@@ -323,6 +318,26 @@ void TpoOverlayRenderer::appendGlyph(std::vector<ChartGlyphInstance>& out,
     out.push_back(instance);
 }
 
+double tpoLetterBaseline(double rowTop, double rowHeight, double capMid, bool snapY, double dpr) {
+    if (!snapY || !(dpr > 0)) return rowTop + rowHeight * 0.5 - capMid;
+    const double top = std::round(rowTop * dpr) / dpr, bottom = std::round((rowTop + rowHeight) * dpr) / dpr;
+    return top + std::round(((bottom - top) * 0.5 - capMid) * dpr) / dpr;
+}
+
+void TpoOverlayRenderer::appendLetter(std::vector<ChartGlyphInstance>& out, const ChartTextAtlas& atlas,
+                                      char letter, double cx, double baseline, double scale, double dpr) const {
+    const auto& glyph = atlas.glyph(QChar(letter));
+    if (glyph.advance <= 0.0f || glyph.uv.isNull()) {
+        return;
+    }
+    const double penX = std::round((cx - glyph.advance * scale * 0.5) * dpr) / dpr;
+    ChartGlyphInstance instance;
+    instance.rect = QRectF(penX + glyph.bounds.left() * scale, baseline + glyph.bounds.top() * scale,
+                           glyph.bounds.width() * scale, glyph.bounds.height() * scale);
+    instance.uv = glyph.uv;
+    out.push_back(instance);
+}
+
 void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, const Style& style,
                                         const ChartTextAtlas& atlas, double basePx, double periodPx,
                                         int64_t topAbs, float textFontPx) {
@@ -357,6 +372,8 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
     int written = 0;
 
     const float fontScale = textFontPx / static_cast<float>(std::max(1, atlas.fontPx()));
+    const auto& capGlyph = atlas.glyph(QChar('A'));
+    const double capMid = (capGlyph.bounds.top() + capGlyph.bounds.bottom()) * 0.5;
     session.lightGlyphs.clear();
     session.darkGlyphs.clear();
 
@@ -373,7 +390,10 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
         const double top = rowTop(row);
         const float y0 = static_cast<float>(edge(top, key.snapY));
         const float y1 = static_cast<float>(edge(top + cellH - gapY, key.snapY));
-        const float cy = static_cast<float>(top + cellH * 0.5);
+        // The cap height centred on the row, measured from the same row geometry as the
+        // cells: at rest (snapY) the snapped edges and a device-pixel offset; while the price
+        // scale is free the continuous edges, so the letter never steps against its row.
+        const double letterBaseline = tpoLetterBaseline(top, cellH, capMid * fontScale, key.snapY, key.dpr);
         const bool inVa = va.contains(row);
         const bool poc = row == va.poc;
         int k = 0;
@@ -388,8 +408,8 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
             }
             if (key.text) {
                 const bool dark = look.cells.visible && tpo::prefersDarkText(color);
-                appendGlyph(dark ? session.darkGlyphs : session.lightGlyphs, atlas, tpo::letterForPeriod(period),
-                            static_cast<float>(left + cellW * 0.5), cy, fontScale);
+                appendLetter(dark ? session.darkGlyphs : session.lightGlyphs, atlas, tpo::letterForPeriod(period),
+                             left + cellW * 0.5, letterBaseline, fontScale, key.dpr);
             }
             ++k;
         });
@@ -406,8 +426,7 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
     session.lightText->updateGeometry(session.lightGlyphs);
     session.darkText->updateGeometry(session.darkGlyphs);
 
-    const double fade = std::clamp((textFontPx - kTextHiddenPx) / (kTextFullPx - kTextHiddenPx), 0.0, 1.0);
-    session.textAlpha = key.text ? static_cast<float>(fade * look.letters.opacity) : 0.0f;
+    session.textAlpha = key.text ? static_cast<float>(look.letters.opacity) : 0.0f;
     session.lightText->setColor(qcolor(look.letters.color, session.textAlpha));
     QColor dark = kDarkText;
     dark.setAlphaF(session.textAlpha);
@@ -611,6 +630,7 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         m_opacity->setOpacity(opacity);  // 0 blocks the whole subtree
     }
     if (!visible) {
+        m_textFit = {};
         return;
     }
 
@@ -678,6 +698,20 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
                                   sessionPx * kCollapsedSessionFill / std::max(1, session.profile.maxCount()));
     }
 
+    // One letter decision per frame for every session: all letters or none
+    // (chart::ChartTextRule): a letter's advance at the rule's size plus its padding must
+    // fit the narrowest cell, the size plus padding the row. The style's letter width caps
+    // the size (chart::tpoLetterPx). Below the smallest cell, cells draw without letters.
+    double letterCellW = std::numeric_limits<double>::infinity();
+    for (const auto& [start, session] : m_sessions) {
+        if (session.periods <= 0) continue;
+        const double periodPx = static_cast<double>(session.periodMs) * pxPerMs;
+        letterCellW = std::min(letterCellW, std::max(style.layout == tpo::Layout::Collapsed ? collapsedCellW : periodPx, 1.0));
+    }
+    const bool lettersWanted = textAvailable && style.look.letters.visible && std::isfinite(letterCellW);
+    m_textFit = chart::tpoLetterFit(m_textFit, {letterCellW, cellH, scale, m_textRule}, advanceRatio, lettersWanted);
+    const double fontPx = chart::tpoLetterPx(m_textFit, m_textRule, style.look.letters.width);
+
     const Session* tagged = nullptr;
     for (auto& [start, session] : m_sessions) {
         ensureSessionNodes(session);
@@ -697,7 +731,6 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
 
         const double periodPx = static_cast<double>(session.periodMs) * pxPerMs;
         const double cellW = std::max(style.layout == tpo::Layout::Collapsed ? collapsedCellW : periodPx, 1.0);
-        const double fontPx = std::min({style.look.letters.width, cellH * kFontPerCellH, cellW * kAdvanceFill / advanceRatio});
         const double sessionPx = static_cast<double>(session.endMs - session.startMs) * pxPerMs;
 
         LayoutKey key;
@@ -713,7 +746,8 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         key.layout = style.layout;
         key.look = style.look;
         key.sessionPx = style.look.reach == tpo::LineReach::Session ? sessionPx : 0.0;
-        key.text = textAvailable && style.look.letters.visible && fontPx >= kTextHiddenPx;
+        key.text = m_textFit.on;
+        key.textPx = fontPx;
         if (onScreen && (!session.hasBuilt || !(key == session.built))) {
             rebuildSession(session, key, style, atlas, basePx, periodPx, topAbs,
                            static_cast<float>(fontPx));

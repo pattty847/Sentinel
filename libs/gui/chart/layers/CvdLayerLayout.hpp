@@ -1,15 +1,17 @@
 #pragma once
 #include "chart/core/CvdSeries.hpp"
-#include "chart/core/FlowNumberFormat.hpp"
+#include "chart/core/ChartNumberFormat.hpp"
+#include "chart/core/ChartTextRule.hpp"
 
 namespace chart {
 struct CvdStripStyle {
     double fillAlpha = 1.0;
     double dividerPx = 1.0;
     double linePx = 1.5;
-    double labelPx = 13.0;
-    double labelRowPx = 17.0;
-    double paddingPx = 2.0;
+    // The chart text rule's defaults: a row holds the smallest size with its padding.
+    double labelPx = ChartTextRule::kDefaultMinPx;
+    double labelRowPx = ChartTextRule::kDefaultMinPx + 2 * ChartTextRule::kDefaultPadPx;
+    double paddingPx = ChartTextRule::kDefaultPadPx;
     bool operator==(const CvdStripStyle&) const = default;
 };
 // Local strip coordinates shared by curve geometry and gutter label placement.
@@ -54,8 +56,6 @@ struct CvdGutterValues {
         }
         return out;
     }
-    static void format(double value, char (&out)[24]) {
-        flowNumber(value, out, value == 0 ? FlowNumberContext::SignedLabel : FlowNumberContext::Footprint);
-    }
+    static void format(double value, char (&out)[24]) { formatChartNumber(value, out); }
 };
 } // namespace chart

@@ -125,8 +125,9 @@ private:
     QCheckBox *m_tradesAboveCandles = nullptr;
     QComboBox *m_labelCurrency = nullptr;
     QCheckBox *m_labelCurrencySymbol = nullptr;
-    QDoubleSpinBox *m_labelMinPx = nullptr;
-    QDoubleSpinBox *m_labelMaxPx = nullptr;
+    // Advanced: the chart text rule.
+    void addTextRuleControls(QFormLayout *, QWidget *);
+    QSpinBox *m_textMinPx = nullptr, *m_textMaxPx = nullptr, *m_textPadPx = nullptr;
     QComboBox *m_candleStyle = nullptr;
     QPushButton *m_candleUpColor = nullptr;
     QPushButton *m_candleDownColor = nullptr;

@@ -9,7 +9,10 @@ TEST(FootprintLod, ThresholdDerivedFromThirteenPixelMagnitudeWidth) {
     const auto width = chart::kFootprintNumbersColumn;
     const auto height = chart::kFootprintNumbersRow;
     EXPECT_EQ(chart::kFootprintTextPx, 13);
-    EXPECT_EQ(width, 2 * 5 * (1229.0 / 2048) * 13 + 18);
+    // Two five-glyph labels with the chart text rule's 2 px on each side, the 10 px candle pill,
+    // and the 2 px stage hysteresis.
+    EXPECT_EQ(width, 2 * (5 * (1229.0 / 2048) * 13 + 4) + 12);
+    EXPECT_EQ(height, 17) << "13 px with 2 px above and below";
     EXPECT_EQ(footprintLod(23, 6), FootprintStage::Strip);
     EXPECT_EQ(footprintLod(24, 6), FootprintStage::Cells);
     EXPECT_EQ(footprintLod(width - .1, height), FootprintStage::Cells);
@@ -142,21 +145,23 @@ TEST(FootprintLod, BandsAnchorToTheAbsoluteRowGrid) {
             EXPECT_EQ(footprintBandStart(start + k - 1, k), start);
         }
 }
+// Footprint numbers use the one chart number format (formatChartNumber); the full table
+// is in test_chart_text_rule.cpp.
 TEST(FootprintLod, FormatsBaseUnitsWithoutZerosOrScientificNotation) {
     struct Case { double value; const char* text; };
-    for (const auto& c : {Case{0,""}, {1e-8,"<.01"}, {.004,"<.01"}, {.42,".42"}, {2.454,"2.45"},
-                         {18.44,"18.4"}, {184.4,"184"}, {1234,"1.23k"}, {34567,"34.6k"}, {3.4e6,"3.4M"},
-                         {1200,"1.2k"}, {9.999,"10.0"}, {999999,"1M"}, {1e300,">999B"}, {-2.454,"-2.45"}}) {
-        char out[24]; const int length = chart::flowNumber(c.value, out);
+    for (const auto& c : {Case{.42,"0.42"}, {2.454,"2.45"}, {18.44,"18.4"}, {184.4,"184"}, {1234,"1.23k"},
+                         {34567,"34.6k"}, {3.4e6,"3.4M"}, {1200,"1.2k"}, {9.999,"10"}, {999999,"1M"},
+                         {1e300,">999T"}, {-2.454,"-2.45"}}) {
+        char out[24]; const int length = chart::formatChartNumber(c.value, out);
         EXPECT_STREQ(out, c.text); EXPECT_EQ(length, std::strlen(out));
         EXPECT_EQ(std::strchr(out, 'e'), nullptr);
         EXPECT_LE(length, chart::kFlowMagnitudeGlyphs + (c.value < 0));
     }
-    for (double value = 1e-12; value < 1e20; value *= 1.03) {
-        char out[24]; EXPECT_LE(chart::flowNumber(value, out), chart::kFlowMagnitudeGlyphs);
+    for (double value = .01; value < 1e20; value *= 1.03) {
+        char out[24]; EXPECT_LE(chart::formatChartNumber(value, out), chart::kFlowMagnitudeGlyphs);
         EXPECT_EQ(std::strchr(out, 'e'), nullptr);
     }
-    char out[24]; EXPECT_EQ(chart::flowNumber(std::numeric_limits<double>::quiet_NaN(), out), 0);
+    char out[24]; EXPECT_EQ(chart::formatChartNumber(std::numeric_limits<double>::quiet_NaN(), out), 0);
 }
 TEST(FootprintLod, NotionalAndStrictSingleSideHeavyTiers) {
     using chart::FlowTier; using chart::flowTier;
@@ -210,8 +215,9 @@ TEST(FootprintLod, SpineOnlyForCoveredBarAndMatchingFrame) {
 }
 
 namespace {
-// Independent decimal oracle: round a string by carrying through its digits,
-// then place the decimal point and suffix. No floating arithmetic or production helpers.
+// Independent decimal oracle for values of at least 1: round a string to three significant
+// digits by carrying through its digits, place the decimal point and suffix, drop trailing
+// zeros. No floating arithmetic or production helpers.
 std::string referenceFlow(std::string input) {
     const auto point = input.find('.');
     int whole = point == std::string::npos ? int(input.size()) : int(point);
@@ -227,39 +233,31 @@ std::string referenceFlow(std::string input) {
     const int unit = (whole - 1) / 3;
     int decimal = whole - unit * 3;
     if (decimal < 3) input.insert(size_t(decimal), ".");
-    if (input[0] == '0') input.erase(0, 1);
-    if (unit) {
-        while (input.back() == '0' && input.find('.') != std::string::npos) input.pop_back();
-        if (input.back() == '.') input.pop_back();
-        input += "kMB"[unit - 1];
-    }
+    while (input.back() == '0' && input.find('.') != std::string::npos) input.pop_back();
+    if (input.back() == '.') input.pop_back();
+    if (unit) input += "kMB"[unit - 1];
     return input;
 }
 }
-TEST(FlowNumberFormat, EveryIntegerThrough999999MatchesIndependentDecimalOracle) {
+TEST(ChartNumberFormat, EveryIntegerThrough999999MatchesIndependentDecimalOracle) {
     char out[24];
     for (int value = 1; value <= 999999; ++value) {
         const auto expected = referenceFlow(std::to_string(value));
-        chart::flowNumber(value, out);
+        chart::formatChartNumber(value, out);
         ASSERT_EQ(out, expected) << value;
-        chart::flowNumber(-value, out);
+        chart::formatChartNumber(-value, out);
         ASSERT_EQ(out, "-" + expected) << -value;
     }
     for (const auto* decimal : {"2300000", "4100000000"}) {
-        chart::flowNumber(std::stod(decimal), out);
+        chart::formatChartNumber(std::stod(decimal), out);
         EXPECT_EQ(out, referenceFlow(decimal));
     }
 }
-TEST(FlowNumberFormat, DecimalHalfUpCarriesAndSignedLabelZero) {
-    for (const auto* decimal : {"0.995", "1.005", "9.996", "99.96", "999.6", "999950",
+TEST(ChartNumberFormat, DecimalHalfUpCarries) {
+    for (const auto* decimal : {"1.005", "9.996", "99.96", "999.6", "999950",
                               "34567", "2300", "2010", "1150", "4100", "2300000", "4100000000"}) {
         char out[24]; const double value = std::stod(decimal);
-        chart::flowNumber(value, out); EXPECT_EQ(out, referenceFlow(decimal)) << decimal;
-        chart::flowNumber(-value, out); EXPECT_EQ(out, "-" + referenceFlow(decimal)) << decimal;
-    }
-    for (double value : {0., -0., .004, -.004, 1e-8, -1e-8}) {
-        char out[24];
-        EXPECT_EQ(chart::flowNumber(value, out, chart::FlowNumberContext::SignedLabel), 1);
-        EXPECT_STREQ(out, "0");
+        chart::formatChartNumber(value, out); EXPECT_EQ(out, referenceFlow(decimal)) << decimal;
+        chart::formatChartNumber(-value, out); EXPECT_EQ(out, "-" + referenceFlow(decimal)) << decimal;
     }
 }

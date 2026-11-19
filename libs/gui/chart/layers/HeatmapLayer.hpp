@@ -1,6 +1,7 @@
 #pragma once
 #include "chart/layers/IChartLayer.hpp"
 #include "render/heatmap/HeatmapLabelLayout.hpp"
+#include "chart/core/ChartTextRule.hpp"
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -25,6 +26,8 @@ public:
     const auto& labelLayout() const { return m_gpuLabels; }
     const auto& labelGlyphs() const { return m_heatmapLabelGlyphs; }
     uint64_t labelSerial() const { return m_gpuLabelSerial; }
+    // The chart text rule of this chart's settings (render thread, GUI blocked).
+    ChartTextRule textRule() const;
 private:
     std::shared_ptr<heatmap::gpu::HeatmapTileStats> tileStats_;
     QSGOpacityNode* gate_ = nullptr;

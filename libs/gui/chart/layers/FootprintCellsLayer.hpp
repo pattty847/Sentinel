@@ -2,6 +2,7 @@
 #include "chart/layers/IChartLayer.hpp"
 #include "chart/feeds/FlowFeed.hpp"
 #include "chart/core/FootprintLod.hpp"
+#include "chart/core/ChartTextRule.hpp"
 #include "render/ChartTextPrimitives.hpp"
 #include <span>
 #include <QSGGeometry>
@@ -18,7 +19,9 @@ public:
     QSGNode* createContainer() override;
     void sync(const ChartFrame&) override;
     void updateNodes(const ChartFrame&, LayerNodeContext&) override;
-    void submitLabels(const ChartFrame&, LayerNodeContext&, double bottomInset = 0);
+    // Numbers follow the chart text rule: all of this frame's numbers or none.
+    void submitLabels(const ChartFrame&, LayerNodeContext&, double bottomInset = 0, const ChartTextRule& rule = {});
+    const ChartTextFit& textFit() const { return fit_; }
     FlowMailbox& mailbox() { return mailbox_; }
     FootprintPresentation& presentation() { return presentation_; }
     FootprintStage stage() const { return stage_; }
@@ -40,12 +43,20 @@ private:
         bool operator==(const Key&) const = default;
     };
     static constexpr int kMaxGlyphs = 32000;
+    // More wanted numbers than this draw none (all or none): no screen fits this many readable numbers.
+    static constexpr int kMaxNumbers = kMaxGlyphs / 3;
     void cells(const ChartFrame&);
     double windowMaximum(const ChartFrame&) const;
-    void labels(const ChartFrame&, const ChartTextAtlas&, double bottomInset);
-    struct Number { double volume, price, maximum, fillAlpha; QRectF box; bool bid; };
+    struct Number {
+        double volume, fillAlpha; QRectF box; FlowTier tier; bool bid;
+        std::array<std::array<char, 16>, kNumberForms> text; // this frame's text per form
+        std::array<uint8_t, kNumberForms> length;
+    };
+    bool collectNumbers(const ChartFrame&, double bottomInset);
+    bool measureNumbers(ChartTextDemand&, double& cellW, double& cellH);
+    void labels(const ChartFrame&, const ChartTextAtlas&, double bottomInset, const ChartTextRule&);
     double normaliser(const FlowColumn&) const;
-    void number(const Number&, const ChartTextAtlas&);
+    void number(const Number&, const ChartTextAtlas&, double dpr);
     QRectF cardRect(const ChartFrame&, const FlowColumn&) const;
     void rowGeometry(QSGGeometry::ColoredPoint2D*, int&, const ChartFrame&, const FlowColumn&, const FlowCell&);
     void stripGeometry(QSGGeometry::ColoredPoint2D*, int&, const ChartFrame&, const FlowColumn&, const FlowCell&);
@@ -62,6 +73,12 @@ private:
     qint64 atlasKey_ = 0;
     double labelBottomInset_ = 0;
     std::vector<ChartGlyphInstance> glyphs_;
+    std::vector<Number> numbers_;
+    ChartTextRule labelRule_;
+    ChartTextFit fit_;
+    int64_t fitTimeframeMs_ = 0;                   // the decision belongs to this timeframe, tick
+    double fitTick_ = 0;                           // and scope generation (symbol)
+    uint64_t fitGeneration_ = 0;
     std::array<QRectF, FlowSnapshot::kMaxBars> cards_{};
     size_t cardCount_ = 0;
 };

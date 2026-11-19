@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
                 size_t valid = 0, labelled = 0;
                 for (const auto& c : result->cells) {
                     valid += tiles::cellState(c.word) == tiles::kCellValid;
-                    labelled += c.usd[0] != 0;
+                    labelled += c.usd[0][0] != 0;
                 }
                 if (!labelled) throw std::runtime_error("benchmark window has no nonzero labels");
                 std::cout << "tf_ms=" << tf << " tick=" << units / 100.0 << " cold_ms=" << cold

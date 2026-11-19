@@ -42,6 +42,7 @@ void HeatmapLayer::afterRendering() {
         [this] { if (queueUpdate) queueUpdate(); },
         [this] { if (queueLabelCheck) queueLabelCheck(); });
 }
+ChartTextRule HeatmapLayer::textRule() const { return gpu ? chart::textRule(gpu->settings()) : ChartTextRule{}; }
 bool HeatmapLayer::labelsChangedSinceDraw() const {
     return gpu && gpu->labelSignature() != m_gpuLabelSignature.load();
 }
@@ -70,8 +71,7 @@ void HeatmapLayer::submitLabels(const ChartFrame& snapshot, LayerNodeContext& co
     style.occlusion = cards;
     style.usd = settings.labelCurrency != "asset";
     style.currencySymbol = settings.labelCurrencySymbol;
-    style.minPx = settings.labelMinPx;
-    style.maxPx = settings.labelMaxPx;
+    style.rule = chart::textRule(settings);
     style.window = {gpu->drawStyle().codeFloor, gpu->drawStyle().codeRange};
     style.palette = gpu->palette();
     m_gpuLabels.layout(labels, context.atlas, frame.mapping, frame.surfaceDpr, style,
@@ -80,7 +80,7 @@ void HeatmapLayer::submitLabels(const ChartFrame& snapshot, LayerNodeContext& co
     m_gpuLabelSignature.store(heatmap::gpu::HeatmapGpuLayer::labelSignature(labels.get(), m_gpuLabelColumns, matched));
     m_gpuLabelsIncomplete.store(st.unmatched > 0);
     sLog_Probe("heatmap.labels.layout", "serial=" << labels->key.serial << " labels=" << st.labels
-               << " glyphs=" << st.glyphs << " sizePx=" << st.sizePx << " narrow=" << st.tooNarrow
+               << " glyphs=" << st.glyphs << " sizePx=" << st.sizePx << " form=" << st.form << " wanted=" << st.wanted << " hidden=" << st.hidden
                << " dropped=" << st.droppedBudget << " unmatched=" << st.unmatched << " matchedColumns=" << matched);
     context.text.submitGlyphs(m_heatmapLabelGlyphs, ChartTextRenderer::Priority::Low);
 }

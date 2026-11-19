@@ -110,8 +110,8 @@ TEST(CvdGutter, VisibleExtremaAndLastExcludeOffscreenHistoryAndIncludePartialBar
     EXPECT_EQ(values.max, 1200); EXPECT_EQ(values.min, -5); EXPECT_EQ(values.last, 7.5);
     char text[24];
     CvdGutterValues::format(values.max, text); EXPECT_STREQ(text, "1.2k");
-    CvdGutterValues::format(values.min, text); EXPECT_STREQ(text, "-5.00");
-    CvdGutterValues::format(values.last, text); EXPECT_STREQ(text, "7.50");
+    CvdGutterValues::format(values.min, text); EXPECT_STREQ(text, "-5");
+    CvdGutterValues::format(values.last, text); EXPECT_STREQ(text, "7.5");
     EXPECT_FALSE(CvdGutterValues::visible(series, 5000, 6000, 1000).valid);
 }
 TEST(CvdGutter, FlatPositiveNegativeAndZeroSamplesAreNotPaddedScaleEndpoints) {
@@ -123,7 +123,8 @@ TEST(CvdGutter, FlatPositiveNegativeAndZeroSamplesAreNotPaddedScaleEndpoints) {
     }
     char text[24];
     CvdGutterValues::format(0, text); EXPECT_STREQ(text, "0");
-    CvdGutterValues::format(-.001, text); EXPECT_STREQ(text, "-<.01");
+    CvdGutterValues::format(-.001, text); EXPECT_STREQ(text, "-0.001");
+    CvdGutterValues::format(-.0001, text); EXPECT_STREQ(text, "-<0.001");
 }
 
 TEST(CvdStripLayout, ValuesTakePriorityAtEveryRowThreshold) {
