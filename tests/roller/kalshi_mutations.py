@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Run through the build queue. Each isolated regression must fail its test;
-restore, rebuild and pass the same test before proceeding. No network or data.
+"""Run the WHOLE script inside one build-queue invocation (never queue nested builds):
+_private/tools/agent/build-queue.sh --label lt-astra/kalshi-journal-decoder -- python3 tests/roller/kalshi_mutations.py
+
+The tree must be clean. Each isolated regression must fail its test; restore,
+rebuild and pass the same test before proceeding. No network or production data.
 """
 import os
 from pathlib import Path
@@ -12,7 +15,7 @@ DECODER = "libs/core/roller/KalshiDecoder.cpp"
 FEED = "libs/core/roller/JournalFeed.cpp"
 READER = "libs/core/roller/JournalReader.cpp"
 REAL = "KalshiFeed.RealCaptureEveryBookSequenceStepAndTrade"
-BAD = "KalshiFeed.MalformedAndUnanchoredFramesInvalidateWithoutPartialCallbacks"
+BAD = "KalshiFeed.MalformedBookFramesInvalidateWithoutPartialCallbacks"
 STATE = "KalshiFeed.StateRoundTripAtEveryCaptureBoundaryPreservesCallbacks"
 CASES = [
     ("K0 reader refusal (a-f,h)", READER,
@@ -34,8 +37,44 @@ CASES = [
      'return 0;\n    int64_t n = 0;', BAD),
     ("accept out-of-range price (d)", DECODER,
      'if (p > 10000) throw', 'if (false && p > 10000) throw', BAD),
-    ("allow delta without snapshot (d)", DECODER,
-     'if (!valid_) throw', 'if (false && !valid_) throw', BAD),
+    ("invalidate every waiting delta (1)", DECODER,
+     'if (type == "orderbook_delta" && !valid_) return {};',
+     'if (type == "orderbook_delta" && !valid_) throw std::runtime_error("delta before snapshot");',
+     "KalshiFeed.WaitingForSnapshotIgnoresDeltasWithoutRepeatedInvalidation"),
+    ("drop selected snapshot on unannounced sid (2)", DECODER,
+     'if (ours && type == "orderbook_snapshot") {', 'if (false && ours && type == "orderbook_snapshot") {',
+     "KalshiFeed.UnannouncedSidSnapshotsAdoptAndDeltasInvalidateOnce"),
+    ("silently ignore selected delta on wrong sid (2)", DECODER,
+     'if (ours && valid_) throw', 'if (false && ours && valid_) throw',
+     "KalshiFeed.UnannouncedSidSnapshotsAdoptAndDeltasInvalidateOnce"),
+    ("malformed trade invalidates book (3)", FEED,
+     'if (!tradeFrame) invalid(local, e.what());', 'invalid(local, e.what());',
+     "KalshiFeed.TradeSideAlternativesAndMalformedFields"),
+    ("remove legacy trade side fallback (3)", DECODER,
+     'if (!buy) read("taker_side", "yes", "no");', 'if (false && !buy) read("taker_side", "yes", "no");',
+     "KalshiFeed.LegacyTradeSideIsUsedOnlyWithoutModernFields"),
+    ("reject authoritative snapshot sequence discontinuity (4)", DECODER,
+     'sequence_ = integer(frame.at("seq"));', 'if (sid_ == sid) advance(frame); sequence_ = integer(frame.at("seq"));',
+     "KalshiFeed.SelectedSnapshotsReanchorSequenceAndRecoverRetiredSubscriptions"),
+    ("lose typed header venue (5)", READER,
+     'venueFromHeader(f.header), f.header.value("instrument", json())',
+     'Venue::Coinbase, f.header.value("instrument", json())',
+     "KalshiFeed.ReaderPreservesOpaqueMetadataAndExposesTypedHeaderIdentity"),
+    ("lose header instrument (5)", READER,
+     'venueFromHeader(f.header), f.header.value("instrument", json())',
+     'venueFromHeader(f.header), json()',
+     "KalshiFeed.ReaderPreservesOpaqueMetadataAndExposesTypedHeaderIdentity"),
+    ("rewrite opaque product metadata (5)", READER,
+     'out = {std::move(record), std::move(pos), f.header.at("product_metadata"),',
+     'out = {std::move(record), std::move(pos), json::object(),',
+     "KalshiFeed.ReaderPreservesOpaqueMetadataAndExposesTypedHeaderIdentity"),
+    ("allow Kalshi trade-only history (6)", "libs/core/trading/MarketEventSource.cpp",
+     'if (sentinel::venueFromHeader(files[i].header) == sentinel::Venue::Kalshi)',
+     'if (false && sentinel::venueFromHeader(files[i].header) == sentinel::Venue::Kalshi)',
+     "BacktestCore.KalshiJournalTradeHistoryRefusesInsteadOfReturningEmpty"),
+    ("mix venues across state import (8)", FEED,
+     'if (venue != venue_) {', 'if (false && venue != venue_) {',
+     "KalshiFeed.VenueChangesInvalidateIncludingAfterStateImport"),
     ("floating-point complement (e)", DECODER,
      'units(bid ? p : 10000 - p, 10000)',
      '(bid ? units(p, 10000) : 1.0 - units(p, 10000))',
@@ -60,17 +99,22 @@ def run(command):
                           text=True, timeout=600)
 
 
-def build():
-    result = run(["cmake", "--build", "--preset", "mac-clang", "-j", "6", "--target",
-                  "test_kalshi_feed", "test_coinbase_feed_state"])
+def executable(test):
+    if test.startswith("BacktestCore."):
+        return "trading", "test_backtest_core"
+    return "roller", "test_coinbase_feed_state" if test.startswith("Coinbase") else "test_kalshi_feed"
+
+
+def build(test):
+    result = run(["cmake", "--build", "--preset", "mac-clang", "-j", "6", "--target", executable(test)[1]])
     if result.returncode:
         print(result.stdout, flush=True)
         raise RuntimeError("mutation build failed")
 
 
 def check(test, should_pass):
-    exe = "test_coinbase_feed_state" if test.startswith("Coinbase") else "test_kalshi_feed"
-    result = run([str(BUILD / "tests/roller" / exe), "--gtest_filter=" + test])
+    directory, exe = executable(test)
+    result = run([str(BUILD / "tests" / directory / exe), "--gtest_filter=" + test])
     # An assertion failure proves the regression; a crash/timeout is not a kill.
     passed = result.returncode == 0
     if passed != should_pass or (not should_pass and "[  FAILED  ]" not in result.stdout):
@@ -82,6 +126,9 @@ def check(test, should_pass):
 
 
 def main():
+    status = run(["git", "status", "--porcelain", "--untracked-files=normal"])
+    if status.returncode or status.stdout.strip():
+        raise RuntimeError("mutation runner requires a clean tree; commit or remove changes first")
     os.environ["CCACHE_DIR"] = str(BUILD / ".ccache")
     for name, path, before, after, test in CASES:
         file = ROOT / path
@@ -91,11 +138,11 @@ def main():
         print("MUTATION " + name, flush=True)
         try:
             file.write_text(original.replace(before, after))
-            build()
+            build(test)
             check(test, False)
         finally:
             file.write_text(original)
-            build()
+            build(test)
         check(test, True)
         print("KILLED + RESTORED PASS " + name, flush=True)
     print(f"kalshi mutations: {len(CASES)}/{len(CASES)} killed; restored checks passed", flush=True)
