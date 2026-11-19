@@ -24,11 +24,11 @@ json metadata(const std::string& product) {
         {"instrument", {{"price_min", "0.0000"}, {"price_max", "1.0000"}, {"size_increment", "0.01"},
             {"price_ranges", json::array({{{"start", "0.0000"}, {"end", "1.0000"}, {"step", "0.0001"}}})}}}};
 }
-std::vector<JournalRecord> journal(const json& frames, const std::string& product = A) {
+std::vector<JournalRecord> journal(const json& frames, const std::string& product = A, json header = nullptr) {
     QTemporaryDir temp;
     if (!temp.isValid()) throw std::runtime_error("test temporary directory");
     capture::WriterConfig cfg; cfg.root = temp.path(); cfg.symbol = product; cfg.fsyncBlocks = 0;
-    capture::Writer writer(cfg, metadata(product));
+    capture::Writer writer(cfg, header.is_null() ? metadata(product) : header);
     size_t index = 0;
     for (const auto& frame : frames) {
         writer.append({capture::Kind::Frame, {(Epoch + int64_t(index)) * 1'000'000, int64_t(index)},
@@ -167,7 +167,7 @@ TEST(KalshiFeed, DroppedOkDeltaDuplicateAndReorderInvalidateUntilSnapshot) {
         EXPECT_EQ(seen.book.bids.at(0.56), 11.5);
     }
 }
-TEST(KalshiFeed, MalformedAndUnanchoredFramesInvalidateWithoutPartialCallbacks) {
+TEST(KalshiFeed, MalformedBookFramesInvalidateWithoutPartialCallbacks) {
     std::vector<json> bad;
     bad.push_back(delta(2, "-10.26"));
     for (const auto* p : {"0.56001", "1.0001", "-0.01", "abc", "0.56", "+0.5600", " 0.5600"}) {
@@ -195,7 +195,7 @@ TEST(KalshiFeed, MalformedAndUnanchoredFramesInvalidateWithoutPartialCallbacks) 
     }
     JournalFeed feed(A); Observer seen; seen.attach(feed);
     for (const auto& r : journal(json::array({delta(1)}))) EXPECT_NO_THROW(feed.apply(r));
-    EXPECT_EQ(seen.invalid.size(), 1u); EXPECT_EQ(seen.updates, 0u);
+    EXPECT_TRUE(seen.invalid.empty()); EXPECT_EQ(seen.updates, 0u);
 }
 TEST(KalshiFeed, EveryYesAndComplementPriceHasIdenticalBits) {
     auto snap = snapshot(); snap["msg"].erase("yes_dollars_fp"); snap["msg"].erase("no_dollars_fp");
@@ -274,8 +274,8 @@ TEST(KalshiFeed, LifecycleAndSubscriptionChangesRequireSnapshots) {
                                         snapshot(2, A, 2), delta(3, "1.00", A, 2), snapshot(99)}));
     JournalFeed feed(A); Observer seen; seen.attach(feed);
     for (const auto& r : changed) feed.apply(r);
-    EXPECT_EQ(seen.snapshots, 2u); EXPECT_EQ(seen.updates, 1u); EXPECT_EQ(seen.invalid.size(), 2u);
-    EXPECT_EQ(seen.book.bids.at(.56), 11.25);
+    EXPECT_EQ(seen.snapshots, 3u); EXPECT_EQ(seen.updates, 1u); EXPECT_EQ(seen.invalid.size(), 1u);
+    EXPECT_EQ(seen.book.bids.at(.56), 10.25);
 }
 TEST(KalshiFeed, StateRejectsMalformedCandidatesAtomicallyAndRestoresInvalidState) {
     auto records = journal(json::array({snapshot(), delta(3), delta(4), snapshot(5), delta(6)}));
@@ -309,21 +309,27 @@ TEST(KalshiFeed, OverflowAndConsumerExceptionsAreNotSilentlyRepaired) {
     throwing.onSnapshot = [](auto, auto, auto) { throw std::runtime_error("consumer failed"); };
     EXPECT_THROW(throwing.apply(records[0]), std::logic_error);
 }
-TEST(KalshiFeed, SequencedSnapshotCannotRepairItsOwnGapAndRetiredSidStaysRetired) {
-    const json retired = {{"type", "unsubscribed"}, {"sid", 1}, {"seq", 6}};
-    auto records = journal(json::array({snapshot(), snapshot(3), delta(4), snapshot(5),
-                                       retired, snapshot(7), delta(8)}));
+TEST(KalshiFeed, SelectedSnapshotsReanchorSequenceAndRecoverRetiredSubscriptions) {
+    for (const int seq : {1, 2, 5}) {
+        SCOPED_TRACE(seq);
+        auto records = journal(json::array({snapshot(), delta(2), snapshot(seq), delta(seq + 1)}));
+        JournalFeed feed(A); Observer seen; seen.attach(feed);
+        for (const auto& r : records) feed.apply(r);
+        EXPECT_TRUE(seen.invalid.empty()); EXPECT_TRUE(seen.book.valid);
+        EXPECT_EQ(seen.snapshots, 2u); EXPECT_EQ(seen.updates, 2u);
+        EXPECT_EQ(seen.book.bids.at(.56), 11.5);
+        EXPECT_EQ(feed.exportState()["kalshi"]["sequence"], seq + 1);
+    }
+    const json retired = {{"type", "unsubscribed"}, {"sid", 1}, {"seq", 2}};
+    auto records = journal(json::array({snapshot(), retired, delta(3), snapshot(8), delta(9)}));
     JournalFeed feed(A); Observer seen; seen.attach(feed);
-    feed.apply(records[0]); feed.apply(records[1]);
-    EXPECT_EQ(seen.snapshots, 1u); EXPECT_FALSE(seen.book.valid);
-    feed.apply(records[2]); EXPECT_EQ(seen.updates, 0u);
-    feed.apply(records[3]); EXPECT_TRUE(seen.book.valid); EXPECT_EQ(seen.snapshots, 2u);
-    feed.apply(records[4]); EXPECT_FALSE(seen.book.valid);
-    const auto state = feed.exportState();
-    JournalFeed restored(A); Observer resumed; resumed.attach(restored); restored.importState(state);
-    feed.apply(records[5]); feed.apply(records[6]); restored.apply(records[5]); restored.apply(records[6]);
-    EXPECT_EQ(seen.snapshots, 2u); EXPECT_EQ(resumed.snapshots, 0u); EXPECT_EQ(resumed.updates, 0u);
-    EXPECT_EQ(feed.exportState(), restored.exportState());
+    feed.apply(records[0]); feed.apply(records[1]); feed.apply(records[2]);
+    EXPECT_FALSE(seen.book.valid); EXPECT_EQ(seen.invalid.size(), 1u); EXPECT_EQ(seen.updates, 0u);
+    JournalFeed restored(A); Observer resumed; resumed.attach(restored); restored.importState(feed.exportState());
+    seen.events.clear();
+    for (size_t i = 3; i < records.size(); ++i) { feed.apply(records[i]); restored.apply(records[i]); }
+    EXPECT_EQ(seen.events, resumed.events); EXPECT_EQ(feed.exportState(), restored.exportState());
+    EXPECT_EQ(resumed.snapshots, 1u); EXPECT_EQ(resumed.updates, 1u); EXPECT_TRUE(resumed.book.valid);
 }
 TEST(KalshiFeed, TradeSideAlternativesAndMalformedFields) {
     auto source = fixture("ws_capture_sample.json");
@@ -336,15 +342,140 @@ TEST(KalshiFeed, TradeSideAlternativesAndMalformedFields) {
         ASSERT_EQ(seen.trades.size(), 1u); EXPECT_EQ(seen.trades[0].side, AggressorSide::Sell);
         EXPECT_TRUE(seen.invalid.empty()); EXPECT_EQ(seen.updates, 1u);
     }
-    for (int mode = 0; mode < 5; ++mode) {
+    for (int mode = 0; mode < 10; ++mode) {
+        SCOPED_TRACE(mode);
         auto trade = *it;
         if (mode == 0) trade["msg"]["taker_book_side"] = "bid";
         if (mode == 1) trade["msg"]["count_fp"] = "-1.00";
         if (mode == 2) trade["msg"]["yes_price_dollars"] = "0.93001";
         if (mode == 3) trade["msg"]["ts_ms"] = 9223372036854775807LL;
         if (mode == 4) trade["msg"]["trade_id"] = nullptr;
+        if (mode == 5 || mode == 9) {
+            trade["msg"].erase("taker_outcome_side"); trade["msg"].erase("taker_book_side");
+            trade["msg"].erase("taker_side");
+            if (mode == 9) trade["msg"]["taker_side"] = "bad";
+        }
+        if (mode == 6) trade["msg"]["ts_ms"] = "bad";
+        if (mode == 7) trade["msg"]["count_fp"] = "1.001";
+        if (mode == 8) trade.erase("msg");
         JournalFeed feed(A); Observer seen; seen.attach(feed);
         for (const auto& r : journal(json::array({snapshot(), trade, delta(2)}))) EXPECT_NO_THROW(feed.apply(r));
-        EXPECT_FALSE(seen.invalid.empty()); EXPECT_TRUE(seen.trades.empty()); EXPECT_EQ(seen.updates, 0u);
+        EXPECT_TRUE(seen.invalid.empty()); EXPECT_TRUE(seen.trades.empty()); EXPECT_EQ(seen.updates, 1u);
+        EXPECT_TRUE(seen.book.valid); EXPECT_EQ(seen.book.bids.at(.56), 11.5);
+    }
+}
+
+TEST(KalshiFeed, WaitingForSnapshotIgnoresDeltasWithoutRepeatedInvalidation) {
+    json frames = json::array({snapshot(), delta(2), delta(4)});
+    for (int seq = 5; seq < 1005; ++seq) frames.push_back(delta(seq));
+    frames.push_back(snapshot(2000)); frames.push_back(delta(2001));
+    auto records = journal(frames);
+    JournalFeed feed(A); Observer seen; seen.attach(feed);
+    feed.apply(records[0]); feed.apply(records[1]); EXPECT_EQ(seen.updates, 1u);
+    seen.updates = 0;
+    for (size_t i = 2; i < records.size() - 2; ++i) feed.apply(records[i]);
+    EXPECT_EQ(seen.boundaries, 1u); EXPECT_EQ(seen.invalid.size(), 1u);
+    EXPECT_EQ(seen.updates, 0u); EXPECT_FALSE(seen.book.valid);
+    EXPECT_EQ(feed.exportState()["kalshi"]["sequence"], 1004);
+    feed.apply(records[records.size()-2]); feed.apply(records.back());
+    EXPECT_TRUE(seen.book.valid); EXPECT_EQ(seen.updates, 1u); EXPECT_EQ(seen.invalid.size(), 1u);
+
+    // Before the first snapshot, only the sequence envelope is relevant.
+    auto bad = delta(2); bad["msg"]["price_dollars"] = "bad"; bad["msg"]["ts_ms"] = "bad";
+    JournalFeed empty(A); Observer waiting; waiting.attach(empty);
+    for (const auto& r : journal(json::array({delta(1), bad, snapshot(3), delta(4)}))) empty.apply(r);
+    EXPECT_EQ(waiting.boundaries, 1u); EXPECT_TRUE(waiting.invalid.empty()); EXPECT_EQ(waiting.updates, 1u);
+}
+TEST(KalshiFeed, UnannouncedSidSnapshotsAdoptAndDeltasInvalidateOnce) {
+    for (bool snapshotFirst : {true, false}) {
+        SCOPED_TRACE(snapshotFirst);
+        auto records = journal(json::array({snapshot(), delta(2), snapshot(99, B, 77), delta(100, "1.00", B, 77),
+            snapshotFirst ? snapshot(10, A, 2) : delta(10, "1.00", A, 2),
+            delta(11, "1.00", A, 2), delta(12, "1.00", A, 2), snapshot(20, A, 2), delta(21, "1.00", A, 2)}));
+        JournalFeed feed(A); Observer seen; seen.attach(feed);
+        for (size_t i = 0; i < 4; ++i) feed.apply(records[i]);
+        EXPECT_TRUE(seen.invalid.empty()); EXPECT_TRUE(seen.book.valid);
+        EXPECT_EQ(feed.exportState()["kalshi"]["sequence"], 2);
+        for (size_t i = 4; i < 7; ++i) feed.apply(records[i]);
+        EXPECT_EQ(seen.invalid.size(), snapshotFirst ? 0u : 1u);
+        EXPECT_EQ(seen.updates, snapshotFirst ? 3u : 1u); EXPECT_EQ(seen.book.valid, snapshotFirst);
+        feed.apply(records[7]); feed.apply(records[8]);
+        EXPECT_TRUE(seen.book.valid); EXPECT_EQ(seen.book.bids.at(.56), 11.25);
+        EXPECT_EQ(feed.exportState()["kalshi"]["sid"], 2);
+        EXPECT_EQ(feed.exportState()["kalshi"]["sequence"], 21);
+    }
+    // A foreign snapshot does not heal a gap in our subscription.
+    JournalFeed feed(A); Observer seen; seen.attach(feed);
+    for (const auto& r : journal(json::array({snapshot(), snapshot(3, B), delta(4)}))) feed.apply(r);
+    EXPECT_EQ(seen.invalid.size(), 1u); EXPECT_EQ(seen.snapshots, 1u); EXPECT_EQ(seen.updates, 0u);
+}
+TEST(KalshiFeed, LegacyTradeSideIsUsedOnlyWithoutModernFields) {
+    const auto frames = fixture("ws_capture_sample.json");
+    const auto source = *std::find_if(frames.begin(), frames.end(), [](const auto& f) { return f.at("type") == "trade"; });
+    for (const auto* side : {"yes", "no"}) {
+        auto trade = source; trade["msg"].erase("taker_outcome_side"); trade["msg"].erase("taker_book_side");
+        trade["msg"]["taker_side"] = side;
+        JournalFeed feed(A); Observer seen; seen.attach(feed);
+        for (const auto& r : journal(json::array({snapshot(), trade}))) feed.apply(r);
+        ASSERT_EQ(seen.trades.size(), 1u);
+        EXPECT_EQ(seen.trades[0].side, std::string_view(side) == "yes" ? AggressorSide::Buy : AggressorSide::Sell);
+        EXPECT_TRUE(seen.invalid.empty()); EXPECT_TRUE(seen.book.valid);
+    }
+    auto modern = source; modern["msg"]["taker_side"] = "yes"; // Modern fields say no/ask.
+    JournalFeed feed(A); Observer seen; seen.attach(feed);
+    for (const auto& r : journal(json::array({modern}))) feed.apply(r);
+    ASSERT_EQ(seen.trades.size(), 1u); EXPECT_EQ(seen.trades[0].side, AggressorSide::Sell);
+}
+TEST(KalshiFeed, ReaderPreservesOpaqueMetadataAndExposesTypedHeaderIdentity) {
+    for (const bool kalshi : {false, true}) {
+        auto header = metadata(A);
+        if (!kalshi) {
+            header.erase("venue"); header.erase("instrument");
+            header["product_metadata"]["quote_increment"] = "0.01";
+            header["product_metadata"]["base_increment"] = "0.01";
+        }
+        header["product_metadata"]["_journal_venue"] = "opaque, not routing";
+        header["product_metadata"]["extra"] = {{"nested", json::array({1, "two"})}};
+        const auto records = journal(json::array({snapshot(), delta(2)}), A, header);
+        for (const auto& r : records) {
+            EXPECT_EQ(r.venue, kalshi ? Venue::Kalshi : Venue::Coinbase);
+            EXPECT_EQ(r.metadata, header["product_metadata"]);
+            EXPECT_EQ(r.instrument, header.value("instrument", json()));
+        }
+    }
+    // Existing fanout aggregate initializers retain their original field order/defaults.
+    JournalRecord synthetic{{capture::Kind::Frame, {Epoch * 1'000'000, 0}, 1, "{}"}, {A, "run", 0, 0}, {}, false, 1};
+    EXPECT_EQ(synthetic.venue, Venue::Coinbase); EXPECT_TRUE(synthetic.instrument.is_null());
+}
+TEST(KalshiFeed, VenueChangesInvalidateIncludingAfterStateImport) {
+    auto kalshi = journal(json::array({snapshot(), delta(2)}));
+    const auto coinFrame = [&](const char* type, int seq) {
+        return json{{"channel", "l2_data"}, {"sequence_num", seq}, {"events", json::array({
+            {{"type", type}, {"product_id", A}, {"updates", json::array({
+                {{"side", "bid"}, {"price_level", "100"}, {"new_quantity", "2"}}})}}})}};
+    };
+    const json coinHeader = {{"product_metadata", {{"product_id", A}, {"quote_increment", "0.01"}, {"base_increment", "0.01"}}}};
+    auto coin = journal(json::array({coinFrame("snapshot", 1), coinFrame("update", 2)}), A, coinHeader);
+    // Isolate venue identity from journal run/connection changes.
+    for (auto* records : {&coin, &kalshi}) for (auto& r : *records) { r.pos.run = "same-run"; r.gapBefore = false; }
+    for (const bool fromKalshi : {false, true}) for (const bool imported : {false, true}) {
+        SCOPED_TRACE(std::to_string(fromKalshi) + "/" + std::to_string(imported));
+        auto& before = fromKalshi ? kalshi : coin; auto& after = fromKalshi ? coin : kalshi;
+        JournalFeed original(A), restored(A); Observer seen;
+        original.apply(before[0]);
+        if (imported) restored.importState(original.exportState());
+        auto& feed = imported ? restored : original; seen.attach(feed);
+        feed.apply(after[1]); // An update from the other venue cannot reuse the old snapshot.
+        ASSERT_EQ(seen.invalid.size(), 1u); EXPECT_EQ(seen.invalid[0], "journal venue changed");
+        EXPECT_EQ(seen.boundaries, 0u); EXPECT_EQ(seen.updates, 0u); EXPECT_FALSE(seen.book.valid);
+        auto snap = after[0], next = after[1];
+        if (fromKalshi) {
+            snap.record.payload = coinFrame("snapshot", 3).dump(); next.record.payload = coinFrame("update", 4).dump();
+        }
+        feed.apply(snap); feed.apply(next);
+        EXPECT_TRUE(seen.book.valid); EXPECT_EQ(seen.updates, 1u);
+        EXPECT_EQ(seen.book.bids.size(), 1u);
+        EXPECT_TRUE(seen.book.bids.contains(fromKalshi ? 100 : .56));
+        EXPECT_EQ(feed.exportState()["version"], fromKalshi ? 1 : 2);
     }
 }

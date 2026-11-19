@@ -2,7 +2,9 @@
 // Offline Kalshi payload state. NO bids stay in NO pricing internally; all
 // arithmetic is integer (1/10000 dollars, 1/100 contracts). Only callback output
 // converts to binary64. Sequence is subscription-wide, including foreign books
-// and control replies. Invalid books cannot apply deltas until a fresh snapshot.
+// and control replies. Invalid books ignore deltas until an authoritative
+// selected-market snapshot re-anchors sid/sequence; malformed trades lose only
+// that trade and cannot invalidate the book.
 #include "marketdata/model/TradeData.h"
 #include "servermodel/BookRecorder.hpp"
 #include <map>

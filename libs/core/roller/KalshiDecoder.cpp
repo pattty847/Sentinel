@@ -84,6 +84,7 @@ AggressorSide aggressor(const json& msg) {
     };
     read("taker_outcome_side", "yes", "no");
     read("taker_book_side", "bid", "ask");
+    if (!buy) read("taker_side", "yes", "no"); // Legacy outcome side, only without modern fields.
     if (!buy) throw std::runtime_error("missing Kalshi trade side");
     return *buy ? AggressorSide::Buy : AggressorSide::Sell;
 }
@@ -109,11 +110,28 @@ KalshiDecoder::Result KalshiDecoder::apply(const json& frame, const std::string&
         return {};
     }
     const bool book = type == "orderbook_snapshot" || type == "orderbook_delta";
+    bool ours = false;
+    if (book) {
+        const auto ticker = frame.at("msg").at("market_ticker").get<std::string>();
+        if (ticker.empty()) throw std::runtime_error("missing Kalshi market ticker");
+        ours = ticker == product;
+    }
     if (book || (frame.contains("sid") && (type == "ok" || type == "unsubscribed" || type == "error"))) {
         const auto sid = integer(frame.at("sid"));
-        if (!sid_ && book) sid_ = sid; // Journals may start at a snapshot, without a subscribe reply.
-        if (sid_ != sid || retired_) return {};
-        if (book || frame.contains("seq")) advance(frame);
+        if (ours && type == "orderbook_snapshot") {
+            // A selected-market snapshot is authoritative, including a new sid,
+            // a sequence discontinuity, or recovery after subscription retirement.
+            sequence_ = integer(frame.at("seq"));
+            sid_ = sid; retired_ = false;
+        } else {
+            if (!sid_ && book) sid_ = sid;
+            if (sid_ != sid) {
+                if (ours && valid_) throw std::runtime_error("Kalshi orderbook subscription changed");
+                return {};
+            }
+            if (retired_) return {};
+            if (book || frame.contains("seq")) advance(frame);
+        }
         if (type == "unsubscribed") {
             retired_ = true;
             throw std::runtime_error("Kalshi orderbook unsubscribed");
@@ -128,9 +146,10 @@ KalshiDecoder::Result KalshiDecoder::apply(const json& frame, const std::string&
     }
     if (!book && type != "trade") return {};
     const auto& msg = frame.at("msg");
-    const auto ticker = msg.at("market_ticker").get<std::string>();
-    if (ticker.empty()) throw std::runtime_error("missing Kalshi market ticker");
-    if (ticker != product) return {}; // Foreign books consumed the sid sequence above.
+    if (book) {
+        if (!ours) return {}; // Foreign books consumed the current sid sequence above.
+        if (type == "orderbook_delta" && !valid_) return {}; // Await an authoritative snapshot.
+    } else if (msg.at("market_ticker").get<std::string>() != product) return {};
     Result out;
     out.envelopeMs = envelope(frame, msg, local);
     if (type == "trade") {
@@ -152,7 +171,6 @@ KalshiDecoder::Result KalshiDecoder::apply(const json& frame, const std::string&
         const auto p = price(msg.at("price_dollars")), delta = fixed(msg.at("delta_fp"), 2, true);
         const auto side = msg.at("side").get<std::string>();
         if (side != "yes" && side != "no") throw std::runtime_error("malformed Kalshi book side");
-        if (!valid_) throw std::runtime_error("Kalshi delta before snapshot");
         auto& levels = side == "yes" ? yes_ : no_;
         const auto it = levels.find(p);
         const auto old = it == levels.end() ? 0 : it->second;

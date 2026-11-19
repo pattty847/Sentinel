@@ -1,4 +1,4 @@
-// Payloads reach JournalFeed with a header-derived venue tag in metadata.
+// Payloads reach consumers with typed header venue and exact instrument metadata.
 // Kalshi anchor search remains refused until its grid/recorder path exists.
 #include "JournalReader.hpp"
 #include "SentinelLogging.hpp"
@@ -155,10 +155,9 @@ bool JournalReader::next(JournalRecord& out) {
                 if (pos != *start_) throw std::runtime_error("journal position missing record");
                 start_.reset();
             }
-            out = {std::move(record), std::move(pos), f.header.at("product_metadata"), std::exchange(gap_, false), f.header.at("format_version").get<int>()};
-            // Reserve this tag for header identity, never opaque product metadata.
-            out.metadata.erase("_journal_venue");
-            if (venueFromHeader(f.header) == Venue::Kalshi) out.metadata["_journal_venue"] = "kalshi";
+            out = {std::move(record), std::move(pos), f.header.at("product_metadata"),
+                   std::exchange(gap_, false), f.header.at("format_version").get<int>(),
+                   venueFromHeader(f.header), f.header.value("instrument", json())};
             return true;
         }
         const auto& result = reader_->result();

@@ -131,6 +131,8 @@ JournalTradeEventSource::JournalTradeEventSource(std::filesystem::path root, std
     const auto& files = s.reader->files();
     std::optional<size_t> candidate;
     for (size_t i = 0; i < files.size(); ++i) {
+        if (sentinel::venueFromHeader(files[i].header) == sentinel::Venue::Kalshi)
+            throw std::runtime_error("Kalshi journal trade history is not supported");
         if (files[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= fromMs) candidate = i;
     }
     if (candidate) {

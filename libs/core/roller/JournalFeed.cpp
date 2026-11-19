@@ -182,12 +182,17 @@ void JournalFeed::applyCoinbase(const JournalRecord& input, int64_t local) {
 }
 void JournalFeed::applyKalshi(const std::string& payload, int64_t local) {
     KalshiDecoder::Result out;
+    bool tradeFrame = false;
     try {
-        out = kalshi_.apply(nlohmann::json::parse(payload), product_, local);
+        const auto frame = nlohmann::json::parse(payload);
+        tradeFrame = frame.is_object() && frame.contains("type") && frame.at("type") == "trade";
+        out = kalshi_.apply(frame, product_, local);
     } catch (const nlohmann::json::exception&) {
-        invalid(local, "malformed Kalshi journal JSON"); return;
+        if (!tradeFrame) invalid(local, "malformed Kalshi journal JSON");
+        return;
     } catch (const std::runtime_error& e) {
-        invalid(local, e.what()); return;
+        if (!tradeFrame) invalid(local, e.what());
+        return;
     }
     // Keep consumer failures fatal, as on the Coinbase path.
     try {
@@ -206,11 +211,7 @@ void JournalFeed::apply(const JournalRecord& input) {
     const auto& r = input.record;
     const auto local = r.time.systemNs / 1'000'000;
     using capture::Kind;
-    // JournalReader copies only the validated header venue into this reserved
-    // metadata tag. Payload contents never choose the decoder.
-    const auto venue = input.metadata.contains("_journal_venue")
-        ? venueFromHeader(nlohmann::json{{"venue", input.metadata.at("_journal_venue")}})
-        : Venue::Coinbase;
+    const auto venue = input.venue;
     if (venue != venue_) {
         if (!run_.empty()) invalid(lastLocal_ ? lastLocal_ : local, "journal venue changed");
         sequence_.reset(); kalshi_.reset(); venue_ = venue;

@@ -1,5 +1,8 @@
 #pragma once
+// Header identity travels in typed record fields, never in opaque product metadata.
+// These in-memory fields are not part of journal positions or checkpoint formats.
 #include "capture/RawCapture.hpp"
+#include "InstrumentSpec.hpp"
 #include <filesystem>
 #include <deque>
 #include <stdexcept>
@@ -35,6 +38,8 @@ struct JournalRecord {
     nlohmann::json metadata;
     bool gapBefore = false;
     int version = 1;
+    Venue venue = Venue::Coinbase; // Also the default for fanout/synthetic records.
+    nlohmann::json instrument; // Exact header block, null when absent.
 };
 // One product, header order (run start, run id, segment), one decoded block at
 // a time. Reopen at a saved position to poll an open file; EOF is not a tick.

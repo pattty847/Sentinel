@@ -591,19 +591,24 @@ before checking the restored baseline.
 ## Kalshi payload decoding
 
 Offline `JournalReader` + `JournalFeed` replay selects the decoder from the RAWL2
-header; the reader carries its venue in the reserved `_journal_venue` metadata
-tag. Kalshi books contain YES and NO bids in their own pricing (`use_yes_price:
-false`): YES bids become bids, NO bids become asks at `1 - price`. Four-decimal
+header; records expose typed `venue` and the exact header `instrument` JSON,
+while `metadata` remains exactly `product_metadata`. Kalshi books contain YES and
+NO bids in their own pricing (`use_yes_price: false`): YES bids become bids, NO bids become asks at `1 - price`. Four-decimal
 price strings and two-decimal quantity strings are parsed to checked integers;
 signed deltas become absolute quantities, and zero removes a level. Complement
 and quantity arithmetic stay integer until one shared callback conversion.
 Order-book sequence is per subscription, including other markets and sequenced
-`ok` replies. Gaps, duplicates, regressions, malformed frames, negative/overflowing
-levels and deltas without a snapshot invalidate until a subsequent accepted
-snapshot. A sequence-rejected snapshot does not restore validity. Subscription
-replacement/retirement also invalidates; unrelated sids do not alter the book.
-Trade sequence loss does not invalidate the book; trades retain YES prices and
-map taker YES/bid to Buy and NO/ask to Sell, rejecting conflicting side fields.
+`ok` replies. Gaps, duplicates, regressions, malformed book frames and
+negative/overflowing levels invalidate. While waiting for a snapshot, deltas
+consume sequence but otherwise do nothing, including before the first snapshot.
+A snapshot for the selected market is authoritative: it adopts its sid, re-anchors
+sequence and installs the book even across a discontinuity or retirement. A delta
+for that market on another sid invalidates a valid book once; other markets on
+other sids are ignored. Subscription replacement/retirement also invalidates.
+Trade sequence loss and malformed trades do not invalidate the book; malformed
+trades are dropped. Trades retain YES prices and map taker YES/bid to Buy and
+NO/ask to Sell, rejecting conflicting modern side fields and falling back to
+legacy `taker_side` only when the modern fields are absent.
 Exchange time uses `msg.ts_ms`, then `msg.ts`, then `sending_ts_ms`, otherwise
 journal receive time. Shared journal lifecycle handling and one tick per record
 are unchanged, including the initial `journal boundary` invalidation.
