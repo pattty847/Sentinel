@@ -17,6 +17,10 @@ inline constexpr uint32_t kHmc2MaxRawLen = 16 * 1024 * 1024;
 inline constexpr int64_t kHmc2MinMs = 946684800000LL;
 inline constexpr int64_t kHmc2EndMs = 7289654400000LL; // 2201-01-01, exclusive
 
+// Recorder policies; absent options retain the deployed hash byte stream.
+struct AbsoluteRowBounds { int64_t low, high; }; // inclusive row indices
+struct PriceBounds { double lower, upper; };     // inclusive price units
+
 struct Hmc2Header {
     std::string symbol, layer;
     int64_t tfMs = 60'000;
@@ -156,7 +160,9 @@ class Hmc2Store {
                                              const std::string &layer, int64_t tfMs, int64_t startMs, int64_t endMs);
     static std::filesystem::path filePath(const std::filesystem::path &root, const Hmc2Header &header,
                                           int64_t bucketStartMs, uint32_t generation = 0);
-    static uint64_t configHash(const Hmc2Header &header, double lowFrac, double highMult);
+    static uint64_t configHash(const Hmc2Header &header, double lowFrac, double highMult,
+                               std::optional<AbsoluteRowBounds> absoluteRows = {},
+                               std::optional<PriceBounds> priceBounds = {});
 
   private:
     struct Impl;
