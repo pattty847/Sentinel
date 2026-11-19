@@ -234,10 +234,110 @@ TEST_F(RecorderTest, BoundedOneSidedStateAndLeadContinueIdentically) {
         ASSERT_FALSE(leadPubs.empty());
         EXPECT_EQ(leadPubs.back()->observedMs,60000);
         EXPECT_EQ(leadPubs.back()->bidRowLo,0); EXPECT_EQ(leadPubs.back()->askRowHi,100);
+        if (!initial.empty() && initial.front().price == 0) {
+            const auto forkedMinute = std::find_if(leadPubs.begin(),leadPubs.end(),[](const auto& p) {
+                return p->bucketStartMs == kEpoch + 60000 && p->midClose == .5;
+            });
+            ASSERT_NE(forkedMinute,leadPubs.end()); // publication after the +110s snapshot
+            EXPECT_DOUBLE_EQ((*forkedMinute)->midOpen,0);
+            EXPECT_DOUBLE_EQ((*forkedMinute)->midMin,0);
+        }
         // A different midpoint or inclusion policy cannot adopt the state.
         QTemporaryDir wrongRoot; c.root = wrongRoot.path().toStdString();
         c.priceBounds.reset(); auto wrong = make(c);
         EXPECT_THROW(wrong->importState(state),std::runtime_error);
+    }
+}
+
+TEST_F(RecorderTest, BoundedHourlyRollupPreservesEmptyCoverageAndRecoversAfterRestart) {
+    constexpr int64_t minute = 60000, hour = 60 * minute;
+    auto c = boundedConfig(dir.path().toStdString());
+    c.layers[0].hourlyRollup = true;
+    {
+        auto r = make(c);
+        snap(*r,0,{{false,0,2}});
+        snap(*r,minute / 2,{});
+        tick(*r,30 * minute);
+        EXPECT_EQ(r->stats().diskErrors,0);
+    }
+    {
+        auto r = make(c); // rebuild the first half-hour from persisted minutes
+        snap(*r,30 * minute,{});
+        tick(*r,59 * minute);
+        snap(*r,59 * minute,{{true,1,4}});
+        tick(*r,hour);
+        EXPECT_EQ(r->stats().diskErrors,0);
+    }
+    const auto minutes = read();
+    ASSERT_EQ(minutes.size(),60);
+    for (size_t i = 0; i < minutes.size(); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(minutes[i].bucketStartMs,int64_t(i) * minute);
+        EXPECT_EQ(minutes[i].observedMs,minute);
+        EXPECT_EQ(minutes[i].bidRowLo,0); EXPECT_EQ(minutes[i].bidRowHi,100);
+        EXPECT_EQ(minutes[i].askRowLo,0); EXPECT_EQ(minutes[i].askRowHi,100);
+        if (i > 0 && i < 59) {
+            EXPECT_TRUE(minutes[i].entries.empty());
+            EXPECT_DOUBLE_EQ(minutes[i].midOpen,.5); EXPECT_DOUBLE_EQ(minutes[i].midClose,.5);
+        }
+    }
+    const auto hours = read(hour);
+    ASSERT_EQ(hours.size(),1);
+    const auto& h = hours.front();
+    EXPECT_EQ(h.bucketStartMs,0); EXPECT_EQ(h.observedMs,hour);
+    EXPECT_EQ(h.flags & (kPartial | kApproximateCoverage),0u);
+    EXPECT_EQ(h.header.configHash,minutes.front().header.configHash);
+    EXPECT_EQ(h.bidRowLo,0); EXPECT_EQ(h.bidRowHi,100);
+    EXPECT_EQ(h.askRowLo,0); EXPECT_EQ(h.askRowHi,100);
+    EXPECT_DOUBLE_EQ(h.midOpen,0); EXPECT_DOUBLE_EQ(h.midMin,0);
+    EXPECT_DOUBLE_EQ(h.midClose,1); EXPECT_DOUBLE_EQ(h.midMax,1);
+    ASSERT_EQ(h.coverage.size(),2);
+    for (size_t side = 0; side < 2; ++side) {
+        EXPECT_EQ(h.coverage[side].isAsk,bool(side));
+        EXPECT_EQ(h.coverage[side].lo,0); EXPECT_EQ(h.coverage[side].hi,100);
+        EXPECT_EQ(h.coverage[side].coveredMs,hour);
+    }
+    ASSERT_EQ(h.entries.size(),2);
+    value(h,0,true,decodeSize(encodeSize(1)) / 60,2); // size 2 for half of one minute
+    value(h,100,false,decodeSize(encodeSize(4)) / 60,4);
+    for (const auto& entry : h.entries) EXPECT_EQ(entry.coveredMs,hour);
+    const auto hourPath = Hmc2Store::filePath(c.root,h.header,kEpoch);
+    const auto expected = recorderBytes(hourPath);
+
+    // Simulate a crash after minute commits but before the hour append, using
+    // only the durable minute prefix in a fresh scratch root.
+    QTemporaryDir recoveredRoot;
+    auto recovered = c; recovered.root = recoveredRoot.path().toStdString();
+    std::filesystem::create_directories(recovered.root / "BTC-USD");
+    std::filesystem::copy(c.root / "BTC-USD/near-60000",recovered.root / "BTC-USD/near-60000",
+                          std::filesystem::copy_options::recursive);
+    EXPECT_FALSE(std::filesystem::exists(Hmc2Store::filePath(recovered.root,h.header,kEpoch)));
+    for (const auto& cfg : {c,recovered}) {
+        auto r = make(cfg);
+        snap(*r,hour + 10000,{}); // preserve existing hour, or recover missing previous hour
+        EXPECT_EQ(r->stats().diskErrors,0);
+        EXPECT_EQ(recorderBytes(Hmc2Store::filePath(cfg.root,h.header,kEpoch)),expected);
+    }
+}
+
+TEST_F(RecorderTest, StateImportRejectsUnboundedAndRelativeSources) {
+    for (const bool unbounded : {true,false}) for (const bool initialized : {false,true}) {
+        SCOPED_TRACE(unbounded ? "unbounded -> bounded" : "relative -> absolute");
+        SCOPED_TRACE(initialized);
+        QTemporaryDir sourceRoot, targetRoot;
+        auto sourceConfig = boundedConfig(sourceRoot.path().toStdString());
+        if (unbounded) sourceConfig.priceBounds.reset();
+        else sourceConfig.layers[0] = {"near",1,.5,2,false};
+        auto source = make(sourceConfig);
+        if (initialized) {
+            snap(*source,0,{{true,.4,2},{false,.6,4}});
+            tick(*source,10000);
+        }
+        const auto state = source->exportState();
+        auto target = make(boundedConfig(targetRoot.path().toStdString()));
+        const auto before = target->exportState();
+        EXPECT_THROW(target->importState(state),std::runtime_error);
+        EXPECT_EQ(target->exportState(),before); // refusal must not partially install state
     }
 }
 

@@ -16,9 +16,9 @@ struct LayerConfig {
     double highMult;
     bool hourlyRollup;
     // Exclusive policy: when present, lowFrac and highMult must both be zero.
-    // Bounds are inclusive row indices, independent of the mid and row tick.
+    // Bounds are inclusive row indices, independent of the mid; their price
+    // window scales with rowTickUnits / priceScale.
     std::optional<AbsoluteRowBounds> absoluteRows;
-
 };
 struct RecorderConfig {
     std::filesystem::path root;

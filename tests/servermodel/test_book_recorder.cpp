@@ -1178,12 +1178,7 @@ TEST_F(RecorderTest, BaseCompatibilityBytes) {
     const auto rows = read();
     ASSERT_EQ(rows.size(), 1);
     EXPECT_EQ(rows[0].header.configHash, 18191379077652817817ull);
-    // ccache can rewrite __FILE__ relative to the build directory. CTest runs
-    // beneath that directory; direct invocations normally run from the checkout.
-    auto source = std::filesystem::current_path();
-    while (!std::filesystem::exists(source / "tests/servermodel/fixtures/recorder-61ae1b08.hmc2") &&
-           source != source.parent_path()) source = source.parent_path();
-    const auto fixtures = source / "tests/servermodel/fixtures";
+    const auto fixtures = std::filesystem::path(SENTINEL_SOURCE_DIR) / "tests/servermodel/fixtures";
     EXPECT_EQ(recorderBytes(Hmc2Store::filePath(c.root, rows[0].header, kEpoch)),
               recorderBytes(fixtures / "recorder-61ae1b08.hmc2"));
     // Replay state deliberately rejects a different long-double representation.

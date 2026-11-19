@@ -34,6 +34,15 @@ def test(name, expected=0):
 
 
 mutations = [
+    ('fork-mid-presence', BOOK, 'to->midSeen = from->midSeen;',
+     '', 'BoundedOneSidedStateAndLeadContinueIdentically'),
+    ('hour-empty-coverage', BOOK, 'out.observedMs += r.observedMs;',
+     'if (r.entries.empty()) continue;\n            out.observedMs += r.observedMs;',
+     'BoundedHourlyRollupPreservesEmptyCoverageAndRecoversAfterRestart'),
+    ('previous-hour-recovery', BOOK, 'rebuildHour(l, previous);\n                    writeHour(l);',
+     'rebuildHour(l, previous);', 'BoundedHourlyRollupPreservesEmptyCoverageAndRecoversAfterRestart'),
+    ('import-policy', BOOK, 'j.at("policy") == statePolicy(dst.cfg) &&',
+     '', 'StateImportRejectsUnboundedAndRelativeSources'),
     ('absolute-window', BOOK,
      'if (layer.absoluteRows) return {layer.absoluteRows->low, layer.absoluteRows->high};',
      'if (layer.absoluteRows) return {1, 0};', 'AbsoluteWindowCoversEveryRowAtLowMiddleAndHighMids'),
@@ -76,10 +85,10 @@ mutations = [
 ]
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--only', choices=[m[0] for m in mutations])
+parser.add_argument('--only', nargs='+', choices=[m[0] for m in mutations])
 selection = parser.parse_args().only
 if selection:
-    mutations = [m for m in mutations if m[0] == selection]
+    mutations = [m for m in mutations if m[0] in selection]
 build()
 run(['ctest', '--test-dir', str(BUILD), '--output-on-failure', '-R', '^BookRecorderTests$'])
 for label, path, old, new, case in mutations:
