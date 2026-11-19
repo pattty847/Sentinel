@@ -15,6 +15,7 @@ add_library(sentinel_core
     roller/AnchorStore.cpp
     roller/JournalReader.cpp
     roller/JournalFeed.cpp
+    roller/KalshiDecoder.cpp
     roller/JournalTradeSeed.cpp
     roller/CandleRestore.cpp
     roller/Grid.cpp

@@ -84,7 +84,7 @@ TEST(Roller, GridsAndClamping) {
     EXPECT_DOUBLE_EQ(native.nearTick,.03); EXPECT_DOUBLE_EQ(native.deepTick,.12);
     m["quote_increment"]="bad"; EXPECT_THROW(deriveGrid(m,100),std::runtime_error);
 }
-TEST(Roller, KalshiHeaderInventoryAndExplicitPayloadError) {
+TEST(Roller, KalshiHeaderInventoryFrameDeliveryAndAnchorRefusal) {
     for (const auto& symbol : {std::string("KXNBAGAME-26NOV18PHIORL-") + std::string(25, 'A'), std::string("KXTEST-1.5")}) {
         QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); ASSERT_TRUE(temp.isValid());
         capture::WriterConfig cfg; cfg.root = temp.path(); cfg.symbol = symbol; cfg.fsyncBlocks = 0;
@@ -101,9 +101,17 @@ TEST(Roller, KalshiHeaderInventoryAndExplicitPayloadError) {
         JournalRecord r; ASSERT_TRUE(reader.next(r)); EXPECT_EQ(r.record.kind, capture::Kind::CaptureStarted);
         const auto unsupported = [](auto&& operation) {
             try { operation(); FAIL() << "Kalshi decoding silently succeeded"; }
-            catch (const std::runtime_error& e) { EXPECT_STREQ(e.what(), "Kalshi journal payload decoding is not supported"); }
+            catch (const std::runtime_error& e) { EXPECT_STREQ(e.what(), "Kalshi journal anchor search is not supported"); }
         };
-        unsupported([&] { reader.next(r); });
+        JournalFeed feed(symbol);
+        feed.apply(r); // Account for the shared initial journal boundary first.
+        int invalid = 0, updates = 0, snapshots = 0;
+        feed.onInvalid = [&](auto, const auto&) { ++invalid; };
+        feed.onUpdates = [&](auto, auto, auto) { ++updates; };
+        feed.onSnapshot = [&](auto, auto, auto) { ++snapshots; };
+        ASSERT_TRUE(reader.next(r)); EXPECT_EQ(r.record.kind, capture::Kind::Frame);
+        EXPECT_NO_THROW(feed.apply(r));
+        EXPECT_EQ(invalid, 1); EXPECT_EQ(updates, 0); EXPECT_EQ(snapshots, 0);
         unsupported([&] { reader.anchor(Epoch + 100); });
     }
 }

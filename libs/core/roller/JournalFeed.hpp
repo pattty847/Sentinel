@@ -3,6 +3,7 @@
 #include "marketdata/model/TradeData.h"
 #include "servermodel/BookRecorder.hpp"
 #include "TradeRecordWindow.hpp"
+#include "KalshiDecoder.hpp"
 
 namespace sentinel::roller {
 // Native-price durable book, also used by the journal model tap. Boundary
@@ -54,6 +55,10 @@ public:
     TradeSeedStats seedTradeIds(const std::vector<JournalFile>& files,
                                const JournalPos& cursor, bool inclusive);
 private:
+    Venue venue_ = Venue::Coinbase;
+    KalshiDecoder kalshi_;
+    void applyCoinbase(const JournalRecord&, int64_t local);
+    void applyKalshi(const std::string& payload, int64_t local);
     std::string product_, run_;
     uint64_t connection_ = 0;
     int64_t lastLocal_ = 0;

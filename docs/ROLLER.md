@@ -587,3 +587,35 @@ scratch before changing bytes; without that variable the real-hour cases skip.
 build in `build/mac-clang`), with the real-hour variable set for those cases. It
 builds the `mac-clang` preset at `-j 2`, restores each source mutation and rebuilds
 before checking the restored baseline.
+
+## Kalshi payload decoding
+
+Offline `JournalReader` + `JournalFeed` replay selects the decoder from the RAWL2
+header; records expose typed `venue` and the exact header `instrument` JSON,
+while `metadata` remains exactly `product_metadata`. Kalshi books contain YES and
+NO bids in their own pricing (`use_yes_price: false`): YES bids become bids, NO bids become asks at `1 - price`. Four-decimal
+price strings and two-decimal quantity strings are parsed to checked integers;
+signed deltas become absolute quantities, and zero removes a level. Complement
+and quantity arithmetic stay integer until one shared callback conversion.
+Order-book sequence is per subscription, including other markets and sequenced
+`ok` replies. Gaps, duplicates, regressions, malformed book frames and
+negative/overflowing levels invalidate. While waiting for a snapshot, deltas
+consume sequence but otherwise do nothing, including before the first snapshot.
+A snapshot for the selected market is authoritative: it adopts its sid, re-anchors
+sequence and installs the book even across a discontinuity or retirement. A delta
+for that market on another sid invalidates a valid book once; other markets on
+other sids are ignored. Subscription replacement/retirement also invalidates.
+Trade sequence loss and malformed trades do not invalidate the book; malformed
+trades are dropped. Trades retain YES prices and map taker YES/bid to Buy and
+NO/ask to Sell, rejecting conflicting modern side fields and falling back to
+legacy `taker_side` only when the modern fields are absent.
+Exchange time uses `msg.ts_ms`, then `msg.ts`, then `sending_ts_ms`, otherwise
+journal receive time. Shared journal lifecycle handling and one tick per record
+are unchanged, including the initial `journal boundary` invalidation.
+
+Kalshi feed state version 2 includes subscription/sequence identity and exact
+integer quantities; import validates before installing and emits no callbacks.
+Coinbase retains its version-1 state bytes and payload behavior. This support
+stops at feed callbacks: Kalshi anchor search explicitly refuses, and fixed
+0..1 grid, recorder wiring, anchor storage integration and HMC2 output remain
+unimplemented. The capture verifier's Kalshi semantic refusal also remains.

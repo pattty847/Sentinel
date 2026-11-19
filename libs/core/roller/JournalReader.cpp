@@ -1,5 +1,5 @@
-// Inventory accepts all RAWL2 venues; replay must fail explicitly until a venue
-// decoder exists. Never pass Kalshi frames to the Coinbase JournalFeed.
+// Payloads reach consumers with typed header venue and exact instrument metadata.
+// Kalshi anchor search remains refused until its grid/recorder path exists.
 #include "JournalReader.hpp"
 #include "SentinelLogging.hpp"
 #include "metrics/MetricsRegistry.hpp"
@@ -148,8 +148,6 @@ bool JournalReader::next(JournalRecord& out) {
             });
         capture::Record record;
         if (reader_->next(record)) {
-            if (record.kind == capture::Kind::Frame && venueFromHeader(f.header) == Venue::Kalshi)
-                throw std::runtime_error("Kalshi journal payload decoding is not supported");
             const auto& scan = reader_->result();
             JournalPos pos{product_, f.header.at("run_id"), scan.recordOrdinal, scan.recordIndex};
             if (start_) {
@@ -157,7 +155,9 @@ bool JournalReader::next(JournalRecord& out) {
                 if (pos != *start_) throw std::runtime_error("journal position missing record");
                 start_.reset();
             }
-            out = {std::move(record), std::move(pos), f.header.at("product_metadata"), std::exchange(gap_, false), f.header.at("format_version").get<int>()};
+            out = {std::move(record), std::move(pos), f.header.at("product_metadata"),
+                   std::exchange(gap_, false), f.header.at("format_version").get<int>(),
+                   venueFromHeader(f.header), f.header.value("instrument", json())};
             return true;
         }
         const auto& result = reader_->result();
@@ -187,7 +187,7 @@ std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs) const {
     // search wall time; then choose the last qualifying snapshot in that segment.
     for (auto f = files_.rbegin(); f != files_.rend(); ++f) {
         if (venueFromHeader(f->header) == Venue::Kalshi)
-            throw std::runtime_error("Kalshi journal payload decoding is not supported");
+            throw std::runtime_error("Kalshi journal anchor search is not supported");
         if (f->header.at("opened_system_ns").get<int64_t>() / 1'000'000 > receiveMs) continue;
         capture::RecordReader reader(QString::fromStdString(f->path.string()), !f->superseded, {},
             [&](const capture::BlockIndex& block, const char* reason) {

@@ -703,10 +703,9 @@ validation rules.
 
 Raw framing readers can inventory and round-trip Kalshi journals. Semantic
 capture verification reports `Kalshi capture replay is not supported`. The
-roller's journal reader accepts the header and lifecycle records, but throws
-`Kalshi journal payload decoding is not supported` on a payload frame or an
-anchor search. Kalshi payload decoding and grids are not implemented yet; these
-errors prevent a successful-looking replay that discarded the data.
+roller's journal reader delivers payload frames for decoding by the roller feed.
+Anchor search still throws `Kalshi journal anchor search is not supported`.
+Kalshi grids are not implemented yet.
 
 ## launchd arguments (review/deploy separately)
 

@@ -471,6 +471,33 @@ TEST(BacktestCore, B1JournalTradesIdentitySideAndMilliseconds) {
     EXPECT_FALSE(source.next());
 }
 
+TEST(BacktestCore, KalshiJournalTradeHistoryRefusesInsteadOfReturningEmpty) {
+    for (bool empty : {false, true}) {
+        SCOPED_TRACE(empty);
+        QTemporaryDir temp;
+        ASSERT_TRUE(temp.isValid());
+        const nlohmann::json metadata = {{"venue", "kalshi"},
+            {"product_metadata", {{"product_id", "BTC-USD"}}},
+            {"instrument", {{"price_min", "0.0000"}, {"price_max", "1.0000"}, {"size_increment", "0.01"},
+                {"price_ranges", nlohmann::json::array({{{"start", "0.0000"}, {"end", "1.0000"}, {"step", "0.0001"}}})}}}};
+        {
+            capture::Writer writer(journalConfig(temp), metadata);
+            writer.append(journalRecord(JournalEpoch, capture::Kind::CaptureStarted));
+            if (!empty) writer.append(journalRecord(JournalEpoch + 1, capture::Kind::Frame,
+                R"({"type":"trade","msg":{"market_ticker":"BTC-USD","yes_price_dollars":"0.5600","count_fp":"1.00","taker_side":"yes","trade_id":"k1","ts_ms":1791331200001}})"));
+            writer.close();
+        }
+        try {
+            auto source = trading::openTradeHistory("BTC-USD", JournalEpoch, JournalEpoch + 1000,
+                                                    temp.path().toStdString());
+            while (source->next()) {}
+            FAIL() << "Kalshi trade history silently accepted";
+        } catch (const std::runtime_error& error) {
+            EXPECT_STREQ(error.what(), "Kalshi journal trade history is not supported");
+        }
+    }
+}
+
 TEST(BacktestCore, B2WindowStartsInEarlierFileAndToIsExclusive) {
     QTemporaryDir temp;
     const auto from = JournalEpoch + 30 * 60 * 1000, to = JournalEpoch + 2 * 60 * 60 * 1000;
