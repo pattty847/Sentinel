@@ -1164,3 +1164,42 @@ TEST(RecorderStallMonitor, GuiProductOutageCannotMuteOrResetPinnedRecorderDeadli
     EXPECT_EQ(monitor.overdueMs("ETH-USD", kT + 240'000, 0), 0); // reconnect restarted ETH's deadline
     EXPECT_FALSE(monitor.overdueMs("SOL-USD", kT + 240'000, 0).has_value()); // never reported
 }
+
+// Base fixtures were captured before changing production sources; see fixtures/README.md.
+#include "test_book_recorder_bounds.inc"
+TEST_F(RecorderTest, BaseCompatibilityBytes) {
+    auto c = config();
+    auto r = make(c);
+    snap(*r, 0);
+    update(*r, 20000, {{true, 99, 6}});
+    tick(*r, 60000);
+    update(*r, 75000, {{false, 101, 0}});
+    tick(*r, 90000);
+    const auto rows = read();
+    ASSERT_EQ(rows.size(), 1);
+    EXPECT_EQ(rows[0].header.configHash, 18191379077652817817ull);
+    const auto fixtures = std::filesystem::path(SENTINEL_SOURCE_DIR) / "tests/servermodel/fixtures";
+    EXPECT_EQ(recorderBytes(Hmc2Store::filePath(c.root, rows[0].header, kEpoch)),
+              recorderBytes(fixtures / "recorder-61ae1b08.hmc2"));
+    // Replay state deliberately rejects a different long-double representation.
+    const auto golden = recorderBytes(fixtures / "recorder-61ae1b08-arm64.state");
+    QTemporaryDir restoredRoot;
+    c.root = restoredRoot.path().toStdString();
+    auto restored = make(c);
+    if (std::numeric_limits<long double>::digits != 53 ||
+        std::numeric_limits<long double>::max_exponent != 1024) {
+        EXPECT_THROW(restored->importState(golden), std::runtime_error);
+        return;
+    }
+    EXPECT_EQ(r->exportState(), golden);
+    restored->importState(golden);
+    EXPECT_EQ(restored->exportState(), golden);
+    std::filesystem::create_directories(c.root / "BTC-USD/near-60000");
+    std::filesystem::copy_file(fixtures / "recorder-61ae1b08.hmc2",
+                               Hmc2Store::filePath(c.root, rows[0].header, kEpoch));
+    for (auto* recorder : {r.get(), restored.get()}) {
+        update(*recorder, 100000, {{false,101,8}});
+        tick(*recorder, 180000);
+    }
+    EXPECT_EQ(restored->exportState(), r->exportState());
+}

@@ -77,6 +77,7 @@ struct Symbol {
     std::pmr::map<int64_t, double> bids{&pool}, asks{&pool};
     std::vector<Layer> layers;
     bool initialized = false, valid = false;
+    bool midSeen = false; // bounded policy only: zero is a legitimate midpoint
     bool observing = false; // derived from continuity and book; not serialized
     int64_t clock = 0, minute = 0, closedThrough = 0, offset = 0;
     int64_t minuteThroughMs = 0;
@@ -90,6 +91,33 @@ struct Symbol {
     // Worker mirror of Impl::awaiting; never exported or forked.
     enum class Wait : uint8_t { None, Upstream, Recorder } wait = Wait::None;
 };
+// Dispatch the level loops once per message. The unbounded specialization is
+// exactly the existing converter, with no new branch or allocation per level.
+template<bool Bounded>
+std::optional<int64_t> recorderPriceUnits(double price, const RecorderConfig& cfg) {
+    if constexpr (!Bounded) return priceUnits(price, cfg.priceScale);
+    else {
+        if (!std::isfinite(price) || price < cfg.priceBounds->lower || price > cfg.priceBounds->upper)
+            return {};
+        const double scaled = price * cfg.priceScale;
+        if (!std::isfinite(scaled) || scaled >= 0x1p63) return {};
+        return std::llround(scaled);
+    }
+}
+std::optional<double> bookMid(const Symbol& s, const RecorderConfig& cfg) {
+    if (cfg.priceBounds) {
+        // Only actual resting sides can cross: a lone ask at zero or bid at
+        // the upper bound is valid even when it equals the synthetic edge.
+        if (!s.bids.empty() && !s.asks.empty() && s.bids.rbegin()->first >= s.asks.begin()->first)
+            return {};
+        return std::midpoint(s.bids.empty() ? cfg.priceBounds->lower : double(s.bids.rbegin()->first) / cfg.priceScale,
+                             s.asks.empty() ? cfg.priceBounds->upper : double(s.asks.begin()->first) / cfg.priceScale);
+    }
+    if (s.bids.empty() || s.asks.empty() || s.bids.rbegin()->first >= s.asks.begin()->first) return {};
+    const double mid = std::midpoint(static_cast<double>(s.bids.rbegin()->first) / cfg.priceScale,
+                                     static_cast<double>(s.asks.begin()->first) / cfg.priceScale);
+    return std::isfinite(mid) ? std::optional<double>{mid} : std::nullopt;
+}
 uint16_t encode(long double v, const SizeScale &scale, uint32_t &flags) {
     if (v <= 0)
         return 0;
@@ -101,6 +129,7 @@ uint16_t encode(long double v, const SizeScale &scale, uint32_t &flags) {
 // Window tests use the row's lower price edge. Bounds cover zeros too: they are
 // the actual inclusion window, not the min/max of the nonzero entries.
 std::pair<int64_t, int64_t> bounds(double loMid, double hiMid, const LayerConfig &layer, double scale) {
+    if (layer.absoluteRows) return {layer.absoluteRows->low, layer.absoluteRows->high};
     const long double low = static_cast<long double>(loMid) * layer.lowFrac * scale / layer.rowTickUnits;
     const long double high = static_cast<long double>(hiMid) * layer.highMult * scale / layer.rowTickUnits;
     constexpr auto max = std::numeric_limits<int64_t>::max();
@@ -155,7 +184,12 @@ StateJson statePolicy(const RecorderConfig& c) {
     j["sizeScale"] = {c.sizeScale.floor,c.sizeScale.codesPerOctave};
     j["publication"] = int(c.publication);
     j["layers"] = StateJson::array();
-    for (const auto& l : c.layers) j["layers"].push_back({l.name,l.rowTickUnits,l.lowFrac,l.highMult,l.hourlyRollup});
+    for (const auto& l : c.layers) {
+        StateJson layer = {l.name,l.rowTickUnits,l.lowFrac,l.highMult,l.hourlyRollup};
+        if (l.absoluteRows) layer.push_back({l.absoluteRows->low,l.absoluteRows->high});
+        j["layers"].push_back(std::move(layer));
+    }
+    if (c.priceBounds) j["priceBounds"] = {c.priceBounds->lower,c.priceBounds->upper};
     return j;
 }
 StateJson pack(const Hmc2Header& v) {
@@ -257,8 +291,9 @@ void unpack(const StateJson& j, Hmc2Record& v) {
         previous = key;
     }
 }
-StateJson packSymbol(const Symbol& v) {
+StateJson packSymbol(const Symbol& v, bool bounded) {
     StateJson j;
+    if (bounded) j["midSeen"] = v.midSeen;
     j["initialized"] = v.initialized;
     j["valid"] = v.valid;
     j["clock"] = v.clock;
@@ -306,6 +341,7 @@ StateJson packSymbol(const Symbol& v) {
 std::unique_ptr<Symbol> unpackSymbol(const StateJson& j, const std::string& name, const RecorderConfig& cfg) {
     auto symbol = std::make_unique<Symbol>();
     auto& v = *symbol;
+    if (cfg.priceBounds) j.at("midSeen").get_to(v.midSeen);
     j.at("initialized").get_to(v.initialized);
     j.at("valid").get_to(v.valid);
     j.at("clock").get_to(v.clock);
@@ -327,12 +363,16 @@ std::unique_ptr<Symbol> unpackSymbol(const StateJson& j, const std::string& name
     stateRequire(v.clock >= 0 && v.clock <= kMaxTime && v.minute >= 0 && v.minute % kMinute == 0 &&
         v.clock >= v.minute && v.clock < v.minute + kMinute && v.observed <= kMinute &&
         v.closedThrough >= 0 && v.closedThrough <= v.clock && (!v.valid || v.initialized), "invalid symbol clock/validity");
-    const auto book = [](const StateJson& items, auto& dest) {
+    const auto book = [&](const StateJson& items, auto& dest) {
         stateRequire(items.is_array(), "book schema");
         for (const auto& e : items) {
             stateRequire(e.is_array() && e.size() == 2, "book entry schema");
             const auto price = e.at(0).get<int64_t>(); const auto size = e.at(1).get<double>();
-            stateRequire(price > 0 && std::isfinite(size) && size > 0 && dest.emplace(price,size).second, "invalid/duplicate book level");
+            const bool priceValid = cfg.priceBounds
+                ? price >= std::llround(cfg.priceBounds->lower * cfg.priceScale) &&
+                  price <= std::llround(cfg.priceBounds->upper * cfg.priceScale)
+                : price > 0;
+            stateRequire(priceValid && std::isfinite(size) && size > 0 && dest.emplace(price,size).second, "invalid/duplicate book level");
         }
     };
     book(j.at("bids"),v.bids); book(j.at("asks"),v.asks);
@@ -351,7 +391,7 @@ std::unique_ptr<Symbol> unpackSymbol(const StateJson& j, const std::string& name
         unpack(a.at("header"),l.header);
         const auto& c = cfg.layers[li++];
         Hmc2Header expected{name,c.name,kMinute,cfg.priceScale,c.rowTickUnits,cfg.sizeScale,0};
-        expected.configHash = Hmc2Store::configHash(expected,c.lowFrac,c.highMult);
+        expected.configHash = Hmc2Store::configHash(expected,c.lowFrac,c.highMult,c.absoluteRows,cfg.priceBounds);
         stateRequire(pack(l.header) == pack(expected), "layer header policy mismatch");
         const auto& o = a.at("publishedOpen");
         l.publishedOpen = {o.at(0),o.at(1),o.at(2),o.at(3)};
@@ -380,10 +420,16 @@ std::unique_ptr<Symbol> unpackSymbol(const StateJson& j, const std::string& name
             out.bucketStartMs < v.minute && (v.pending.empty() || v.pending.back().bucketStartMs <= out.bucketStartMs), "pending identity/order");
         v.pending.push_back(std::move(out));
     }
-    v.observing = v.valid && !v.bids.empty() && !v.asks.empty() &&
-        v.bids.rbegin()->first < v.asks.begin()->first &&
-        std::isfinite(std::midpoint(static_cast<double>(v.bids.rbegin()->first) / cfg.priceScale,
-                                  static_cast<double>(v.asks.begin()->first) / cfg.priceScale));
+    const auto mid = bookMid(v, cfg);
+    v.observing = v.valid && mid.has_value();
+    if (cfg.priceBounds) {
+        stateRequire((v.observed == 0 || v.midSeen) && (v.midSeen ||
+            (v.midOpen == 0 && v.midClose == 0 && v.midMin == 0 && v.midMax == 0)), "bounded mid presence");
+        stateRequire(!v.observing || (v.midSeen && v.mid == *mid && v.unobservedSince == -1), "bounded midpoint state");
+        stateRequire(!v.midSeen || (v.midMin <= v.midOpen && v.midOpen <= v.midMax &&
+            v.midMin <= v.midClose && v.midClose <= v.midMax &&
+            v.midMin >= cfg.priceBounds->lower && v.midMax <= cfg.priceBounds->upper), "bounded mid range");
+    }
     return symbol;
 }
 } // namespace
@@ -439,10 +485,24 @@ struct BookRecorder::Impl {
             c.oneSidedSuspectMs < 0 || c.livePublishMs <= 0 ||
             c.commitFloorMs < 0 || c.commitFloorMs > c.commitCeilingMs || c.commitCeilingMs > kHmc2EndMs)
             throw std::invalid_argument("BookRecorder: invalid config");
+        if (c.priceBounds) {
+            const auto [lower, upper] = *c.priceBounds;
+            // Endpoints must survive quantization unchanged; otherwise the
+            // recorded best price could escape the declared midpoint domain.
+            const auto edge = [&](double p) {
+                const double units = p * c.priceScale;
+                return std::isfinite(units) && units < 0x1p63 && units == std::round(units);
+            };
+            if (!std::isfinite(lower) || !std::isfinite(upper) || lower < 0 || upper <= lower ||
+                !edge(lower) || !edge(upper))
+                throw std::invalid_argument("BookRecorder: invalid price bounds");
+        }
         std::set<std::string> names;
         for (const auto &l : c.layers) {
-            if (l.rowTickUnits <= 0 || !std::isfinite(l.lowFrac) || !std::isfinite(l.highMult) || l.lowFrac <= 0 ||
-                l.highMult < l.lowFrac || !names.insert(l.name).second)
+            const bool windowValid = l.absoluteRows
+                ? l.lowFrac == 0 && l.highMult == 0 && l.absoluteRows->low >= 0 && l.absoluteRows->high >= l.absoluteRows->low
+                : std::isfinite(l.lowFrac) && std::isfinite(l.highMult) && l.lowFrac > 0 && l.highMult >= l.lowFrac;
+            if (l.rowTickUnits <= 0 || !windowValid || !names.insert(l.name).second)
                 throw std::invalid_argument("BookRecorder: invalid layer");
             Hmc2Header h;
             h.symbol = "validation";
@@ -529,7 +589,7 @@ struct BookRecorder::Impl {
         for (const auto &l : cfg.layers) {
             auto &layer = next->layers.emplace_back(&next->pool);
             layer.header = {name, l.name, kMinute, cfg.priceScale, l.rowTickUnits, cfg.sizeScale, 0};
-            layer.header.configHash = Hmc2Store::configHash(layer.header, l.lowFrac, l.highMult);
+            layer.header.configHash = Hmc2Store::configHash(layer.header, l.lowFrac, l.highMult, l.absoluteRows, cfg.priceBounds);
             (void)Hmc2Store::filePath(cfg.root, layer.header, kHmc2MinMs);
         }
         return *symbols.emplace(name, std::move(next)).first->second;
@@ -580,23 +640,21 @@ struct BookRecorder::Impl {
         awaitSnapshot(name, s, "unobserved suspect", false);
     }
     bool trackMid(Symbol &s) {
-        if (s.bids.empty() || s.asks.empty() || s.bids.rbegin()->first >= s.asks.begin()->first)
-            return false;
-        const double mid = std::midpoint(static_cast<double>(s.bids.rbegin()->first) / cfg.priceScale,
-                                         static_cast<double>(s.asks.begin()->first) / cfg.priceScale);
-        if (!std::isfinite(mid))
-            return false;
-        s.mid = mid;
-        if (!s.midMin) {
+        const auto mid = bookMid(s, cfg);
+        if (!mid) return false;
+        s.mid = *mid;
+        if (cfg.priceBounds ? !s.midSeen : !s.midMin) {
             s.midOpen = s.midMin = s.midMax = s.mid;
         }
         s.midMin = std::min(s.midMin, s.mid);
         s.midMax = std::max(s.midMax, s.mid);
         s.midClose = s.mid;
+        s.midSeen = true;
         return true;
     }
     void resetMinute(Symbol &s) {
         s.observed = 0;
+        s.midSeen = false;
         s.flags = 0;
         s.midOpen = s.midMin = s.midMax = s.midClose = 0;
         if (s.observing)
@@ -963,11 +1021,12 @@ struct BookRecorder::Impl {
             l.publishedColumnMs = l.lastColumnMs;
         }
     }
+    template<bool Bounded>
     void apply(Symbol &s, const Message &m) {
         // Validate the complete message before changing any level. A malformed
         // batch invalidates continuity; skipping only its bad levels invents a book.
         for (const auto &level : m.levels) {
-            if (!priceUnits(level.price, cfg.priceScale) || !std::isfinite(level.size) || level.size < 0) {
+            if (!recorderPriceUnits<Bounded>(level.price, cfg) || !std::isfinite(level.size) || level.size < 0) {
                 sLog_Warning("BookRecorder: malformed L2 symbol=" << m.symbol());
                 invalidate(m.symbol(), s, "malformed L2");
                 return;
@@ -991,7 +1050,7 @@ struct BookRecorder::Impl {
         for (auto &l : s.layers)
             l.touched.clear();
         for (const auto &level : m.levels) {
-            const int64_t units = *priceUnits(level.price, cfg.priceScale);
+            const int64_t units = *recorderPriceUnits<Bounded>(level.price, cfg);
             auto &book = level.isBid ? s.bids : s.asks;
             const auto old = book.find(units);
             const double oldSize = old == book.end() ? 0 : old->second;
@@ -1031,7 +1090,7 @@ struct BookRecorder::Impl {
                 }
             }
         }
-        if (m.kind == Kind::Snapshot && (s.bids.empty() || s.asks.empty())) {
+        if (!Bounded && m.kind == Kind::Snapshot && (s.bids.empty() || s.asks.empty())) {
             invalidate(m.symbol(), s, "missing two-sided mid");
             return;
         }
@@ -1128,8 +1187,10 @@ struct BookRecorder::Impl {
         advance(s, t);
         if (late)
             s.flags |= kLateEvents;
-        if (m.kind == Kind::Snapshot || s.valid)
-            apply(s, m);
+        if (m.kind == Kind::Snapshot || s.valid) {
+            if (cfg.priceBounds) apply<true>(s, m);
+            else apply<false>(s, m);
+        }
         publishOpen(s);
         sLog_Probe("recording.event", "symbol=" << m.symbol() << " envelope=" << m.time << " clock=" << s.clock
                                                 << " valid=" << s.valid << " levels=" << m.levels.size());
@@ -1213,6 +1274,7 @@ std::unique_ptr<BookRecorder> BookRecorder::forkLead(std::function<void(std::sha
         to->observed = from->observed;
         to->flags = from->flags;
         to->lastPublish = from->lastPublish;
+        to->midSeen = from->midSeen;
         to->mid = from->mid;
         to->midOpen = from->midOpen;
         to->midMin = from->midMin;
@@ -1238,7 +1300,7 @@ std::vector<uint8_t> BookRecorder::exportState() {
         {"watermarks",StateJson::array()},
         {"stats",{src.columnsWritten.load(),src.lateEvents.load(),src.backwardSteps.load(),
                    src.invalidations.load(),src.diskErrors.load()}}};
-    for (const auto& [name,s] : src.symbols) j["symbols"][name] = packSymbol(*s);
+    for (const auto& [name,s] : src.symbols) j["symbols"][name] = packSymbol(*s, src.cfg.priceBounds.has_value());
     {
         std::lock_guard lock(src.watermarksMutex);
         for (const auto& [key,w] : src.watermarksBySeries)

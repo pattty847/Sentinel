@@ -1215,12 +1215,26 @@ fs::path Hmc2Store::filePath(const fs::path &root, const Hmc2Header &h, int64_t 
     return root / h.symbol / (h.layer + "-" + std::to_string(h.tfMs)) /
            (dayName(ms) + (gen ? ".g" + std::to_string(gen) : "") + ".hmc2");
 }
-uint64_t Hmc2Store::configHash(const Hmc2Header &h, double low, double high) {
+uint64_t Hmc2Store::configHash(const Hmc2Header &h, double low, double high,
+                                std::optional<AbsoluteRowBounds> absoluteRows,
+                                std::optional<PriceBounds> priceBounds) {
     auto copy = h;
     copy.configHash = 0;
     auto b = headerBody(copy);
     put(b, low);
     put(b, high);
+    // No extension at all for legacy policies: existing files/anchors keep
+    // their exact identity. Tagged fixed-width fields distinguish each option.
+    if (absoluteRows) {
+        put(b, uint32_t{0x31575241}); // ARW1
+        put(b, absoluteRows->low);
+        put(b, absoluteRows->high);
+    }
+    if (priceBounds) {
+        put(b, uint32_t{0x31444e42}); // BND1
+        put(b, priceBounds->lower);
+        put(b, priceBounds->upper);
+    }
     uint64_t hash = 14695981039346656037ull;
     for (auto v : b) {
         hash ^= v;

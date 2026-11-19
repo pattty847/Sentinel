@@ -15,6 +15,10 @@ struct LayerConfig {
     double lowFrac;
     double highMult;
     bool hourlyRollup;
+    // Exclusive policy: when present, lowFrac and highMult must both be zero.
+    // Bounds are inclusive row indices, independent of the mid; their price
+    // window scales with rowTickUnits / priceScale.
+    std::optional<AbsoluteRowBounds> absoluteRows;
 };
 struct RecorderConfig {
     std::filesystem::path root;
@@ -33,7 +37,7 @@ struct RecorderConfig {
     // Deterministic allocation-failure seam, before building any publication
     // (open-minute records and pending/committed copies). Tests only.
     std::function<void(bool provisional)> beforePublicationForTest;
-    // Continuous empty, one-sided or crossed books stay reconstructible but unobserved.
+    // Unbounded empty/one-sided books and all crossed books stay reconstructible but unobserved.
     // After this integration-clock duration, request a precautionary snapshot.
     int64_t oneSidedSuspectMs = 30'000;
     // Test synchronization only, called under the queue mutex before blocking.
@@ -53,6 +57,10 @@ struct RecorderConfig {
     // claim (committedThroughMs 0); normally created by forkLead().
     enum class Publication { Finals = 1, Lead = 2 };
     Publication publication = Publication::Finals;
+    // Missing bids/asks use lower/upper for the midpoint; even an empty book
+    // is observed. Real crossed/locked sides remain unusable. Prices outside
+    // these inclusive, nonnegative bounds invalidate the whole L2 batch.
+    std::optional<PriceBounds> priceBounds;
 };
 struct Level {
     bool isBid;
@@ -101,7 +109,8 @@ class BookRecorder {
     // oneSidedSuspectMs. upstream means onInvalid (transport/journal); recorder
     // failures and suspicious continuous books use upstream=false. An accepted
     // snapshot clears any wait. A continuous book also clears its precautionary
-    // wait when updates restore a two-sided, uncrossed, representable midpoint.
+    // wait when updates restore a usable midpoint (bounded books may be empty
+    // or one-sided; actual crossed/locked sides remain unusable).
     // Thread-safe; reflects processed messages.
     struct SnapshotWait {
         std::string reason;
