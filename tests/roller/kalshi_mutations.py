@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Run the WHOLE script inside one build-queue invocation (never queue nested builds):
-_private/tools/agent/build-queue.sh --label lt-astra/kalshi-journal-decoder -- python3 tests/roller/kalshi_mutations.py
+"""Run the WHOLE script inside one build-queue invocation; never queue nested builds.
 
 The tree must be clean. Each isolated regression must fail its test; restore,
 rebuild and pass the same test before proceeding. No network or production data.
