@@ -84,9 +84,10 @@ nlohmann::json kalshiMetadata(const std::string& symbol) {
 }
 // Header-only file with independently rebuilt length/CRC, so a malformed
 // schema reaches reader validation instead of failing the framing checksum.
-void saveHeader(const QString& path, const nlohmann::json& header) {
+void saveHeader(const QString& path, const nlohmann::json& header, char version = 1) {
     const auto body = header.dump();
     QByteArray bytes("RAWL2\r\n\1", 8);
+    bytes[7] = version;
     for (const uint32_t value : {uint32_t(body.size()), sentinel::crc32(body.data(), body.size())})
         for (int i = 0; i < 4; ++i) bytes.append(char(value >> (8 * i)));
     bytes.append(body.data(), body.size()); save(path, bytes);
@@ -145,6 +146,28 @@ TEST_F(CaptureTest, CoinbaseHeaderGoldenBytes) {
     ASSERT_EQ(spec.tickBands.size(), 1); EXPECT_EQ(spec.tickBands[0].step, "0.01");
     EXPECT_EQ(spec.sizeIncrement, "0.00000001");
 }
+TEST_F(CaptureTest, CoinbaseWriterPreservesMetadataAgnosticConstruction) {
+    // The writer accepts opaque metadata at base. Reader schema validation is
+    // intentionally stricter; these synthetic headers need not be readable.
+    for (const auto& meta : std::vector<nlohmann::json>{
+            nlohmann::json::object(), {{"tool_version", "opaque-metadata"}}, nullptr,
+            {{"product_metadata", nullptr}}, {{"product_metadata", "opaque"}},
+            {{"product_metadata", {{"product_id", "OTHER"}}}},
+            {{"product_metadata", {{"product_id", "BTC-USD"}, {"quote_increment", 1}}}}}) {
+        SCOPED_TRACE(meta.dump());
+        EXPECT_NO_THROW({
+            Writer writer(config, meta);
+            writer.append(record(Kind::Frame, 0, "opaque"));
+            writer.close();
+            EXPECT_TRUE(QFileInfo::exists(writer.currentPath()));
+        });
+    }
+    // Missing metadata must not mask the base symbol/config runtime_error.
+    auto bad = config; bad.symbol = "BTC.USD";
+    EXPECT_THROW(Writer(bad, nlohmann::json::object()), std::runtime_error);
+    bad = config; bad.blockBytes = 0;
+    EXPECT_THROW(Writer(bad, nlohmann::json::object()), std::runtime_error);
+}
 TEST_F(CaptureTest, CoinbaseWriterKeepsStrictSymbolRules) {
     for (const auto& symbol : {std::string("BTC.USD"), std::string(41, 'A')}) {
         config.symbol = symbol; auto meta = metadata(); meta["product_metadata"]["product_id"] = symbol;
@@ -188,6 +211,7 @@ TEST_F(CaptureTest, MalformedKalshiInstrumentRejectedByWriterAndReader) {
         bad = header; bad["instrument"].erase(field); check(bad);
     }
     for (const auto& value : {nlohmann::json("nan"), nlohmann::json("1e-2"), nlohmann::json("-0.01"),
+         nlohmann::json("+0.01"), nlohmann::json(" 0.01"), nlohmann::json("0.01 "),
          nlohmann::json(".01"), nlohmann::json("1."), nlohmann::json(""), nlohmann::json("0.0.1"), nlohmann::json(0.01)}) {
         bad = header; bad["instrument"]["price_ranges"][0]["step"] = value; check(bad);
     }
@@ -213,13 +237,42 @@ TEST_F(CaptureTest, MalformedKalshiInstrumentRejectedByWriterAndReader) {
 TEST_F(CaptureTest, KalshiReaderChecksChannelsAndProductIdentity) {
     Writer good(config, kalshiMetadata(config.symbol)); good.append(record(Kind::Frame, 0)); good.close();
     const auto header = readHeader(good.currentPath());
-    auto bad = header; bad["channels"] = {"level2", "market_trades", "heartbeats"};
+    for (const auto& channels : std::vector<nlohmann::json>{
+            {"trade"}, {"ticker", "orderbook_delta"}, {"future_channel"},
+            {"level2", "market_trades", "heartbeats"}}) {
+        auto changed = header; changed["channels"] = channels;
+        saveHeader(dir.path() + "/channels.rawl2", changed);
+        EXPECT_EQ(readHeader(dir.path() + "/channels.rawl2").at("channels"), channels);
+    }
+    for (const auto& channels : std::vector<nlohmann::json>{
+            nullptr, nlohmann::json::array(), "trade", nlohmann::json::object(),
+            {""}, {"trade", ""}, {"trade", 7}, {"trade", nullptr}}) {
+        auto bad = header; bad["channels"] = channels;
+        saveHeader(dir.path() + "/bad.rawl2", bad);
+        EXPECT_THROW(readHeader(dir.path() + "/bad.rawl2"), std::exception) << channels.dump();
+    }
+    auto bad = header; bad.erase("channels");
     saveHeader(dir.path() + "/bad.rawl2", bad);
     EXPECT_THROW(readHeader(dir.path() + "/bad.rawl2"), std::exception);
     bad = header; bad["products"] = {"OTHER"}; saveHeader(dir.path() + "/bad.rawl2", bad);
     EXPECT_THROW(readHeader(dir.path() + "/bad.rawl2"), std::exception);
     bad = header; bad["product_metadata"]["product_id"] = "OTHER";
     EXPECT_THROW(Writer(config, bad), std::runtime_error);
+}
+TEST_F(CaptureTest, KalshiVenueRejectedOnV2Header) {
+    Writer writer(config, kalshiMetadata(config.symbol));
+    writer.append(record(Kind::Frame, 0)); writer.close();
+    auto header = readHeader(writer.currentPath());
+    header["format_version"] = 2;
+    header["connection_products"] = {"BTC-USD", "ETH-USD"};
+    header["routing"] = RoutingId;
+    saveHeader(dir.path() + "/v2.rawl2", header, 2);
+    try {
+        readHeader(dir.path() + "/v2.rawl2");
+        FAIL() << "Kalshi accepted with Coinbase v2 routing";
+    } catch (const std::runtime_error& e) {
+        EXPECT_STREQ(e.what(), "RAWL2: v2 routing requires Coinbase");
+    }
 }
 TEST_F(CaptureTest, ExactBytesAndClocksRoundTripIncludingWhitespaceNulAndInvalidJson) {
     config.fsyncBlocks = 1;
