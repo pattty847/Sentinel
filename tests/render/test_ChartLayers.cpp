@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <map>
 #include "heatmap/HeatmapResolution.hpp"
 #include <chrono>
 #include <cstdio>
@@ -1152,7 +1153,7 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     params.fontPx = 64; params.charset = " 0123456789.+-,:/<>$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     ASSERT_TRUE(atlas.build(params));
     const double widest = chart::kFlowMagnitudeGlyphs * atlas.glyph(QChar('8')).advance * chart::kFootprintTextPx / atlas.fontPx();
-    EXPECT_LE(widest, (chart::kFootprintNumbersFitColumn - chart::kFootprintCandleSpace) / 2 - 3);
+    EXPECT_LE(widest, (chart::kFootprintNumbersFitColumn - chart::kFootprintCandleSpace) / 2 - 2 * chart::ChartTextRule::kDefaultPadPx);
     chart::FootprintCellsLayer layer;
     layer.presentation().enabled = true;
     auto frame = footprintChartFrame();
@@ -1215,11 +1216,224 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
     EXPECT_EQ(layer.stage(), chart::FootprintStage::Numbers);
     EXPECT_EQ(layer.glyphCount(), 10u) << "widest labels survive at the hysteresis exit edge";
+    // All or none (chart text rule): each number is its own per-value text, centred; at 18 px
+    // "5" fits its half column and "123k" does not, so the frame shows no number at all.
+    auto& mixed = layer.mailbox().back(); mixed = layer.current();
+    mixed.cells[0].bidVol = 500; mixed.cells[0].askVol = 12'300'000;
+    layer.mailbox().post();
+    frame.context.raster.colPxF = chart::kFootprintNumbersColumn;
+    frame.context.raster.rowPxF = 24; // one row per band, tall enough for 18 px with its padding
+    frame.context.raster.topF = 102 * frame.context.raster.rowPxF;
+    const auto large = chart::ChartTextRule::clamped(18, 18, 2);
+    layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context, 0, large);
+    EXPECT_EQ(layer.glyphCount(), 0u);
+    EXPECT_FALSE(layer.textFit().on);
+    // Each value prints per value: 5 and 123k, and that text fits the default rule.
+    layer.submitLabels(frame, context, 0, chart::ChartTextRule{});
+    EXPECT_EQ(layer.glyphCount(), 5u) << "5 and 123k at the default rule";
+    EXPECT_TRUE(layer.textFit().on);
+    // A new timeframe (or tick, or a symbol switch through invalid data) forgets the decision.
+    auto other = frame;
+    other.context.time.activeTimeframeMs = 5000;
+    layer.sync(other);
+    EXPECT_EQ(layer.textFit(), chart::ChartTextFit{});
+    layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context, 0, chart::ChartTextRule{});
+    EXPECT_TRUE(layer.textFit().on);
     layer.presentation().numbers = false;
     layer.sync(frame); layer.submitLabels(frame, context);
     EXPECT_EQ(layer.glyphCount(), 0u);
     EXPECT_TRUE(layer.drawing());
     EXPECT_FALSE(layer.drawingNumbers());
+}
+
+// Footprint numbers (owner 2026-11-18): each number is the shared formatter's per-value text
+// in the layer's form, its ink box centred in its usable half cell (clear of the candle space
+// and the spine). Pen start and baseline are device-snapped; centring error <= half a device px.
+struct FootprintNumber { std::string text; double inkLeft = 0, inkRight = 0; QPointF anchor; };
+struct FootprintRun {
+    std::vector<FootprintNumber> numbers;
+    double scale = 0, mid = 0, colLogical = 0;
+    std::string full[4], compact[4];
+};
+FootprintRun footprintRun(const std::array<int64_t, 4>& volumes, double colLogical, double dpr) {
+    FootprintRun out;
+    ChartTextAtlas atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 64; params.charset = "0123456789.<>kMBT";
+    EXPECT_TRUE(atlas.build(params));
+    chart::FootprintCellsLayer layer;
+    layer.presentation().enabled = true;
+    layer.presentation().dustNotional = 0;
+    auto frame = footprintChartFrame();
+    auto& raster = frame.context.raster;
+    raster.dpr = dpr;
+    raster.colPxF = colLogical * dpr;
+    raster.rowPxF = 24 * dpr;
+    raster.topF = 102 * raster.rowPxF;
+    EXPECT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), footprintFrame()));
+    auto& data = layer.mailbox().back();
+    EXPECT_EQ(data.cellCount, 2);
+    data.cells[0].bidVol = volumes[0]; data.cells[0].askVol = volumes[1];
+    data.cells[1].bidVol = volumes[2]; data.cells[1].askVol = volumes[3];
+    for (size_t i = 0; i < 4; ++i) {
+        char t[24];
+        chart::formatChartNumber(double(volumes[i]) / 100, t);
+        out.full[i] = t;
+        chart::formatChartNumber(double(volumes[i]) / 100, t, {chart::NumberForm::Compact});
+        out.compact[i] = t;
+    }
+    layer.mailbox().post();
+    std::unique_ptr<QSGNode> root(layer.createContainer());
+    ChartTextRenderer text;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
+    layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+    EXPECT_TRUE(layer.textFit().on);
+    out.scale = layer.textFit().sizePx / atlas.fontPx();
+    out.colLogical = colLogical;
+    out.mid = (colLogical + chart::kFootprintCandleSpace) * .5;
+    const double pad = atlas.paddingPx() * out.scale;
+    for (const auto& glyph : layer.glyphs()) {
+        char c = '?';
+        for (const char k : std::string(params.charset.toLatin1().constData()))
+            if (atlas.glyph(QChar(k)).uv == glyph.uv) c = k;
+        if (out.numbers.empty() || out.numbers.back().anchor != glyph.debugAnchor) {
+            out.numbers.push_back({"", glyph.rect.left() + pad, 0, glyph.debugAnchor});
+        }
+        out.numbers.back().text += c;
+        out.numbers.back().inkRight = glyph.rect.right() - pad;
+    }
+    return out;
+}
+
+TEST(FootprintCells, NumbersAreCentredInTheirHalfCell) {
+    QTemporaryDir cache;
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
+    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
+    for (const double dpr : {1.0, 2.0})
+        for (const double col : {160.0, 161.0, 163.5}) {
+            SCOPED_TRACE(std::to_string(dpr) + " x " + std::to_string(col));
+            const auto run = footprintRun({22, 373, 3, 1240}, col, dpr); // 0.22 | 3.73, 0.03 | 12.4
+            ASSERT_EQ(run.numbers.size(), 4u);
+            for (const auto& n : run.numbers) {
+                EXPECT_NEAR(n.anchor.x() * dpr, std::round(n.anchor.x() * dpr), 1e-6) << "pen start snapped";
+                EXPECT_NEAR(n.anchor.y() * dpr, std::round(n.anchor.y() * dpr), 1e-6) << "baseline snapped";
+                const bool sell = n.inkRight <= run.mid;
+                const double boxLeft = sell ? chart::kFootprintCandleSpace : run.mid, boxRight = sell ? run.mid : col;
+                EXPECT_LE(std::abs((n.inkLeft + n.inkRight) * .5 - (boxLeft + boxRight) * .5), 0.5 / dpr + 1e-6) << n.text;
+            }
+        }
+}
+
+// A mixed-magnitude frame prints each value exactly as the formatter does in the layer's
+// form: no shared unit, no shared decimals.
+TEST(FootprintCells, MixedMagnitudesPrintTheFormatterText) {
+    QTemporaryDir cache;
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
+    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
+    const auto run = footprintRun({123'400, 1'234'500, 24'500, 3}, 200, 1); // 1234 | 12345, 245 | 0.03
+    std::multiset<std::string> drawn, expected;
+    for (const auto& n : run.numbers) drawn.insert(n.text);
+    for (const auto& t : run.full) expected.insert(t);
+    EXPECT_EQ(drawn, expected);
+    EXPECT_EQ(expected, (std::multiset<std::string>{"1.23k", "12.3k", "245", "0.03"}));
+}
+
+// A coalesced symbol switch (a new scope generation, no invalid snapshot between) forgets
+// the text decision.
+TEST(FootprintCells, AScopeSwitchForgetsTheDecision) {
+    QTemporaryDir cache;
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
+    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
+    ChartTextAtlas atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 64; params.charset = "0123456789.<>kMBT";
+    ASSERT_TRUE(atlas.build(params));
+    chart::FootprintCellsLayer layer;
+    layer.presentation().enabled = true;
+    layer.presentation().dustNotional = 0;
+    auto frame = footprintChartFrame();
+    frame.context.raster.colPxF = 160;
+    frame.context.raster.rowPxF = 24;
+    frame.context.raster.topF = 102 * frame.context.raster.rowPxF;
+    std::unique_ptr<QSGNode> root(layer.createContainer());
+    ChartTextRenderer text;
+    chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
+    const auto publish = [&](uint64_t generation) {
+        ASSERT_TRUE(chart::FlowFeed::bin(layer.mailbox().back(), footprintSeries(), footprintFrame()));
+        layer.mailbox().back().scopeGeneration = generation;
+        layer.mailbox().post();
+    };
+    publish(1);
+    layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+    ASSERT_TRUE(layer.textFit().on);
+    publish(2);
+    layer.sync(frame);
+    EXPECT_EQ(layer.textFit(), chart::ChartTextFit{}) << "a new scope generation forgets the decision";
+}
+
+// All or none at the footprint's budgets: more wanted numbers than the collection holds,
+// or more glyphs than kMaxGlyphs in every form, draw no number at all (never a subset).
+TEST(FootprintCells, CollectionOverflowAndGlyphBudgetDrawNone) {
+    QTemporaryDir cache;
+    QString error;
+    ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
+    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
+    ChartTextAtlas atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 64; params.charset = "0123456789.<>kMBT";
+    ASSERT_TRUE(atlas.build(params));
+    const auto run = [&](int bars, int rows, int64_t volume) {
+        chart::FootprintCellsLayer layer;
+        layer.presentation().enabled = true;
+        layer.presentation().dustNotional = 0;
+        chart::ChartFrame frame;
+        auto& f = frame.context;
+        f.surfaceBounds = {0, 0, double(bars) * 160, double(rows) * 18 + 10};
+        f.itemBounds = f.surfaceBounds;
+        f.time.activeTimeframeMs = 1000;
+        f.overlays.footprint = true;
+        auto& r = f.raster;
+        r.valid = true; r.dpr = 1; r.tick = 1; r.tfMs = 1000;
+        r.rowPx = 18; r.rowPxF = 18; r.colPx = 160; r.colPxF = 160;
+        r.drawnStartMs = 0; r.drawnEndMs = bars * 1000.0; r.drawnMinPrice = 100; r.drawnMaxPrice = 100.0 + rows;
+        r.topF = (100.0 + rows) * 18; r.heightDev = rows * 18 + 10; r.widthDev = bars * 160;
+        auto& data = layer.mailbox().back();
+        data.valid = true; data.timeframeMs = 1000; data.tick = 1;
+        for (int b = 0; b < bars; ++b) {
+            auto& bar = data.bars[size_t(b)];
+            bar.startMs = b * 1000; bar.baseScale = 100;
+            bar.firstCell = data.cellCount; bar.cellCount = rows; bar.lowRow = 100; bar.highRow = 100 + rows;
+            for (int row = 0; row < rows; ++row) {
+                auto& cell = data.cells[size_t(data.cellCount++)];
+                cell.row = 100 + row; cell.span = 1; cell.bidVol = volume; cell.askVol = volume;
+            }
+            bar.maxSideVol = volume; bar.maxRowVol = 2 * volume;
+        }
+        data.barCount = bars; data.visibleBarCount = bars;
+        layer.mailbox().post();
+        std::unique_ptr<QSGNode> root(layer.createContainer());
+        ChartTextRenderer text;
+        chart::LayerNodeContext context{nullptr, root.get(), text, atlas, true};
+        layer.sync(frame); layer.updateNodes(frame, context); layer.submitLabels(frame, context);
+        EXPECT_EQ(layer.stage(), chart::FootprintStage::Numbers);
+        return std::pair{layer.glyphCount(), layer.textFit().on};
+    };
+    // A small frame of the same cells draws its numbers ("123k" in both forms: four glyphs).
+    EXPECT_GT(run(4, 10, 12'345'600).first, 0u);
+    // 20 x 300 bands, both sides: 12,000 numbers, more than the collection holds.
+    EXPECT_EQ(run(20, 300, 12'345'600), (std::pair<size_t, bool>{0u, false}));
+    // The same overflow with one-glyph numbers (5): within the glyph budget, still none.
+    EXPECT_EQ(run(20, 300, 500), (std::pair<size_t, bool>{0u, false}));
+    // 20 x 240 x 2 = 9,600 numbers of four glyphs or more: 38,400 > 32,000 in every form.
+    EXPECT_EQ(run(20, 240, 12'345'600), (std::pair<size_t, bool>{0u, false}));
+    // 20 x 180 x 2 = 7,200 numbers: within the budget, every number drawn.
+    EXPECT_EQ(run(20, 180, 12'345'600).first, 7'200u * 4);
 }
 
 TEST(FootprintSource, CellsAreTheOnlyFootprintLayerAndNeedNoSourceSetting) {
@@ -1518,14 +1732,14 @@ TEST(CvdLayer, LabelsAreBoundedAndFreshDataFramesAllocateNothing) {
     layer.updateNodes(frame, context); layer.submitLabels(frame, context);
     const std::string_view title(layer.current().label.data());
     const size_t titleCount = std::count_if(title.begin(), title.end(), [](char c) { return c != ' '; });
-    ASSERT_EQ(text.submittedGlyphs(), int(titleCount) + 9)
-        << "3.00 maximum, zero minimum and 3.00 last must all have glyphs";
+    ASSERT_EQ(text.submittedGlyphs(), int(titleCount) + 3)
+        << "3 maximum, zero minimum and 3 last must all have glyphs";
     const auto glyphs = layer.labelGlyphs();
     QRectF maximum, minimum, last;
     for (size_t i = titleCount; i < glyphs.size(); ++i) {
         EXPECT_TRUE(layer.gutter().contains(glyphs[i].rect));
         EXPECT_FALSE(layer.strip().intersects(glyphs[i].rect));
-        auto& box = i < titleCount + 4 ? maximum : i < titleCount + 5 ? minimum : last;
+        auto& box = i < titleCount + 1 ? maximum : i < titleCount + 2 ? minimum : last;
         box = box.united(glyphs[i].rect);
     }
     EXPECT_FALSE(maximum.intersects(last)); EXPECT_FALSE(minimum.intersects(last));
@@ -1535,7 +1749,7 @@ TEST(CvdLayer, LabelsAreBoundedAndFreshDataFramesAllocateNothing) {
         layer.sync(frame); layer.updateNodes(frame, context);
         text.beginFrame(root.get(), nullptr, atlas);
         layer.submitLabels(frame, context);
-        const int values = height >= 59 ? 9 : height >= 40 ? 5 : height >= 21 ? 4 : 0;
+        const int values = height >= 59 ? 3 : height >= 40 ? 2 : height >= 21 ? 1 : 0;
         const int titleGlyphs = height >= 78 ? int(titleCount) : 0;
         EXPECT_EQ(text.submittedGlyphs(), values + titleGlyphs);
         for (const auto& glyph : layer.labelGlyphs())
@@ -1730,7 +1944,7 @@ TEST(FlowFooter, FreshDataPanAndLabelsAllocateNothingAfterWarmup) {
             if (atlas.glyph(c).uv == glyph.uv) { rendered += c.toLatin1(); break; }
         }
     }
-    EXPECT_EQ(rendered, "+3.00+3.0011.2+3.00+6.0011.2+3.00+9.0011.2DELTACUMVOLview");
+    EXPECT_EQ(rendered, "+3+311.2+3+611.2+3+911.2DELTACUMVOLview");
     for (const auto& glyph : footer.glyphs()) {
         EXPECT_GE(glyph.rect.left(), frame.context.surfaceBounds.left());
         EXPECT_LE(glyph.rect.right(), frame.context.surfaceBounds.right());
@@ -1853,17 +2067,18 @@ TEST(FlowFooter, RowsShareOneColumnGridBesideAFixedLabelGutter) {
     for (const auto& glyph : glyphs)
         for (const auto c : params.charset)
             if (atlas.glyph(c).uv == glyph.uv) { rendered += c.toLatin1(); break; }
-    const std::string column = "+3.00+3.004.00";
+    const std::string column = "+3+34";
     ASSERT_EQ(rendered.substr(0, column.size()), column);
     EXPECT_EQ(rendered.substr(rendered.size() - 18), "DELTACUMVOLBTCview") << "the unit once, after DELTA";
     const double scale = chart::FlowFooterLayout::textPx / atlas.fontPx();
     const auto pen = [&](size_t i, char c) { return glyphs[i].rect.left() - atlas.glyph(QChar(c)).bounds.left() * scale; };
     const auto end = [&](size_t i, char c) { return pen(i, c) + atlas.glyph(QChar(c)).advance * scale; };
     for (int col = 0; col < footer.columnCount(); ++col) {
-        const size_t base = size_t(col) * 14; // +d.dd / +d.dd / d.dd
+        const size_t base = size_t(col) * 5; // +3 / +3 / 4
         SCOPED_TRACE(col);
-        EXPECT_NEAR(end(base + 4, '0'), end(base + 9, '0'), 1e-6) << "DELTA and CUM end together";
-        EXPECT_NEAR(end(base + 4, '0'), end(base + 13, '0'), 1e-6) << "VOL (one character shorter) too";
+        const auto at = [&](size_t i) { return end(i, rendered[i]); };
+        EXPECT_NEAR(at(base + 1), at(base + 3), 1e-6) << "DELTA and CUM end together";
+        EXPECT_NEAR(at(base + 1), at(base + 4), 1e-6) << "VOL (one character shorter) too";
     }
     const size_t labels = glyphs.size() - 18;
     EXPECT_NEAR(pen(labels, 'D'), footer.bounds().left() + 4, 1e-6);

@@ -15,10 +15,11 @@ TEST(FlowFooterPolicy, OneLeadingZeroRuleForEveryRow) {
     char value[24];
     footerNumber(.09, value, true); EXPECT_STREQ(value, "+0.09");
     footerNumber(-.72, value, true); EXPECT_STREQ(value, "-0.72");
-    footerNumber(.5, value, false); EXPECT_STREQ(value, "0.50");
-    footerNumber(.004, value, false); EXPECT_STREQ(value, "<0.01");
-    footerNumber(-.004, value, false); EXPECT_STREQ(value, "-<0.01");
-    footerNumber(3.6, value, false); EXPECT_STREQ(value, "3.60");
+    footerNumber(.5, value, false); EXPECT_STREQ(value, "0.5");
+    footerNumber(.004, value, false); EXPECT_STREQ(value, "0.004");
+    footerNumber(-.004, value, false); EXPECT_STREQ(value, "-0.004");
+    footerNumber(.0004, value, false); EXPECT_STREQ(value, "<0.001");
+    footerNumber(3.6, value, false); EXPECT_STREQ(value, "3.6");
     footerNumber(-11.3, value, true); EXPECT_STREQ(value, "-11.3");
 }
 TEST(FlowFooterPolicy, ThinningIsNonOverlappingAndAnchoredAcrossOneBarPan) {
@@ -49,17 +50,19 @@ TEST(FlowFooterPolicy, ThreeRowsStayAboveStripAndTooSmallSurfacesSuppressFooter)
     EXPECT_FALSE(FlowFooterLayout::place(10, 110, 96).fits);
 }
 
-TEST(FlowFooterPolicy, SubcentDeltasAreUnsignedZeroWithoutAPill) {
-    for (double delta : {-.009, 0., .009}) {
+// Principle 8: a nonzero delta never reads as zero; below a cent it has no pill.
+TEST(FlowFooterPolicy, SubcentDeltasKeepTheirValueWithoutAPill) {
+    const std::pair<double, const char*> cases[] = {{-.009, "-0.009"}, {0., "0"}, {.009, "+0.009"}, {.0001, "+<0.001"}};
+    for (const auto& [delta, text] : cases) {
         char value[24]; footerNumber(delta, value, true);
-        EXPECT_STREQ(value, "0"); EXPECT_FALSE(footerPill(delta));
+        EXPECT_STREQ(value, text); EXPECT_FALSE(footerPill(delta));
     }
     EXPECT_TRUE(footerPill(.01)); EXPECT_TRUE(footerPill(-.01));
 }
 TEST(FlowFooterPolicy, WidthBoundCoversFormatterTransitionsIndependentlyOfValues) {
     const auto width = footerLabelWidth([](char) { return 8.; });
-    EXPECT_EQ(width, 48);
-    for (double value : {0., .001, .01, 9.99, 99.9, 999., 1000., 99999., 1e12, -1e12}) {
+    EXPECT_EQ(width, 56); // "-<0.001": a sign, '<' and five characters
+    for (double value : {0., .0001, .001, .0123, .01, 9.99, 99.9, 999., 1000., 99999., 1e12, -1e12, 1e18, -1e18, -.0001}) {
         for (bool signedValue : {false, true}) {
             char text[24]; const int count = footerNumber(value, text, signedValue);
             EXPECT_LE(count * 8., width);

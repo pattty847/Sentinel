@@ -215,6 +215,7 @@ void FlowFeed::selectSymbol() {
     const auto symbol = ports_.symbol ? ports_.symbol() : QString{};
     if (symbol == symbol_) return;
     symbol_ = symbol;
+    ++scopeGeneration_;
     band_ = 0; // band hysteresis belongs to the old symbol's view
     buffer_.clear();
     withdraw();
@@ -228,6 +229,7 @@ void FlowFeed::withdraw() {
     auto& out = mailbox_.back();
     out.valid = false; out.windowState = FlowSnapshot::WindowState::Loading;
     out.barCount = 0; out.cellCount = 0; out.visibleBarCount = 0; out.serial = ++serial_;
+    out.scopeGeneration = scopeGeneration_;
     post();
 }
 void FlowFeed::receive(SentinelStreamClient::FlowBatchPtr batch) {
@@ -332,6 +334,7 @@ void FlowFeed::publishRows() {
     auto& out = mailbox_.back();
     out.valid = false; out.barCount = 0; out.cellCount = 0; out.visibleBarCount = 0;
     out.skippedBars = 0; out.truncatedBars = 0; out.serial = ++serial_;
+    out.scopeGeneration = scopeGeneration_;
     const auto* series = buffer_.series(symbol_, frame.activeTimeframeMs);
     // Numbers off caps the stage at Cells, as the layer does, so bands stay at the Cells height.
     const auto stage = !numbers_ && lod_ == FootprintStage::Numbers ? FootprintStage::Cells : lod_;

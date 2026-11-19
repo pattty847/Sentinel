@@ -1,4 +1,5 @@
 #include "chart/layers/LadderBadges.hpp"
+#include "chart/core/ChartNumberFormat.hpp"
 #include "chart/layers/LadderGrid.hpp"
 #include "chart/layers/LadderLayer.hpp"
 #include "render/ChartTextAtlas.hpp"
@@ -18,18 +19,6 @@ constexpr BadgeRgba premultiplied(BadgeRgba c) {
 constexpr BadgeRgba kPillBack = premultiplied(kPillBackSrgb);
 constexpr BadgeRgba kBidArrow = premultiplied(kBidArrowSrgb);
 constexpr BadgeRgba kAskArrow = premultiplied(kAskArrowSrgb);
-
-int writeUint(uint64_t v, char* out, int minDigits = 1) {
-    char digits[20];
-    int n = 0;
-    do {
-        digits[n++] = char('0' + v % 10);
-        v /= 10;
-    } while (v);
-    while (n < minDigits) digits[n++] = '0';
-    for (int i = 0; i < n; ++i) out[i] = digits[n - 1 - i];
-    return n;
-}
 
 int append(char* out, const char* text) {
     const int n = int(std::strlen(text));
@@ -83,26 +72,9 @@ QRgb textColour(BadgePill::Colour c) {
 } // namespace
 
 int formatMoney(double usd, char* out) {
-    static constexpr char kUnits[] = {0, 'k', 'M', 'B'};
-    double v = std::isfinite(usd) && usd > 0 ? usd : 0;
-    int unit = 0, decimals = 0;
-    for (;;) {
-        decimals = v < 9.995 ? 2 : v < 99.95 ? 1 : 0;
-        if (decimals > 0 || std::round(v) < 1000) break;
-        if (unit == 3) return append(out, "$999B+");
-        v /= 1000;
-        ++unit;
-    }
-    const uint64_t scale = decimals == 2 ? 100 : decimals == 1 ? 10 : 1;
-    const uint64_t r = uint64_t(std::llround(v * double(scale)));
-    int n = 0;
-    out[n++] = '$';
-    n += writeUint(r / scale, out + n);
-    if (decimals) {
-        out[n++] = '.';
-        n += writeUint(r % scale, out + n, decimals);
-    }
-    if (kUnits[unit]) out[n++] = kUnits[unit];
+    char text[24];
+    const int n = formatChartNumber(std::isfinite(usd) && usd > 0 ? usd : 0, text, {NumberForm::Full, false, true});
+    std::memcpy(out, text, size_t(n));
     return n;
 }
 
@@ -200,10 +172,11 @@ BadgePill edgePill(const WallCandidate& c, int side, bool top, const chart_raste
         p.length += formatMoney(distance, p.text + p.length);
         return p;
     }
-    char money[kBadgeChars];
-    const int n = formatMoney(unit.toDisplay(distance), money); // drop its '$'
-    std::memcpy(p.text + p.length, money + 1, size_t(n - 1));
-    p.length += n - 1;
+    char scaled[24]; // the distance in the display unit, without '$'
+    const double display = unit.toDisplay(distance);
+    const int n = formatChartNumber(std::isfinite(display) && display > 0 ? display : 0, scaled);
+    std::memcpy(p.text + p.length, scaled, size_t(n));
+    p.length += n;
     p.length += append(p.text + p.length, " ");
     p.length += append(p.text + p.length, unit.tag());
     return p;

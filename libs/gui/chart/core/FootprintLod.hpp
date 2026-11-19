@@ -3,19 +3,24 @@
 #include <array>
 #include <cstdint>
 #include <cmath>
-#include "FlowNumberFormat.hpp"
+#include "ChartNumberFormat.hpp"
+#include "ChartTextRule.hpp"
 #include "../../../core/heatmap/ChartSurface.hpp"
 
 namespace chart {
 enum class FootprintStage { Hidden, Strip, Cells, Numbers };
-inline constexpr double kFootprintTextPx = 13;
-// Bundled Roboto Mono advance is 1229/2048 em. Two widest magnitude labels, centre gap,
-// outer padding and the left candle pill must all fit before numbers appear.
+// The chart text rule's default smallest size (ChartTextRule); the stage thresholds below are
+// fixed at it, and the rule decides at draw time whether the numbers fit.
+inline constexpr double kFootprintTextPx = ChartTextRule::kDefaultMinPx;
+// Bundled Roboto Mono advance is 1229/2048 em. Two widest magnitude labels with the text
+// rule's padding on both sides of each, and the left candle pill, must all fit before
+// numbers appear; a band holds the smallest size with its padding.
 inline constexpr double kFootprintCandleSpace = 10;
-inline constexpr double kFootprintNumbersFitColumn = 2 * kFlowMagnitudeGlyphs * (1229.0 / 2048) * kFootprintTextPx + 6 + kFootprintCandleSpace;
-inline constexpr double kFootprintNumbersFitRow = kFootprintTextPx + 2;
+inline constexpr double kFootprintNumbersFitColumn =
+    2 * (kFlowMagnitudeGlyphs * (1229.0 / 2048) * kFootprintTextPx + 2 * ChartTextRule::kDefaultPadPx) + kFootprintCandleSpace;
+inline constexpr double kFootprintNumbersFitRow = kFootprintTextPx + 2 * ChartTextRule::kDefaultPadPx;
 inline constexpr double kFootprintNumbersColumn = kFootprintNumbersFitColumn + 2;
-inline constexpr double kFootprintNumbersRow = kFootprintNumbersFitRow + 2;
+inline constexpr double kFootprintNumbersRow = kFootprintNumbersFitRow;
 // Logical px per column where Cells starts (bid/ask split and spine). Below it every
 // valid positive column draws Strip across exactly its column, never hidden by zoom.
 // The narrowest column is the chart's shared zoom-out limit, kMinChartCellLogicalPx

@@ -7,27 +7,14 @@
 #include <stdexcept>
 
 namespace heatmap {
-void formatLabelAmount(std::array<char, 48>& out, double value, bool usd) {
-    out[0] = 0;
-    if (!(value > 0) || !std::isfinite(value)) return;
-    constexpr const char* suffix[] = {"", "k", "M", "B", "T"};
-    int unit = 0;
-    while (value >= 999.5 && unit < 4) { value /= 1000; ++unit; }
-    // At most three significant digits, trailing zeros dropped ($11k, $1.2M,
-    // 0.36): the owner's choice (2026-10-02), over a fixed width.
-    int decimals = std::clamp(2 - int(std::floor(std::log10(value))), 0, 15);
-    if (decimals > 0 && std::round(value * std::pow(10.0, decimals)) >= 1000) --decimals; // 9.996 -> "10"
-    char* at = out.data();
-    if (usd) *at++ = '$';
-    const auto result = std::to_chars(at, out.data() + 28, value, std::chars_format::fixed, decimals);
-    if (result.ec != std::errc{}) { out[0] = 0; return; }
-    char* end = result.ptr;
-    if (decimals) {
-        while (end > at && end[-1] == '0') --end;
-        if (end > at && end[-1] == '.') --end;
+void formatLabelCell(LabelCell& cell, double midPrice) {
+    for (int f = 0; f < chart::kNumberForms; ++f) {
+        cell.usd[f][0] = cell.asset[f][0] = 0;
+        if (!(cell.value > 0)) continue;
+        const auto form = chart::NumberForm(f);
+        chart::formatChartNumber(cell.value * midPrice, cell.usd[f], {form, false, true});
+        chart::formatChartNumber(cell.value, cell.asset[f], {form});
     }
-    if (unit) *end++ = *suffix[unit];
-    *end = 0;
 }
 
 std::shared_ptr<const SparseColumns> LabelWindowBuilder::composeWindow(const SpanSourceKey& key,
@@ -207,8 +194,7 @@ std::shared_ptr<const LabelCells> LabelWindowBuilder::build(const LabelRequest& 
             if (reused[x]) continue;
             auto& cell = out->cells[size_t(y) * request.columns + x];
             if (tiles::cellState(cell.word) != tiles::kCellValid || !(cell.word & 0x7fff)) continue;
-            formatLabelAmount(cell.usd, cell.value * mid, true);
-            formatLabelAmount(cell.asset, cell.value, false); // the number only (owner 2026-10-02)
+            formatLabelCell(cell, mid);
         }
     }
     if (out->missing.empty()) { previous_ = out; previousPieces_ = pieces; }

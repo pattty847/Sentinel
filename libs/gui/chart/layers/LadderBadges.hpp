@@ -53,8 +53,8 @@ constexpr BadgeRgba kPillBackSrgb{12, 16, 22, 235};
 constexpr BadgeRgba kBidArrowSrgb{0, 255, 255, 255};
 constexpr BadgeRgba kAskArrowSrgb{255, 200, 0, 255};
 
-// Text formatting into a caller's buffer (no terminator); each returns the length.
-// Money: three significant digits, $999 / $12.3k / $1.07M / $2.10B, $999B+ beyond.
+// Money in the chart number format (formatChartNumber with '$'), into a caller's buffer
+// without a terminator; returns the length. Not finite or not positive: $0.
 int formatMoney(double usd, char* out);
 
 struct BadgePill {

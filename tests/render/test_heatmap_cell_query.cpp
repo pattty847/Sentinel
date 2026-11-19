@@ -135,8 +135,8 @@ TEST(HeatmapCellQuery, LabelsEqualTheFillOracleAndExactValuesAfterUploadImagesAr
                 if (tiles::cellState(c.word) == tiles::kCellValid) {
                     EXPECT_DOUBLE_EQ(c.value, exact[i]);
                     EXPECT_EQ(recording::encodeSize(c.value), c.word & 0x7fff);
-                    if (c.value > 0) { ++nonzero; EXPECT_EQ(c.usd[0], '$'); EXPECT_EQ(std::string(c.asset.data()).find(' '), std::string::npos); } // number only
-                } else EXPECT_EQ(c.usd[0], 0);
+                    if (c.value > 0) { ++nonzero; EXPECT_EQ(c.usd[0][0], '$'); EXPECT_EQ(std::string(c.asset[0]).find(' '), std::string::npos); } // number only
+                } else EXPECT_EQ(c.usd[0][0], 0);
             }
             EXPECT_GT(nonzero, 0u);
             auto warm = builder.build(q, spans, nullptr, f.store);
@@ -176,7 +176,7 @@ TEST(HeatmapCellQuery, CoarseValidCellsStopFineCompositionAndGenerationMismatchC
     f.store.put(chunk->key, revised, {true, end, 2}, 987654);
     labels = builder.build(q, spans, nullptr, f.store);
     EXPECT_FALSE(labels->missing.empty());
-    for (const auto& c : labels->cells) EXPECT_EQ(c.usd[0], 0);
+    for (const auto& c : labels->cells) EXPECT_EQ(c.usd[0][0], 0);
 }
 
 TEST(HeatmapDrawPieces, CompleteHistoryAndLiveHaveExclusiveOwnershipAndKeepTheELHole) {
@@ -627,8 +627,11 @@ TEST(HeatmapCellQuery, TickChangesReuseTickFreeCompositionsAndTextUsesTheCellMid
         if (!(cell.value > 0)) continue;
         ++checked;
         const double usd = cell.value * (q.firstBin+q.rows-y-.5) * 5;
-        EXPECT_NEAR(parse(cell.usd.data()), usd, .501 * std::pow(10., std::floor(std::log10(usd))-2));
-        EXPECT_NEAR(parse(cell.asset.data()), cell.value, .501 * std::pow(10., std::floor(std::log10(cell.value))-2));
+        // Three significant digits, at most three decimals (formatChartNumber).
+        const auto tolerance = [](double v) { return std::max(.501 * std::pow(10., std::floor(std::log10(v)) - 2), .000501); };
+        EXPECT_NEAR(parse(cell.usd[0]), usd, tolerance(usd));
+        if (cell.value >= .0005) EXPECT_NEAR(parse(cell.asset[0]), cell.value, tolerance(cell.value));
+        else EXPECT_STREQ(cell.asset[0], "<0.001");
     }
     EXPECT_GT(checked, 0u);
 }

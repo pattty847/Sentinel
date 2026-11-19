@@ -650,13 +650,13 @@ TEST(AgentApiSchema, SettingsSchemaListsExactlyTheAcceptedKeysAndRoundTripsThem)
              "bidGradient", "askGradient", "sensitivityMin", "sensitivityMax", "opacity", "smoothZoomOut", "gpuCapBytes",
              "uploadBudgetBytes", "prefetchTiles", "liveMinIntervalMs", "showTelemetry", "showTrades", "tradesAboveCandles",
              "tradeMinNotional", "bubblePlacement", "bubblesOverFootprint", "paperPositionStyle", "timeZone", "showLabels", "labelCurrency", "labelCurrencySymbol",
-             "labelMinPx", "labelMaxPx", "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity",
+             "textMinPx", "textMaxPx", "textPadPx", "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity",
              "candleWickWidth", "candleBodyFraction", "candleMaxBodyPx", "showVolumeBars", "volumeBandPercent", "volumeOpacity",
              "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "cvdFillAnchor", "footprintIntensity", "footprintCandle",
              "footprintDustNotional", "footprintNumbers", "showLadder", "ladderWidthPx", "showWallRadar", "wallMultiple"})
         EXPECT_TRUE(settings.contains(key)) << key;
-    // Raised by another key's value at the defaults (labelMinPx 12, sensitivityMin 0.05), as their descriptions say.
-    const QMap<QString, double> dependentMin{{"labelMaxPx", 12}, {"sensitivityMax", 0.1}};
+    // Raised by another key's value at the defaults (textMinPx 13, sensitivityMin 0.05), as their descriptions say.
+    const QMap<QString, double> dependentMin{{"textMaxPx", 13}, {"sensitivityMax", 0.1}};
     for (auto it = settings.begin(); it != settings.end(); ++it) {
         const QString key = it.key();
         const auto e = it->toObject();
@@ -781,8 +781,9 @@ TEST(AgentApiSchema, EachSettingKeyWritesOnlyItsOwnField) {
         {"showLabels", false, [](S& s) { s.showLabels = false; }},
         {"labelCurrency", "asset", [](S& s) { s.labelCurrency = "asset"; }},
         {"labelCurrencySymbol", true, [](S& s) { s.labelCurrencySymbol = true; }},
-        {"labelMinPx", 10, [](S& s) { s.labelMinPx = 10; }},
-        {"labelMaxPx", 20, [](S& s) { s.labelMaxPx = 20; }},
+        {"textMinPx", 12, [](S& s) { s.textMinPx = 12; }},
+        {"textMaxPx", 20, [](S& s) { s.textMaxPx = 20; }},
+        {"textPadPx", 3, [](S& s) { s.textPadPx = 3; }},
         {"candleUpColor", "#112233", [](S& s) { s.candleUpColor = "#112233"; }},
         {"candleDownColor", "#445566", [](S& s) { s.candleDownColor = "#445566"; }},
         {"candleWickColor", "#778899", [](S& s) { s.candleWickColor = "#778899"; }},
@@ -809,7 +810,7 @@ TEST(AgentApiSchema, EachSettingKeyWritesOnlyItsOwnField) {
     };
     // Documented cross-key limits: each also changes the named other field.
     const std::vector<Case> crossKey{
-        {"labelMaxPx", 8, [](S& s) { s.labelMaxPx = s.labelMinPx; }},
+        {"textMaxPx", 10, [](S& s) { s.textMaxPx = s.textMinPx; }},
         {"sensitivityMax", 1e-9, [](S& s) { s.sensitivityMax = 2 * s.sensitivityMin; }},
         {"gpuCapBytes", qint64(MiB), [&](S& s) { s.gpuCapBytes = MiB; s.uploadBudgetBytes = MiB; }},
         {"manualTick", 300, [](S& s) { s.manualTick = 500; }}, // raised to the next 1/2/2.5/5 x 10^k preset

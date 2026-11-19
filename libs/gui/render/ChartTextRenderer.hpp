@@ -18,6 +18,11 @@ public:
         High,
         Low,
     };
+    // Low-priority glyphs accepted per frame, over every consumer (heatmap labels, footprint
+    // numbers, CVD, footer, ladder); a Low submission that would pass it is dropped whole.
+    // Heatmap labels (64,000) plus the small consumers fit; footprint numbers after dense
+    // heatmap labels may not, and are then dropped whole.
+    static constexpr int kMaxGlyphs = 72000;
 
     void onRootRebuilt();
     QSGNode* createRoot();
@@ -61,7 +66,7 @@ private:
     QQuickWindow* m_window = nullptr;
     const ChartTextAtlas* m_atlas = nullptr;
     std::vector<Bucket> m_buckets;
-    int m_maxGlyphs = 48000;
+    int m_maxGlyphs = kMaxGlyphs;
     int m_usedGlyphs = 0;
     int m_droppedGlyphs = 0;
     int m_droppedHighGlyphs = 0;

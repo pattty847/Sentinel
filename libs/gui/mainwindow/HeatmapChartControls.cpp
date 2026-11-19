@@ -247,7 +247,7 @@ void HeatmapChartControls::requestLabelCurrency(bool usd) {
 }
 
 void HeatmapChartControls::requestLabelSize(double minPx, double maxPx) {
-    if (const auto error = m_model->apply({{"labelMinPx", minPx}, {"labelMaxPx", maxPx}}); !error.isEmpty())
+    if (const auto error = m_model->apply({{"textMinPx", minPx}, {"textMaxPx", maxPx}}); !error.isEmpty())
         sLog_Warning("Label size rejected: " << error);
     syncNow();
 }
@@ -257,15 +257,15 @@ void HeatmapChartControls::requestCandleStyle(int style) {
     syncNow();
 }
 
-// The label size presets the menu offers (labelMinPx/labelMaxPx; the dialog's
-// Chart tab edits any values).
+// The chart text size presets the menu offers (textMinPx/textMaxPx; the dialog's
+// Chart tab, Advanced, edits any values). Never below the 13 px MSDF floor.
 namespace {
 struct SizePreset {
     const char *name;
     double minPx, maxPx;
 };
-constexpr SizePreset kLabelSizes[] = {{"Small (12-15 px)", 12, 15}, {"Medium (14-18 px)", 14, 18},
-                                      {"Large (16-20 px)", 16, 20}};
+constexpr SizePreset kLabelSizes[] = {{"Small (13-15 px)", 13, 15}, {"Medium (13-18 px)", 13, 18},
+                                      {"Large (16-22 px)", 16, 22}};
 const char *kCandleStyles[] = {"Candle", "Hollow", "Line"};
 constexpr int kLadderWidths[] = {60, 90, 120, 180, 240};
 constexpr double kWallMultiples[] = {2, 3, 4, 6, 8};
@@ -445,7 +445,7 @@ void HeatmapChartControls::refreshChartMenu() {
         else if (name == "chartMenuCurrencyAsset") a->setChecked(s.labelCurrency == "asset");
         else if (name == "chartMenuLabelSizePreset") {
             const auto &p = kLabelSizes[a->data().toInt()];
-            a->setChecked(p.minPx == s.labelMinPx && p.maxPx == s.labelMaxPx);
+            a->setChecked(p.minPx == s.textMinPx && p.maxPx == s.textMaxPx);
         } else if (name == "chartMenuCandleStylePreset") {
             a->setChecked(m_renderer && m_renderer->candles()->candleStyle() == a->data().toInt());
             a->setEnabled(bool(m_renderer));

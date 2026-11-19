@@ -1,6 +1,7 @@
 #pragma once
 #include "chart/core/CvdSeries.hpp"
-#include "chart/core/FlowNumberFormat.hpp"
+#include "chart/core/ChartNumberFormat.hpp"
+#include "chart/core/ChartTextRule.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -11,9 +12,11 @@ struct FlowFooterTotals {
     double delta = 0, volume = 0;
     bool valid = false;
 };
-// Logical text size and padding also define the shared bottom exclusion area.
+// Logical text size and padding also define the shared bottom exclusion area: the chart
+// text rule's defaults (a fixed band other layers reserve, so it does not follow the
+// live textMinPx/textPadPx settings).
 struct FlowFooterLayout {
-    static constexpr double textPx = 13, padding = 2;
+    static constexpr double textPx = ChartTextRule::kDefaultMinPx, padding = ChartTextRule::kDefaultPadPx;
     static constexpr double rowHeight = textPx + 2 * padding;
     static constexpr double height = 3 * rowHeight + 2 * padding;
     double top = 0, bottom = 0;
@@ -36,17 +39,17 @@ struct FlowFooterLayout {
         return index % k == 0;
     }
 };
-// Bounds all formatter forms: three significant digits, decimal/suffix,
-// the >999B cap, and the unsigned <0.01 sentinel. Independent of live data.
+// Bounds every formatChartNumber Full form with a sign: three significant digits with a
+// decimal point and a suffix (1.23k), four digits below 1 (0.123), the >999T cap and the
+// <0.001 floor. Independent of live data.
 template<class Advance>
 double footerLabelWidth(Advance advance) {
     double digit = 0;
     for (char c = '0'; c <= '9'; ++c) digit = std::max(digit, advance(c));
-    const double suffix = std::max({advance('k'), advance('M'), advance('B')});
-    const double magnitude = std::max({3 * digit + advance('.'), 3 * digit + suffix + advance('.'),
-                                      advance('>') + 3 * digit + advance('B')});
-    const double signedWidth = magnitude + std::max(advance('+'), advance('-'));
-    return std::max(signedWidth, advance('<') + 2 * advance('0') + advance('.') + advance('1'));
+    const double suffix = std::max({advance('k'), advance('M'), advance('B'), advance('T')});
+    const double magnitude = std::max({4 * digit + advance('.'), 3 * digit + suffix + advance('.'),
+                                      advance('>') + 3 * digit + suffix, advance('<') + 4 * digit + advance('.')});
+    return magnitude + std::max(advance('+'), advance('-'));
 }
 // Gutter labels. The unit after DELTA shows at most kFooterUnitGlyphs characters; a
 // longer base asset keeps its first six and ends in "..", never silently cut. The
@@ -68,23 +71,8 @@ inline const char* footerResetLabel(CvdReset reset) {
     return reset == CvdReset::Visible ? "view" : reset == CvdReset::UtcDay ? "day" : "sess";
 }
 inline bool footerPill(double delta) { return std::isfinite(delta) && std::abs(delta) >= .01; }
-// One leading-zero rule for the footer: a magnitude below 1 keeps its zero
-// (+0.09, 0.50, <0.01); the shared flow format drops it for footprint cells.
+// Footer values in the chart number format; DELTA and CUM carry a '+' on positives.
 inline int footerNumber(double value, char (&out)[24], bool signedValue) {
-    int size = flowNumber(value, out, signedValue ? FlowNumberContext::SignedLabel : FlowNumberContext::Footprint);
-    int lead = 0;
-    while (lead < size && (out[lead] == '-' || out[lead] == '<')) ++lead;
-    if (lead < size && out[lead] == '.') {
-        std::move_backward(out + lead, out + size + 1, out + size + 2);
-        out[lead] = '0';
-        ++size;
-    }
-    if (signedValue && value >= .01 && size) {
-        std::move_backward(out, out + size + 1, out + size + 2);
-        out[0] = '+';
-        return size + 1;
-    }
-    if (!signedValue && value == 0) { out[0] = '0'; out[1] = '\0'; return 1; }
-    return size;
+    return formatChartNumber(value, out, {NumberForm::Full, signedValue, false});
 }
 } // namespace chart

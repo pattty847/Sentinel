@@ -8,7 +8,9 @@
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace chart {
 namespace {
@@ -33,10 +35,11 @@ FlowRgb rgb(const QColor& c) { return {uint8_t(c.red()), uint8_t(c.green()), uin
 }
 FootprintCellsLayer::FootprintCellsLayer() : current_(std::make_unique<FlowSnapshot>()) {
     glyphs_.reserve(kMaxGlyphs);
+    numbers_.reserve(kMaxNumbers);
 }
 void FootprintCellsLayer::onRootRebuilt() {
     gate_ = nullptr; node_ = nullptr; capacity_ = 0; vertices_ = 0; reserved_ = false;
-    built_ = false; labelsDirty_ = true;
+    built_ = false; labelsDirty_ = true; fit_ = {};
 }
 QSGNode* FootprintCellsLayer::createContainer() {
     gate_ = new QSGOpacityNode;
@@ -57,6 +60,16 @@ void FootprintCellsLayer::sync(const ChartFrame& frame) {
     const auto& data = *current_;
     drawing_ = frame.context.overlays.footprint && stage_ != FootprintStage::Hidden && data.valid &&
         data.cellCount > 0 && data.tick == cam.tick && data.timeframeMs == frame.context.time.activeTimeframeMs;
+    // The text decision belongs to one symbol (the snapshot's scope generation), timeframe
+    // and tick; a coalesced symbol switch is seen through the generation alone.
+    if (!drawing_ || data.timeframeMs != fitTimeframeMs_ || data.tick != fitTick_ ||
+        data.scopeGeneration != fitGeneration_) {
+        fit_ = {};
+        labelsDirty_ = true;
+        fitTimeframeMs_ = drawing_ ? data.timeframeMs : 0;
+        fitTick_ = drawing_ ? data.tick : 0;
+        fitGeneration_ = data.scopeGeneration;
+    }
 }
 QString FootprintCellsLayer::emptyStateText(const ChartFrame& frame) const {
     const auto& cam = frame.context.raster;
@@ -183,61 +196,128 @@ void FootprintCellsLayer::updateNodes(const ChartFrame& frame, LayerNodeContext&
     if (presentation_.windowIntensity) current_->maxRowVolume = windowMaximum(frame);
     cells(frame);
 }
-void FootprintCellsLayer::number(const Number& value, const ChartTextAtlas& atlas) {
-    const auto& box = value.box;
-    const auto tier = flowTier(value.volume, value.price, value.maximum, presentation_.dustNotional);
-    if (tier == FlowTier::Empty || tier == FlowTier::Dust) return;
+// Each number's ink box is centred in its usable half cell (the box clears the candle
+// space and the spine): horizontally on the box's centre, vertically with the digits' ink
+// between the band's device-pixel edges. The pen start and the baseline are device-snapped,
+// so the centring error is at most half a device pixel.
+void FootprintCellsLayer::number(const Number& value, const ChartTextAtlas& atlas, double dpr) {
     const bool light = flowInkIsLight(rgb(sideColour(value.bid)), value.fillAlpha, rgb(ChartLookSettings::chartBackground()),
                                       rgb(ChartLookSettings::footprintText()), rgb(ChartLookSettings::footprintInkDark()));
-    const auto colour = inkColour(light, tier);
-    char text[24];
-    const int length = std::min(23, flowNumber(value.volume, text));
-    const double scale = kFootprintTextPx / atlas.fontPx();
-    double width = 0, top = 0, bottom = 0;
+    const auto colour = inkColour(light, value.tier);
+    const auto& text = value.text[size_t(fit_.form)];
+    const int length = value.length[size_t(fit_.form)];
+    if (!length) return;
+    const double scale = fit_.sizePx / atlas.fontPx();
+    const double pad = atlas.paddingPx() * scale;
+    const auto snap = [dpr](double v) { return std::round(v * dpr) / dpr; };
+    // The ink box from the pen start: the first glyph's ink left to the last glyph's ink right.
+    double inkRight = 0, pen = 0;
     for (int i = 0; i < length; ++i) {
-        const auto& glyph = atlas.glyph(QChar(text[i]));
-        width += glyph.advance * scale;
-        top = std::min(top, glyph.bounds.top() * scale);
-        bottom = std::max(bottom, glyph.bounds.bottom() * scale);
+        const auto& g = atlas.glyph(QChar(text[size_t(i)]));
+        if (i == length - 1) inkRight = pen + g.bounds.right() * scale - pad;
+        pen += g.advance * scale;
     }
-    const double height = bottom - top;
-    if (width > box.width() || height > box.height() || glyphs_.size() + size_t(length) > kMaxGlyphs) return;
-    double pen = value.bid ? box.right() - width : box.left();
-    const double baseline = box.center().y() - height * 0.5 - top;
+    const double inkLeft = atlas.glyph(QChar(text[0])).bounds.left() * scale + pad;
+    const auto& zero = atlas.glyph(QChar('0'));
+    const double inkTop = (zero.bounds.top() + atlas.paddingPx()) * scale;
+    const double ink = (zero.bounds.bottom() - zero.bounds.top() - 2 * atlas.paddingPx()) * scale;
+    const double top = snap(value.box.top()), bottom = snap(value.box.bottom());
+    const double baseline = top + snap((bottom - top - ink) * .5 - inkTop);
+    pen = snap(value.box.center().x() - (inkLeft + inkRight) * .5);
+    const QPointF anchor(pen, baseline); // the number's pen start and baseline (tests, debug overlay)
     for (int i = 0; i < length; ++i) {
-        const auto& g = atlas.glyph(QChar(text[i]));
+        const auto& g = atlas.glyph(QChar(text[size_t(i)]));
         ChartGlyphInstance glyph;
         glyph.rect = QRectF(pen + g.bounds.left() * scale, baseline + g.bounds.top() * scale,
                             g.bounds.width() * scale, g.bounds.height() * scale);
         glyph.uv = g.uv; glyph.color = colour;
+        glyph.debugAnchor = anchor;
         glyphs_.push_back(glyph);
         pen += g.advance * scale;
     }
 }
-void FootprintCellsLayer::labels(const ChartFrame& frame, const ChartTextAtlas& atlas, double bottomInset) {
+// Numbers this frame wants: sides above the dust threshold whose whole band and half
+// column are on screen above the bottom inset. A clipped edge band shows no number.
+// False: more numbers than kMaxNumbers, so none is drawn.
+bool FootprintCellsLayer::collectNumbers(const ChartFrame& frame, double bottomInset) {
+    numbers_.clear();
     auto textBounds = frame.context.surfaceBounds;
     textBounds.setBottom(textBounds.bottom() - bottomInset);
+    const auto& cam = frame.context.raster;
     for (int b = 0; b < current_->barCount; ++b) {
         const auto& bar = current_->bars[size_t(b)];
+        const double left = frame.context.surfaceBounds.left() + cam.xDev(double(bar.startMs)) / cam.dpr;
+        const double right = left + cam.colPxF / cam.dpr;
+        const double mid = (left + right + kFootprintCandleSpace) * .5;
+        const double maximum = double(bar.maxSideVol) / bar.baseScale;
         for (int i = bar.firstCell; i < bar.firstCell + bar.cellCount; ++i) {
             const auto& cell = current_->cells[size_t(i)];
-            const auto rect = cellRect(frame, bar, cell);
-            if (rect.isEmpty()) continue;
-            const auto& cam = frame.context.raster;
-            const double left = frame.context.surfaceBounds.left() + cam.xDev(double(bar.startMs)) / cam.dpr;
-            const double right = left + cam.colPxF / cam.dpr;
-            const double mid = (left + right + kFootprintCandleSpace) * .5;
+            const double top = frame.context.surfaceBounds.top() + cam.yDev((double(cell.row) + cell.span) * cam.tick) / cam.dpr;
+            const double bottom = frame.context.surfaceBounds.top() + cam.yDev(double(cell.row) * cam.tick) / cam.dpr;
             const double price = (double(cell.row) + cell.span * .5) * cam.tick;
-            const double maximum = double(bar.maxSideVol) / bar.baseScale;
-            const QRectF bid(left + kFootprintCandleSpace + 1, rect.top(), mid - left - kFootprintCandleSpace - 3, rect.height());
-            const QRectF ask(mid + 2, rect.top(), right - mid - 3, rect.height());
-            const double sell = double(cell.bidVol) / bar.baseScale, buy = double(cell.askVol) / bar.baseScale;
-            if (textBounds.contains(bid)) number({sell, price, maximum, flowFillAlpha(sell, normaliser(bar)), bid, true}, atlas);
-            if (textBounds.contains(ask)) number({buy, price, maximum, flowFillAlpha(buy, normaliser(bar)), ask, false}, atlas);
+            const QRectF sides[] = {{left + kFootprintCandleSpace, top, mid - left - kFootprintCandleSpace, bottom - top},
+                                    {mid, top, right - mid, bottom - top}};
+            for (bool sell : {true, false}) {
+                const double volume = double(sell ? cell.bidVol : cell.askVol) / bar.baseScale;
+                const auto tier = flowTier(volume, price, maximum, presentation_.dustNotional);
+                const auto& box = sides[sell ? 0 : 1];
+                if (tier == FlowTier::Empty || tier == FlowTier::Dust || !textBounds.contains(box)) continue;
+                if (numbers_.size() == numbers_.capacity()) return false;
+                Number& n = numbers_.emplace_back();
+                n.volume = volume; n.fillAlpha = flowFillAlpha(volume, normaliser(bar)); n.box = box;
+                n.tier = tier; n.bid = sell;
+            }
         }
     }
+    return true;
 }
-void FootprintCellsLayer::submitLabels(const ChartFrame& frame, LayerNodeContext& context, double bottomInset) {
+// Formats every number in both forms once (formatChartNumber, kept for drawing) and
+// measures the frame: the most glyphs per form, all glyphs per form against kMaxGlyphs,
+// and the narrowest box and shortest band.
+bool FootprintCellsLayer::measureNumbers(ChartTextDemand& demand, double& cellW, double& cellH) {
+    cellW = cellH = std::numeric_limits<double>::infinity();
+    std::array<size_t, kNumberForms> total{};
+    demand = {};
+    demand.forms = kNumberForms;
+    for (auto& n : numbers_) {
+        cellW = std::min(cellW, n.box.width());
+        cellH = std::min(cellH, n.box.height());
+        for (size_t f = 0; f < size_t(kNumberForms); ++f) {
+            char text[24];
+            const int length = formatChartNumber(n.volume, text, {NumberForm(f)});
+            if (length > int(n.text[f].size())) return false;
+            std::memcpy(n.text[f].data(), text, size_t(length));
+            n.length[f] = uint8_t(length);
+            demand.glyphs[f] = std::max(demand.glyphs[f], length);
+            total[f] += size_t(length);
+        }
+    }
+    demand.withinBudget = 0;
+    for (size_t f = 0; f < total.size(); ++f)
+        if (total[f] <= size_t(kMaxGlyphs)) demand.withinBudget |= 1u << f;
+    return true;
+}
+// All or none (ChartTextRule): the longest wanted number of each form against the
+// narrowest box and the shortest band decides the size and form of every number; a form
+// whose numbers exceed the glyph budget is not used.
+void FootprintCellsLayer::labels(const ChartFrame& frame, const ChartTextAtlas& atlas, double bottomInset,
+                                 const ChartTextRule& rule) {
+    const bool collected = collectNumbers(frame, bottomInset);
+    if (collected && numbers_.empty()) return; // nothing wanted: keep the decision for the next frame
+    ChartTextDemand demand;
+    double cellW = 0, cellH = 0;
+    const double advance = double(atlas.glyph(QChar('0')).advance) / atlas.fontPx();
+    if (!collected || !measureNumbers(demand, cellW, cellH)) {
+        fit_.on = false;
+        return;
+    }
+    const double dpr = frame.context.raster.dpr;
+    fit_ = decideText({cellW, cellH, dpr, rule}, advance, demand, fit_);
+    if (!fit_.on) return;
+    for (const auto& n : numbers_) number(n, atlas, dpr);
+}
+void FootprintCellsLayer::submitLabels(const ChartFrame& frame, LayerNodeContext& context, double bottomInset,
+                                       const ChartTextRule& rule) {
     if (!drawing_ || !context.atlasReady) {
         glyphs_.clear(); labelsDirty_ = true;
         return;
@@ -249,13 +329,13 @@ void FootprintCellsLayer::submitLabels(const ChartFrame& frame, LayerNodeContext
         }
     }
     if (stage_ != FootprintStage::Numbers || context.atlas.fontPx() <= 0) {
-        glyphs_.clear(); labelsDirty_ = true;
+        glyphs_.clear(); labelsDirty_ = true; fit_ = {};
         return;
     }
     const auto atlasKey = context.atlas.image().cacheKey();
-    if (labelsDirty_ || atlasKey_ != atlasKey || labelBottomInset_ != bottomInset) {
-        glyphs_.clear(); labels(frame, context.atlas, bottomInset);
-        labelBottomInset_ = bottomInset;
+    if (labelsDirty_ || atlasKey_ != atlasKey || labelBottomInset_ != bottomInset || !(labelRule_ == rule)) {
+        glyphs_.clear(); labels(frame, context.atlas, bottomInset, rule);
+        labelBottomInset_ = bottomInset; labelRule_ = rule;
         atlasKey_ = atlasKey; labelsDirty_ = false;
     }
     context.text.submitGlyphs(glyphs_, ChartTextRenderer::Priority::Low);

@@ -455,7 +455,7 @@ void HeatmapSettingsDialog::setRenderer(UnifiedGridRenderer *renderer) {
 }
 
 QStringList HeatmapSettingsDialog::tabKeys(const QString &tab) {
-    if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelCurrencySymbol", "labelMinPx", "labelMaxPx",
+    if (tab == "Chart") return {"bubblePlacement", "tradeMinNotional", "tradesAboveCandles", "showLabels", "labelCurrency", "labelCurrencySymbol", "textMinPx", "textMaxPx", "textPadPx",
                                 "timeZone",
                                 "candleUpColor", "candleDownColor", "candleWickColor", "candleBodyOpacity", "candleBodyFraction", "candleMaxBodyPx", "candleWickWidth", "showVolumeBars", "volumeBandPercent", "volumeOpacity", "footprintIntensity", "footprintCandle", "footprintNumbers",
                                 "footprintDustNotional", "flowFooter", "cvdStripPx", "cvdReset", "cvdStyle", "cvdFillAnchor"};
@@ -569,14 +569,8 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     m_labelCurrencySymbol->setObjectName("labelCurrencySymbol");
     currencyRow->addWidget(m_labelCurrencySymbol);
     form->addRow("Label currency", currencyRow);
-    m_labelMinPx = doubleSpin(page, "labelMinPx", 8, 24, 0.5, 1);
-    m_labelMinPx->setSuffix(" px");
-    m_labelMaxPx = doubleSpin(page, "labelMaxPx", 8, 32, 0.5, 1);
-    m_labelMaxPx->setSuffix(" px");
-    form->addRow("Label size, smallest", m_labelMinPx);
-    form->addRow("Label size, largest", m_labelMaxPx);
-    addHelp(form, "GPU labels appear on coloured cells above the range low when the text fits. "
-                  "Their size grows with the cell, up to the largest size.", page);
+    addHelp(form, "GPU labels appear on coloured cells above the range low when every label fits. "
+                  "Their size grows with the cell (Advanced: text size).", page);
     addFlowControls(form, page);
     auto* bubbleGroup = new QGroupBox("Trade bubbles", page);
     auto* bubbleLayout = new QVBoxLayout(bubbleGroup);
@@ -673,8 +667,6 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     describe(form, m_showLabels, "Show liquidity sizes on GPU heatmap cells above the range low when text fits. Turn off to reduce clutter.");
     describe(form, currencyRow, "Show liquidity as USD notional or base-asset size. Use USD to compare value, or Asset to compare quantity.");
     m_labelCurrencySymbol->setToolTip("Show a dollar sign before USD liquidity numbers in heatmap cells.");
-    describe(form, m_labelMinPx, "Smallest GPU liquidity text, in pixels (8-24); labels that cannot fit at this size are hidden. Raise it for readability.");
-    describe(form, m_labelMaxPx, "Largest GPU liquidity text, in pixels (8-32). Raise it for bigger labels when cells have room.");
     describe(form, m_tradesAboveCandles, m_tradesAboveCandles->toolTip());
     describe(candleForm, m_candleStyle, "Choose filled candles, hollow up candles, or a line through closes. Use the line for a simpler price view; this session only.");
     describe(candleForm, m_candleUpColor, "Choose the colour for candles that close at or above their open. Change it to make up bars easier to spot.");
@@ -691,12 +683,6 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
         if (index >= 0) apply({{"labelCurrency", m_labelCurrency->itemData(index).toString()}});
     });
     connect(m_labelCurrencySymbol, &QCheckBox::toggled, this, [this](bool on) { apply({{"labelCurrencySymbol", on}}); });
-    connect(m_labelMinPx, &QDoubleSpinBox::valueChanged, this, [this](double v) {
-        apply({{"labelMinPx", v}, {"labelMaxPx", std::max(v, m_labelMaxPx->value())}});
-    });
-    connect(m_labelMaxPx, &QDoubleSpinBox::valueChanged, this, [this](double v) {
-        apply({{"labelMinPx", std::min(v, m_labelMinPx->value())}, {"labelMaxPx", v}});
-    });
     connect(m_candleStyle, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         if (m_renderer && index >= 0 && !m_loading) m_renderer->candles()->setCandleStyle(index);
     });
@@ -724,7 +710,33 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     connect(m_candleWickWidth, &QSpinBox::valueChanged, this, [this](int value) {
         apply({{"candleWickWidth", value}});
     });
+    addTextRuleControls(form, page);
     return page;
+}
+
+// Advanced: the chart text rule (chart/core/ChartTextRule.hpp) shared by heatmap labels,
+// footprint numbers and TPO letters.
+void HeatmapSettingsDialog::addTextRuleControls(QFormLayout *form, QWidget *page) {
+    auto *group = new QGroupBox("Advanced", page);
+    group->setObjectName("textRuleGroup");
+    auto *rows = new QFormLayout(group);
+    m_textMinPx = intSpin(group, "textMinPx", 10, 24, 1, " px");
+    m_textMaxPx = intSpin(group, "textMaxPx", 10, 32, 1, " px");
+    m_textPadPx = intSpin(group, "textPadPx", 0, 8, 1, " px");
+    rows->addRow("Text size, smallest", m_textMinPx);
+    rows->addRow("Text size, largest", m_textMaxPx);
+    rows->addRow("Text padding", m_textPadPx);
+    describe(rows, m_textMinPx, "Smallest text in chart cells (heatmap, footprint, TPO letters). A layer whose text does not all fit at this size shows none.");
+    describe(rows, m_textMaxPx, "Largest text in chart cells; text grows with its cells up to this size.");
+    describe(rows, m_textPadPx, "Space kept free around cell text on each side.");
+    form->addRow(group);
+    connect(m_textMinPx, &QSpinBox::valueChanged, this, [this](int v) {
+        apply({{"textMinPx", v}, {"textMaxPx", std::max(v, m_textMaxPx->value())}});
+    });
+    connect(m_textMaxPx, &QSpinBox::valueChanged, this, [this](int v) {
+        apply({{"textMinPx", std::min(v, m_textMinPx->value())}, {"textMaxPx", v}});
+    });
+    connect(m_textPadPx, &QSpinBox::valueChanged, this, [this](int v) { apply({{"textPadPx", v}}); });
 }
 
 QWidget *HeatmapSettingsDialog::buildTickTab() {
@@ -1158,8 +1170,9 @@ void HeatmapSettingsDialog::refreshFromModel() {
         m_tradeMinNotional->setEnabled(s.tradeMinNotional > 0);
     }
     if (s.tradeMinNotional > 0) set(m_tradeMinNotional, s.tradeMinNotional);
-    set(m_labelMinPx, s.labelMinPx);
-    set(m_labelMaxPx, s.labelMaxPx);
+    set(m_textMinPx, s.textMinPx);
+    set(m_textMaxPx, s.textMaxPx);
+    set(m_textPadPx, s.textPadPx);
     auto swatch = [](QPushButton *button, const std::string &value) {
         const QString color = QString::fromStdString(value);
         button->setText(color == "auto" ? "Body colour" : color.toUpper());

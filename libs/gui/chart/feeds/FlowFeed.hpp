@@ -29,6 +29,9 @@ struct FlowSnapshot {
     enum class WindowState { Loading, Unavailable, Ready };
     static constexpr int kMaxBars = kFootprintMaxBars, kMaxCells = 65536;
     uint64_t serial = 0;
+    // Bumped on a scope change (symbol), never on an ordinary publication: a layer that
+    // sees a new generation forgets its text decision even when the switch coalesced.
+    uint64_t scopeGeneration = 0;
     bool valid = false;
     WindowState windowState = WindowState::Loading;
     int64_t timeframeMs = 0;
@@ -89,7 +92,7 @@ private:
     QTimer timer_;
     QMetaObject::Connection sourceConnection_;
     QString symbol_;
-    uint64_t serial_ = 0;
+    uint64_t serial_ = 0, scopeGeneration_ = 0;
     bool enabled_ = false;
     FootprintStage lod_ = FootprintStage::Hidden;
     int64_t band_ = 0; // band factor history, cleared on a symbol or timeframe change
