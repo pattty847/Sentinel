@@ -423,6 +423,8 @@ std::unique_ptr<Symbol> unpackSymbol(const StateJson& j, const std::string& name
     const auto mid = bookMid(v, cfg);
     v.observing = v.valid && mid.has_value();
     if (cfg.priceBounds) {
+        stateRequire((v.observed == 0 || v.midSeen) && (v.midSeen ||
+            (v.midOpen == 0 && v.midClose == 0 && v.midMin == 0 && v.midMax == 0)), "bounded mid presence");
         stateRequire(!v.observing || (v.midSeen && v.mid == *mid && v.unobservedSince == -1), "bounded midpoint state");
         stateRequire(!v.midSeen || (v.midMin <= v.midOpen && v.midOpen <= v.midMax &&
             v.midMin <= v.midClose && v.midClose <= v.midMax &&

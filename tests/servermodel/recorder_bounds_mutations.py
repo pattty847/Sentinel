@@ -3,6 +3,7 @@
 Each mutation must compile, fail its named regression, then pass after restoration.
 Only the two owned recorder/store source files are temporarily changed.
 """
+import argparse
 import os
 from pathlib import Path
 import subprocess
@@ -66,11 +67,19 @@ mutations = [
     ('restored-observation', BOOK, 'v.observing = v.valid && mid.has_value();',
      'v.observing = v.valid && mid.has_value() && !v.bids.empty() && !v.asks.empty();',
      'BoundedOneSidedStateAndLeadContinueIdentically'),
+    ('invalid-mid-presence', BOOK,
+     'stateRequire((v.observed == 0 || v.midSeen) && (v.midSeen ||\n            (v.midOpen == 0 && v.midClose == 0 && v.midMin == 0 && v.midMax == 0)), "bounded mid presence");',
+     '', 'BoundedInvalidStateStillRetainsZeroMidPresence'),
     ('restored-mid-validation', BOOK,
      'stateRequire(!v.observing || (v.midSeen && v.mid == *mid && v.unobservedSince == -1), "bounded midpoint state");',
      '', 'BoundedStateRejectsCorruptPolicyPriceAndMidBeforeInstallation'),
 ]
 
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--only', choices=[m[0] for m in mutations])
+selection = parser.parse_args().only
+if selection:
+    mutations = [m for m in mutations if m[0] == selection]
 build()
 run(['ctest', '--test-dir', str(BUILD), '--output-on-failure', '-R', '^BookRecorderTests$'])
 for label, path, old, new, case in mutations:

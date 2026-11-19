@@ -269,3 +269,25 @@ TEST_F(RecorderTest, BoundedStateRejectsCorruptPolicyPriceAndMidBeforeInstallati
         EXPECT_EQ(restored->exportState(),bytes);
     }
 }
+
+TEST_F(RecorderTest, BoundedInvalidStateStillRetainsZeroMidPresence) {
+    auto c = boundedConfig(dir.path().toStdString());
+    auto r = make(c); snap(*r,0,{{false,0,2}});
+    r->onInvalid("BTC-USD",kEpoch+10000,"gap"); r->drain();
+    const auto bytes = r->exportState();
+    auto j = nlohmann::json::from_cbor(bytes.begin(),bytes.end()-4);
+    j["symbols"]["BTC-USD"]["midSeen"] = false;
+    auto corrupt = nlohmann::json::to_cbor(j);
+    const auto crc = sentinel::crc32(corrupt.data(),corrupt.size());
+    for (unsigned n = 0; n < 4; ++n) corrupt.push_back(uint8_t(crc >> (n*8)));
+    QTemporaryDir own; c.root = own.path().toStdString(); auto restored = make(c);
+    EXPECT_THROW(restored->importState(corrupt),std::runtime_error);
+    restored->importState(bytes);
+    for (auto* recorder : {r.get(),restored.get()}) {
+        snap(*recorder,20000,{{true,1,4}}); tick(*recorder,60000);
+    }
+    EXPECT_EQ(r->exportState(),restored->exportState());
+    const auto rows = read(); ASSERT_EQ(rows.size(),1);
+    EXPECT_EQ(rows[0].observedMs,50000);
+    EXPECT_DOUBLE_EQ(rows[0].midOpen,0); EXPECT_DOUBLE_EQ(rows[0].midMin,0);
+}
