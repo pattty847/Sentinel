@@ -458,7 +458,7 @@ int64_t HeatmapGpuLayer::chooseTick(const ViewWindow &view) {
     TickKey key{snapshot_->version, &summary, view, heightPx, settings_.minRowPx, settings_.hysteresis, autoUnits_};
     if (key == tickKey_) return autoUnits_ > 0 ? autoUnits_ : tickUnits_;
     const int64_t units = autoTickUnits(summary, autoUnits_, view.timeLoMs, view.timeHiMs, view.priceLo, view.priceHi,
-                                        heightPx, {settings_.minRowPx, settings_.hysteresis});
+                                        heightPx, {settings_.minRowPx, settings_.hysteresis}, tickScratch_);
     if (units > 0) autoUnits_ = units;
     key.current = autoUnits_;
     tickKey_ = key;
@@ -532,7 +532,7 @@ int64_t HeatmapGpuLayer::predictTickUnits(const ViewWindow &view) const {
 
     const ResolutionSummary &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;
     const int64_t units = autoTickUnits(summary, autoUnits_, view.timeLoMs, view.timeHiMs, view.priceLo, view.priceHi,
-                                        heightPx_ * dpr_, {settings_.minRowPx, settings_.hysteresis});
+                                        heightPx_ * dpr_, {settings_.minRowPx, settings_.hysteresis}, tickScratch_);
     return units > 0 ? units : autoUnits_ > 0 ? autoUnits_ : tickUnits_;
 }
 
@@ -550,7 +550,8 @@ void HeatmapGpuLayer::armStartupTick() {
 bool HeatmapGpuLayer::buildsTick(int64_t units, const ViewWindow &candidate) const {
     if (!hasCurrentResolution()) return false;
     const auto &summary = resolution_ && resolution_->tfMs == tfMs_ ? *resolution_ : snapshot_->resolution;
-    return buildsInView(summary, units, candidate.timeLoMs, candidate.timeHiMs, candidate.priceLo, candidate.priceHi);
+    return buildsInView(summary, units, candidate.timeLoMs, candidate.timeHiMs, candidate.priceLo, candidate.priceHi,
+                        tickScratch_);
 }
 
 bool HeatmapGpuLayer::setAutoPriceTick(std::optional<int64_t> units) {

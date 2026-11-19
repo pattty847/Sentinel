@@ -74,7 +74,8 @@ int64_t LabItem::chooseTick() {
     TickKey key{snapshot_->version, &summary, view_, heightPx, minRowPx_, hysteresis_, autoUnits_};
     if (key == tickKey_) return autoUnits_ > 0 ? autoUnits_ : tickUnits_;
     const int64_t units = heatmap::autoTickUnits(summary, autoUnits_, view_.timeLoMs, view_.timeHiMs,
-                                                 view_.priceLo, view_.priceHi, heightPx, {minRowPx_, hysteresis_});
+                                                 view_.priceLo, view_.priceHi, heightPx, {minRowPx_, hysteresis_},
+                                                 tickScratch_);
     if (units > 0) autoUnits_ = units;
     key.current = autoUnits_;
     tickKey_ = key;

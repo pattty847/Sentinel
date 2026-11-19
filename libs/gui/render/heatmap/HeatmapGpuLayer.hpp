@@ -21,6 +21,7 @@
 #include "HeatmapLabelMatch.hpp"
 #include "heatmap/HeatmapChartSettings.hpp"
 #include "heatmap/HeatmapResolution.hpp"
+#include "heatmap/HeatmapSpanPlanner.hpp"
 #include <QJsonObject>
 #include <QVariantMap>
 #include <QObject>
@@ -263,6 +264,9 @@ private:
         int64_t current = 0;
         bool operator==(const TickKey &) const = default;
     } tickKey_;
+    // Reused by the tick checks (chooseTick, predictTickUnits, buildsTick): the GUI
+    // thread, or the render thread while the GUI thread is blocked.
+    mutable TickScratch tickScratch_;
     uint64_t tickChanges_ = 0;
     uint64_t viewSerial_ = 0, renderedSerial_ = 0;
     double lastMaxTime_ = -1, lastMaxPrice_ = -1, lastMinTime_ = -1, lastMinPrice_ = -1;

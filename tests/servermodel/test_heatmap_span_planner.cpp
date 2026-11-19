@@ -1,6 +1,7 @@
 #include "heatmap/BinCell.hpp"
 #include "heatmap/HeatmapSpanPlanner.hpp"
 #include <gtest/gtest.h>
+#include <random>
 #include <set>
 
 namespace {
@@ -232,5 +233,168 @@ TEST(HeatmapSpanPlanner, GridChangeSummaryMatchesTheBinningOracle) {
                 EXPECT_EQ(unbuildableRows(summary.columns[0], tick, {lo, lo + tick}).empty(), oracle) << tick;
         }
     }
+}
+
+// The tick-eligibility algorithm as it was before the reusable scratch buffers
+// (HeatmapSpanPlanner.cpp at 800d29a7): a fresh vector per step. The function bodies
+// are that code with three edits: calls qualified with reference:: or recording::,
+// the Ranges alias declared here, and inView inlined into buildsInView. The scratch
+// path must choose exactly what it chose for every input.
+namespace reference {
+using Ranges = std::vector<PriceRange>;
+Ranges unite(Ranges ranges) {
+    std::sort(ranges.begin(), ranges.end(), [](const auto &a, const auto &b) { return a.lo < b.lo; });
+    Ranges out;
+    for (const auto &r : ranges) {
+        if (r.end <= r.lo) continue;
+        if (!out.empty() && r.lo <= out.back().end) out.back().end = std::max(out.back().end, r.end);
+        else out.push_back(r);
+    }
+    return out;
+}
+Ranges intersect(const Ranges &a, const Ranges &b) {
+    Ranges out;
+    for (size_t i = 0, j = 0; i < a.size() && j < b.size();) {
+        const auto lo = std::max(a[i].lo, b[j].lo), end = std::min(a[i].end, b[j].end);
+        if (lo < end) out.push_back({lo, end});
+        if (a[i].end < b[j].end) ++i;
+        else ++j;
+    }
+    return out;
+}
+Ranges subtract(const Ranges &a, const Ranges &b) {
+    Ranges out;
+    size_t j = 0;
+    for (auto r : a) {
+        while (j < b.size() && b[j].end <= r.lo) ++j;
+        for (size_t k = j; k < b.size() && b[k].lo < r.end; ++k) {
+            if (b[k].lo > r.lo) out.push_back({r.lo, b[k].lo});
+            r.lo = std::max(r.lo, b[k].end);
+        }
+        if (r.lo < r.end) out.push_back(r);
+    }
+    return out;
+}
+Ranges inward(const Ranges &ranges, int64_t tick) {
+    Ranges out;
+    for (const auto &r : ranges) {
+        const int64_t lo = -recording::floorDiv(-r.lo, tick) * tick, end = recording::floorDiv(r.end, tick) * tick;
+        if (lo < end) out.push_back({lo, end});
+    }
+    return out;
+}
+std::optional<PriceRange> binsInView(double priceLo, double priceHi, double scale, int64_t tick) {
+    if (tick <= 0 || !std::isfinite(priceLo) || !std::isfinite(priceHi) || !(priceHi > priceLo)) return std::nullopt;
+    const double lo = std::floor(std::max(priceLo, 0.0) * scale), hi = std::ceil(priceHi * scale);
+    if (!(hi > lo) || hi >= 0x1p62) return std::nullopt;
+    const int64_t first = recording::floorDiv(int64_t(lo), tick), last = recording::floorDiv(int64_t(hi) - 1, tick);
+    return PriceRange{first * tick, (last + 1) * tick};
+}
+Ranges unbuildableRows(const ColumnResolution &column, int64_t tick, PriceRange rows) {
+    if (tick <= 0 || rows.end <= rows.lo) return {};
+    Ranges data, covered;
+    for (const auto &source : column.sources) {
+        if (source.state != BucketState::Present) continue;
+        data.insert(data.end(), source.bands.begin(), source.bands.end());
+        if (buildsOn(tick, source.commonUnits)) {
+            const auto whole = inward(source.bands, tick);
+            covered.insert(covered.end(), whole.begin(), whole.end());
+        }
+    }
+    const auto needed = intersect(inward(unite(std::move(data)), tick), {rows});
+    return subtract(needed, unite(std::move(covered)));
+}
+bool buildsInView(const ResolutionSummary &summary, int64_t tick, double timeLo, double timeHi, double priceLo,
+                  double priceHi) {
+    const auto rows = binsInView(priceLo, priceHi, summary.priceScale, tick);
+    if (!rows) return false;
+    bool loaded = false;
+    for (const auto &column : summary.columns) {
+        if (!(double(column.startMs) < timeHi && double(column.startMs + summary.tfMs) > timeLo)) continue;
+        for (const auto &source : column.sources)
+            if (source.state == BucketState::Present && buildsOn(tick, source.commonUnits)) loaded = true;
+        if (!reference::unbuildableRows(column, tick, *rows).empty()) return false;
+    }
+    return loaded;
+}
+int64_t autoTickUnits(const ResolutionSummary &summary, int64_t currentUnits, double timeLo, double timeHi,
+                      double priceLo, double priceHi, double heightPx, const AutoTickParams &params) {
+    if (!std::isfinite(heightPx) || !(heightPx > 0) || !(priceHi > priceLo) || summary.columns.empty()) return 0;
+    const double unitsPerPx = (priceHi - priceLo) * summary.priceScale / heightPx;
+    return autoTickUnitsIf(currentUnits, unitsPerPx, [&](int64_t tick) {
+        return reference::buildsInView(summary, tick, timeLo, timeHi, priceLo, priceHi);
+    }, params);
+}
+} // namespace reference
+
+// Seeded random summaries (overlapping, unsorted, empty and touching bands; gap and
+// not-loaded sources; mixed common ticks) and views. One scratch serves every call,
+// so a buffer that keeps stale rows between calls shows up as a different answer.
+TEST(HeatmapSpanPlanner, ScratchTickChoiceMatchesTheAllocatingAlgorithm) {
+    std::mt19937_64 rng(20261118);
+    auto uniform = [&](int64_t lo, int64_t hi) { return std::uniform_int_distribution<int64_t>(lo, hi)(rng); };
+    auto real = [&](double lo, double hi) { return std::uniform_real_distribution<double>(lo, hi)(rng); };
+    const int64_t commons[] = {1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 100, 1000};
+    TickScratch scratch;
+    std::set<int64_t> autoTicks;
+    size_t builds = 0, refusals = 0, rowsCompared = 0, veils = 0;
+    for (int trial = 0; trial < 1500; ++trial) {
+        ResolutionSummary summary{tf, trial % 5 ? 100.0 : 1000.0, {}};
+        const int64_t columns = uniform(1, 60);
+        const int64_t centre = uniform(5'000, 15'000) * 100;
+        for (int64_t c = 0; c < columns; ++c) {
+            ColumnResolution column{c * tf, {}};
+            for (int64_t s = uniform(0, 3); s > 0; --s) {
+                SourceResolution source;
+                const int64_t state = uniform(0, 9);
+                source.state = state == 0 ? BucketState::Gap : state == 1 ? BucketState::NotLoaded : BucketState::Present;
+                source.commonUnits = uniform(0, 30) ? commons[uniform(0, 12)] : 0;
+                for (int64_t b = uniform(0, 4); b > 0; --b) {
+                    const int64_t lo = centre + uniform(-60'000, 60'000);
+                    source.bands.push_back({lo, lo + uniform(-500, 50'000)});
+                }
+                if (uniform(0, 1)) std::sort(source.bands.begin(), source.bands.end(),
+                                             [](const auto &a, const auto &b) { return a.lo < b.lo; });
+                column.sources.push_back(std::move(source));
+            }
+            summary.columns.push_back(std::move(column));
+        }
+        for (int view = 0; view < 12; ++view) {
+            const double scale = summary.priceScale;
+            const double priceLo = double(centre) / scale + real(-800, 800), priceHi = priceLo + real(-5, 1500);
+            const double timeLo = real(-2, double(columns)) * double(tf), timeHi = timeLo + real(0, 70) * double(tf);
+            const double height = view % 6 ? real(40, 2400) : (view % 4 ? 0.0 : std::nan(""));
+            const auto &ladder = presetLadderUnits();
+            const int64_t current = uniform(0, 3) ? ladder[size_t(uniform(0, 20))] : uniform(0, 777);
+            const AutoTickParams params{real(0.5, 6), real(-0.1, 0.95)};
+            const auto expected = reference::autoTickUnits(summary, current, timeLo, timeHi, priceLo, priceHi, height,
+                                                           params);
+            ASSERT_EQ(autoTickUnits(summary, current, timeLo, timeHi, priceLo, priceHi, height, params, scratch),
+                      expected) << "trial " << trial << " view " << view;
+            ASSERT_EQ(autoTickUnits(summary, current, timeLo, timeHi, priceLo, priceHi, height, params), expected);
+            autoTicks.insert(expected);
+            for (const int64_t tick : {ladder[size_t(uniform(0, 20))], current, expected}) {
+                const bool want = reference::buildsInView(summary, tick, timeLo, timeHi, priceLo, priceHi);
+                ASSERT_EQ(buildsInView(summary, tick, timeLo, timeHi, priceLo, priceHi, scratch), want);
+                ASSERT_EQ(buildsInView(summary, tick, timeLo, timeHi, priceLo, priceHi), want);
+                (want ? builds : refusals)++;
+                if (const auto rows = reference::binsInView(priceLo, priceHi, scale, tick))
+                    for (const auto &column : summary.columns) {
+                        const auto rowsWant = reference::unbuildableRows(column, tick, *rows);
+                        ASSERT_EQ(unbuildableRows(column, tick, *rows, scratch), rowsWant);
+                        ASSERT_EQ(unbuildableRows(column, tick, *rows), rowsWant);
+                        ++rowsCompared;
+                        veils += rowsWant.size();
+                    }
+            }
+        }
+    }
+    // The inputs reach every branch: many ticks, both answers, non-empty veils.
+    EXPECT_GE(autoTicks.size(), 15u);
+    EXPECT_GT(builds, 1000u);
+    EXPECT_GT(refusals, 1000u);
+    EXPECT_GT(veils, 1000u);
+    std::printf("differential: %zu auto ticks distinct, %zu builds, %zu refusals, %zu column rows compared\n",
+                autoTicks.size(), builds, refusals, rowsCompared);
 }
 } // namespace

@@ -62,28 +62,29 @@ std::vector<PlannedSpan> planSpans(const std::string &symbol, int64_t tfMs, doub
 // ------------------------------------------------------------------ resolution
 namespace {
 using Ranges = std::vector<PriceRange>;
-Ranges unite(Ranges ranges) {
+// The set operations write into the caller's vectors (cleared, capacity kept): the
+// tick checks reuse TickScratch, so a changing view allocates nothing after warm-up.
+void unite(Ranges &ranges) {
     std::sort(ranges.begin(), ranges.end(), [](const auto &a, const auto &b) { return a.lo < b.lo; });
-    Ranges out;
+    size_t n = 0;
     for (const auto &r : ranges) {
         if (r.end <= r.lo) continue;
-        if (!out.empty() && r.lo <= out.back().end) out.back().end = std::max(out.back().end, r.end);
-        else out.push_back(r);
+        if (n && r.lo <= ranges[n - 1].end) ranges[n - 1].end = std::max(ranges[n - 1].end, r.end);
+        else ranges[n++] = r;
     }
-    return out;
+    ranges.resize(n);
 }
-Ranges intersect(const Ranges &a, const Ranges &b) {
-    Ranges out;
+void intersect(std::span<const PriceRange> a, std::span<const PriceRange> b, Ranges &out) {
+    out.clear();
     for (size_t i = 0, j = 0; i < a.size() && j < b.size();) {
         const auto lo = std::max(a[i].lo, b[j].lo), end = std::min(a[i].end, b[j].end);
         if (lo < end) out.push_back({lo, end});
         if (a[i].end < b[j].end) ++i;
         else ++j;
     }
-    return out;
 }
-Ranges subtract(const Ranges &a, const Ranges &b) {
-    Ranges out;
+void subtract(const Ranges &a, const Ranges &b, Ranges &out) {
+    out.clear();
     size_t j = 0;
     for (auto r : a) {
         while (j < b.size() && b[j].end <= r.lo) ++j;
@@ -93,16 +94,13 @@ Ranges subtract(const Ranges &a, const Ranges &b) {
         }
         if (r.lo < r.end) out.push_back(r);
     }
-    return out;
 }
-// Whole bins of `tick` inside each range.
-Ranges inward(const Ranges &ranges, int64_t tick) {
-    Ranges out;
+// Appends the whole bins of `tick` inside each range.
+void appendInward(const Ranges &ranges, int64_t tick, Ranges &out) {
     for (const auto &r : ranges) {
         const int64_t lo = -floorDiv(-r.lo, tick) * tick, end = floorDiv(r.end, tick) * tick;
         if (lo < end) out.push_back({lo, end});
     }
-    return out;
 }
 // Native tick in target price units, 0 when not a positive whole number.
 int64_t unitsIn(const GridIdentity &grid, double priceScale) {
@@ -136,8 +134,13 @@ SourceResolution summarizeColumn(const SparseColumns &data, const std::string &s
                 if (run.lo < 0 || run.hi >= INT64_MAX / tick - 1) continue;
                 full.push_back({run.lo * tick, (run.hi + 1) * tick});
             }
-            full = unite(std::move(full));
-            out.bands = first ? std::move(full) : intersect(out.bands, full);
+            unite(full);
+            if (first) out.bands = std::move(full);
+            else {
+                Ranges both;
+                intersect(out.bands, full, both);
+                out.bands = std::move(both);
+            }
             first = false;
         }
     }
@@ -183,19 +186,29 @@ void mergeResolution(ResolutionSummary &into, const ResolutionSummary &from) {
     }
 }
 
-std::vector<PriceRange> unbuildableRows(const ColumnResolution &column, int64_t tick, PriceRange rows) {
-    if (tick <= 0 || rows.end <= rows.lo) return {};
-    Ranges data, covered;
+const std::vector<PriceRange> &unbuildableRows(const ColumnResolution &column, int64_t tick, PriceRange rows,
+                                               TickScratch &scratch) {
+    auto &[data, covered, whole, needed, out] = scratch;
+    out.clear();
+    if (tick <= 0 || rows.end <= rows.lo) return out;
+    data.clear();
+    covered.clear();
     for (const auto &source : column.sources) {
         if (source.state != BucketState::Present) continue;
         data.insert(data.end(), source.bands.begin(), source.bands.end());
-        if (buildsOn(tick, source.commonUnits)) {
-            const auto whole = inward(source.bands, tick);
-            covered.insert(covered.end(), whole.begin(), whole.end());
-        }
+        if (buildsOn(tick, source.commonUnits)) appendInward(source.bands, tick, covered);
     }
-    const auto needed = intersect(inward(unite(std::move(data)), tick), {rows});
-    return subtract(needed, unite(std::move(covered)));
+    unite(data);
+    whole.clear();
+    appendInward(data, tick, whole);
+    intersect(whole, std::span(&rows, 1), needed);
+    unite(covered);
+    subtract(needed, covered, out);
+    return out;
+}
+std::vector<PriceRange> unbuildableRows(const ColumnResolution &column, int64_t tick, PriceRange rows) {
+    TickScratch scratch;
+    return unbuildableRows(column, tick, rows, scratch);
 }
 
 std::vector<VeiledRange> veiledRanges(const ResolutionSummary &summary, int64_t tick, double timeLo, double timeHi,
@@ -205,9 +218,10 @@ std::vector<VeiledRange> veiledRanges(const ResolutionSummary &summary, int64_t 
     if (!rows) return out;
     // Consecutive columns with identical veiled rows merge into one range.
     std::map<std::pair<int64_t, int64_t>, size_t> last; // rows -> index in out
+    TickScratch scratch;
     for (const auto &column : summary.columns) {
         if (!inView(column, summary.tfMs, timeLo, timeHi)) continue;
-        for (const auto &range : unbuildableRows(column, tick, *rows)) {
+        for (const auto &range : unbuildableRows(column, tick, *rows, scratch)) {
             const auto it = last.find({range.lo, range.end});
             if (it != last.end() && out[it->second].endMs == column.startMs) {
                 out[it->second].endMs += summary.tfMs;
@@ -224,7 +238,7 @@ std::vector<VeiledRange> veiledRanges(const ResolutionSummary &summary, int64_t 
 }
 
 bool buildsInView(const ResolutionSummary &summary, int64_t tick, double timeLo, double timeHi, double priceLo,
-                  double priceHi) {
+                  double priceHi, TickScratch &scratch) {
     const auto rows = binsInView(priceLo, priceHi, summary.priceScale, tick);
     if (!rows) return false;
     bool loaded = false;
@@ -232,18 +246,29 @@ bool buildsInView(const ResolutionSummary &summary, int64_t tick, double timeLo,
         if (!inView(column, summary.tfMs, timeLo, timeHi)) continue;
         for (const auto &source : column.sources)
             if (source.state == BucketState::Present && buildsOn(tick, source.commonUnits)) loaded = true;
-        if (!unbuildableRows(column, tick, *rows).empty()) return false;
+        if (!unbuildableRows(column, tick, *rows, scratch).empty()) return false;
     }
     return loaded;
 }
+bool buildsInView(const ResolutionSummary &summary, int64_t tick, double timeLo, double timeHi, double priceLo,
+                  double priceHi) {
+    TickScratch scratch;
+    return buildsInView(summary, tick, timeLo, timeHi, priceLo, priceHi, scratch);
+}
 
 int64_t autoTickUnits(const ResolutionSummary &summary, int64_t currentUnits, double timeLo, double timeHi,
-                      double priceLo, double priceHi, double heightPx, const AutoTickParams &params) {
+                      double priceLo, double priceHi, double heightPx, const AutoTickParams &params,
+                      TickScratch &scratch) {
     if (!std::isfinite(heightPx) || !(heightPx > 0) || !(priceHi > priceLo) || summary.columns.empty()) return 0;
     const double unitsPerPx = (priceHi - priceLo) * summary.priceScale / heightPx;
     return autoTickUnitsIf(currentUnits, unitsPerPx, [&](int64_t tick) {
-        return buildsInView(summary, tick, timeLo, timeHi, priceLo, priceHi);
+        return buildsInView(summary, tick, timeLo, timeHi, priceLo, priceHi, scratch);
     }, params);
+}
+int64_t autoTickUnits(const ResolutionSummary &summary, int64_t currentUnits, double timeLo, double timeHi,
+                      double priceLo, double priceHi, double heightPx, const AutoTickParams &params) {
+    TickScratch scratch;
+    return autoTickUnits(summary, currentUnits, timeLo, timeHi, priceLo, priceHi, heightPx, params, scratch);
 }
 
 std::vector<int64_t> manualPresetUnits(const ResolutionSummary &summary, int64_t maxUnits) {

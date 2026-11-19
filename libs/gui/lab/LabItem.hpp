@@ -20,6 +20,7 @@
 // server mode the view follows the live edge until the user pans.
 #include "LabData.hpp"
 #include "heatmap/HeatmapResolution.hpp"
+#include "heatmap/HeatmapSpanPlanner.hpp"
 #include "render/heatmap/HeatmapTileNode.hpp"
 #include <QElapsedTimer>
 #include <QQuickItem>
@@ -160,6 +161,7 @@ private:
         int64_t current = 0;
         bool operator==(const TickKey &) const = default;
     } tickKey_;
+    heatmap::TickScratch tickScratch_; // reused by chooseTick (same thread contract)
     uint64_t tickChanges_ = 0;
     uint64_t viewSerial_ = 0, renderedSerial_ = 0; // settled() needs a frame of the current view
     QElapsedTimer launched_, lastFrame_;
