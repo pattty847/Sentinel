@@ -1263,6 +1263,7 @@ void SentinelStreamClient::handleTpoSliceMessage(const nlohmann::json& msg) {
     slice.tickSize = tickSize;
     slice.format = QString::fromStdString(format);
     slice.letters = std::move(letters);
+    slice.approximate = msg.value("approximate", false);
     emit tpoSliceReceived(slice);
 }
 
@@ -1347,6 +1348,7 @@ void SentinelStreamClient::handleTpoHistoryChunkMessage(const nlohmann::json& ms
         slice.tickSize = tickSize;
         slice.format = QString::fromStdString(format);
         slice.letters = std::move(letters);
+        slice.approximate = item.value("approximate", false);
         emit tpoSliceReceived(slice);
         ++emitted;
         lastEndMs = std::max(lastEndMs, endMs);

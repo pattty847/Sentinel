@@ -18,6 +18,9 @@ struct TpoSlice {
     double tickSize = 0.0;
     QString format = QStringLiteral("tpo_ascii");
     QByteArray letters;
+    // Letters built from REST candle high/low ranges instead of recorded trades
+    // (wire field "approximate", absent = false).
+    bool approximate = false;
 };
 
 Q_DECLARE_METATYPE(TpoSlice)

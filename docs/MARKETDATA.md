@@ -892,7 +892,10 @@ TPO history additionally approximates older price rows from REST candle high/low
 ranges before the complete selected tape, including a partially covered boundary
 candle. This covers both pre-retention time and trades omitted by the budget. With
 no retained tape (for example after restart), candles cover the entire requested
-history window. Fetches run on the history worker, in pages of at most 350 candles;
+history window. Each TPO column (`tpo_slice`, and every `tpo_history_chunk` column)
+carries `approximate`: true when any of its letters come from a candle range, false
+when they all come from trades (absent = false). The GUI draws approximate periods
+at reduced opacity. Fetches run on the history worker, in pages of at most 350 candles;
 fetch errors fail the request explicitly. Every REST call has one 10-second total
 network deadline covering DNS, connect, TLS and HTTP, including any auth fallback.
 Timeouts return a failed result and log a warning. Overlay jobs check cancellation

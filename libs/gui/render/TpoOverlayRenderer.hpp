@@ -46,6 +46,9 @@ double tpoLetterBaseline(double rowTop, double rowHeight, double capMid, bool sn
  *              (classic market profile). The profile sticks to the left edge of
  *              the plot while its session is still on screen.
  *
+ * Approximate periods (letters the server built from REST candle high/low ranges, not
+ * from recorded trades) draw the same cells and letters at kApproximateOpacity.
+ *
  * Every look comes from tpo::StyleModel (chart/core/TpoStyle.hpp): cell fill,
  * letters, the value-area rule, and the POC/VAH/VAL/IBH/IBL lines. Level lines
  * sit under the cells and reach across the profile or the whole session; the
@@ -61,6 +64,10 @@ double tpoLetterBaseline(double rowTop, double rowHeight, double capMid, bool sn
  */
 class TpoOverlayRenderer {
 public:
+    // Opacity of approximate (REST candle) periods relative to trade-built ones: cell
+    // fill and letters alike. The one knob for how "approximate" looks.
+    static constexpr double kApproximateOpacity = 0.55;
+
     struct PendingUpload {
         int x = 0;              // period index within the session
         int gridWidth = 0;      // periods in the session
@@ -68,6 +75,7 @@ public:
         QByteArray letters;     // one byte per row, '\0' = not visited
         TradeOverlayGrid grid;  // startMs/endMs = session bounds
         int64_t periodMs = 0;
+        bool approximate = false;  // letters built from REST candles, not trades
     };
 
     struct Style {
@@ -138,6 +146,7 @@ private:
         int64_t periodMs = 0;
         int periods = 0;
         std::vector<std::vector<int>> rowsByPeriod;
+        std::vector<char> approximate;  // per period
         uint64_t dataVersion = 1;
 
         tpo::ProfileRows profile;
@@ -152,6 +161,9 @@ private:
         QSGGeometryNode* levels = nullptr;
         ChartTextNode* lightText = nullptr;
         ChartTextNode* darkText = nullptr;
+        // Letters of approximate periods, drawn at kApproximateOpacity.
+        ChartTextNode* approxLightText = nullptr;
+        ChartTextNode* approxDarkText = nullptr;
         int cellCapacity = 0;
         LayoutKey built;
         bool hasBuilt = false;
@@ -160,6 +172,8 @@ private:
         float textAlpha = 0.0f;
         std::vector<ChartGlyphInstance> lightGlyphs;
         std::vector<ChartGlyphInstance> darkGlyphs;
+        std::vector<ChartGlyphInstance> approxLightGlyphs;
+        std::vector<ChartGlyphInstance> approxDarkGlyphs;
     };
 
     struct GroupKey {

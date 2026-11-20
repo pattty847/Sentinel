@@ -13,6 +13,7 @@
 #include "mainwindow/ChartAgentPort.hpp"
 #include "render/VolumeProfileRenderer.hpp"
 #include "render/ChartTextAtlas.hpp"
+#include "render/ChartTextNode.hpp"
 #include "lab/LabData.hpp"
 #include "lab/OffscreenQuick.hpp"
 #include "lab/RhiBackend.hpp"
@@ -1221,6 +1222,101 @@ TEST(TpoTags, FollowTheVisibleSessionAtCurrentPrices) {
     renderer.render(&window, &root, true, atlas, true, cameraFor(older - 3 * day, older - 2 * day, 100, 220), 1.0,
                     true, true, surface);
     EXPECT_EQ(renderer.tagsForTest().count, 0) << "no session on screen: no tags";
+}
+
+// Periods built from REST candles draw the same cells and letters at
+// kApproximateOpacity; trade periods are untouched.
+TEST(TpoApproximate, CandlePeriodsDrawCellsAndLettersDimmed) {
+    ChartTextAtlas atlas;
+    ChartTextAtlas::BuildParams params;
+    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPx = 48;
+    params.charset = QStringLiteral("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+    ASSERT_TRUE(atlas.build(params));
+    constexpr qint64 hour = 3'600'000, day = 24 * hour, period = 30 * 60'000, start = 100 * day;
+    constexpr double tick = 1.0, top = 200.0;
+    // Periods A and B from candles, C from trades, all on base rows 40..49 (prices 151..160).
+    auto feed = [&](TpoOverlayRenderer& renderer, bool flagged) {
+        for (int p = 0; p < 3; ++p) {
+            TpoOverlayRenderer::PendingUpload upload;
+            upload.x = p;
+            upload.gridWidth = 48;
+            upload.gridHeight = 100;
+            upload.periodMs = period;
+            upload.grid = {start, start + day, top, tick, 1};
+            upload.letters = QByteArray(100, '\0');
+            for (int row = 40; row < 50; ++row) upload.letters[row] = char('A' + p);
+            upload.approximate = flagged && p < 2;
+            renderer.enqueue(std::move(upload));
+        }
+    };
+    chart_raster::RasterInputs in;
+    in.timeStart = start - hour;
+    in.timeEnd = start + 4 * hour;
+    in.minPrice = 140;
+    in.maxPrice = 170;
+    in.tfMs = period;
+    in.tick = 1;
+    in.itemWidthLogical = 640;
+    in.itemHeightLogical = 320;
+    in.dpr = 1.0;
+    const auto camera = chart_raster::computeRaster(in, {});
+    const QRectF surface(0, 0, 640, 320);
+    // Letters need the atlas uploaded as a texture, so a real scene graph: an offscreen
+    // QRhi window when one can be created; otherwise only the cells are checked.
+    QQuickWindow plainWindow;
+    QQuickWindow* window = &plainWindow;
+    std::unique_ptr<lab::OffscreenQuick> scene;
+    QString error;
+    if (lab::gpuUnavailableReason().isEmpty()) {
+        scene = std::make_unique<lab::OffscreenQuick>();
+        if (scene->create(QSize(640, 320), &error) && !scene->renderFrame(&error).isNull()) window = scene->window();
+        else scene.reset();
+    }
+    QSGNode approxRoot, plainRoot;
+    TpoOverlayRenderer approx, plain;
+    TpoOverlayRenderer::Style style;
+    style.layout = tpo::Layout::Split;
+    for (auto* r : {&approx, &plain}) r->setStyle(style);
+    feed(approx, true);
+    feed(plain, false);
+    approx.render(window, &approxRoot, true, atlas, true, camera, 1.0, true, true, surface);
+    plain.render(window, &plainRoot, true, atlas, true, camera, 1.0, true, true, surface);
+
+    // Split cells: row by row, periods in order (A, B, C).
+    const auto* cells = approx.sessionNodesForTest(start).cellGeometry;
+    const auto* plainCells = plain.sessionNodesForTest(start).cellGeometry;
+    ASSERT_TRUE(cells && plainCells);
+    const auto* v = cells->geometry()->vertexDataAsColoredPoint2D();
+    const auto* pv = plainCells->geometry()->vertexDataAsColoredPoint2D();
+    int quads = 0;
+    for (int q = 0; q * 6 < cells->geometry()->vertexCount() && pv[q * 6].a != 0; ++q, ++quads) {
+        const int p = q % 3;
+        const int expected = p < 2 ? int(std::lround(pv[q * 6].a * TpoOverlayRenderer::kApproximateOpacity)) : pv[q * 6].a;
+        EXPECT_EQ(int(v[q * 6].a), expected) << "quad " << q << " period " << p;
+    }
+    EXPECT_GE(quads, 9) << "three periods on at least three display rows";
+
+    // Letters: approximate periods use their own text nodes at the reduced alpha.
+    const QSGNode* transform = approx.sessionNodesForTest(start).cells;
+    ASSERT_TRUE(transform);
+    std::vector<const ChartTextNode*> text;
+    for (auto* child = transform->firstChild(); child; child = child->nextSibling())
+        if (auto* node = dynamic_cast<const ChartTextNode*>(child)) text.push_back(node);
+    ASSERT_EQ(text.size(), 4u) << "light, dark, approximate light, approximate dark";
+    const auto alpha = [](const ChartTextNode* node) {
+        return static_cast<const ChartTextMaterial*>(node->material())->color().w();
+    };
+    const auto drawn = [](const ChartTextNode* node) { return node->geometry()->vertexCount() > 0 && !node->vertexIsZero(0); };
+    if (scene) {
+        EXPECT_TRUE(drawn(text[0]) || drawn(text[1])) << "trade period letters";
+        EXPECT_TRUE(drawn(text[2]) || drawn(text[3])) << "candle period letters";
+        ASSERT_GT(alpha(text[0]), 0.0f);
+        EXPECT_NEAR(alpha(text[2]), alpha(text[0]) * TpoOverlayRenderer::kApproximateOpacity, 1e-3);
+        EXPECT_NEAR(alpha(text[3]), alpha(text[1]) * TpoOverlayRenderer::kApproximateOpacity, 1e-3);
+    } else {
+        std::cout << "GPU case skipped: TPO letter checks need an offscreen QRhi: " << error.toStdString() << std::endl;
+    }
 }
 
 // Settings opened over a restored non-default style shows it, and one edit keeps the rest.

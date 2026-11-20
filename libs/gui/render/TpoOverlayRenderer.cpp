@@ -140,6 +140,8 @@ void TpoOverlayRenderer::onRootRebuilt() {
         session.cells = nullptr;
         session.lightText = nullptr;
         session.darkText = nullptr;
+        session.approxLightText = nullptr;
+        session.approxDarkText = nullptr;
         session.cellCapacity = 0;
         session.hasBuilt = false;
     }
@@ -159,6 +161,8 @@ void TpoOverlayRenderer::dropSessionNodes(Session& session) {
     session.cells = nullptr;
     session.lightText = nullptr;
     session.darkText = nullptr;
+    session.approxLightText = nullptr;
+    session.approxDarkText = nullptr;
     session.cellCapacity = 0;
     session.hasBuilt = false;
 }
@@ -225,7 +229,9 @@ void TpoOverlayRenderer::applyUploads(std::vector<PendingUpload>& uploads, int m
         if (session.periods != upload.gridWidth) {
             session.periods = upload.gridWidth;
             session.rowsByPeriod.resize(static_cast<size_t>(upload.gridWidth));
+            session.approximate.resize(static_cast<size_t>(upload.gridWidth), 0);
         }
+        session.approximate[static_cast<size_t>(upload.x)] = upload.approximate ? 1 : 0;
         session.periodMs = upload.periodMs > 0
             ? upload.periodMs
             : (session.endMs - session.startMs) / std::max(1, session.periods);
@@ -285,9 +291,11 @@ void TpoOverlayRenderer::ensureSessionNodes(Session& session) {
     session.cells = colorNode();
     session.lightText = new ChartTextNode();
     session.darkText = new ChartTextNode();
+    session.approxLightText = new ChartTextNode();
+    session.approxDarkText = new ChartTextNode();
     session.transform->appendChildNode(session.cells);
-    session.transform->appendChildNode(session.lightText);
-    session.transform->appendChildNode(session.darkText);
+    for (ChartTextNode* node : {session.lightText, session.darkText, session.approxLightText, session.approxDarkText})
+        session.transform->appendChildNode(node);
     m_sessionsRoot->appendChildNode(session.transform);
     session.cellCapacity = 0;
     session.hasBuilt = false;
@@ -376,6 +384,8 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
     const double capMid = (capGlyph.bounds.top() + capGlyph.bounds.bottom()) * 0.5;
     session.lightGlyphs.clear();
     session.darkGlyphs.clear();
+    session.approxLightGlyphs.clear();
+    session.approxDarkGlyphs.clear();
 
     auto rowTop = [&](int row) {
         const int64_t g = profile.minGroup() + row;
@@ -402,13 +412,18 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
             const float x0 = static_cast<float>(edge(left, key.snapX));
             const float x1 = static_cast<float>(edge(left + cellW - gapX, key.snapX));
             const tpo::Rgba color = tpo::cellColor(look, period, session.periods, inVa, poc);
+            const bool approximate = session.approximate[static_cast<size_t>(period)] != 0;
             if (look.cells.visible && written + 6 <= session.cellCapacity) {
-                writeQuad(v + written, x0, y0, std::max(x0 + minCell, x1), std::max(y0 + minCell, y1), color);
+                tpo::Rgba fill = color;
+                if (approximate) fill.a = static_cast<uint8_t>(std::lround(fill.a * kApproximateOpacity));
+                writeQuad(v + written, x0, y0, std::max(x0 + minCell, x1), std::max(y0 + minCell, y1), fill);
                 written += 6;
             }
             if (key.text) {
                 const bool dark = look.cells.visible && tpo::prefersDarkText(color);
-                appendLetter(dark ? session.darkGlyphs : session.lightGlyphs, atlas, tpo::letterForPeriod(period),
+                auto& glyphs = approximate ? (dark ? session.approxDarkGlyphs : session.approxLightGlyphs)
+                                           : (dark ? session.darkGlyphs : session.lightGlyphs);
+                appendLetter(glyphs, atlas, tpo::letterForPeriod(period),
                              left + cellW * 0.5, letterBaseline, fontScale, key.dpr);
             }
             ++k;
@@ -425,12 +440,18 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
 
     session.lightText->updateGeometry(session.lightGlyphs);
     session.darkText->updateGeometry(session.darkGlyphs);
+    session.approxLightText->updateGeometry(session.approxLightGlyphs);
+    session.approxDarkText->updateGeometry(session.approxDarkGlyphs);
 
     session.textAlpha = key.text ? static_cast<float>(look.letters.opacity) : 0.0f;
+    const double approxAlpha = session.textAlpha * kApproximateOpacity;
     session.lightText->setColor(qcolor(look.letters.color, session.textAlpha));
+    session.approxLightText->setColor(qcolor(look.letters.color, approxAlpha));
     QColor dark = kDarkText;
     dark.setAlphaF(session.textAlpha);
     session.darkText->setColor(dark);
+    dark.setAlphaF(approxAlpha);
+    session.approxDarkText->setColor(dark);
 
     sLog_Probe("tpo.build", "session=" << session.startMs << " periods=" << session.periods
                << " layout=" << tpo::layoutName(key.layout) << " theme=" << tpo::themeName(look.theme)
@@ -719,10 +740,11 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
             continue;
         }
         if (textAvailable) {
-            session.lightText->setSharedAtlasTexture(m_root->texture);
-            session.darkText->setSharedAtlasTexture(m_root->texture);
-            session.lightText->setPxRange(atlas.pxRange());
-            session.darkText->setPxRange(atlas.pxRange());
+            for (ChartTextNode* node : {session.lightText, session.darkText,
+                                        session.approxLightText, session.approxDarkText}) {
+                node->setSharedAtlasTexture(m_root->texture);
+                node->setPxRange(atlas.pxRange());
+            }
         }
         const double startX = surfaceBounds.left() + mapping.timeToScreenX(static_cast<double>(session.startMs));
         const double endX = surfaceBounds.left() + mapping.timeToScreenX(static_cast<double>(session.endMs));

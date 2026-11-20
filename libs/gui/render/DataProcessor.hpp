@@ -43,7 +43,8 @@ signals:
                         QByteArray letters,
                         int64_t sessionStartMs,
                         int64_t sessionEndMs,
-                        int64_t timeframeMs, TradeOverlayGrid grid);
+                        int64_t timeframeMs, TradeOverlayGrid grid,
+                        bool approximate = false);  // letters from REST candles
     void volumeProfileReady(std::vector<float> bins, VolumeProfileState::Snapshot snap);
 
 private:

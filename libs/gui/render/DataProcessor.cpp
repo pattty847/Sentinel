@@ -140,7 +140,8 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
                                              slice.timeframeMs,
                                              m_tpoGridWidth,
                                              m_tpoGridHeight,
-                                             slice.letters);
+                                             slice.letters,
+                                             slice.approximate);
     if (!ok) {
         return;
     }
@@ -158,7 +159,8 @@ void DataProcessor::onTpoSliceReceived(const TpoSlice& slice) {
                             upload.sessionStartMs,
                             upload.sessionEndMs,
                             slice.timeframeMs,
-                            {upload.sessionStartMs, upload.sessionEndMs, m_tpoMaxPrice, m_tpoTickSize, m_tpoGridGeneration});
+                            {upload.sessionStartMs, upload.sessionEndMs, m_tpoMaxPrice, m_tpoTickSize, m_tpoGridGeneration},
+                            upload.approximate);
     }
 }
 

@@ -77,7 +77,8 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
                                  int64_t timeframeMs,
                                  int /*gridWidth*/,
                                  int gridHeight,
-                                 const QByteArray& data) {
+                                 const QByteArray& data,
+                                 bool approximate) {
     if (bucketStartMs <= 0 || bucketEndMs <= bucketStartMs || timeframeMs <= 0 ||
         gridHeight <= 0 || data.size() != gridHeight) {
         return false;
@@ -119,6 +120,7 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
         Session session;
         session.endMs = boundary.endMs;
         session.columns.assign(static_cast<size_t>(periods), QByteArray());
+        session.approximate.assign(static_cast<size_t>(periods), 0);
         it = m_sessions.emplace(boundary.startMs, std::move(session)).first;
         sLog_Data("TPO session added: start=" << boundary.startMs << " end=" << boundary.endMs
                   << " sessionType=" << m_sessionType << " periods=" << periods
@@ -141,17 +143,20 @@ bool TpoStreamState::ingestSlice(int64_t bucketStartMs,
                    << " period=" << period);
         return false;
     }
-    if (col == data) {
+    char& approx = it->second.approximate[static_cast<size_t>(period)];
+    if (col == data && approx == static_cast<char>(approximate)) {
         return true;
     }
     col = data;
+    approx = static_cast<char>(approximate);
     sLog_Probe("tpo.ingest", "bucket: start=" << bucketStartMs << " end=" << bucketEndMs
                << " tf=" << timeframeMs << " session=" << boundary.startMs
                << " period=" << period << "/" << periods
                << " rows=" << incomingStats.occupied
-               << " span=[" << incomingStats.firstRow << ".." << incomingStats.lastRow << "]");
+               << " span=[" << incomingStats.firstRow << ".." << incomingStats.lastRow << "]"
+               << " approximate=" << approximate);
     m_pending.push_back(PendingUpload{period, periods, boundary.startMs, boundary.endMs,
-                                      bucketStartMs, bucketEndMs, col});
+                                      bucketStartMs, bucketEndMs, col, approximate});
     return true;
 }
 
