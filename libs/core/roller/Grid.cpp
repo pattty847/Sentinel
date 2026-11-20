@@ -118,9 +118,14 @@ Grid deriveKalshiGrid(const nlohmann::json& instrument) {
             previous = end;
         }
         if (previous != 1000) throw std::runtime_error("bands must cover tick-aligned 0..1 without gaps");
-        Grid grid{1000,.001,.01,std::stod(spec.sizeIncrement)};
-        if (!std::isfinite(grid.sizeFloor) || grid.sizeFloor <= 0)
-            throw std::runtime_error("size increment is not representable");
+        // Metadata representability only: any positive number with at most
+        // two normalized fractional digits is an exact multiple of 0.01.
+        const auto size = decimal(spec.sizeIncrement);
+        const auto sizeDot = size.find('.');
+        const auto sizeFraction = sizeDot == std::string::npos ? 0 : size.size() - sizeDot - 1;
+        if (sizeFraction > 2)
+            throw std::runtime_error("size increment must be a positive integer multiple of 0.01");
+        Grid grid{1000,.001,.01,.01};
         grid.instrument = normalizeKalshiInstrument(instrument);
         return grid;
     } catch (const std::exception& e) {

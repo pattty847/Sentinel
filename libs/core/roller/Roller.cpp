@@ -240,7 +240,7 @@ json roll(const RollOptions& o) {
             if (!gridReady) {
                 Grid grid;
                 if (input.venue == Venue::Kalshi) {
-                    if (!o.overrides.empty()) throw std::runtime_error("Kalshi grid: overrides are not supported; use the instrument block");
+                    if (!o.overrides.empty()) throw std::runtime_error("Kalshi grid: overrides are not supported; recorder grid is fixed");
                     grid = deriveKalshiGrid(input.instrument);
                 } else {
                     double bid = 0, ask = std::numeric_limits<double>::infinity();
@@ -310,7 +310,7 @@ json roll(const RollOptions& o) {
                 // starting point; intraday anchors require the committed prefix.
                 if (!checkpoint && a.boundaryMs != day) continue;
                 if (a.identity.venue == Venue::Kalshi && !o.overrides.empty())
-                    throw std::runtime_error("Kalshi grid: overrides are not supported; use the instrument block");
+                    throw std::runtime_error("Kalshi grid: overrides are not supported; recorder grid is fixed");
                 const auto grid = a.identity.venue == Venue::Kalshi ? deriveKalshiGrid(a.instrument) :
                     deriveGrid(a.metadata,*a.referenceMid,o.overrides);
                 const auto expectedHash = configHash(grid.config(o.outputRoot));

@@ -80,32 +80,36 @@ void oneRun(const fs::path& root, const json& h, bool coinbase = false) {
 }
 
 TEST(KalshiRecovery, MiddayUnrepresentableInstrumentPreservesPrefix) {
-    QTemporaryDir temp; const fs::path root = temp.path().toStdString();
-    {
-        capture::Writer writer(config(root / "raw"),header(spec()));
-        append(writer,Epoch,snapshot()); ticks(writer,1,5); writer.close();
+    for (bool sizeChange : {false,true}) {
+        QTemporaryDir temp; const fs::path root = temp.path().toStdString();
+        {
+            capture::Writer writer(config(root / "raw"),header(spec()));
+            append(writer,Epoch,snapshot()); ticks(writer,1,5); writer.close();
+        }
+        RollOptions o{root / "raw",root / "out",Product,Epoch,Epoch + 5 * Minute};
+        roll(o); const auto prefix = files(o.outputRoot);
+        ASSERT_FALSE(prefix.empty());
+        const auto checkpoint = read(o.outputRoot / Product / "roller.json");
+        {
+            auto policy = sizeChange ? spec() : spec("0.0005");
+            if (sizeChange) policy["size_increment"] = "0.001";
+            capture::Writer writer(config(root / "raw"),header(policy));
+            // Refuse the first record of the new policy, even before its snapshot.
+            append(writer,Epoch + 5 * Minute + 5000,json::object(),capture::Kind::CaptureStarted);
+            auto book = snapshot();
+            book["msg"]["yes_dollars_fp"] = json::array({{"0.0550","10.00"},{"0.0570","20.00"}});
+            book["msg"]["no_dollars_fp"] = json::array({{"0.9390","30.00"}});
+            append(writer,Epoch + 5 * Minute + 6000,book); ticks(writer,6,10); writer.close();
+        }
+        o.toMs = Epoch + 10 * Minute;
+        int64_t lastApplied = 0;
+        o.onApplied = [&](const JournalRecord& r) { lastApplied = r.record.time.systemNs / 1'000'000; };
+        try { roll(o); FAIL() << "silently accepted a changed intra-day instrument"; }
+        catch (const std::runtime_error& e) { EXPECT_NE(std::string(e.what()).find("Kalshi grid:"),std::string::npos); EXPECT_NE(std::string(e.what()).find(sizeChange ? "0.01" : "0.001"),std::string::npos); }
+        EXPECT_LT(lastApplied,Epoch + 5 * Minute + 5000);
+        EXPECT_EQ(files(o.outputRoot),prefix);
+        EXPECT_EQ(read(o.outputRoot / Product / "roller.json"),checkpoint);
     }
-    RollOptions o{root / "raw",root / "out",Product,Epoch,Epoch + 5 * Minute};
-    roll(o); const auto prefix = files(o.outputRoot);
-    ASSERT_FALSE(prefix.empty());
-    const auto checkpoint = read(o.outputRoot / Product / "roller.json");
-    {
-        capture::Writer writer(config(root / "raw"),header(spec("0.0005")));
-        // Refuse the first record of the new policy, even before its snapshot.
-        append(writer,Epoch + 5 * Minute + 5000,json::object(),capture::Kind::CaptureStarted);
-        auto book = snapshot();
-        book["msg"]["yes_dollars_fp"] = json::array({{"0.0550","10.00"},{"0.0570","20.00"}});
-        book["msg"]["no_dollars_fp"] = json::array({{"0.9390","30.00"}});
-        append(writer,Epoch + 5 * Minute + 6000,book); ticks(writer,6,10); writer.close();
-    }
-    o.toMs = Epoch + 10 * Minute;
-    int64_t lastApplied = 0;
-    o.onApplied = [&](const JournalRecord& r) { lastApplied = r.record.time.systemNs / 1'000'000; };
-    try { roll(o); FAIL() << "silently accepted a changed intra-day instrument"; }
-    catch (const std::runtime_error& e) { EXPECT_NE(std::string(e.what()).find("Kalshi grid:"),std::string::npos); EXPECT_NE(std::string(e.what()).find("0.001"),std::string::npos); }
-    EXPECT_LT(lastApplied,Epoch + 5 * Minute + 5000);
-    EXPECT_EQ(files(o.outputRoot),prefix);
-    EXPECT_EQ(read(o.outputRoot / Product / "roller.json"),checkpoint);
 }
 
 TEST(KalshiRecovery, EquivalentDecimalHeadersShareIdentityAndPersistNormalizedInstrument) {
@@ -242,10 +246,12 @@ TEST(KalshiRecovery, ThreeHourDeltasOneSidedMidnightAndHourCrashHaveIdenticalByt
     EXPECT_EQ(files(crash.outputRoot),uninterrupted);
 }
 
-TEST(KalshiRecovery, BandChangesKeepGridCheckpointAnchorsAndDeterministicHistory) {
+static void instrumentChanges(bool sizes) {
     QTemporaryDir temp; const fs::path root = temp.path().toStdString();
     const auto midnight = Epoch + Day, end = midnight + 30 * Minute;
-    const auto old = spec(), fine = spec("0.001"), coarse = spec("0.004");
+    const auto old = spec();
+    auto fine = sizes ? spec() : spec("0.001"), coarse = sizes ? spec() : spec("0.004");
+    if (sizes) { fine["size_increment"] = "1"; coarse["size_increment"] = "0.02"; }
     const json expected = json::array({{{"fromMs",midnight},{"instrument",old}},
         {{"fromMs",midnight + 3000},{"instrument",fine}},
         {{"fromMs",midnight + 5 * Minute + 3000},{"instrument",coarse}},
@@ -287,7 +293,7 @@ TEST(KalshiRecovery, BandChangesKeepGridCheckpointAnchorsAndDeterministicHistory
         ASSERT_FALSE(rows.empty());
         for (const auto& row : rows) EXPECT_EQ(row.header.configHash,rows.front().header.configHash);
     }
-    // Restore an old-band midnight anchor against a new-band journal cursor,
+    // Restore a prior-instrument midnight anchor against a changed journal cursor,
     // with no checkpoint and no prior-day journal available.
     const auto anchor = AnchorStore::load(o.outputRoot / Product / "anchors/2026-10-25/0000.anchor");
     EXPECT_EQ(anchor.instrument,old);
@@ -315,6 +321,13 @@ TEST(KalshiRecovery, BandChangesKeepGridCheckpointAnchorsAndDeterministicHistory
         EXPECT_EQ(files(crash.outputRoot),files(o.outputRoot));
         if (anchors) EXPECT_EQ(recovered["days"][1]["anchorBoundaryMs"],midnight + 15 * Minute);
     }
+}
+
+TEST(KalshiRecovery, BandChangesKeepGridCheckpointAnchorsAndDeterministicHistory) {
+    instrumentChanges(false);
+}
+TEST(KalshiRecovery, SizeChangesKeepGridCheckpointAnchorsAndDeterministicHistory) {
+    instrumentChanges(true);
 }
 
 TEST(KalshiRecovery, OffGridSnapshotAndDeltaStopBeforeQuantization) {

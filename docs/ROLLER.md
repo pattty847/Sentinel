@@ -637,25 +637,31 @@ Both retained layer names cover the complete inclusive 0..1 range, with
 | deep | 0.01 (1 cent) | 10 | 0..100 (101 rows) | minutes and hourly rollup |
 
 HMC2 stores occupied rows, so a one-cent market does not fill the intervening
-near rows. The size floor is the instrument's `size_increment`; relative window
-factors are zero. Coinbase overrides retain their existing behavior; Kalshi
-rejects overrides because its fixed policy and instrument size increment own
-these values.
+near rows. The size floor is always **0.01 contracts**, independently of the
+instrument's `size_increment`; relative window factors are zero. Coinbase
+overrides retain their existing behavior; Kalshi rejects overrides because
+its recorder policy is fixed.
 
 The instrument is validated with exact normalized decimals: bounds must be
 exactly 0..1, bands must cover that range without gaps, endpoints must align to
 their band's step, and every step must be an integer multiple of 0.001.
 Steps 0.002, 0.004, 0.005, 0.008, 0.01, 0.02, 0.05 and 0.1 are representable;
 0.0005 and 0.0025 are refused with a `Kalshi grid:` error naming the 0.001 limit.
+The normalized `size_increment` must be a positive integer multiple of 0.01,
+validated as an exact decimal without converting it to a storage size floor.
+Values such as 0.02, 1 and 1.23 are accepted; 0.001 and 0.015 are refused with a
+`Kalshi grid:` error naming the 0.01 limit.
 A new unrepresentable header stops replay before applying its first record,
 leaving previously committed columns valid.
 
-Band schedules are viewer metadata. A representable band-only change, within
-or between UTC days, preserves both the roller checkpoint/anchor identity and
-the HMC2 identity and generation. These identities depend on the recorder grid
-(scale, layer ticks, absolute rows, price bounds and size floor), so changing
-`size_increment` changes both identities. Coinbase identities and bytes remain
-unchanged.
+Band schedules and `size_increment` are viewer metadata. Any representable
+instrument change, within or between UTC days, preserves the roller config
+hash and the HMC2 identity and generation for that stream. Every Kalshi market
+uses the same recorder grid, including size floor, so no instrument field
+changes the recorder policy. Full HMC2 hashes still include the symbol, layer
+and timeframe under the existing store contract; matching policies do not
+make those distinct streams share a full header hash. Coinbase identities and
+bytes remain unchanged.
 
 Each Kalshi `roller.json` day entry and stdout day report includes `venue` and
 `instrumentHistory`: an ordered list of `{fromMs, instrument}` entries with
@@ -674,7 +680,11 @@ emitting levels. The roller recovers those integers from the decoder's exact
 `units / 10000` conversion, verifies the round trip, and checks divisibility by
 10 using integer arithmetic before sending a snapshot or delta to the recorder.
 An off-grid level stops the product with `Kalshi grid: price <p> is finer than
-0.001`; no such level is rounded onto a recorder row.
+0.001`; no such level is rounded onto a recorder row. Quantities need no extra
+roller check: `KalshiDecoder.cpp` parses snapshot quantities with `fixed(..., 2)`
+and deltas with `fixed(..., 2, true)`, integrates integer hundredths, and only
+then converts callback sizes with `units(q, 100)`. Finer quantities cannot reach
+the roller from that decoder.
 
 Journal anchor search recognizes `orderbook_snapshot` for the selected ticker
 and searches earlier hours and runs using the same ordering and damage handling
@@ -685,7 +695,7 @@ the current normalized instrument block and instrument history. Their envelope i
 reject the envelope version. Coinbase envelopes and payload bytes stay version 1,
 with their required positive reference mid and Coinbase increment metadata.
 Venue participates in anchor identity; the actual journal cursor's venue and
-recorder grid are checked before state installation; a band-only difference is compatible. Missing or rejected anchors
+recorder grid are checked before state installation; any representable instrument difference is compatible. Missing or rejected anchors
 fall back to journal snapshot replay. Checkpoint fences, lateness, commit bounds,
 and crash recovery otherwise use the shared driver unchanged.
 
@@ -695,7 +705,7 @@ receive clocks. Decoded sizes allow half a logarithmic size-code step plus
 floating-point noise. Mid OHLC, observation duration and row bounds are checked
 separately. Synthetic cases cover grid validation, empty/one-sided starts,
 checkpoint/venue identity, midnight restore without the previous day's snapshot,
-snapshot fallback, band-history changes and recovery, size-floor identity changes,
+snapshot fallback, band and size-increment history changes and recovery,
 off-grid refusal, crash/resume and CLI reports.
 `coinbase_roll_6910fc11.json` pins SHA-256 of every HMC2, checkpoint and anchor
 file from the unmodified base executable on both existing Coinbase captures;

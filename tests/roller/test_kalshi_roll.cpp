@@ -249,9 +249,9 @@ TEST(KalshiRoll, CrashResumeMatchesUninterrupted) {
     EXPECT_EQ(hmcFiles(o.outputRoot), expected);
 }
 
-TEST(KalshiRoll, SizeIdentityRejectsCheckpointAndVenueMismatch) {
+TEST(KalshiRoll, FixedIdentityRejectsCheckpointAndVenueMismatch) {
     QTemporaryDir temp; const fs::path root = temp.path().toStdString();
-    auto other = instrument(); other["size_increment"] = "0.02";
+    auto other = instrument(); other["size_increment"] = "1";
     simple(root / "raw", A, instrument()); simple(root / "other", A, other);
     RollOptions o{root / "raw", root / "out", A, Epoch, Epoch + 4 * Minute};
     roll(o);
@@ -261,10 +261,11 @@ TEST(KalshiRoll, SizeIdentityRejectsCheckpointAndVenueMismatch) {
     auto otherOptions = o; otherOptions.journalRoot = root / "other"; otherOptions.outputRoot = root / "other-out";
     roll(otherOptions);
     const auto otherHash = read(otherOptions.outputRoot / A / "roller.json").at("configHash");
-    EXPECT_NE(otherHash, first);
+    EXPECT_EQ(otherHash, first);
+    EXPECT_EQ(hmcFiles(otherOptions.outputRoot), bytes);
     auto checkpoint = read(o.outputRoot / A / "roller.json");
-    checkpoint["configHash"] = otherHash;
-    checkpoint["days"][std::to_string(Epoch)]["configHash"] = otherHash;
+    checkpoint["configHash"] = first.get<uint64_t>() + 1;
+    checkpoint["days"][std::to_string(Epoch)]["configHash"] = first.get<uint64_t>() + 1;
     writeCheckpoint(o.outputRoot / A / "roller.json", checkpoint);
     try { roll(o); FAIL() << "accepted changed policy"; }
     catch (const std::logic_error& e) { EXPECT_NE(std::string(e.what()).find("checkpoint policy/range mismatch"), std::string::npos); }
@@ -318,30 +319,27 @@ TEST(KalshiRoll, MidnightAnchorAndOldJournalSnapshotHaveIdenticalNextDayBytes) {
     roll(o); EXPECT_EQ(hmcFiles(o.outputRoot), expected);
 }
 
-TEST(KalshiRoll, SizeChangeBetweenDaysChangesGridAndHmcPolicy) {
-    QTemporaryDir temp; const fs::path root = temp.path().toStdString();
-    for (int d = 0; d < 2; ++d) {
-        capture::WriterConfig cfg; cfg.root = QString::fromStdString((root / "raw").string()); cfg.symbol = A; cfg.fsyncBlocks = 0;
-        auto spec = instrument(); spec["size_increment"] = d ? "0.02" : "0.01";
-        auto h = header(A, spec);
-        capture::Writer writer(cfg, h);
-        append(writer, Epoch + d * Day, snapshot(A));
-        append(writer, Epoch + d * Day + Minute + 3000, json::object(), capture::Kind::CaptureStarted);
-        writer.close();
+TEST(KalshiRoll, SizeMetadataRepresentabilityUsesFixedFloor) {
+    for (const auto* size : {"0.01","0.02","1","1.2300","00001.000","12345678901234567890.12"}) {
+        auto policy = instrument(); policy["size_increment"] = size;
+        const auto grid = deriveKalshiGrid(policy);
+        EXPECT_EQ(grid.sizeFloor,.01) << size;
+        EXPECT_EQ(grid.config("unused").sizeScale.floor,.01) << size;
+        EXPECT_EQ(grid.instrument,normalizeKalshiInstrument(policy));
     }
-    RollOptions o{root / "raw", root / "out", A, Epoch, Epoch + Day + Minute};
-    const auto report = roll(o);
-    EXPECT_EQ(report["days"][0]["grid"]["sizeFloor"], .01);
-    EXPECT_EQ(report["days"][1]["grid"]["sizeFloor"], .02);
-    const auto cp = read(o.outputRoot / A / "roller.json");
-    EXPECT_NE(cp["days"][std::to_string(Epoch)]["configHash"], cp["days"][std::to_string(Epoch + Day)]["configHash"]);
-    for (const auto* layer : {"near", "deep"}) {
-        const auto before = recording::Hmc2Store::readRange(o.outputRoot, A, layer, Minute, Epoch, Epoch + Minute);
-        const auto after = recording::Hmc2Store::readRange(o.outputRoot, A, layer, Minute, Epoch + Day, Epoch + Day + Minute);
-        ASSERT_EQ(before.size(), 1u); ASSERT_EQ(after.size(), 1u);
-        EXPECT_NE(before[0].header.configHash, after[0].header.configHash);
-        EXPECT_EQ(after[0].header.priceScale, 1000);
+    for (const auto* size : {"0.001","0.015","1.001","0.0000000001"}) {
+        QTemporaryDir temp; const fs::path root = temp.path().toStdString();
+        auto policy = instrument(); policy["size_increment"] = size;
+        simple(root / "raw",A,policy);
+        RollOptions o{root / "raw",root / "out",A,Epoch,Epoch + Minute};
+        try { roll(o); FAIL() << "accepted " << size; }
+        catch (const std::runtime_error& e) {
+            EXPECT_STREQ(e.what(),"Kalshi grid: size increment must be a positive integer multiple of 0.01");
+        }
+        EXPECT_FALSE(fs::exists(o.outputRoot));
     }
+    auto zero = instrument(); zero["size_increment"] = "0";
+    EXPECT_THROW(deriveKalshiGrid(zero),std::runtime_error);
 }
 
 TEST(KalshiRoll, CliDryAndRealReports) {
