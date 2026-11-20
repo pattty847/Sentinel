@@ -1,5 +1,7 @@
 #include "Grid.hpp"
+#include "InstrumentSpec.hpp"
 #include <cmath>
+#include <algorithm>
 #include <stdexcept>
 
 namespace sentinel::roller {
@@ -65,7 +67,67 @@ recording::RecorderConfig Grid::config(const std::filesystem::path& root) const 
     c.root = root; c.priceScale = priceScale; c.sizeScale.floor = sizeFloor;
     c.layers = {{"near",std::llround(nearTick*priceScale),.95,1.05,false},
                 {"deep",std::llround(deepTick*priceScale),.25,4.,true}};
+    if (!instrument.is_null()) {
+        c.priceBounds = recording::PriceBounds{0,1};
+        for (auto& layer : c.layers) {
+            layer.lowFrac = layer.highMult = 0;
+            layer.absoluteRows = recording::AbsoluteRowBounds{0, int64_t(priceScale) / layer.rowTickUnits};
+        }
+    }
     c.deterministicResume = true;
     return c;
+}
+
+Grid deriveKalshiGrid(const nlohmann::json& instrument) {
+    try {
+        const auto spec = InstrumentSpec::fromHeader({{"venue","kalshi"},
+            {"product_metadata",{{"product_id","KALSHI"}}},{"instrument",instrument}});
+        using instrument_detail::decimal;
+        using instrument_detail::compare;
+        if (decimal(spec.priceBounds->min) != "0" || decimal(spec.priceBounds->max) != "1")
+            throw std::runtime_error("bounds must cover exactly 0..1");
+        auto finest = decimal(spec.tickBands.front().step);
+        for (const auto& band : spec.tickBands) {
+            const auto step = decimal(band.step);
+            if (compare(step, finest) < 0) finest = step;
+        }
+        const auto dot = finest.find('.');
+        const size_t places = dot == std::string::npos ? 0 : finest.size() - dot - 1;
+        if (places > 15) throw std::runtime_error("finest tick exceeds integer price precision");
+        int64_t scale = 1;
+        for (size_t i = 0; i < places; ++i) scale *= 10;
+        const auto units = [&](const std::string& text) {
+            auto s = decimal(text);
+            if (compare(s, "1") > 0) throw std::runtime_error("price or step exceeds 1");
+            const auto d = s.find('.');
+            const auto fraction = d == std::string::npos ? 0 : s.size() - d - 1;
+            if (fraction > places) throw std::runtime_error("band is not aligned to the finest tick scale");
+            if (d != std::string::npos) s.erase(d, 1);
+            s.append(places - fraction, '0');
+            return std::stoll(s);
+        };
+        const int64_t near = units(finest);
+        // A finest tick >= one cent is itself the deep tick; otherwise scale
+        // necessarily represents a cent exactly.
+        const int64_t deep = std::max(near, scale / 100);
+        if (near <= 0 || scale % near || scale % deep)
+            throw std::runtime_error("1.0 must be an integer multiple of each layer tick");
+        int64_t previous = 0;
+        for (const auto& band : spec.tickBands) {
+            const auto start = units(band.bounds->min), end = units(band.bounds->max), step = units(band.step);
+            if (step % near) throw std::runtime_error("band step must be an integer multiple of the finest tick");
+            if (start != previous || start % step || end % step)
+                throw std::runtime_error("bands must cover tick-aligned 0..1 without gaps");
+            previous = end;
+        }
+        if (previous != scale) throw std::runtime_error("bands must cover tick-aligned 0..1 without gaps");
+        Grid grid{double(scale),double(near)/scale,double(deep)/scale,std::stod(spec.sizeIncrement)};
+        if (!std::isfinite(grid.sizeFloor) || grid.sizeFloor <= 0)
+            throw std::runtime_error("size increment is not representable");
+        grid.instrument = instrument;
+        return grid;
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("Kalshi grid: ") + e.what());
+    }
 }
 } // namespace sentinel::roller

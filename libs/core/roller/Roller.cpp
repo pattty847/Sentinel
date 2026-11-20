@@ -53,13 +53,19 @@ void writeCheckpoint(const fs::path& path, const json& j) {
         throw std::runtime_error("checkpoint durable rename failed");
 }
 namespace {
-uint64_t configHash(const recording::RecorderConfig& c) {
+uint64_t configHash(const recording::RecorderConfig& c, const json& instrument = nullptr) {
     // Roller checkpoint identity is frozen: this literal belongs to existing
     // checkpoints and anchors, not a live setting. The one-sided policy lives
     // in replay-state policy; a change there falls back to journal replay.
     json j = {{"version",Version},{"scale",c.priceScale},{"floor",c.sizeScale.floor},
               {"codes",c.sizeScale.codesPerOctave},{"lateness",c.latenessMs},{"grace",5000}};
-    for (const auto& l : c.layers) j["layers"].push_back({l.name,l.rowTickUnits,l.lowFrac,l.highMult,l.hourlyRollup});
+    for (const auto& l : c.layers) {
+        json layer = {l.name,l.rowTickUnits,l.lowFrac,l.highMult,l.hourlyRollup};
+        if (l.absoluteRows) layer.push_back({l.absoluteRows->low,l.absoluteRows->high});
+        j["layers"].push_back(std::move(layer));
+    }
+    if (c.priceBounds) j["priceBounds"] = {c.priceBounds->lower,c.priceBounds->upper};
+    if (!instrument.is_null()) j["instrument"] = instrument;
     uint64_t h = 14695981039346656037ull;
     for (unsigned char ch : j.dump()) { h ^= ch; h *= 1099511628211ull; }
     return h;
@@ -83,7 +89,7 @@ int64_t parseTime(const std::string& text) {
     return ms;
 }
 void validateOutputProduct(const fs::path& root, const std::string& product) {
-    capture::validateSymbol(product);
+    capture::validateSymbol(product, Venue::Kalshi);
     const auto dir = root/product;
     if (fs::exists(dir) && !fs::is_regular_file(dir/"roller.json"))
         for (auto it = fs::recursive_directory_iterator(dir); it != fs::recursive_directory_iterator{}; ++it) {
@@ -96,7 +102,7 @@ json roll(const RollOptions& o) {
     validateOutputProduct(o.outputRoot, o.product);
     if (o.fromMs < recording::kHmc2MinMs || o.toMs <= o.fromMs || o.toMs >= recording::kHmc2EndMs ||
         o.fromMs % Minute || o.toMs % Minute) throw std::runtime_error("roll range must contain complete UTC minutes");
-    capture::validateSymbol(o.product);
+    capture::validateSymbol(o.product, Venue::Kalshi);
     const auto started = std::chrono::steady_clock::now();
     JournalReader inventory(o.journalRoot, o.product);
     const auto cpPath = o.outputRoot/o.product/"roller.json";
@@ -160,8 +166,9 @@ json roll(const RollOptions& o) {
         JournalPos applied, gridSnapshot, restoreCursor;
         bool restoreCursorApplied = true;
         int64_t restoreLocal = 0;
-        double referenceMid = 0;
-        json gridMetadata;
+        std::optional<double> referenceMid;
+        json gridMetadata, gridInstrument;
+        Venue gridVenue = Venue::Coinbase;
         JournalBook book;
         bool bookUp = true;
         int64_t recorderFloor = from, nextBoundary = day, receiveThrough = 0;
@@ -185,6 +192,14 @@ json roll(const RollOptions& o) {
         const auto describeGrid = [&](const Grid& grid) {
             dayReport["grid"] = {{"priceScale",grid.priceScale},{"nearTick",grid.nearTick},
                                   {"deepTick",grid.deepTick},{"sizeFloor",grid.sizeFloor}};
+            if (gridVenue == Venue::Kalshi) {
+                const auto cfg = grid.config(o.outputRoot);
+                dayReport["grid"].update({{"venue","kalshi"},{"referenceMid",nullptr},
+                    {"priceBounds",{cfg.priceBounds->lower,cfg.priceBounds->upper}},
+                    {"nearRows",{cfg.layers[0].absoluteRows->low,cfg.layers[0].absoluteRows->high}},
+                    {"deepRows",{cfg.layers[1].absoluteRows->low,cfg.layers[1].absoluteRows->high}},
+                    {"instrument",gridInstrument}});
+            }
             if (o.onGrid) o.onGrid(day, grid, gridMetadata);
         };
 
@@ -202,16 +217,23 @@ json roll(const RollOptions& o) {
         feed.onSnapshot = [&](int64_t exchange, int64_t local, std::vector<recording::Level> levels) {
             if (!o.anchorBook) book.snapshot(exchange,levels);
             if (!gridReady) {
-                double bid = 0, ask = std::numeric_limits<double>::infinity();
-                for (const auto& l : levels) if (l.size > 0) {
-                    if (l.isBid) bid = std::max(bid,l.price); else ask = std::min(ask,l.price);
+                Grid grid;
+                if (input.venue == Venue::Kalshi) {
+                    if (!o.overrides.empty()) throw std::runtime_error("Kalshi grid: overrides are not supported; use the instrument block");
+                    grid = deriveKalshiGrid(input.instrument);
+                } else {
+                    double bid = 0, ask = std::numeric_limits<double>::infinity();
+                    for (const auto& l : levels) if (l.size > 0) {
+                        if (l.isBid) bid = std::max(bid,l.price); else ask = std::min(ask,l.price);
+                    }
+                    if (!(bid > 0) || !std::isfinite(ask)) return;
+                    referenceMid = std::midpoint(bid,ask);
+                    grid = deriveGrid(input.metadata,*referenceMid,o.overrides);
                 }
-                if (!(bid > 0) || !std::isfinite(ask)) return;
-                referenceMid = std::midpoint(bid,ask);
                 gridSnapshot = input.pos; gridMetadata = input.metadata;
-                const auto grid = deriveGrid(gridMetadata,referenceMid,o.overrides);
+                gridVenue = input.venue; gridInstrument = grid.instrument;
                 auto cfg = grid.config(o.outputRoot);
-                hash = configHash(cfg);
+                hash = configHash(cfg,gridInstrument);
                 if (cp["days"].contains(key)) {
                     const auto& saved = cp["days"][key];
                     if (saved.at("configHash") != hash || saved.at("fromMs") != from)
@@ -265,12 +287,16 @@ json roll(const RollOptions& o) {
                 // With no checkpoint only midnight is a complete independent
                 // starting point; intraday anchors require the committed prefix.
                 if (!checkpoint && a.boundaryMs != day) continue;
-                const auto grid = deriveGrid(a.metadata,a.referenceMid,o.overrides);
-                const auto expectedHash = configHash(grid.config(o.outputRoot));
-                const AnchorIdentity expected{o.product,day,from,end,expectedHash};
+                if (a.identity.venue == Venue::Kalshi && !o.overrides.empty())
+                    throw std::runtime_error("Kalshi grid: overrides are not supported; use the instrument block");
+                const auto grid = a.identity.venue == Venue::Kalshi ? deriveKalshiGrid(a.instrument) :
+                    deriveGrid(a.metadata,*a.referenceMid,o.overrides);
+                const auto expectedHash = configHash(grid.config(o.outputRoot),grid.instrument);
+                const AnchorIdentity expected{o.product,day,from,end,expectedHash,a.identity.venue};
                 if (a.identity != expected &&
                     !(o.allowGrowingEnd && a.identity.product == expected.product &&
                       a.identity.dayMs == expected.dayMs && a.identity.fromMs == expected.fromMs &&
+                      a.identity.venue == expected.venue &&
                       a.identity.configHash == expected.configHash &&
                       a.identity.toMs >= a.boundaryMs && a.identity.toMs < end))
                     throw std::runtime_error("anchor policy/range mismatch");
@@ -297,6 +323,10 @@ json roll(const RollOptions& o) {
                 candidateDecoded = candidateReader->decodedRecords();
                 if (!present || cursor.pos != cursorPos)
                     throw std::runtime_error("anchor durable position unavailable");
+                if (cursor.venue != a.identity.venue ||
+                    (cursor.venue == Venue::Kalshi && (cursor.instrument != a.instrument ||
+                        state.at("feed").at("version") != 2 || state.at("feed").at("venue") != "kalshi")))
+                    throw std::runtime_error("anchor venue/instrument mismatch");
                 JournalFeed candidateFeed(o.product); candidateFeed.importState(state.at("feed"));
                 auto candidateBook = JournalBook::fromState(state.at("book"));
                 const bool candidateUp = state.at("up");
@@ -355,6 +385,7 @@ json roll(const RollOptions& o) {
                 recorder = std::move(candidate); reader = std::move(candidateReader);
                 gridReady = true; hash = expectedHash; recorderFloor = floor;
                 referenceMid = a.referenceMid; gridSnapshot = a.gridSnapshot; gridMetadata = a.metadata;
+                gridVenue = a.identity.venue; gridInstrument = a.instrument;
                 applied = a.pos; restoreCursor = cursorPos; restoreCursorApplied = !before;
                 nextBoundary = a.boundaryMs + Quarter;
                 receiveThrough = candidateReceive; restoreLocal = lastLocal;
@@ -427,8 +458,9 @@ json roll(const RollOptions& o) {
                 if (o.anchorBook) {
                     auto state = o.anchorBook(); book = std::move(state.first); bookUp = state.second;
                 }
-                a.identity = {o.product,day,from,end,hash}; a.boundaryMs = boundary; a.pos = applied;
+                a.identity = {o.product,day,from,end,hash,gridVenue}; a.boundaryMs = boundary; a.pos = applied;
                 a.gridSnapshot = gridSnapshot; a.referenceMid = referenceMid; a.metadata = gridMetadata;
+                a.instrument = gridInstrument;
                 a.feed.bytes = json::to_cbor({{"feed",feed.exportState()},{"book",book.exportState()},
                     {"up",bookUp},{"recorderFloor",recorderFloor},{"receiveThroughMs",receiveThrough},
                     {"resumeAt",resume ? json(resume->pos) : json()},{"resumeGap",resume && resume->gapBefore}});
