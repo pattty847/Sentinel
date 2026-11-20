@@ -31,7 +31,12 @@
 #include <cmath>
 #include <QToolButton>
 #ifdef Q_OS_UNIX
+#include <cerrno>
 #include <signal.h>
+#endif
+#ifdef Q_OS_MACOS
+#include <sys/proc.h>
+#include <sys/sysctl.h>
 #endif
 
 class FixtureProvider : public ResearchProcess {
@@ -56,6 +61,30 @@ static bool waitUntil(const std::function<bool()>& predicate, int timeoutMs = 30
     while (!predicate() && timer.elapsed() < timeoutMs) QTest::qWait(10);
     return predicate();
 }
+#ifdef Q_OS_UNIX
+// True once `pid` runs no more code: gone, or a zombie that its new parent (launchd or
+// init, after the uv wrapper exits) has not reaped yet. kill(pid, 0) alone still succeeds
+// on a zombie, which made these checks wait on another process's scheduling under load.
+static bool processGone(qint64 pid) {
+    if (::kill(pid_t(pid), 0) != 0) return true;
+#ifdef Q_OS_MACOS
+    kinfo_proc info{};
+    size_t size = sizeof(info);
+    int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, int(pid)};
+    if (::sysctl(mib, 4, &info, &size, nullptr, 0) != 0) return errno == ESRCH;
+    return size == 0 || info.kp_proc.p_stat == SZOMB;
+#else
+    QFile stat(QString("/proc/%1/stat").arg(pid));
+    if (!stat.open(QIODevice::ReadOnly)) return true;
+    const auto text = stat.readAll();
+    const auto end = text.lastIndexOf(')');
+    return end >= 0 && end + 2 < text.size() && (text[end + 2] == 'Z' || text[end + 2] == 'X');
+#endif
+}
+// Process launch and exit wait on the OS; under a loaded host that takes seconds.
+// The waits return as soon as the state is reached; this only bounds a hang.
+constexpr int kProcessHangMs = 30000;
+#endif
 static int count(QObject* root) {
     const auto data = root->property("candleData");
     return (data.metaType() == QMetaType::fromType<QJSValue>() ? data.value<QJSValue>().toVariant() : data).toList().size();
@@ -378,7 +407,7 @@ TEST(ResearchProcess, CancellationDoesNotWaitAndDestructionDoesNotCallBack) {
     QElapsedTimer elapsed; elapsed.start(); runner->cancel();
     EXPECT_LT(elapsed.elapsed(), 100);
     EXPECT_TRUE(waitUntil([&] { return !process; }));
-    EXPECT_TRUE(waitUntil([&] { return ::kill(pid_t(childPid), 0) != 0; })) << "Python fixture child remained alive";
+    EXPECT_TRUE(waitUntil([&] { return processGone(childPid); }, kProcessHangMs)) << "Python fixture child remained alive";
     EXPECT_TRUE(waitUntil([&] { return ::kill(-pid_t(group), 0) != 0; })) << "uv/Python process group remained alive";
     runner->run(2, "fixture", {directory.filePath("second-child.pid")});
     for (auto* child : qApp->findChildren<QProcess*>()) if (child->program() == "uv") process = child;
@@ -390,7 +419,7 @@ TEST(ResearchProcess, CancellationDoesNotWaitAndDestructionDoesNotCallBack) {
     const auto secondGroup = process->processId(); ASSERT_GT(secondGroup, 0);
     elapsed.restart(); runner.reset(); EXPECT_LT(elapsed.elapsed(), 100);
     EXPECT_TRUE(waitUntil([&] { return !process; }));
-    EXPECT_TRUE(waitUntil([&] { return ::kill(pid_t(secondChildPid), 0) != 0; }));
+    EXPECT_TRUE(waitUntil([&] { return processGone(secondChildPid); }, kProcessHangMs));
     EXPECT_TRUE(waitUntil([&] { return ::kill(-pid_t(secondGroup), 0) != 0; }));
     EXPECT_EQ(completed.count(), 0);
     qputenv("PATH", oldPath);
@@ -410,10 +439,10 @@ TEST(ResearchProcess, LauncherExitStillReapsItsChild) {
     ResearchProcess runner;
     QSignalSpy completed(&runner, &ResearchProcess::completed);
     runner.run(1, "fixture", {directory.filePath("child.pid")});
-    ASSERT_TRUE(waitUntil([&] { return completed.count() == 1; }));
+    ASSERT_TRUE(waitUntil([&] { return completed.count() == 1; }, kProcessHangMs)) << "uv wrapper never finished";
     QFile pidFile(directory.filePath("child.pid")); ASSERT_TRUE(pidFile.open(QIODevice::ReadOnly));
     const auto pid = pidFile.readAll().trimmed().toLongLong(); ASSERT_GT(pid, 0);
-    EXPECT_TRUE(waitUntil([&] { return ::kill(pid_t(pid), 0) != 0; })) << "Child survived its uv wrapper";
+    EXPECT_TRUE(waitUntil([&] { return processGone(pid); }, kProcessHangMs)) << "Child survived its uv wrapper";
 #else
     GTEST_SKIP() << "Unix process-tree fixture; Windows job runtime requires a Windows runner";
 #endif
