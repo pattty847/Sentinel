@@ -6,6 +6,8 @@
 // as test_ugr_gpu) skip with the reason when no QRhi can be created.
 #include "UnifiedGridRenderer.h"
 #include "config/TooltipHelp.hpp"
+#include "../servermodel/FakeChunkTransport.hpp"
+#include "render/heatmap/HeatmapDataService.hpp"
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/CandlePixelGeometry.hpp"
 #include "chart/core/FootprintLod.hpp"
@@ -519,6 +521,67 @@ TEST(HeatmapSettingsModelTest, PendingRangeAtWideZoomPostsNoLabelQuery) {
     EXPECT_EQ(layer.postedLabelRequest().serial, 0u);
     EXPECT_FALSE(t.store.loadSensitivity("BTC-USD"));
     layer.setService(nullptr);
+}
+
+// A pending range (no saved range, no price yet) draws the default window scaled
+// to the symbol's display scale (a product with a coarse size floor, as PEPE). The
+// toolbar handles show that window, so a drag starts where the picture is.
+TEST(HeatmapSettingsModelTest, PendingRangeHandlesFollowTheDrawnScaleForNonBtcProducts) {
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    FakeChunkTransport *transport = nullptr;
+    heatmap::HeatmapDataService service([&](QObject *) { return transport = new FakeChunkTransport; });
+    UnifiedGridRenderer renderer;
+    renderer.setSize(QSizeF(640, 320));
+    renderer.setHeatmapService(&service);
+    renderer.view()->setTimeframe(int(minute));
+    renderer.setActiveSymbol("PEPE-USD");
+    TopToolbar toolbar;
+    HeatmapChartControls controls(&model);
+    controls.setToolbar(&toolbar);
+    controls.setRenderer(&renderer);
+    ASSERT_FALSE(model.settings().sensitivityReady);
+    auto *layer = renderer.gpuHeatmapLayer();
+    ASSERT_TRUE(layer);
+    ASSERT_EQ(layer->symbol(), "PEPE-USD");
+
+    protocol::chunkwire::Availability a;
+    a.symbol = "PEPE-USD";
+    a.chunkWireVersion = heatmap::kChunkWireVersion;
+    protocol::chunkwire::SourceInfo source;
+    source.id = heatmap::kChunkSources.front().id;
+    source.latestGrid = protocol::chunkwire::GridInfo{};
+    source.latestGrid->priceScale = 100;
+    source.latestGrid->sizeFloor = 1.0;
+    source.latestGrid->codesPerOctave = 819;
+    const int64_t start = recording::kHmc2MinMs + 50 * heatmap::kDayMs;
+    source.levels.push_back({heatmap::kMinuteMs, kHourMs, start + 3 * kHourMs, start, start + 3 * kHourMs - heatmap::kMinuteMs});
+    a.sources.push_back(source);
+    layer->setSurface(640, 320, 1);
+    layer->setView({double(start), double(start + 10 * heatmap::kMinuteMs), 100, 102}, true);
+    service.onData([&] { transport->goOnline(); transport->push(heatmap::ChunkAvailability{a}); });
+    for (int i = 0; i < 50 && layer->displayScale().floor == recording::SizeScale{}.floor; ++i) {
+        service.onData([] { QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall); });
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+    }
+    ASSERT_EQ(layer->displayScale().floor, heatmap::gpu::displaySizeScale(1.0).floor);
+    ASSERT_FALSE(model.settings().sensitivityReady);
+    const double factor = layer->displayScale().floor / recording::SizeScale{}.floor;
+    ASSERT_GT(factor, 1.0);
+
+    controls.syncNow();
+    EXPECT_DOUBLE_EQ(toolbar.rangeSlider()->low(), 0.05 * factor);
+    EXPECT_DOUBLE_EQ(toolbar.rangeSlider()->high(), 50 * factor);
+    // Applying the handles as shown leaves the drawn window where it was.
+    const auto drawn = layer->drawStyle();
+    controls.requestLiquidityRange(toolbar.rangeSlider()->low(), toolbar.rangeSlider()->high(), false);
+    ASSERT_TRUE(model.settings().sensitivityReady);
+    EXPECT_FLOAT_EQ(layer->drawStyle().codeFloor, drawn.codeFloor);
+    EXPECT_FLOAT_EQ(layer->drawStyle().codeRange, drawn.codeRange);
+    controls.syncNow();
+    EXPECT_DOUBLE_EQ(toolbar.rangeSlider()->low(), 0.05 * factor);
+    EXPECT_DOUBLE_EQ(toolbar.rangeSlider()->high(), 50 * factor);
+    renderer.setHeatmapService(nullptr);
 }
 
 TEST(CandleStyleTest, PhysicalWicksSnapAndDojiIsOnePixel) {

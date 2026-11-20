@@ -184,6 +184,14 @@ public:
     int labelRetryMs() const { return retry_.delayMs(); }
     const DrawStyle &drawStyle() const { return style_; }
     recording::SizeScale displayScale() const { return displayScale_; }
+    // The sensitivity window the picture is drawn with (base-asset quantity, as
+    // sensitivityMin/Max): the settings' range, or while it is pending
+    // (!sensitivityReady) the default range scaled to this symbol's display scale.
+    // The liquidity slider's handles show this.
+    struct SensitivityRange {
+        double min = 0, max = 0;
+    };
+    SensitivityRange drawnSensitivity() const;
     std::shared_ptr<const HeatmapPalette> palette() const { return palette_; }
     // The liquidity (base-asset quantity, as sensitivityMin/Max) of valid cells
     // in the visible view from the latest current label result: the range slider's

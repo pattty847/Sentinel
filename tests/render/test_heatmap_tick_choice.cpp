@@ -254,6 +254,41 @@ TEST(HeatmapTickChoice, LabItemChangedViewsAllocateNothingAfterWarmUp) {
     delete node;
 }
 
+// Entering Manual with nothing remembered locks the drawn tick (a resolved
+// fallback). A tick-memory update that names nothing for this symbol and
+// timeframe keeps that lock; one that names a tick for them applies it.
+TEST(HeatmapTickChoice, TickMemoryUpdateKeepsTheResolvedManualFallback) {
+    const auto &scenario = kScenarios[0];
+    LoadedLayer loaded(scenario.tfMs, {scenario.start});
+    auto &layer = loaded.layer;
+    ASSERT_TRUE(loaded.settle());
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 200); // the startup tick commits
+    const int64_t tick = layer.tickUnits();
+    ASSERT_GT(tick, 0);
+    auto settings = layer.settings();
+    settings.tickMode = heatmap::TickMode::Manual;
+    layer.setSettings(settings);
+    ASSERT_TRUE(layer.manualTickLocked());
+    ASSERT_EQ(layer.manualTickUnits(), tick);
+    const ViewWindow zoomed{scenario.start.timeLoMs, scenario.start.timeHiMs, 100'095, 100'105};
+    ASSERT_EQ(layer.predictTickUnits(zoomed), tick);
+
+    heatmap::ManualTickMemory other;
+    ASSERT_TRUE(other.set("ETH-USD", scenario.tfMs, 500));
+    layer.setTickMemory(other);
+    EXPECT_TRUE(layer.manualTickLocked()) << "the memory update unlocked the drawn tick";
+    EXPECT_EQ(layer.manualTickUnits(), tick);
+    EXPECT_EQ(layer.predictTickUnits(zoomed), tick);
+    EXPECT_GT(layer.maxPriceSpan(), 0);
+
+    const int64_t remembered = tick == 500 ? 1000 : 500;
+    heatmap::ManualTickMemory named = other;
+    ASSERT_TRUE(named.set("BTC-USD", scenario.tfMs, remembered));
+    layer.setTickMemory(named);
+    EXPECT_TRUE(layer.manualTickLocked());
+    EXPECT_EQ(layer.manualTickUnits(), remembered);
+}
+
 // Per changed view (miss: the view differs from the last frame's) and per repeated
 // view (hit: the TickKey cache), Auto then Manual, for a pan and a price zoom.
 TEST(HeatmapTickChoice, DISABLED_ChangedViewCost) {

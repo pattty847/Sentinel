@@ -101,7 +101,9 @@ struct ChunkBytes {
 //   more and emits settled() when a job finishes).
 // - Cancellation is by consumer. Only jobs without waiters stop. Queued jobs
 //   release inputs and admission immediately; running jobs keep both in the
-//   ledger until they acknowledge cancellation. A cancelled job is never joined.
+//   ledger until they acknowledge cancellation. A cancelled job is never joined;
+//   its finished build warms the cache only while no replacement for its key is
+//   alive or uploaded.
 // - Sharing: an LRU of builds plus a weak registry, so a build some chart still
 //   holds is shared even after the LRU dropped it.
 // - CPU tier (maxBytes, HeatmapBudgets::spanSources): controllers claim the

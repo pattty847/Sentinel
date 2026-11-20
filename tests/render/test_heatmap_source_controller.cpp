@@ -13,6 +13,7 @@
 #include <deque>
 #include <map>
 #include <set>
+#include <utility>
 
 // Fake-node tests: FakeChunkTransport, a manual build executor
 // (jobs run only when the test says), no GPU and no sleeps.
@@ -1043,6 +1044,52 @@ TEST_F(SourceController, MissingSourcesAreRebuiltFromLocalChunks) {
             }
         }
     EXPECT_EQ(withImage, 1u);
+}
+
+// A build whose worker finished just before its consumer cancelled it is
+// delivered after a same-key replacement was built, delivered and uploaded (two
+// pool workers: the replacement's delivery overtakes it). The late build is
+// redundant: it must not re-enter the LRU (a CPU image a node already uploaded)
+// nor replace the replacement in the live registry.
+class DeliverFirst final : public QObject {
+public:
+    std::function<void()> before;
+    bool eventFilter(QObject *, QEvent *event) override {
+        if (event->type() == QEvent::MetaCall && before) std::exchange(before, nullptr)();
+        return false;
+    }
+};
+TEST_F(SourceController, LateCancelledBuildDoesNotReAddAnUploadedImage) {
+    QObject consumer, replacementConsumer;
+    auto in = input();
+    const auto key = in.key;
+    SpanSourceBuildPtr replacement;
+    int oldCalls = 0;
+    ASSERT_TRUE(cache->request(in, 0, 100, &consumer, [&](auto, auto) { ++oldCalls; }));
+    runFirst(); // the first build finished on its worker; its delivery is queued
+    cache->cancelRequests(&consumer);
+    DeliverFirst filter;
+    filter.before = [&] {
+        ASSERT_TRUE(cache->request(in, 0, 100, &replacementConsumer,
+                                   [&](auto build, auto) { replacement = build; }));
+        runFirst();
+        QCoreApplication::sendPostedEvents(cache.get(), QEvent::MetaCall);
+        ASSERT_TRUE(replacement);
+        cache->released(key); // the node uploaded the replacement
+    };
+    cache->installEventFilter(&filter);
+    drain();
+    cache->removeEventFilter(&filter);
+    ASSERT_TRUE(replacement);
+    EXPECT_EQ(oldCalls, 0);
+    EXPECT_EQ(cache->stats().runningCancels, 1u);
+    EXPECT_EQ(cache->stats().builds, 2u);
+    EXPECT_EQ(cache->stats().failures, 0u);
+    EXPECT_EQ(cache->stats().jobs, 0u);
+    EXPECT_EQ(cache->stats().reservedBytes, 0u);
+    EXPECT_EQ(cache->stats().entries, 0u) << "the late image re-entered the LRU";
+    EXPECT_EQ(cache->stats().bytes, 0u);
+    EXPECT_EQ(cache->find(key), replacement) << "the live registry still shares the uploaded build";
 }
 
 // Once the node reports a source uploaded, nothing on the CPU keeps its image:

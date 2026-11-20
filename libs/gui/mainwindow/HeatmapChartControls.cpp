@@ -547,7 +547,11 @@ TopToolbar::TickSelectorState HeatmapChartControls::tickSelectorState() const {
     st.offeredUnits = layer->offeredTickUnits();
     st.priceScale = layer->priceScale();
     st.indicator = layer->resolutionIndicator();
-    st.unit = PriceUnits::instance().unitFor(QString::fromStdString(layer->symbol()));
+    if (layer->symbol() != m_unitSymbol) { // converted once per symbol, not on every view change
+        m_unitSymbol = layer->symbol();
+        m_unitSymbolText = QString::fromStdString(m_unitSymbol);
+    }
+    st.unit = PriceUnits::instance().unitFor(m_unitSymbolText);
     return st;
 }
 
@@ -561,8 +565,11 @@ void HeatmapChartControls::syncNow() {
         const auto &s = m_model->settings();
         const auto *layer = m_renderer ? m_renderer->gpuHeatmapLayer() : nullptr;
         const auto range = layer ? layer->liquidityRange() : heatmap::gpu::HeatmapGpuLayer::LiquidityRange{};
-        m_toolbar->setLiquidityRange(range.valid ? range.lo : 0, range.valid ? range.hi : 0,
-                                     s.sensitivityMin, s.sensitivityMax);
+        // The handles show the window the picture is drawn with: a pending range is
+        // scaled to the symbol's display scale (non-BTC products) as the layer draws it.
+        const auto drawn = layer ? layer->drawnSensitivity()
+                                 : heatmap::gpu::HeatmapGpuLayer::SensitivityRange{s.sensitivityMin, s.sensitivityMax};
+        m_toolbar->setLiquidityRange(range.valid ? range.lo : 0, range.valid ? range.hi : 0, drawn.min, drawn.max);
         m_toolbar->setLabelOptions(s.showLabels, s.labelCurrency == "usd");
         m_toolbar->setColorPreset(QString::fromStdString(s.palettePreset));
         m_toolbar->setChartAttached(bool(m_renderer));
