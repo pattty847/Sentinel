@@ -140,6 +140,8 @@ void TpoOverlayRenderer::onRootRebuilt() {
         session.cells = nullptr;
         session.lightText = nullptr;
         session.darkText = nullptr;
+        session.approxLightText = nullptr;
+        session.approxDarkText = nullptr;
         session.cellCapacity = 0;
         session.hasBuilt = false;
     }
@@ -159,6 +161,8 @@ void TpoOverlayRenderer::dropSessionNodes(Session& session) {
     session.cells = nullptr;
     session.lightText = nullptr;
     session.darkText = nullptr;
+    session.approxLightText = nullptr;
+    session.approxDarkText = nullptr;
     session.cellCapacity = 0;
     session.hasBuilt = false;
 }
@@ -169,6 +173,8 @@ void TpoOverlayRenderer::clearSessions() {
     }
     m_sessions.clear();
     m_textFit = {}; // a new grid (symbol, tick) or session layout decides its letters afresh
+    std::lock_guard<std::mutex> lock(m_hoverMutex);
+    m_hover.clear();
 }
 
 void TpoOverlayRenderer::applyUploads(std::vector<PendingUpload>& uploads, int maxSessions) {
@@ -225,7 +231,9 @@ void TpoOverlayRenderer::applyUploads(std::vector<PendingUpload>& uploads, int m
         if (session.periods != upload.gridWidth) {
             session.periods = upload.gridWidth;
             session.rowsByPeriod.resize(static_cast<size_t>(upload.gridWidth));
+            session.approximate.resize(static_cast<size_t>(upload.gridWidth), 0);
         }
+        session.approximate[static_cast<size_t>(upload.x)] = upload.approximate ? 1 : 0;
         session.periodMs = upload.periodMs > 0
             ? upload.periodMs
             : (session.endMs - session.startMs) / std::max(1, session.periods);
@@ -285,9 +293,11 @@ void TpoOverlayRenderer::ensureSessionNodes(Session& session) {
     session.cells = colorNode();
     session.lightText = new ChartTextNode();
     session.darkText = new ChartTextNode();
+    session.approxLightText = new ChartTextNode();
+    session.approxDarkText = new ChartTextNode();
     session.transform->appendChildNode(session.cells);
-    session.transform->appendChildNode(session.lightText);
-    session.transform->appendChildNode(session.darkText);
+    for (ChartTextNode* node : {session.lightText, session.darkText, session.approxLightText, session.approxDarkText})
+        session.transform->appendChildNode(node);
     m_sessionsRoot->appendChildNode(session.transform);
     session.cellCapacity = 0;
     session.hasBuilt = false;
@@ -376,6 +386,8 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
     const double capMid = (capGlyph.bounds.top() + capGlyph.bounds.bottom()) * 0.5;
     session.lightGlyphs.clear();
     session.darkGlyphs.clear();
+    session.approxLightGlyphs.clear();
+    session.approxDarkGlyphs.clear();
 
     auto rowTop = [&](int row) {
         const int64_t g = profile.minGroup() + row;
@@ -402,13 +414,18 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
             const float x0 = static_cast<float>(edge(left, key.snapX));
             const float x1 = static_cast<float>(edge(left + cellW - gapX, key.snapX));
             const tpo::Rgba color = tpo::cellColor(look, period, session.periods, inVa, poc);
+            const bool approximate = session.approximate[static_cast<size_t>(period)] != 0;
             if (look.cells.visible && written + 6 <= session.cellCapacity) {
-                writeQuad(v + written, x0, y0, std::max(x0 + minCell, x1), std::max(y0 + minCell, y1), color);
+                tpo::Rgba fill = color;
+                if (approximate) fill.a = static_cast<uint8_t>(std::lround(fill.a * kApproximateOpacity));
+                writeQuad(v + written, x0, y0, std::max(x0 + minCell, x1), std::max(y0 + minCell, y1), fill);
                 written += 6;
             }
             if (key.text) {
                 const bool dark = look.cells.visible && tpo::prefersDarkText(color);
-                appendLetter(dark ? session.darkGlyphs : session.lightGlyphs, atlas, tpo::letterForPeriod(period),
+                auto& glyphs = approximate ? (dark ? session.approxDarkGlyphs : session.approxLightGlyphs)
+                                           : (dark ? session.darkGlyphs : session.lightGlyphs);
+                appendLetter(glyphs, atlas, tpo::letterForPeriod(period),
                              left + cellW * 0.5, letterBaseline, fontScale, key.dpr);
             }
             ++k;
@@ -425,12 +442,18 @@ void TpoOverlayRenderer::rebuildSession(Session& session, const LayoutKey& key, 
 
     session.lightText->updateGeometry(session.lightGlyphs);
     session.darkText->updateGeometry(session.darkGlyphs);
+    session.approxLightText->updateGeometry(session.approxLightGlyphs);
+    session.approxDarkText->updateGeometry(session.approxDarkGlyphs);
 
     session.textAlpha = key.text ? static_cast<float>(look.letters.opacity) : 0.0f;
+    const double approxAlpha = session.textAlpha * kApproximateOpacity;
     session.lightText->setColor(qcolor(look.letters.color, session.textAlpha));
+    session.approxLightText->setColor(qcolor(look.letters.color, approxAlpha));
     QColor dark = kDarkText;
     dark.setAlphaF(session.textAlpha);
     session.darkText->setColor(dark);
+    dark.setAlphaF(approxAlpha);
+    session.approxDarkText->setColor(dark);
 
     sLog_Probe("tpo.build", "session=" << session.startMs << " periods=" << session.periods
                << " layout=" << tpo::layoutName(key.layout) << " theme=" << tpo::themeName(look.theme)
@@ -543,6 +566,51 @@ void TpoOverlayRenderer::updateTags(const ChartTextAtlas& atlas, const TagKey& k
     m_tagDark->setColor(kDarkText);
 }
 
+void TpoOverlayRenderer::publishHover(Session& s, double tx, double ty, double basePx, double cellW,
+                                      double periodPx, int64_t topAbs) {
+    // Hold the profile the cells were built from; copy only when it changed.
+    if (!s.hoverProfile || s.hoverVersion != s.profileVersion || s.hoverGroup != s.profileGroup) {
+        s.hoverProfile = std::make_shared<const tpo::ProfileRows>(s.profile);
+        s.hoverApproximate = std::make_shared<const std::vector<char>>(s.approximate);
+        s.hoverVersion = s.profileVersion;
+        s.hoverGroup = s.profileGroup;
+    }
+    std::lock_guard<std::mutex> lock(m_hoverMutex);
+    m_hover.push_back({s.startMs, tx, ty, basePx, cellW, periodPx, topAbs,
+                       s.built.layout == tpo::Layout::Split, s.hoverProfile, s.hoverApproximate});
+}
+
+TpoOverlayRenderer::Hover TpoOverlayRenderer::hoverAt(double x, double y) const {
+    std::lock_guard<std::mutex> lock(m_hoverMutex);
+    for (const HoverSession& s : m_hover) {
+        const tpo::ProfileRows& profile = *s.profile;
+        const int group = profile.group();
+        if (!(s.basePx > 0.0) || !(s.cellW > 0.0) || group <= 0 || !std::isfinite(x) || !std::isfinite(y)) continue;
+        // Display row r spans [(topAbs - (minGroup + r + 1) * group) * basePx, + group * basePx).
+        const double u = (static_cast<double>(s.topAbs) - (y - s.ty) / s.basePx) / group;
+        const double row = std::ceil(u) - 1.0 - static_cast<double>(profile.minGroup());
+        const double localX = x - s.tx;
+        if (row < 0.0 || row >= profile.rows() || localX < 0.0) continue;
+        const int r = static_cast<int>(row);
+        int period = -1;
+        if (s.split) {
+            const double p = s.periodPx > 0.0 ? std::floor(localX / s.periodPx) : -1.0;
+            if (p >= 0.0 && p < profile.periods() && profile.has(r, static_cast<int>(p))) period = static_cast<int>(p);
+        } else {
+            const double k = std::floor(localX / s.cellW);
+            if (k < profile.periods()) {
+                int left = static_cast<int>(k);
+                profile.forEachPeriod(r, [&](int p) { if (left-- == 0) period = p; });
+            }
+        }
+        if (period < 0) continue;
+        const bool approximate = static_cast<size_t>(period) < s.approximate->size() &&
+                                 (*s.approximate)[static_cast<size_t>(period)] != 0;
+        return {true, tpo::letterForPeriod(period), period, approximate, s.startMs};
+    }
+    return {};
+}
+
 TpoOverlayRenderer::SessionNodes TpoOverlayRenderer::sessionNodesForTest(int64_t sessionStartMs) const {
     const auto it = m_sessions.find(sessionStartMs);
     if (it == m_sessions.end()) return {};
@@ -631,6 +699,8 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     }
     if (!visible) {
         m_textFit = {};
+        std::lock_guard<std::mutex> lock(m_hoverMutex);
+        m_hover.clear();
         return;
     }
 
@@ -712,6 +782,10 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     m_textFit = chart::tpoLetterFit(m_textFit, {letterCellW, cellH, scale, m_textRule}, advanceRatio, lettersWanted);
     const double fontPx = chart::tpoLetterPx(m_textFit, m_textRule, style.look.letters.width);
 
+    {
+        std::lock_guard<std::mutex> lock(m_hoverMutex);
+        m_hover.clear();
+    }
     const Session* tagged = nullptr;
     for (auto& [start, session] : m_sessions) {
         ensureSessionNodes(session);
@@ -719,10 +793,11 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
             continue;
         }
         if (textAvailable) {
-            session.lightText->setSharedAtlasTexture(m_root->texture);
-            session.darkText->setSharedAtlasTexture(m_root->texture);
-            session.lightText->setPxRange(atlas.pxRange());
-            session.darkText->setPxRange(atlas.pxRange());
+            for (ChartTextNode* node : {session.lightText, session.darkText,
+                                        session.approxLightText, session.approxDarkText}) {
+                node->setSharedAtlasTexture(m_root->texture);
+                node->setPxRange(atlas.pxRange());
+            }
         }
         const double startX = surfaceBounds.left() + mapping.timeToScreenX(static_cast<double>(session.startMs));
         const double endX = surfaceBounds.left() + mapping.timeToScreenX(static_cast<double>(session.endMs));
@@ -772,6 +847,7 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
             session.lastLevelTx = levelTx;
         }
         session.lastTy = ty;
+        if (onScreen && session.hasBuilt) publishHover(session, tx, ty, basePx, cellW, periodPx, topAbs);
     }
     updateTags(atlas, tagKey(tagged, mapping, atlasReady && atlas.isBuilt() && atlas.fontPx() > 0, surfaceBounds));
 

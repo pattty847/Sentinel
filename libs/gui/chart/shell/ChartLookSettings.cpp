@@ -194,6 +194,12 @@ QString ChartLookSettings::tpoTheme() const {
 
 int ChartLookSettings::tpoSessions() const { return layers_.tpo.renderer.style().maxSessions; }
 
+QString ChartLookSettings::tpoHoverText(double x, double y) const {
+    const auto hover = layers_.tpo.renderer.hoverAt(x, y);
+    if (!hover.hit || !hover.approximate) return {};
+    return QStringLiteral("TPO %1 \u00b7 approximate (from candles)").arg(QLatin1Char(hover.letter));
+}
+
 void ChartLookSettings::applyClientConfig(const ClientConfig& config, ChartViewController& view,
                                           AxisTextService* axes) {
     setHeatmapGamma(config.heatmap.gamma);

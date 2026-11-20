@@ -222,6 +222,9 @@ struct Builder {
             for (const auto& [bucket, data] : live->columns)
                 if (bucket == start) { letters = data; break; }
         } else scan(grid, start, start + tf, [&](int row, const Trade&) { letters[row] = letter; });
+        // A period is approximate when any of its letters come from a REST candle's
+        // high/low range rather than from recorded trades.
+        bool approximate = false;
         if (q.kind == Kind::TpoHistory) {
             auto bar = std::lower_bound(candles.begin(), candles.end(), start,
                 [](const OHLCVBar& b, int64_t time) { return b.timestamp_ms < time; });
@@ -234,9 +237,11 @@ struct Builder {
                 const int lo = static_cast<int>(std::max(0.0, first));
                 const int hi = static_cast<int>(std::min(double(grid.rows - 1), last));
                 for (int row = lo; row <= hi; ++row) letters[row] = letter;
+                approximate = true;
             }
         }
         j["letters"] = letters.toBase64().toStdString(); j["format"] = "tpo_ascii";
+        j["approximate"] = approximate;
         return j;
     }
     void columns(bool live) {

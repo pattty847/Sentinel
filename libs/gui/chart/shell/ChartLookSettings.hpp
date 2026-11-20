@@ -68,6 +68,8 @@ public:
     int tpoTimeframeMs() const { return tpoTimeframeMs_; }
     int tpoSessionType() const { return tpoSessionType_; }
     int tpoSessions() const;
+    // Hover text for the TPO cell under an item point; empty unless it is approximate.
+    QString tpoHoverText(double x, double y) const;
     QString tpoLayout() const;
     QString tpoTheme() const;
     QString tpoPreset() const;

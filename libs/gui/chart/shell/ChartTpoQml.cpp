@@ -23,6 +23,7 @@ int ChartTpoQml::tpoSessions() const { return look_.tpoSessions(); }
 
 void ChartTpoQml::setTpoPreset(const QString& preset) { look_.setTpoPreset(preset); }
 QString ChartTpoQml::tpoPreset() const { return look_.tpoPreset(); }
+QString ChartTpoQml::hoverText(double x, double y) const { return look_.tpoHoverText(x, y); }
 tpo::StyleModel ChartTpoQml::tpoLook() const { return look_.tpoLook(); }
 void ChartTpoQml::setTpoLook(const tpo::StyleModel& look) { look_.setTpoLook(look); }
 void ChartTpoQml::resetTpoLook() { look_.resetTpoLook(); }

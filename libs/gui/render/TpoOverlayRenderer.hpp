@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -46,6 +47,10 @@ double tpoLetterBaseline(double rowTop, double rowHeight, double capMid, bool sn
  *              (classic market profile). The profile sticks to the left edge of
  *              the plot while its session is still on screen.
  *
+ * Approximate periods (letters the server built from REST candle high/low ranges, not
+ * from recorded trades) draw the same cells and letters at kApproximateOpacity, and
+ * hoverAt() reports them so the chart can say so on hover.
+ *
  * Every look comes from tpo::StyleModel (chart/core/TpoStyle.hpp): cell fill,
  * letters, the value-area rule, and the POC/VAH/VAL/IBH/IBL lines. Level lines
  * sit under the cells and reach across the profile or the whole session; the
@@ -56,11 +61,15 @@ double tpoLetterBaseline(double rowTop, double rowHeight, double capMid, bool sn
  * QSGTransformNode; cells and glyphs are rebuilt only when that session's data,
  * the row grouping, the cell size (zoom), the layout or the theme change.
  *
- * Threading: enqueue()/setStyle() on the GUI thread; everything else on the
+ * Threading: enqueue()/setStyle()/hoverAt() on the GUI thread; everything else on the
  * render thread inside updatePaintNode.
  */
 class TpoOverlayRenderer {
 public:
+    // Opacity of approximate (REST candle) periods relative to trade-built ones: cell
+    // fill and letters alike. The one knob for how "approximate" looks.
+    static constexpr double kApproximateOpacity = 0.55;
+
     struct PendingUpload {
         int x = 0;              // period index within the session
         int gridWidth = 0;      // periods in the session
@@ -68,7 +77,19 @@ public:
         QByteArray letters;     // one byte per row, '\0' = not visited
         TradeOverlayGrid grid;  // startMs/endMs = session bounds
         int64_t periodMs = 0;
+        bool approximate = false;  // letters built from REST candles, not trades
     };
+
+    // The TPO cell under an item point, as last drawn.
+    struct Hover {
+        bool hit = false;
+        char letter = 0;
+        int period = -1;
+        bool approximate = false;
+        int64_t sessionStartMs = 0;
+    };
+    /// Thread-safe (GUI thread): hit-tests the cells of the last rendered frame.
+    Hover hoverAt(double x, double y) const;
 
     struct Style {
         tpo::Layout layout = tpo::Layout::Collapsed;
@@ -138,6 +159,7 @@ private:
         int64_t periodMs = 0;
         int periods = 0;
         std::vector<std::vector<int>> rowsByPeriod;
+        std::vector<char> approximate;  // per period
         uint64_t dataVersion = 1;
 
         tpo::ProfileRows profile;
@@ -152,6 +174,9 @@ private:
         QSGGeometryNode* levels = nullptr;
         ChartTextNode* lightText = nullptr;
         ChartTextNode* darkText = nullptr;
+        // Letters of approximate periods, drawn at kApproximateOpacity.
+        ChartTextNode* approxLightText = nullptr;
+        ChartTextNode* approxDarkText = nullptr;
         int cellCapacity = 0;
         LayoutKey built;
         bool hasBuilt = false;
@@ -160,6 +185,24 @@ private:
         float textAlpha = 0.0f;
         std::vector<ChartGlyphInstance> lightGlyphs;
         std::vector<ChartGlyphInstance> darkGlyphs;
+        std::vector<ChartGlyphInstance> approxLightGlyphs;
+        std::vector<ChartGlyphInstance> approxDarkGlyphs;
+        // Immutable copies for hoverAt(), refreshed when the profile or flags change.
+        std::shared_ptr<const tpo::ProfileRows> hoverProfile;
+        std::shared_ptr<const std::vector<char>> hoverApproximate;
+        uint64_t hoverVersion = 0;
+        int hoverGroup = 0;
+    };
+
+    // One drawn session as hoverAt() sees it (item coordinates).
+    struct HoverSession {
+        int64_t startMs = 0;
+        double tx = 0.0, ty = 0.0;
+        double basePx = 0.0, cellW = 0.0, periodPx = 0.0;
+        int64_t topAbs = 0;
+        bool split = false;
+        std::shared_ptr<const tpo::ProfileRows> profile;
+        std::shared_ptr<const std::vector<char>> approximate;
     };
 
     struct GroupKey {
@@ -189,6 +232,8 @@ private:
     int chooseRowGroup(double basePx, double pxPerMs, int64_t topAbs, const Style& style);
     void applyUploads(std::vector<PendingUpload>& uploads, int maxSessions);
     void clearSessions();
+    void publishHover(Session& session, double tx, double ty, double basePx, double cellW,
+                      double periodPx, int64_t topAbs);
     void dropSessionNodes(Session& session);
     void ensureRoot(QSGNode* parentNode);
     void ensureSessionNodes(Session& session);
@@ -228,4 +273,8 @@ private:
     int m_group = 1;
     chart::ChartTextRule m_textRule;
     chart::ChartTextFit m_textFit;
+
+    // Render -> GUI hover handoff, rebuilt each frame (capacity reused).
+    mutable std::mutex m_hoverMutex;
+    std::vector<HoverSession> m_hover;
 };

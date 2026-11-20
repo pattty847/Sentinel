@@ -33,7 +33,8 @@ void TradeOverlayFeeds::connectDataProcessorSignals() {
     connect(processor_.get(), &DataProcessor::tpoColumnReady,
             context_,
             [this](int x, int gridWidth, int gridHeight, QByteArray letters,
-                   int64_t sessionStartMs, int64_t sessionEndMs, int64_t timeframeMs, TradeOverlayGrid grid) {
+                   int64_t sessionStartMs, int64_t sessionEndMs, int64_t timeframeMs, TradeOverlayGrid grid,
+                   bool approximate) {
                 if (gridWidth <= 0 || gridHeight <= 0 || x < 0 || x >= gridWidth ||
                     letters.size() != gridHeight) {
                     sLog_RenderN(1000, "tpo column dropped: x=" << x
@@ -48,7 +49,7 @@ void TradeOverlayFeeds::connectDataProcessorSignals() {
                     return;
                 }
                 layers_.tpo.renderer.enqueue(TpoOverlayRenderer::PendingUpload{
-                    x, gridWidth, gridHeight, std::move(letters), grid, timeframeMs});
+                    x, gridWidth, gridHeight, std::move(letters), grid, timeframeMs, approximate});
                 update_();
             },
             Qt::QueuedConnection);

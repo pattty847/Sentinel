@@ -12,6 +12,7 @@
 
 #include <QSGGeometryNode>
 #include <cmath>
+#include <map>
 #include <utility>
 #include <tuple>
 #include "render/TpoStreamState.hpp"
@@ -487,6 +488,75 @@ TEST_F(TradeOverlay, CandleHistoryFillsOlderPeriodsAndPartialRetentionMinuteOnOw
     EXPECT_TRUE(fetchTpoCandles(q, day + 13 * hour, [](auto, auto, auto, auto) {
         ADD_FAILURE() << "unnecessary candle fetch"; return CandleFetchResult{};
     }).candles.empty());
+}
+
+// Periods whose letters come from REST candles carry `approximate` from the server
+// builder through the wire codec and the client store to the renderer upload; trade
+// periods and live slices do not.
+TEST_F(TradeOverlay, CandlePeriodsAreMarkedApproximateFromServerToClientColumns) {
+    constexpr int64_t hour = 3600000;
+    auto q = request(); q.kind = Kind::TpoHistory; q.session = SessionManager::SessionType::NY;
+    q.tpoMs = hour; q.nowMs = day + 23 * hour; q.count = 9; q.requestId = "tpo-approx";
+    const auto retainedFrom = day + 20 * hour + 30000;
+    std::vector<OHLCVBar> candles;
+    for (auto t = day + 13 * hour; t < day + 21 * hour; t += hour) {
+        OHLCVBar bar; bar.timestamp_ms = t; bar.high = 117; bar.low = 113; bar.close = 115;
+        candles.push_back(bar);
+    }
+    // Periods 0-6 candles only, 7 the partially retained boundary candle plus a trade, 8 trades only.
+    const auto history = build(q, {{retainedFrom, 109, 1, AggressorSide::Buy},
+                                   {day + 21 * hour, 111, 2, AggressorSide::Sell}}, candles, retainedFrom);
+    ASSERT_TRUE(history.error.empty()) << history.error;
+    const auto chunk = nlohmann::json::parse(history.messages.at(0));
+    ASSERT_EQ(chunk["columns"].size(), 9);
+    for (int i = 0; i < 9; ++i)
+        EXPECT_EQ(chunk["columns"][i].value("approximate", false), i < 8) << "server column " << i;
+
+    SentinelStreamClient client("127.0.0.1", "0");
+    TradeOverlayWireTest::expectTpo(client, "tpo-approx");
+    DataProcessor processor;
+    QObject::connect(&client, &SentinelStreamClient::tpoSliceReceived, &processor, &DataProcessor::onTpoSliceReceived);
+    std::vector<TpoSlice> slices;
+    QObject::connect(&client, &SentinelStreamClient::tpoSliceReceived, &client, [&](auto s) { slices.push_back(s); });
+    std::map<int, bool> columns;
+    QObject::connect(&processor, &DataProcessor::tpoColumnReady, &processor,
+                     [&](int x, int, int, QByteArray, int64_t, int64_t, int64_t, TradeOverlayGrid, bool approximate) {
+                         columns[x] = approximate;
+                     });
+    TradeOverlayWireTest::receive(client, chunk);
+    ASSERT_EQ(slices.size(), 9u);
+    ASSERT_EQ(columns.size(), 9u);
+    for (int i = 0; i < 9; ++i) {
+        EXPECT_EQ(slices[size_t(i)].approximate, i < 8) << "decoded slice " << i;
+        EXPECT_EQ(columns.at(i), i < 8) << "client column " << i;
+    }
+
+    // Live slices are built from trades: never approximate. A live slice that replaces
+    // a candle period with the same letters still re-uploads it as exact.
+    q.kind = Kind::Live; q.nowMs = day + 21 * hour + 1; q.previousMs = day + 21 * hour - 1;
+    const auto live = build(q, {{day + 20 * hour + 1, 115, 1, AggressorSide::Buy}});
+    ASSERT_TRUE(live.error.empty()) << live.error;
+    int liveSlices = 0;
+    for (const auto& message : live.messages) {
+        const auto j = nlohmann::json::parse(message);
+        if (j["type"] != "tpo_slice") continue;
+        ++liveSlices;
+        EXPECT_EQ(j.value("approximate", true), false);
+    }
+    EXPECT_GT(liveSlices, 0);
+    TpoStreamState state; state.setSessionType(static_cast<int>(SessionManager::SessionType::NY));
+    const QByteArray letters(10, 'H');
+    std::vector<TpoStreamState::PendingUpload> uploads;
+    ASSERT_TRUE(state.ingestSlice(day + 20 * hour, day + 21 * hour, hour, 9, 10, letters, true));
+    state.takePendingUploads(uploads);
+    ASSERT_EQ(uploads.size(), 1u); EXPECT_TRUE(uploads[0].approximate);
+    ASSERT_TRUE(state.ingestSlice(day + 20 * hour, day + 21 * hour, hour, 9, 10, letters, false));
+    state.takePendingUploads(uploads);
+    ASSERT_EQ(uploads.size(), 1u) << "same letters, new provenance: re-upload";
+    EXPECT_FALSE(uploads[0].approximate);
+    ASSERT_TRUE(state.ingestSlice(day + 20 * hour, day + 21 * hour, hour, 9, 10, letters, false));
+    state.takePendingUploads(uploads);
+    EXPECT_TRUE(uploads.empty()) << "unchanged column: no upload";
 }
 
 TEST_F(TradeOverlay, RestartWithoutTradesBackfillsClosedSessionAndAnchorsGridFromCandles) {

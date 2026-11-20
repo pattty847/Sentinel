@@ -27,6 +27,7 @@ public:
         int64_t bucketStartMs = 0;
         int64_t bucketEndMs = 0;
         QByteArray data;            // one letter byte per row, '\0' = not visited
+        bool approximate = false;   // letters built from REST candles, not trades
     };
 
     struct Snapshot {
@@ -53,13 +54,15 @@ public:
     int maxSessions() const;
 
     // Returns false when the slice is malformed, outside its session, or older
-    // than every retained session while the store is full.
+    // than every retained session while the store is full. `approximate` marks a
+    // period whose letters come from REST candles; it travels with the column.
     bool ingestSlice(int64_t bucketStartMs,
                      int64_t bucketEndMs,
                      int64_t timeframeMs,
                      int gridWidth,
                      int gridHeight,
-                     const QByteArray& data);
+                     const QByteArray& data,
+                     bool approximate = false);
     void takePendingUploads(std::vector<PendingUpload>& out);
     Snapshot snapshot() const;
 
@@ -67,6 +70,7 @@ private:
     struct Session {
         int64_t endMs = 0;
         std::vector<QByteArray> columns;
+        std::vector<char> approximate;  // per column
     };
 
     void clearLocked();

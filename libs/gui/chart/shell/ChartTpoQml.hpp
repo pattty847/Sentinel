@@ -22,6 +22,8 @@ public:
     QString tpoLayout() const;
     QString tpoTheme() const;
     Q_INVOKABLE void setTpoPreset(const QString& preset);
+    // Text for the TPO cell under an item point; empty unless its letters are approximate.
+    Q_INVOKABLE QString hoverText(double x, double y) const;
     QString tpoPreset() const;
     tpo::StyleModel tpoLook() const;
     void setTpoLook(const tpo::StyleModel& look);
