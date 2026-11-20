@@ -182,7 +182,7 @@ TEST_F(TradingSnapshotWire, SharedTradingTicksOnceWithZeroOneAndTwoClients) {
         EXPECT_EQ(ticks->load(), 1) << "phase " << phase;
     };
     tick(1);
-    SentinelStreamClient other("127.0.0.1", std::to_string(fixture->port()));
+    SentinelStreamClient other("127.0.0.1", std::to_string(fixture->port()), fixture->config.tls.certFile);
     bool ready = false;
     QObject::connect(&other, &SentinelStreamClient::tradingSnapshotReceived, &app,
                      [&](const auto&) { ready = true; });
