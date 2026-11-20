@@ -1578,6 +1578,41 @@ TEST(ChartTooltips, SharedQmlTooltipStaysBesidePointerAtRightEdge) {
     EXPECT_FALSE(warnings.join('\n').contains("Binding loop")) << warnings.join('\n').toStdString();
 }
 
+// W-0049: the shared tooltip takes its colours from the theme singleton, and they are the
+// colours it always had.
+TEST(ChartTooltips, SharedQmlTooltipColoursComeFromTheTheme) {
+    QQmlEngine engine;
+    engine.addImportPath("qrc:/qt/qml");
+    QQmlComponent component(&engine);
+    component.setData(R"(
+        import QtQuick 2.15
+        import Sentinel.Charts 1.0
+        Item {
+            id: root
+            width: 200
+            height: 100
+            property color fromTheme: ChartTheme.tooltipBackground
+            ChartToolTip { objectName: "tip"; parent: root; text: "x" }
+        }
+    )", QUrl("test:chart-tooltip-theme"));
+    QTRY_VERIFY_WITH_TIMEOUT(!component.isLoading(), 3000);
+    ASSERT_TRUE(component.isReady()) << component.errorString().toStdString();
+    std::unique_ptr<QObject> root(component.create());
+    ASSERT_TRUE(root) << component.errorString().toStdString();
+    auto* tip = root->findChild<QObject*>("tip");
+    ASSERT_NE(tip, nullptr);
+    auto* label = tip->property("contentItem").value<QObject*>();
+    auto* background = tip->property("background").value<QObject*>();
+    ASSERT_TRUE(label && background);
+    EXPECT_EQ(label->property("color").value<QColor>(), theme::text2());
+    EXPECT_EQ(background->property("color").value<QColor>(), theme::bg2());
+    EXPECT_EQ(background->property("border").value<QObject*>()->property("color").value<QColor>(), theme::line());
+    // No visible change: the same literals the QML carried before.
+    EXPECT_EQ(theme::text2(), QColor("#B6C2CF"));
+    EXPECT_EQ(theme::bg2(), QColor("#20252B"));
+    EXPECT_EQ(theme::line(), QColor("#2B3138"));
+}
+
 // Lock to mid's corner toggle (M) reflects and drives view.lockToMid, replaces the
 // auto price scale, and goes unchecked when a price-axis route releases the lock.
 TEST(ChartShell, LockToMidToggleReflectsDrivesAndReleases) {
