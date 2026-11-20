@@ -194,6 +194,7 @@ bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
     try {
         const bool serving = m_serverModel->servesRoller();
         auto& shadow = m_serverConfig.rollerShadow;
+        shadow.rollupRoot = serving ? m_serverConfig.recording.rollupDir : std::string{};
         // Protect configured archival roots from accidental output aliasing.
         shadow.protectedRoots = {m_serverConfig.recording.dir};
         if (!m_serverConfig.recording.fallbackDir.empty())

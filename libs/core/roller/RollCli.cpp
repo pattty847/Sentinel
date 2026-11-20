@@ -66,12 +66,29 @@ int rollMain(int argc,char** argv) {
         if (!foundServerConfig && (!config["recording"] || !config["recording"]["dir"]))
             throw std::runtime_error("--config must specify recording.dir when the standard server config is unavailable");
         refuseLiveRoot(config);
+        // A product-scoped repair of the served tree must invalidate the same
+        // derived store as the server. Unrelated scratch outputs use their own
+        // sibling store, never the standard config's live rollup directory.
+        std::string servedRoot;
+        if (foundServerConfig && effective.recording.source == "roller")
+            servedRoot = effective.rollerShadow.outputRoot;
+        else if (!foundServerConfig && config && config["recording"] &&
+                 config["recording"]["source"] && config["recording"]["source"].as<std::string>() == "roller" &&
+                 config["roller_shadow"] && config["roller_shadow"]["dir"])
+            servedRoot = config["roller_shadow"]["dir"].as<std::string>();
+        if (!servedRoot.empty() && std::filesystem::weakly_canonical(o.outputRoot) ==
+                                     std::filesystem::weakly_canonical(servedRoot)) {
+            if (foundServerConfig) o.rollupRoot = effective.recording.rollupDir;
+            if (config && config["recording"] && config["recording"]["rollup_dir"])
+                o.rollupRoot = config["recording"]["rollup_dir"].as<std::string>();
+        }
         for (const auto& p : products) validateOutputProduct(o.outputRoot, p);
         QTemporaryDir scratch;
         if (rebuild) {
             if (!scratch.isValid() || o.dryRun) throw std::runtime_error("rebuild requires writable scratch and no --dry-run");
             o.anchorRoot = o.outputRoot;
             o.outputRoot = scratch.path().toStdString();
+            o.rollupRoot.clear(); // rebuilding sidecars writes only scratch minutes
             o.useAnchors = false; o.writeAnchors = true;
             o.anchorFailuresFatal = true;
         }

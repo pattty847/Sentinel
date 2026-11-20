@@ -52,7 +52,13 @@ struct RollOptions {
     std::function<bool(JournalReader&, JournalRecord&)> anchorOverlapReadForTest;
     // Observe recorder drains at checkpoint fences (cadence tests only).
     std::function<void()> afterFenceForTest;
-
+    // Derived 1h/1d store to invalidate after durable HMC2 writes. Empty uses
+    // rollupRootFor's sibling default. Not recorder/checkpoint policy.
+    std::filesystem::path rollupRoot;
+    // Serving ShadowRoller keeps checkpointing when derived-file deletion fails.
+    // Offline backfill leaves this false and fails before checkpointing.
+    bool rollupInvalidationBestEffort = false;
+    sentinel::metrics::Counter* rollupInvalidationFailuresCounter = nullptr;
 };
 void registerAnchorMetrics(metrics::MetricsRegistry&, const std::string& product);
 // Atomically replace and fsync a checkpoint in an already durable parent.

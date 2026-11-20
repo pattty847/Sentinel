@@ -59,6 +59,8 @@ struct ShadowConfig {
   bool enabled = false;
   std::string journalRoot = "/Volumes/T7/sentinel-data/raw-l2";
   std::string outputRoot = "/Volumes/T7/sentinel-data/hmc2";
+  // Installed by the server from recording.rollup_dir; empty = sibling default.
+  std::string rollupRoot;
   std::string socketPath; // empty: ~/Sentinel-runtime/run/capture.sock
   // Required explicit UTC start on first deployment; checkpoints retain it.
   std::string from;

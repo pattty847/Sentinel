@@ -1,3 +1,6 @@
+// Offline backfill and ShadowRoller share the durable recorder fence. Derived
+// .shr invalidation belongs there, before the checkpoint can skip those writes
+// on restart; it must never delete minutes or follow links below its root.
 #include "Roller.hpp"
 #include "AnchorStore.hpp"
 #include "metrics/MetricsRegistry.hpp"
@@ -5,6 +8,7 @@
 #include <mutex>
 #include "SentinelLogging.hpp"
 #include "servermodel/PersistenceIo.hpp"
+#include "servermodel/RollupStore.hpp"
 #include <QDateTime>
 #include <QTimeZone>
 #include <QSaveFile>
@@ -95,6 +99,42 @@ uint64_t outputBytes(const fs::path& root, const std::string& product) {
     }
     return n;
 }
+// Shared by offline backfill and ShadowRoller. Called only after a recorder
+// drain proved durable writes, before advancing the restart checkpoint. Never
+// traverse links below the resolved rollup root or remove anything but this
+// day's two derived levels; minute files and neighbouring days stay untouched.
+void invalidateRollups(const fs::path& root, const std::string& product, int64_t day) {
+    const auto name = QDateTime::fromMSecsSinceEpoch(day, QTimeZone::UTC).toString("yyyy-MM-dd").toStdString() + ".shr";
+    unsigned removed = 0;
+    for (const auto* layer : {"near", "deep"}) for (const auto* level : {"3600000", "86400000"}) {
+        const auto dir = root / product / layer / level;
+        bool missing = false;
+        for (const auto& at : {root, root / product, root / product / layer, dir}) {
+            std::error_code ec;
+            const auto status = fs::symlink_status(at, ec);
+            if (ec == std::errc::no_such_file_or_directory || (!ec && !fs::exists(status))) {
+                missing = true;
+                break;
+            }
+            if (ec) throw std::system_error(ec, "rollup invalidation directory: " + at.string());
+            if (!fs::is_directory(status))
+                throw std::runtime_error("rollup invalidation requires a plain directory: " + at.string());
+        }
+        if (missing) continue;
+        const auto path = dir / name;
+        std::error_code ec;
+        const auto status = fs::symlink_status(path, ec);
+        if (ec == std::errc::no_such_file_or_directory || (!ec && !fs::exists(status))) continue;
+        if (ec) throw std::system_error(ec, "rollup invalidation file: " + path.string());
+        if (!fs::is_regular_file(status) && !fs::is_symlink(status))
+            throw std::runtime_error("rollup invalidation refuses non-file: " + path.string());
+        if (fs::remove(path)) ++removed; // a final symlink itself, never its target
+        int error = 0;
+        if (!persistence::syncDirectory(dir, error))
+            throw std::system_error(error, std::generic_category(), "rollup invalidation directory sync");
+    }
+    if (removed) sLog_Data("Roller invalidated rollups product=" << product << " dayMs=" << day << " files=" << removed);
+}
 }
 int64_t parseTime(const std::string& text) {
     if (text.size() == 10) return parseTime(text + "T00:00:00Z");
@@ -120,6 +160,7 @@ json roll(const RollOptions& o) {
     if (o.fromMs < recording::kHmc2MinMs || o.toMs <= o.fromMs || o.toMs >= recording::kHmc2EndMs ||
         o.fromMs % Minute || o.toMs % Minute) throw std::runtime_error("roll range must contain complete UTC minutes");
     capture::validateSymbol(o.product, Venue::Kalshi);
+    std::optional<fs::path> rollupRoot;
     const auto started = std::chrono::steady_clock::now();
     JournalReader inventory(o.journalRoot, o.product);
     const auto cpPath = o.outputRoot/o.product/"roller.json";
@@ -558,6 +599,22 @@ json roll(const RollOptions& o) {
             if (o.afterFenceForTest) o.afterFenceForTest();
             const auto stats = recorder->stats();
             if (stats.diskErrors) throw std::runtime_error("roller recorder failed; checkpoint not advanced");
+            // Only closed UTC days need derived-file invalidation. A replay
+            // that re-offers stored columns may repeat it: columnsWritten
+            // counts offers, and removing the same files again is safe.
+            if (stats.columnsWritten != checkpointColumns && day + Day <= QDateTime::currentMSecsSinceEpoch()) {
+                try {
+                    if (!rollupRoot)
+                        rollupRoot = recording::rollupRootFor(o.rollupRoot.string(), o.outputRoot);
+                    // A refused root means there is no usable derived store.
+                    if (!rollupRoot->empty()) invalidateRollups(*rollupRoot, o.product, day);
+                } catch (const std::exception& e) {
+                    if (!o.rollupInvalidationBestEffort) throw;
+                    if (o.rollupInvalidationFailuresCounter) o.rollupInvalidationFailuresCounter->inc();
+                    sLog_Error("Roller rollup invalidation failed product=" << o.product
+                               << " dayMs=" << day << " reason=" << e.what());
+                }
+            }
             const bool metadataChanged = gridVenue == Venue::Kalshi && !completedCheckpoint && cp["days"].contains(key) &&
                 cp["days"].value(key,json::object()).value("instrumentHistory",json::array()) != instrumentHistory;
             if (!o.productWriterLease && !metadataChanged && stats.columnsWritten == checkpointColumns) return;

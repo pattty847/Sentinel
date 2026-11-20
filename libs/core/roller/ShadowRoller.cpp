@@ -1145,6 +1145,7 @@ struct ShadowRoller::Impl {
     metrics::Gauge *running, *lastComparison, *cooldown, *retryExhausted;
     metrics::Counter *records, *failures, *compareFailures, *cooldowns,
         *leadForks, *invalidations, *writeErrors;
+    metrics::Counter *rollupInvalidationFailures = nullptr; // serving only
     metrics::Counter *minuteColumns = nullptr;
     metrics::Counter *resnapshotRequests = nullptr; // serving only
     metrics::Gauge *resnapshotWaiting = nullptr;    // serving only
@@ -1215,6 +1216,9 @@ struct ShadowRoller::Impl {
           "Roller HMC2 append failures (minutes and rollups).", labels);
       // Only serving runs contribute to recording throughput.
       if (cfg.publisher) {
+        p->rollupInvalidationFailures = &registry.counter(
+            "sentinel_roller_rollup_invalidation_failures_total",
+            "Failed closed-day derived rollup deletions while recording continues.", labels);
         p->minuteColumns = &registry.counter(
             "sentinel_recorder_columns_written_total",
             "Minute columns the serving roller committed across products and layers.");
@@ -1533,6 +1537,9 @@ struct ShadowRoller::Impl {
         if (restoreEnabled() && !std::exchange(p.candlesRestored, true))
           restoreCandles(p, source, tap);
         RollOptions o{cfg.journalRoot, cfg.outputRoot, p.name, day, day + Day};
+        o.rollupRoot = cfg.rollupRoot;
+        o.rollupInvalidationBestEffort = bool(cfg.publisher);
+        o.rollupInvalidationFailuresCounter = p.rollupInvalidationFailures;
         o.publisher = cfg.publisher;
         if (tap.enabled() && cfg.model.grid)
           o.onGrid = [&, product = p.name](int64_t dayStartMs, const Grid& grid,
