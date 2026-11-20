@@ -295,8 +295,8 @@ with any price change uses full bubble opacity.
 
 Default sizing uses `radius = clamp(2, 18, 9 * sqrt(notional / ref))` in logical pixels.
 The buy/sell style radius rescales this curve (18 px by default, editable from 4–48 px).
-Individual marks use the p95 of individual trade notionals in the visible
-half-open **time** window. Side aggregates and their notable marks use the p95
+Individual marks use the p95 of the marks Individual placement draws in the visible
+half-open **time** window: whole sweeps (fills merged as below) at or above both minimums. Side aggregates and their notable marks use the p95
 of the side-bar aggregate notionals drawn in Slot mode. Each notable's radius
 is capped at its side aggregate's radius. Auto minimum uses the visible lower median
 of individual trades. The p95 and median are quantised to quarter-octave steps;

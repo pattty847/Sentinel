@@ -37,6 +37,25 @@ struct Mark {
     double radiusCap = MaxRadius;
     double baseSize = 0; // Sum of every fill; retained through sweeps and Slot aggregation.
 };
+// One execution, and whether the next row continues its sweep: the same instant,
+// side and exchange time with the next numeric trade ID (one aggressor order).
+inline bool validExecution(const Execution& t) {
+    return std::isfinite(t.timeMs) && t.timeMs > 0 && std::isfinite(t.price * t.size) &&
+           t.price > 0 && t.size > 0 && (t.side == 0 || t.side == 1);
+}
+inline bool consecutiveIds(std::string_view a, std::string_view b) {
+    if (a.empty() || b.empty()) return false;
+    uint64_t x = 0, y = 0;
+    const auto ra = std::from_chars(a.data(), a.data() + a.size(), x);
+    const auto rb = std::from_chars(b.data(), b.data() + b.size(), y);
+    return ra.ec == std::errc{} && rb.ec == std::errc{} &&
+           ra.ptr == a.data() + a.size() && rb.ptr == b.data() + b.size() &&
+           x != std::numeric_limits<uint64_t>::max() && y == x + 1;
+}
+inline bool joinsSweep(const Execution& a, const Execution& b) {
+    return validExecution(b) && a.timeMs == b.timeMs && a.exchangeNs == b.exchangeNs &&
+           a.side == b.side && consecutiveIds(a.id, b.id);
+}
 class PlacementMode {
 public:
     Mode select(Mode requested, double columnPx, double tfMs) {
@@ -109,12 +128,23 @@ public:
         if (!count) return {};
         const double median = select(scratch_.get(), count, (count-1)/2);
         const double fallbackP95 = select(scratch_.get(), count, size_t(std::ceil(.95*double(count)))-1);
+        // p95 is taken over what Individual placement draws: whole sweeps (BubblePlacement
+        // merges a sweep's fills into one mark) at or above both display minimums.
         const double cutoff = minimum < 0 ? median : minimum;
         size_t visible = 0;
-        for (size_t i = 0; i < rows.size() && visible < Capacity; ++i) {
-            const auto t = rows[i];
-            const double n = t.price * t.size;
-            if (std::isfinite(n) && n > 0 && n >= cutoff && t.size >= minBaseSize)
+        for (size_t i = 0; i < rows.size() && i < Capacity && visible < Capacity;) {
+            auto t = rows[i++];
+            if (!validExecution(t)) continue;
+            double n = t.price * t.size, size = t.size;
+            while (i < rows.size() && i < Capacity) {
+                const auto next = rows[i];
+                if (!joinsSweep(t, next)) break;
+                n += next.price * next.size;
+                size += next.size;
+                t = next;
+                ++i;
+            }
+            if (std::isfinite(n) && n > 0 && n >= cutoff && size >= minBaseSize)
                 scratch_[visible++] = n;
         }
         return {median, visible ? select(scratch_.get(), visible, size_t(std::ceil(.95*double(visible)))-1)
@@ -196,7 +226,7 @@ public:
         Bar bar;
         for (size_t i = 0; i < rows.size() && i < Capacity;) {
             const auto first = rows[i];
-            if (!valid(first)) { ++i; continue; }
+            if (!validExecution(first)) { ++i; continue; }
             auto mark = sweep(rows, i, previousPrice);
             if (options.mode == Mode::Slot) {
                 const double start = std::floor(mark.timeMs / tfMs) * tfMs;
@@ -218,23 +248,6 @@ private:
         std::array<size_t, 2> counts{};
         std::array<Mark, NotableCount + 2> notable{};
     };
-    static bool valid(const Execution& t) {
-        return std::isfinite(t.timeMs) && t.timeMs > 0 && std::isfinite(t.price * t.size) &&
-               t.price > 0 && t.size > 0 && (t.side == 0 || t.side == 1);
-    }
-    static bool consecutive(std::string_view a, std::string_view b) {
-        if (a.empty() || b.empty()) return false;
-        uint64_t x = 0, y = 0;
-        const auto ra = std::from_chars(a.data(), a.data() + a.size(), x);
-        const auto rb = std::from_chars(b.data(), b.data() + b.size(), y);
-        return ra.ec == std::errc{} && rb.ec == std::errc{} &&
-               ra.ptr == a.data() + a.size() && rb.ptr == b.data() + b.size() &&
-               x != std::numeric_limits<uint64_t>::max() && y == x + 1;
-    }
-    static bool joins(const Execution& a, const Execution& b) {
-        return valid(b) && a.timeMs == b.timeMs && a.exchangeNs == b.exchangeNs &&
-               a.side == b.side && consecutive(a.id, b.id);
-    }
     template<class Rows> Mark sweep(const Rows& rows, size_t& i, double& previousPrice) {
         auto t = rows[i];
         Mark mark{t.timeMs, t.price, 0, t.price, t.price, t.side, false};
@@ -252,7 +265,7 @@ private:
             hasPrevious = true;
             previousPrice = t.price;
             scratch_[levels++] = t.price;
-        } while (i < rows.size() && i < Capacity && joins(t, rows[i]));
+        } while (i < rows.size() && i < Capacity && joinsSweep(t, rows[i]));
         std::sort(scratch_.get(), scratch_.get() + levels);
         mark.sweepLevels = size_t(std::unique(scratch_.get(), scratch_.get() + levels) - scratch_.get());
         mark.baseSize = size;
