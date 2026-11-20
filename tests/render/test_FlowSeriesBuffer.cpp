@@ -414,6 +414,7 @@ TEST(FlowBackfillState, UnarmedLiveEdgeCoversNothingButPacesEdgePages) {
     state.setWindow(0, 601'000);
     state.markLiveEdge(600'000);
     EXPECT_FALSE(state.next(200)) << "the edge page waits for its 5 s pace";
+    EXPECT_EQ(state.wakeAtMs(200), 5000) << "the pager wakes for the held edge page";
     const auto edge = state.next(5000); ASSERT_TRUE(edge);
     EXPECT_EQ(edge->endMs, 600'000);
     EXPECT_EQ(edge->limit, 1);
@@ -688,6 +689,33 @@ TEST_F(FlowDataSourceTest, SwitchPagesHistoryBelowTheLiveEdgeInTheFirstPage) {
     const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
     EXPECT_EQ(sent[1]["end_time_ms"], live + 2 * tf);
     EXPECT_EQ(sent[1]["limit"], 66) << "one page reaches the window start (one-view margin included)";
+}
+// A quiet (or refused) subscription: no live frame arms coverage. A bucket that enters
+// the view inside the edge pace must still be paged when the pace ends, by the pager's
+// own timer, with no further viewport change or live delivery.
+TEST_F(FlowDataSourceTest, PacedEdgePageFiresOnItsOwnBeforeLiveArrives) {
+    constexpr int64_t tf = 60'000;
+    ready();
+    const int64_t live = QDateTime::currentMSecsSinceEpoch() / tf * tf;
+    source.subscribeFlowLive("ETH-USD", tf);
+    source.requestFlowHistory("ETH-USD", tf, live - 30 * tf, live + tf);
+    const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
+    emitPage(sent[1]); // covers the window; no provisional bars, no building ranges
+    source.requestFlowHistory("ETH-USD", tf, live - 29 * tf, live + 2 * tf);
+    if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
+    EXPECT_TRUE(requests().empty()) << "the new bucket waits for the 5 s edge pace";
+    QElapsedTimer clock; clock.start();
+    std::vector<Json> page;
+    while (page.empty() && clock.elapsed() < 8000) {
+        QEventLoop loop;
+        QTimer::singleShot(50, &loop, &QEventLoop::quit);
+        loop.exec();
+        page = requests();
+    }
+    ASSERT_EQ(page.size(), 1u) << "the pager must wake for the paced edge page";
+    EXPECT_EQ(page[0]["end_time_ms"], live + tf);
+    EXPECT_EQ(page[0]["limit"], 1);
+    EXPECT_GE(clock.elapsed(), 4000) << "and only once the pace has passed";
 }
 TEST_F(FlowDataSourceTest, DeliveredLiveFrameCoversTheLiveEdge) {
     constexpr int64_t tf = 60'000;

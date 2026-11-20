@@ -278,5 +278,8 @@ int64_t FlowBackfillState::wakeAtMs(int64_t nowMs) const {
         const int64_t edgeAt = nowMs + 5000;
         at = at == 0 ? edgeAt : std::min(at, edgeAt);
     }
+    // A paced edge page is due even before live is armed: wake for it, or a page held
+    // back by the pace waits for an unrelated event.
+    if (!m_symbol.isEmpty() && !m_pagingStopped && m_window && m_nextEdgePageMs > nowMs) at = at == 0 ? m_nextEdgePageMs : std::min(at, m_nextEdgePageMs);
     return at;
 }
