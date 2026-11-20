@@ -46,7 +46,8 @@ public:
     std::function<bool()> tradesAboveCandlesSource;
     bool tradesAboveCandles() const { return tradesAboveCandlesSource ? tradesAboveCandlesSource() : true; }
     enum class Notice { TpoConfig, TpoStyle, Gamma, Contrast, ShaderFloor, CandleStyle, CandleAppearance };
-    explicit ChartLookSettings(ChartLayers& layers) : layers_(layers) {}
+    explicit ChartLookSettings(ChartLayers& layers);
+    ~ChartLookSettings() override;
     std::function<void()> requestUpdate, onViewportChanged;
     std::function<void(float, float, float)> applyTone;
 

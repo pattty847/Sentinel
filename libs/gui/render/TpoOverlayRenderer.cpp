@@ -173,8 +173,8 @@ void TpoOverlayRenderer::clearSessions() {
     }
     m_sessions.clear();
     m_textFit = {}; // a new grid (symbol, tick) or session layout decides its letters afresh
-    std::lock_guard<std::mutex> lock(m_hoverMutex);
-    m_hover.clear();
+    m_hoverNext.clear();
+    commitHover();
 }
 
 void TpoOverlayRenderer::applyUploads(std::vector<PendingUpload>& uploads, int maxSessions) {
@@ -567,7 +567,7 @@ void TpoOverlayRenderer::updateTags(const ChartTextAtlas& atlas, const TagKey& k
 }
 
 void TpoOverlayRenderer::publishHover(Session& s, double tx, double ty, double basePx, double cellW,
-                                      double periodPx, int64_t topAbs) {
+                                      double periodPx, int64_t topAbs, const QRectF& clip) {
     // Hold the profile the cells were built from; copy only when it changed.
     if (!s.hoverProfile || s.hoverVersion != s.profileVersion || s.hoverGroup != s.profileGroup) {
         s.hoverProfile = std::make_shared<const tpo::ProfileRows>(s.profile);
@@ -575,9 +575,15 @@ void TpoOverlayRenderer::publishHover(Session& s, double tx, double ty, double b
         s.hoverVersion = s.profileVersion;
         s.hoverGroup = s.profileGroup;
     }
+    m_hoverNext.push_back({s.startMs, tx, ty, basePx, cellW, periodPx, topAbs,
+                           s.built.layout == tpo::Layout::Split, clip, s.hoverProfile, s.hoverApproximate});
+}
+
+void TpoOverlayRenderer::commitHover() {
     std::lock_guard<std::mutex> lock(m_hoverMutex);
-    m_hover.push_back({s.startMs, tx, ty, basePx, cellW, periodPx, topAbs,
-                       s.built.layout == tpo::Layout::Split, s.hoverProfile, s.hoverApproximate});
+    if (m_hover == m_hoverNext) return;
+    m_hover.swap(m_hoverNext);
+    m_hoverRevision.fetch_add(1, std::memory_order_release);
 }
 
 TpoOverlayRenderer::Hover TpoOverlayRenderer::hoverAt(double x, double y) const {
@@ -586,6 +592,7 @@ TpoOverlayRenderer::Hover TpoOverlayRenderer::hoverAt(double x, double y) const 
         const tpo::ProfileRows& profile = *s.profile;
         const int group = profile.group();
         if (!(s.basePx > 0.0) || !(s.cellW > 0.0) || group <= 0 || !std::isfinite(x) || !std::isfinite(y)) continue;
+        if (!s.clip.contains(QPointF(x, y))) continue;  // clipped away (a docked pane, the plot edge)
         // Display row r spans [(topAbs - (minGroup + r + 1) * group) * basePx, + group * basePx).
         const double u = (static_cast<double>(s.topAbs) - (y - s.ty) / s.basePx) / group;
         const double row = std::ceil(u) - 1.0 - static_cast<double>(profile.minGroup());
@@ -699,8 +706,8 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     }
     if (!visible) {
         m_textFit = {};
-        std::lock_guard<std::mutex> lock(m_hoverMutex);
-        m_hover.clear();
+        m_hoverNext.clear();
+        commitHover();
         return;
     }
 
@@ -782,10 +789,8 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     m_textFit = chart::tpoLetterFit(m_textFit, {letterCellW, cellH, scale, m_textRule}, advanceRatio, lettersWanted);
     const double fontPx = chart::tpoLetterPx(m_textFit, m_textRule, style.look.letters.width);
 
-    {
-        std::lock_guard<std::mutex> lock(m_hoverMutex);
-        m_hover.clear();
-    }
+    m_hoverNext.clear();
+    const QRectF hoverClip = m_hoverClip.isNull() ? surfaceBounds : surfaceBounds.intersected(m_hoverClip);
     const Session* tagged = nullptr;
     for (auto& [start, session] : m_sessions) {
         ensureSessionNodes(session);
@@ -847,8 +852,9 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
             session.lastLevelTx = levelTx;
         }
         session.lastTy = ty;
-        if (onScreen && session.hasBuilt) publishHover(session, tx, ty, basePx, cellW, periodPx, topAbs);
+        if (onScreen && session.hasBuilt) publishHover(session, tx, ty, basePx, cellW, periodPx, topAbs, hoverClip);
     }
+    commitHover();
     updateTags(atlas, tagKey(tagged, mapping, atlasReady && atlas.isBuilt() && atlas.fontPx() > 0, surfaceBounds));
 
     sLog_Probe("tpo.frame", "sessions=" << m_sessions.size() << " layout=" << tpo::layoutName(style.layout)

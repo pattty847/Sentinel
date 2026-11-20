@@ -10,6 +10,16 @@
 #include <cmath>
 
 namespace chart {
+ChartLookSettings::ChartLookSettings(ChartLayers& layers) : layers_(layers) {
+    // Render thread, after a frame changed what lies under a hover point: QML re-reads
+    // tpo.hoverText on the GUI thread. A queued call to a destroyed `tpo` is dropped.
+    layers_.tpo.onHoverChanged = [this] {
+        QMetaObject::invokeMethod(&tpo, [this] { tpo.notifyHoverChanged(); }, Qt::QueuedConnection);
+    };
+}
+// The owner stops the render thread's afterRendering calls before it destroys this.
+ChartLookSettings::~ChartLookSettings() { layers_.tpo.onHoverChanged = nullptr; }
+
 void ChartLookSettings::setInitialTone(const ClientConfig& config) {
     gamma_ = config.heatmap.gamma;
     contrast_ = config.heatmap.contrast;

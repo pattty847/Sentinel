@@ -167,10 +167,18 @@ Rectangle {
         objectName: "tpoHover"
         parent: unifiedGridRenderer
         anchors.fill: unifiedGridRenderer
-        readonly property real mouseX: tpoHoverHandler.point.position.x
-        readonly property real mouseY: tpoHoverHandler.point.position.y
-        readonly property string text: tpoHoverHandler.hovered
-            ? unifiedGridRenderer.tpo.hoverText(mouseX, mouseY) : ""
+        // The pointer, from the hover handler.
+        property bool hovering: tpoHoverHandler.hovered
+        property real mouseX: tpoHoverHandler.point.position.x
+        property real mouseY: tpoHoverHandler.point.position.y
+        // Re-read on every drawn change under a still pointer (new provenance, zoom, pan,
+        // layer off); hoverRevision is read only while hovered, so idle frames cost nothing.
+        readonly property string text: {
+            if (!hovering)
+                return ""
+            const revision = unifiedGridRenderer.tpo.hoverRevision
+            return revision >= 0 ? unifiedGridRenderer.tpo.hoverText(mouseX, mouseY) : ""
+        }
         HoverHandler { id: tpoHoverHandler }
     }
     ChartToolTip {

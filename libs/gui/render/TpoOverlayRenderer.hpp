@@ -9,6 +9,7 @@
 #include <QByteArray>
 #include <QRectF>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -88,8 +89,12 @@ public:
         bool approximate = false;
         int64_t sessionStartMs = 0;
     };
-    /// Thread-safe (GUI thread): hit-tests the cells of the last rendered frame.
+    /// Thread-safe (GUI thread): hit-tests the cells of the last rendered frame, inside
+    /// the area they were drawn in (see setHoverClip).
     Hover hoverAt(double x, double y) const;
+    /// Thread-safe: advances whenever a rendered frame changes what hoverAt() can return
+    /// (data or provenance, camera, layout, visibility, clip).
+    uint64_t hoverRevision() const { return m_hoverRevision.load(std::memory_order_acquire); }
 
     struct Style {
         tpo::Layout layout = tpo::Layout::Collapsed;
@@ -110,6 +115,9 @@ public:
     void onRootRebuilt();
     // Render thread, before render(): the chart text rule for the letters.
     void setTextRule(const chart::ChartTextRule& rule) { m_textRule = rule; }
+    // Render thread, before render(): the area the profile is drawn in when a pane clips
+    // it (item coordinates). A null rect means the whole surface.
+    void setHoverClip(const QRectF& clip) { m_hoverClip = clip; }
 
     // World -> screen uses the published frame camera; DPR and per-axis snapping also
     // participate in the cached layout. No integer time-bound conversion.
@@ -194,15 +202,18 @@ private:
         int hoverGroup = 0;
     };
 
-    // One drawn session as hoverAt() sees it (item coordinates).
+    // One drawn session as hoverAt() sees it (item coordinates). The shared pointers
+    // change exactly when the profile or its flags change, so == compares by identity.
     struct HoverSession {
         int64_t startMs = 0;
         double tx = 0.0, ty = 0.0;
         double basePx = 0.0, cellW = 0.0, periodPx = 0.0;
         int64_t topAbs = 0;
         bool split = false;
+        QRectF clip;
         std::shared_ptr<const tpo::ProfileRows> profile;
         std::shared_ptr<const std::vector<char>> approximate;
+        bool operator==(const HoverSession&) const = default;
     };
 
     struct GroupKey {
@@ -233,7 +244,8 @@ private:
     void applyUploads(std::vector<PendingUpload>& uploads, int maxSessions);
     void clearSessions();
     void publishHover(Session& session, double tx, double ty, double basePx, double cellW,
-                      double periodPx, int64_t topAbs);
+                      double periodPx, int64_t topAbs, const QRectF& clip);
+    void commitHover();
     void dropSessionNodes(Session& session);
     void ensureRoot(QSGNode* parentNode);
     void ensureSessionNodes(Session& session);
@@ -274,7 +286,11 @@ private:
     chart::ChartTextRule m_textRule;
     chart::ChartTextFit m_textFit;
 
-    // Render -> GUI hover handoff, rebuilt each frame (capacity reused).
+    // Render -> GUI hover handoff: built each frame in m_hoverNext (render thread only),
+    // swapped into m_hover when it differs; both keep their capacity.
+    QRectF m_hoverClip;
+    std::vector<HoverSession> m_hoverNext;
     mutable std::mutex m_hoverMutex;
     std::vector<HoverSession> m_hover;
+    std::atomic<uint64_t> m_hoverRevision{0};
 };
