@@ -14,7 +14,6 @@
 #include "render/VolumeProfileRenderer.hpp"
 #include "render/ChartTextAtlas.hpp"
 #include "render/ChartTextNode.hpp"
-#include "render/DataProcessor.hpp"
 #include "lab/LabData.hpp"
 #include "lab/OffscreenQuick.hpp"
 #include "lab/RhiBackend.hpp"
@@ -1226,8 +1225,8 @@ TEST(TpoTags, FollowTheVisibleSessionAtCurrentPrices) {
 }
 
 // Periods built from REST candles draw the same cells and letters at
-// kApproximateOpacity, and hover names them; trade periods are untouched.
-TEST(TpoApproximate, CandlePeriodsDrawDimmedAndHoverSaysSo) {
+// kApproximateOpacity; trade periods are untouched.
+TEST(TpoApproximate, CandlePeriodsDrawCellsAndLettersDimmed) {
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
@@ -1262,10 +1261,9 @@ TEST(TpoApproximate, CandlePeriodsDrawDimmedAndHoverSaysSo) {
     in.itemHeightLogical = 320;
     in.dpr = 1.0;
     const auto camera = chart_raster::computeRaster(in, {});
-    const auto mapping = chart_raster::toMapping(camera);
     const QRectF surface(0, 0, 640, 320);
     // Letters need the atlas uploaded as a texture, so a real scene graph: an offscreen
-    // QRhi window when one can be created; otherwise only cells and hover are checked.
+    // QRhi window when one can be created; otherwise only the cells are checked.
     QQuickWindow plainWindow;
     QQuickWindow* window = &plainWindow;
     std::unique_ptr<lab::OffscreenQuick> scene;
@@ -1319,103 +1317,6 @@ TEST(TpoApproximate, CandlePeriodsDrawDimmedAndHoverSaysSo) {
     } else {
         std::cout << "GPU case skipped: TPO letter checks need an offscreen QRhi: " << error.toStdString() << std::endl;
     }
-
-    // Hover: each period's own column at a row it touched.
-    const double y = mapping.priceToScreenY(155.5);
-    for (int p = 0; p < 3; ++p) {
-        const double x = mapping.timeToScreenX(double(start + p * period + period / 2));
-        const auto hit = approx.hoverAt(x, y);
-        ASSERT_TRUE(hit.hit) << "period " << p;
-        EXPECT_EQ(hit.letter, char('A' + p));
-        EXPECT_EQ(hit.approximate, p < 2);
-        EXPECT_EQ(hit.sessionStartMs, start);
-        EXPECT_FALSE(plain.hoverAt(x, y).approximate);
-    }
-    EXPECT_FALSE(approx.hoverAt(mapping.timeToScreenX(double(start + 3 * period + period / 2)), y).hit)
-        << "an empty period";
-    EXPECT_FALSE(approx.hoverAt(mapping.timeToScreenX(double(start + period / 2)), mapping.priceToScreenY(145.5)).hit)
-        << "a row the period never touched";
-    // Collapsed: the first cell of a row is that row's first period.
-    style.layout = tpo::Layout::Collapsed;
-    approx.setStyle(style);
-    approx.render(window, &approxRoot, true, atlas, true, camera, 1.0, true, true, surface);
-    const auto first = approx.hoverAt(mapping.timeToScreenX(double(start)) + 1.0, y);
-    EXPECT_TRUE(first.hit && first.letter == 'A' && first.approximate);
-    // A hidden overlay has nothing under the pointer.
-    approx.render(window, &approxRoot, false, atlas, true, camera, 1.0, true, true, surface);
-    EXPECT_FALSE(approx.hoverAt(mapping.timeToScreenX(double(start)) + 1.0, y).hit);
-}
-
-// The hover snapshot advances its revision exactly when a frame changes what lies
-// under a still point (provenance, camera, visibility), and stays inside the pane clip.
-TEST(TpoApproximate, HoverRevisionFollowsDrawnChangesAndPaneClip) {
-    constexpr qint64 hour = 3'600'000, day = 24 * hour, period = 30 * 60'000, start = 100 * day;
-    TpoOverlayRenderer renderer;
-    TpoOverlayRenderer::Style style;
-    style.layout = tpo::Layout::Split;
-    renderer.setStyle(style);
-    auto upload = [&](int p, bool approximate) {
-        TpoOverlayRenderer::PendingUpload u;
-        u.x = p;
-        u.gridWidth = 48;
-        u.gridHeight = 100;
-        u.periodMs = period;
-        u.grid = {start, start + day, 200.0, 1.0, 1};
-        u.letters = QByteArray(100, '\0');
-        for (int row = 40; row < 50; ++row) u.letters[row] = char('A' + p);
-        u.approximate = approximate;
-        renderer.enqueue(std::move(u));
-    };
-    for (int p = 0; p < 3; ++p) upload(p, p < 2);
-    auto cameraFor = [&](qint64 from) {
-        chart_raster::RasterInputs in;
-        in.timeStart = from;
-        in.timeEnd = from + 5 * hour;
-        in.minPrice = 140;
-        in.maxPrice = 170;
-        in.tfMs = period;
-        in.tick = 1;
-        in.itemWidthLogical = 640;
-        in.itemHeightLogical = 320;
-        in.dpr = 1.0;
-        return chart_raster::computeRaster(in, {});
-    };
-    const auto camera = cameraFor(start - hour);
-    const auto mapping = chart_raster::toMapping(camera);
-    QQuickWindow window;
-    ChartTextAtlas atlas;  // cells only: no letters, no texture
-    QSGNode root;
-    const QRectF surface(0, 0, 640, 320);
-    auto draw = [&](const chart_raster::RasterCamera& cam, bool on = true) {
-        renderer.render(&window, &root, on, atlas, false, cam, 1.0, true, true, surface);
-    };
-    const double x = mapping.timeToScreenX(double(start + period / 2)), y = mapping.priceToScreenY(155.5);
-    draw(camera);
-    const uint64_t first = renderer.hoverRevision();
-    EXPECT_GT(first, 0u);
-    ASSERT_TRUE(renderer.hoverAt(x, y).approximate);
-    draw(camera);
-    EXPECT_EQ(renderer.hoverRevision(), first) << "an unchanged frame does not notify";
-    upload(0, false);  // the same letters, now from trades
-    draw(camera);
-    const uint64_t provenance = renderer.hoverRevision();
-    EXPECT_GT(provenance, first);
-    EXPECT_FALSE(renderer.hoverAt(x, y).approximate);
-    draw(cameraFor(start - hour + period));  // pan by one period: B under the point
-    const uint64_t panned = renderer.hoverRevision();
-    EXPECT_GT(panned, provenance);
-    EXPECT_EQ(renderer.hoverAt(x, y).letter, 'B');
-    draw(camera, false);
-    EXPECT_GT(renderer.hoverRevision(), panned);
-    EXPECT_FALSE(renderer.hoverAt(x, y).hit) << "a hidden overlay has nothing under the pointer";
-    // A pane docked below clips the profile above it: rows under the pane do not hover.
-    renderer.setHoverClip(QRectF(0, 0, 640, y - 2));
-    draw(camera);
-    EXPECT_FALSE(renderer.hoverAt(x, y).hit) << "under the docked pane";
-    EXPECT_TRUE(renderer.hoverAt(x, mapping.priceToScreenY(159.5)).hit) << "above the pane";
-    renderer.setHoverClip(QRectF());
-    draw(camera);
-    EXPECT_TRUE(renderer.hoverAt(x, y).hit) << "no pane: the whole surface";
 }
 
 // Settings opened over a restored non-default style shows it, and one edit keeps the rest.
@@ -3485,65 +3386,4 @@ TEST(CandleStyleTest, VolumeControlsRoundTripClampResetAndDriveRealQmlVisibility
     child<QPushButton>(dialog, "resetChart")->click();
     EXPECT_TRUE(t.reload().showVolumeBars); EXPECT_EQ(band->value(), 22); EXPECT_EQ(opacity->value(), 45);
     EXPECT_DOUBLE_EQ(volume->volumeBandPercent(), 22); EXPECT_DOUBLE_EQ(volume->volumeOpacity(), 0.45);
-}
-
-// The production TPO hover item from DepthChartView.qml on a rendering chart: with the
-// pointer held still, its text follows a provenance change, a viewport change and the
-// layer going off (the render thread's hover revision reaches the QML binding).
-TEST_F(HeatmapChartUi, TpoHoverTextFollowsDrawnChangesUnderAStillPointer) {
-    QFile source(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml"));
-    ASSERT_TRUE(source.open(QIODevice::ReadOnly));
-    const QByteArray qml = source.readAll();
-    const auto from = qml.indexOf("    Item {\n        id: tpoHover");
-    ASSERT_GE(from, 0);
-    const auto to = qml.indexOf("\n    }\n", from);
-    ASSERT_GT(to, from);
-    QQmlEngine engine;
-    engine.rootContext()->setContextProperty("unifiedGridRenderer", ugr);
-    QQmlComponent component(&engine);
-    component.setData("import QtQuick\nItem {\n" + qml.mid(from, to - from + 7) + "}\n", QUrl());
-    std::unique_ptr<QObject> holder(component.create());
-    ASSERT_NE(holder, nullptr) << component.errorString().toStdString();
-    auto* hover = holder->findChild<QQuickItem*>("tpoHover");
-    ASSERT_NE(hover, nullptr);
-    ASSERT_EQ(hover->parentItem(), ugr);
-
-    constexpr int64_t period = 30 * minute;
-    const int64_t start = viewLo - 2 * kHourMs;  // a 24 h session holding the view
-    ugr->view()->setViewport(start - 30 * minute, start + 4 * kHourMs, 100'000, 100'200);
-    ugr->layers()->setTpoEnabled(true);
-    ugr->tpo()->setTpoLayout("split");
-    const TradeOverlayGrid grid{start, start + 24 * kHourMs, 100'300, 10, 1};
-    auto column = [&](int p, bool approximate) {
-        QByteArray letters(40, '\0');
-        for (int r = 15; r < 25; ++r) letters[r] = char('A' + p);
-        emit ugr->getDataProcessor()->tpoColumnReady(p, 48, 40, letters, grid.startMs, grid.endMs, period, grid,
-                                                     approximate);
-    };
-    for (int p = 0; p < 3; ++p) column(p, p < 2);  // A and B from candles, C from trades
-    pump(1000, [] { return false; });
-    // Find a point on period A's cells through the same query QML uses.
-    QPointF point(-1, -1);
-    for (int y = 4; y < 316 && point.x() < 0; y += 4)
-        for (int x = 2; x < 640 && point.x() < 0; x += 4)
-            if (ugr->tpo()->hoverText(x, y).startsWith("TPO A")) point = QPointF(x, y);
-    ASSERT_GE(point.x(), 0) << "period A is drawn";
-    // An offscreen window gets no hover delivery: hold the pointer the way the HoverHandler would.
-    hover->setProperty("mouseX", point.x());
-    hover->setProperty("mouseY", point.y());
-    hover->setProperty("hovering", true);
-    const auto textIs = [&](const QString& expected) {
-        return pump(3000, [&] { return hover->property("text").toString() == expected; });
-    };
-    const QString a = QStringLiteral("TPO A · approximate (from candles)");
-    ASSERT_TRUE(textIs(a)) << hover->property("text").toString().toStdString();
-    column(0, false);  // the same letters, now from trades
-    EXPECT_TRUE(textIs(QString())) << "provenance: " << hover->property("text").toString().toStdString();
-    column(0, true);
-    ASSERT_TRUE(textIs(a)) << hover->property("text").toString().toStdString();
-    ugr->view()->setViewport(start - 30 * minute + period, start + 4 * kHourMs + period, 100'000, 100'200);
-    EXPECT_TRUE(textIs(QStringLiteral("TPO B · approximate (from candles)")))
-        << "viewport: " << hover->property("text").toString().toStdString();
-    ugr->layers()->setTpoEnabled(false);
-    EXPECT_TRUE(textIs(QString())) << "layer off: " << hover->property("text").toString().toStdString();
 }

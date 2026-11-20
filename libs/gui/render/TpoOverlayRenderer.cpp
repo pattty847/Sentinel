@@ -173,8 +173,6 @@ void TpoOverlayRenderer::clearSessions() {
     }
     m_sessions.clear();
     m_textFit = {}; // a new grid (symbol, tick) or session layout decides its letters afresh
-    m_hoverNext.clear();
-    commitHover();
 }
 
 void TpoOverlayRenderer::applyUploads(std::vector<PendingUpload>& uploads, int maxSessions) {
@@ -566,58 +564,6 @@ void TpoOverlayRenderer::updateTags(const ChartTextAtlas& atlas, const TagKey& k
     m_tagDark->setColor(kDarkText);
 }
 
-void TpoOverlayRenderer::publishHover(Session& s, double tx, double ty, double basePx, double cellW,
-                                      double periodPx, int64_t topAbs, const QRectF& clip) {
-    // Hold the profile the cells were built from; copy only when it changed.
-    if (!s.hoverProfile || s.hoverVersion != s.profileVersion || s.hoverGroup != s.profileGroup) {
-        s.hoverProfile = std::make_shared<const tpo::ProfileRows>(s.profile);
-        s.hoverApproximate = std::make_shared<const std::vector<char>>(s.approximate);
-        s.hoverVersion = s.profileVersion;
-        s.hoverGroup = s.profileGroup;
-    }
-    m_hoverNext.push_back({s.startMs, tx, ty, basePx, cellW, periodPx, topAbs,
-                           s.built.layout == tpo::Layout::Split, clip, s.hoverProfile, s.hoverApproximate});
-}
-
-void TpoOverlayRenderer::commitHover() {
-    std::lock_guard<std::mutex> lock(m_hoverMutex);
-    if (m_hover == m_hoverNext) return;
-    m_hover.swap(m_hoverNext);
-    m_hoverRevision.fetch_add(1, std::memory_order_release);
-}
-
-TpoOverlayRenderer::Hover TpoOverlayRenderer::hoverAt(double x, double y) const {
-    std::lock_guard<std::mutex> lock(m_hoverMutex);
-    for (const HoverSession& s : m_hover) {
-        const tpo::ProfileRows& profile = *s.profile;
-        const int group = profile.group();
-        if (!(s.basePx > 0.0) || !(s.cellW > 0.0) || group <= 0 || !std::isfinite(x) || !std::isfinite(y)) continue;
-        if (!s.clip.contains(QPointF(x, y))) continue;  // clipped away (a docked pane, the plot edge)
-        // Display row r spans [(topAbs - (minGroup + r + 1) * group) * basePx, + group * basePx).
-        const double u = (static_cast<double>(s.topAbs) - (y - s.ty) / s.basePx) / group;
-        const double row = std::ceil(u) - 1.0 - static_cast<double>(profile.minGroup());
-        const double localX = x - s.tx;
-        if (row < 0.0 || row >= profile.rows() || localX < 0.0) continue;
-        const int r = static_cast<int>(row);
-        int period = -1;
-        if (s.split) {
-            const double p = s.periodPx > 0.0 ? std::floor(localX / s.periodPx) : -1.0;
-            if (p >= 0.0 && p < profile.periods() && profile.has(r, static_cast<int>(p))) period = static_cast<int>(p);
-        } else {
-            const double k = std::floor(localX / s.cellW);
-            if (k < profile.periods()) {
-                int left = static_cast<int>(k);
-                profile.forEachPeriod(r, [&](int p) { if (left-- == 0) period = p; });
-            }
-        }
-        if (period < 0) continue;
-        const bool approximate = static_cast<size_t>(period) < s.approximate->size() &&
-                                 (*s.approximate)[static_cast<size_t>(period)] != 0;
-        return {true, tpo::letterForPeriod(period), period, approximate, s.startMs};
-    }
-    return {};
-}
-
 TpoOverlayRenderer::SessionNodes TpoOverlayRenderer::sessionNodesForTest(int64_t sessionStartMs) const {
     const auto it = m_sessions.find(sessionStartMs);
     if (it == m_sessions.end()) return {};
@@ -706,8 +652,6 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     }
     if (!visible) {
         m_textFit = {};
-        m_hoverNext.clear();
-        commitHover();
         return;
     }
 
@@ -789,8 +733,6 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
     m_textFit = chart::tpoLetterFit(m_textFit, {letterCellW, cellH, scale, m_textRule}, advanceRatio, lettersWanted);
     const double fontPx = chart::tpoLetterPx(m_textFit, m_textRule, style.look.letters.width);
 
-    m_hoverNext.clear();
-    const QRectF hoverClip = m_hoverClip.isNull() ? surfaceBounds : surfaceBounds.intersected(m_hoverClip);
     const Session* tagged = nullptr;
     for (auto& [start, session] : m_sessions) {
         ensureSessionNodes(session);
@@ -852,9 +794,7 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
             session.lastLevelTx = levelTx;
         }
         session.lastTy = ty;
-        if (onScreen && session.hasBuilt) publishHover(session, tx, ty, basePx, cellW, periodPx, topAbs, hoverClip);
     }
-    commitHover();
     updateTags(atlas, tagKey(tagged, mapping, atlasReady && atlas.isBuilt() && atlas.fontPx() > 0, surfaceBounds));
 
     sLog_Probe("tpo.frame", "sessions=" << m_sessions.size() << " layout=" << tpo::layoutName(style.layout)

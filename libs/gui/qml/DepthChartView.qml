@@ -160,35 +160,6 @@ Rectangle {
         tradesAboveCandles: unifiedGridRenderer.candles.tradesAboveCandles
     }
 
-    // TPO hover: says when the letters under the pointer were built from REST candles.
-    // A passive HoverHandler, so chart clicks, drags and wheel still reach the renderer.
-    Item {
-        id: tpoHover
-        objectName: "tpoHover"
-        parent: unifiedGridRenderer
-        anchors.fill: unifiedGridRenderer
-        // The pointer, from the hover handler.
-        property bool hovering: tpoHoverHandler.hovered
-        property real mouseX: tpoHoverHandler.point.position.x
-        property real mouseY: tpoHoverHandler.point.position.y
-        // Re-read on every drawn change under a still pointer (new provenance, zoom, pan,
-        // layer off); hoverRevision is read only while hovered, so idle frames cost nothing.
-        readonly property string text: {
-            if (!hovering)
-                return ""
-            const revision = unifiedGridRenderer.tpo.hoverRevision
-            return revision >= 0 ? unifiedGridRenderer.tpo.hoverText(mouseX, mouseY) : ""
-        }
-        HoverHandler { id: tpoHoverHandler }
-    }
-    ChartToolTip {
-        objectName: "tpoHoverToolTip"
-        parent: root
-        pointerItem: tpoHover
-        visible: tpoHover.text !== ""
-        text: tpoHover.text
-    }
-
     AlgoOverlayRenderer {
         id: algoOverlayRenderer
         objectName: "algoOverlayRenderer"

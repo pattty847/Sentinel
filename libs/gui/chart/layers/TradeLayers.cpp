@@ -51,14 +51,7 @@ void TpoLayer::updateNodes(const ChartFrame& snapshot, LayerNodeContext& context
     const auto& frame = snapshot.context;
     const auto snap = candle_pixels::axisSnap(frame.raster);
     renderer.setTextRule(text_ ? text_->textRule() : ChartTextRule{});
-    renderer.setHoverClip(paneRect(frame.surfaceBounds));
     renderer.render(context.window, content(snapshot, context), frame.overlays.tpo, context.atlas, context.atlasReady,
                     frame.raster, frame.surfaceDpr, snap.x, snap.y, frame.surfaceBounds);
-}
-void TpoLayer::afterRendering() {
-    const uint64_t revision = renderer.hoverRevision();
-    if (revision == hoverRevision_) return;
-    hoverRevision_ = revision;
-    if (onHoverChanged) onHoverChanged();
 }
 } // namespace chart

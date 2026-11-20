@@ -11,8 +11,6 @@ class ChartTpoQml : public QObject {
     Q_OBJECT
     Q_PROPERTY(int tpoTimeframeMs READ tpoTimeframeMs WRITE setTpoTimeframeMs NOTIFY tpoConfigChanged)
     Q_PROPERTY(int tpoSessionType READ tpoSessionType WRITE setTpoSessionType NOTIFY tpoConfigChanged)
-    // Advances when a drawn frame changes what hoverText() returns for a still pointer.
-    Q_PROPERTY(int hoverRevision READ hoverRevision NOTIFY hoverChanged)
 public:
     explicit ChartTpoQml(ChartLookSettings& look);
     int tpoTimeframeMs() const;
@@ -24,10 +22,6 @@ public:
     QString tpoLayout() const;
     QString tpoTheme() const;
     Q_INVOKABLE void setTpoPreset(const QString& preset);
-    // Text for the TPO cell under an item point; empty unless its letters are approximate.
-    Q_INVOKABLE QString hoverText(double x, double y) const;
-    int hoverRevision() const { return hoverRevision_; }
-    void notifyHoverChanged() { ++hoverRevision_; emit hoverChanged(); }
     QString tpoPreset() const;
     tpo::StyleModel tpoLook() const;
     void setTpoLook(const tpo::StyleModel& look);
@@ -38,9 +32,7 @@ public:
 signals:
     void tpoConfigChanged();
     void tpoStyleChanged();
-    void hoverChanged();
 private:
     ChartLookSettings& look_;
-    int hoverRevision_ = 0;
 };
 } // namespace chart

@@ -4,7 +4,6 @@
 #include "render/VolumeProfileRenderer.hpp"
 #include "render/TpoOverlayRenderer.hpp"
 #include <QString>
-#include <functional>
 
 namespace chart {
 class VolumeProfileLayer final : public PaneChartLayer {
@@ -37,13 +36,8 @@ public:
     std::string_view name() const override { return "TPO"; }
     void onRootRebuilt() override { renderer.onRootRebuilt(); }
     void updateNodes(const ChartFrame&, LayerNodeContext&) override;
-    void afterRendering() override;
     TpoOverlayRenderer renderer;
-    // Render thread, after a frame changed what lies under a hover point; the callback
-    // queues the notification to the GUI thread.
-    std::function<void()> onHoverChanged;
 private:
     const HeatmapLayer* text_ = nullptr;
-    uint64_t hoverRevision_ = 0;  // render thread: the last revision notified
 };
 } // namespace chart
