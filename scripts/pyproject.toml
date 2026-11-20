@@ -1,13 +1,12 @@
 [project]
 name = "sentinel-scripts"
 version = "0.1.0"
-description = "Sentinel Python backends — SEC, screener, candles"
+description = "Sentinel Python backends — SEC, candles"
 requires-python = ">=3.12"
 dependencies = [
     "copetech-edgar",
     "aiohttp>=3.9.0",
     "websockets>=12.0",
-    "tvscreener>=0.2.0",
     "yfinance>=1.1.0",
     "python-dotenv>=1.2.1",
     "aiosqlite>=0.22.1",

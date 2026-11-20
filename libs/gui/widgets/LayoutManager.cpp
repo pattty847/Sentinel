@@ -61,11 +61,15 @@ bool LayoutManager::restoreLayout(QMainWindow* window, const QString& layoutName
     retiredLab.setObjectName("LabDock");
     QDockWidget retiredAICommentary;
     retiredAICommentary.setObjectName("AICommentaryFeedDock");
+    QDockWidget retiredScreener;
+    retiredScreener.setObjectName("ScreenerDock");
     window->addDockWidget(Qt::RightDockWidgetArea, &retiredLab);
     window->addDockWidget(Qt::BottomDockWidgetArea, &retiredAICommentary);
+    window->addDockWidget(Qt::RightDockWidgetArea, &retiredScreener);
     const bool restored = window->restoreState(state);
     window->removeDockWidget(&retiredLab);
     window->removeDockWidget(&retiredAICommentary);
+    window->removeDockWidget(&retiredScreener);
     window->setDockOptions(options);
     window->setUpdatesEnabled(updatesEnabled);
     if (!restored) {

@@ -381,13 +381,8 @@ endpoints have a five-minute fresh TTL and stay usable while refresh is pending
 or capacity is exhausted. Uncached callers wait within their request deadline
 for capacity. No resolver thread retains server/client state.
 Overlay pagination checks shutdown and selection cancellation between pages.
-Candle-history REST and screener work also use the joined, bounded history pool;
-no detached task retains a session or server executor. The screener uses blocking
-QProcess APIs with a 90-second process deadline (uv startup, the upstream
-30-second HTTP timeout, and serialization margin), cancellation checks every
-50 ms, and an 8 MiB output cap. On POSIX, the launched process starts its own
-process group; cancellation sends SIGTERM to the group, allows 250 ms of grace,
-then sends SIGKILL to the group and reaps the direct child. Shutdown joins admitted work before destroying the REST
+Candle-history REST work also uses the joined, bounded history pool;
+no detached task retains a session or server executor. Shutdown joins admitted work before destroying the REST
 client or executor.
 The legacy HMCL writer, streamer, JSON history and band-projected live path are removed. Existing archives remain untouched. `RecordingPage` and `LiveBuilder` survive only in the test support target as projection oracles; production core does not link them.
 

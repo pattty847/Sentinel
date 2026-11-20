@@ -585,45 +585,6 @@ TEST(RecordingServerStop, StalledCandleFetchIsJoinedBeforeServerDestruction) {
     EXPECT_EQ(closedFuture.wait_for(std::chrono::milliseconds(500)), std::future_status::ready);
 }
 
-#ifndef _WIN32
-TEST(RecordingServerStop, JoinedProcessWorkHonorsCancellationAndDeadline) {
-    int argc = 1; char name[] = "process-stop"; char* argv[] = {name, nullptr};
-    QCoreApplication app(argc, argv);
-    EXPECT_EQ(kScreenerProcessBudget, std::chrono::seconds(90));
-    for (bool cancel : {true, false}) {
-        QTemporaryDir directory; ASSERT_TRUE(directory.isValid());
-        const auto pidFile = directory.path() + "/child.pid";
-        pid_t child = 0;
-        const auto readChild = [&] {
-            QFile file(pidFile);
-            if (file.open(QIODevice::ReadOnly)) child = static_cast<pid_t>(file.readAll().trimmed().toLongLong());
-        };
-        bool cancellationRequested = false;
-        const auto start = std::chrono::steady_clock::now();
-        const auto result = runBoundedProcess("/bin/sh",
-            {"-c", "trap 'wait; exit' TERM; sleep 60 & echo $! > child.pid; wait"}, directory.path(), [&] {
-                if (cancel && !cancellationRequested) {
-                    readChild();
-                    cancellationRequested = child > 0 && ::kill(child, 0) == 0;
-                }
-                return cancellationRequested;
-            }, cancel ? std::chrono::seconds(5) : std::chrono::milliseconds(500));
-        EXPECT_EQ(result.error, cancel ? "process cancelled" : "process deadline exceeded");
-        EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(3));
-        readChild();
-        ASSERT_GT(child, 0); // real shell -> sleep grandchild of this test process
-        const auto reapedBy = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (::kill(child, 0) == 0 && std::chrono::steady_clock::now() < reapedBy)
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        errno = 0;
-        const auto status = ::kill(child, 0);
-        EXPECT_EQ(status, -1) << "grandchild survived process-group termination: " << child;
-        EXPECT_EQ(errno, ESRCH);
-        if (status == 0) ::kill(child, SIGKILL); // clean up on regression without hiding failure
-    }
-}
-#endif
-
 TEST(CandleHistoryPaging, OneSecondPagesReachOlderRetainedBars) {
     int argc = 1;
     char name[] = "candle-pages";

@@ -57,57 +57,7 @@ for line in result.stdout.splitlines():
 
 ---
 
-## 2. Screener — `screener/screener_fetch.py`
-
-Pulls top movers / screener results from TradingView via `tvscreener`. Works for both stocks and crypto.
-
-**Usage:**
-```bash
-uv run python screener/screener_fetch.py [--asset stock|crypto] [--limit N] [--min-volume V] [--fields FIELD1,FIELD2,...]
-```
-
-| Flag          | Default  | Description                                      |
-|---------------|----------|--------------------------------------------------|
-| `--asset`     | `crypto` | `stock` or `crypto`                              |
-| `--limit`     | `50`     | Number of results                                |
-| `--min-volume`| `0`      | Filter by minimum volume                         |
-| `--fields`    | —        | Extra fields beyond the base set (see below)     |
-
-**Base fields always included:**
-
-*Stocks:* `symbol, name, price, change%, volume, rel_volume, market_cap, P/E, div_yield, sector, exchange`
-
-*Crypto:* `symbol, name, price, change%, volume, rel_volume, market_cap, category, sector, exchange`
-
-**Extra field shorthands (stocks):** `RSI`, `EMA20`, `EMA50`, `EMA200`, `MACD`, `ADX`, `ATR`, `PE`, `DIV_YIELD`
-
-**Extra field shorthands (crypto):** `RSI`, `RSI_1H`, `RSI_4H`, `EMA20`, `EMA50`, `EMA200`, `MACD_4H`, `VWAP`
-
-**Output (stdout):**
-```
-SCREENER_DATA:{"asset":"stock","rows":[{"symbol":"NVDA","name":"NVIDIA","price":950.2,...}, ...]}
-```
-
-**Parse pattern (Python):**
-```python
-import subprocess, json
-
-result = subprocess.run(
-    ["uv", "run", "python", "screener/screener_fetch.py",
-     "--asset", "stock", "--limit", "20", "--fields", "RSI,EMA50,ADX"],
-    capture_output=True, text=True, cwd="path/to/scripts"
-)
-for line in result.stdout.splitlines():
-    if line.startswith("SCREENER_DATA:"):
-        data = json.loads(line[len("SCREENER_DATA:"):])
-        rows = data["rows"]  # list of dicts keyed by field name
-```
-
-**Good for:** cron jobs that scan for high-RSI stocks, watchlist alerting, building ranked lists by any TA field.
-
----
-
-## 3. SEC Filings — `sec/`
+## 2. SEC Filings — `sec/`
 
 Fetches SEC EDGAR data: insider transactions (Form 4), financial summaries, and filing lists.
 See [`sec/README.md`](sec/README.md) for the full module breakdown.
@@ -152,7 +102,7 @@ def run_script(script: str, args: list[str], scripts_dir: str) -> dict | None:
         capture_output=True, text=True, cwd=scripts_dir
     )
     for line in result.stdout.splitlines():
-        for tag in ("OHLCV_DATA:", "SCREENER_DATA:", "FILINGS_DATA:", "FINANCIALS_DATA:", "TRANSACTIONS_DATA:", "ERROR_DATA:"):
+        for tag in ("OHLCV_DATA:", "FILINGS_DATA:", "FINANCIALS_DATA:", "TRANSACTIONS_DATA:", "ERROR_DATA:"):
             if line.startswith(tag):
                 return json.loads(line[len(tag):])
     return None

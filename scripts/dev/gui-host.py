@@ -70,7 +70,7 @@ EXTERNAL_WORKTREES = "/Volumes/T7/sentinel-worktrees"
 FLAG = b"--agent-host"
 # The products the recorder already captures; a GUI symbol change subscribes the recorder upstream.
 SYMBOLS = os.environ.get("GUI_HOST_SYMBOLS", "BTC-USD,ETH-USD,SOL-USD,FARTCOIN-USD,PEPE-USD,DOGE-USD,AVAX-USD")
-SHOT_TARGETS = re.compile(r"^(window|heatmap|orderBook|watchlist|screener|stockChart|paperTrading|sec|copenet|telemetry|statusBar|toolbar|chartmenu|settings(:(Chart|Tick|Look|Budgets|Live|Debug|TPO))?)$")
+SHOT_TARGETS = re.compile(r"^(window|heatmap|orderBook|watchlist|stockChart|paperTrading|sec|copenet|telemetry|statusBar|toolbar|chartmenu|settings(:(Chart|Tick|Look|Budgets|Live|Debug|TPO))?)$")
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 # Environment the GUI child may inherit. Nothing else (no DYLD_*, QT_*, QSG_*, QML*, SENTINEL_*).
 ENV_ALLOW = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "__CF_USER_TEXT_ENCODING")

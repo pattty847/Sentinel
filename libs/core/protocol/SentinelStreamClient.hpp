@@ -49,7 +49,6 @@ class SentinelStreamClient : public QObject {
     friend struct HeatmapChunkWireTest;
     friend struct TradeHistoryWireClientTest;
     friend struct ServerFeedAdmissionTest;
-    friend struct ScreenerErrorDispatchTest;
     Q_OBJECT
 public:
     struct CandleBar {
@@ -147,9 +146,6 @@ public:
     void setCandleDeliveryGeneration(quint64 generation) {
         m_candleDeliveryGeneration.store(generation, std::memory_order_release);
     }
-    void requestScreenerData(const std::string& asset,
-                             int limit = 50,
-                             double minVolume = 0.0);
     void sendTradeCommand(const trading::TradeCommand& command);
     // commandId is echoed by the trading_snapshot the server broadcasts after it processed the command.
     void sendAlgoCommand(const std::string& algoId, const std::string& action, const std::string& symbol,
@@ -163,7 +159,6 @@ signals:
     void disconnected();
     // Transport failures report once per outage; protocol errors remain independently reported.
     void errorOccurred(const QString& error);
-    void screenerRequestError(const QString& message);
     void subscriptionRefused(const QString& symbol, int maxConnections, const QString& message);
     void subscriptionAcknowledged(const QString& symbol);
     void serverConfigReceived(const ServerConfig& config);
@@ -208,9 +203,6 @@ signals:
                                  const CandleBar &candle, quint64 deliveryGeneration);
     void candleBarClosedReceived(const QString &symbol, int64_t timeframeMs, int64_t bucketStartMs, int64_t seq,
                                  const CandleBar &candle, quint64 deliveryGeneration);
-    // Emitted when the server returns a screener_update in response to screener_request.
-    // rows is the raw JSON array as a QByteArray (UTF-8); asset is "crypto" or "stock".
-    void screenerUpdateReceived(const QString& asset, int rowCount, const QByteArray& rowsJson);
     void orderUpdated(const trading::OrderUpdate& update);
     void positionUpdated(const trading::PositionUpdate& update);
     void riskOrderUpdated(const trading::RiskOrderUpdate& update);
@@ -253,7 +245,6 @@ private:
     void handleOrderUpdateMessage(const nlohmann::json& msg);
     void handlePositionUpdateMessage(const nlohmann::json& msg);
     void handleRiskOrderUpdateMessage(const nlohmann::json& msg);
-    void handleScreenerUpdateMessage(const nlohmann::json& msg);
     void handleVolumeProfileSliceMessage(const nlohmann::json& msg);
     void handleCoinbaseLatencyMessage(const nlohmann::json& msg);
     void handleAlgoOrderEventMessage(const nlohmann::json& msg);

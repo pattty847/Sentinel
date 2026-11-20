@@ -25,7 +25,6 @@
 #include "widgets/ChartDock.hpp"
 #include "widgets/StatusBar.hpp"
 #include "widgets/SecFilingDock.hpp"
-#include "widgets/ScreenerDock.hpp"
 #include "widgets/CopenetFeedDock.hpp"
 #include "widgets/TopToolbar.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
@@ -302,7 +301,6 @@ void MainWindowGPU::setupUI() {
     m_secDock = docks.secDock;
     m_copenetDock = docks.copenetDock;
     m_watchlistDock = docks.watchlistDock;
-    m_screenerDock = docks.screenerDock;
     m_stockChartDock = docks.stockChartDock;
     m_orderBookDock = docks.orderBookDock;
     m_paperTradingDock = new PaperTradingDock(this);
@@ -318,13 +316,6 @@ void MainWindowGPU::setupUI() {
         m_statusBar->setMarketHealth(health);
         m_heatmapTelemetryDock->setMarketHealth(health);
         connect(this, &MainWindowGPU::symbolChanged, health, &MarketHealth::setActiveSymbol);
-    }
-    if (m_screenerDock) {
-        if (auto* remote = dynamic_cast<RemoteGridDataSource*>(m_dataSource.get())) {
-            m_screenerDock->setStreamClient(remote->streamClient());
-        }
-        connect(m_screenerDock, &ScreenerDock::rowSelected,
-                this, &MainWindowGPU::onAssetSymbolSelected);
     }
     if (m_watchlistDock) {
         m_watchlistDock->setCryptoAvailability({}, false, "No authoritative runtime market catalog; presets are navigation suggestions");
@@ -1089,7 +1080,6 @@ void MainWindowGPU::setupMenuBar() {
     docks.secDock = m_secDock;
     docks.copenetDock = m_copenetDock;
     docks.watchlistDock = m_watchlistDock;
-    docks.screenerDock = m_screenerDock;
     docks.stockChartDock = m_stockChartDock;
     docks.orderBookDock = m_orderBookDock;
     docks.paperTradingDock = m_paperTradingDock;
@@ -1480,7 +1470,6 @@ LayoutOrchestrator::DockWidgets MainWindowGPU::getDockWidgets() const {
     docks.secDock = m_secDock;
     docks.copenetDock = m_copenetDock;
     docks.watchlistDock = m_watchlistDock;
-    docks.screenerDock = m_screenerDock;
     docks.stockChartDock = m_stockChartDock;
     docks.orderBookDock = m_orderBookDock;
     docks.paperTradingDock = m_paperTradingDock;

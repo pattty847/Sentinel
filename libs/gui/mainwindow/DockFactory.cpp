@@ -4,7 +4,6 @@
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
 #include "../widgets/WatchlistDock.hpp"
-#include "../widgets/ScreenerDock.hpp"
 #include "../widgets/StockChartDock.hpp"
 #include "../widgets/OrderBookDock.hpp"
 
@@ -22,7 +21,6 @@ DockFactory::DockWidgets DockFactory::createDocks() {
     m_docks.secDock = new SecFilingDock(m_parent);
     m_docks.copenetDock = new CopenetFeedDock(m_parent);
     m_docks.watchlistDock = new WatchlistDock(m_parent);
-    m_docks.screenerDock   = new ScreenerDock(m_parent);
     m_docks.stockChartDock = new StockChartDock(m_parent);
     m_docks.orderBookDock  = new OrderBookDock(m_parent);
 
@@ -30,7 +28,6 @@ DockFactory::DockWidgets DockFactory::createDocks() {
     m_docks.heatmapDock->setMinimumSize(m_docks.heatmapDock->minimumSizeHint());
     m_docks.secDock->setMinimumSize(m_docks.secDock->minimumSizeHint());
     m_docks.watchlistDock->setMinimumSize(m_docks.watchlistDock->minimumSizeHint());
-    m_docks.screenerDock->setMinimumSize(m_docks.screenerDock->minimumSizeHint());
     m_docks.orderBookDock->setMinimumSize(m_docks.orderBookDock->minimumSizeHint());
     return m_docks;
 }

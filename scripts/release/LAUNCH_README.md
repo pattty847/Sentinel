@@ -37,6 +37,6 @@ Run the **server** first, then the **client**. Use the client to connect and str
 
 - **Server:** `sentinel-server` / `sentinel-server.exe`, or **`SentinelServer.app`** (macOS release) — run first  
 - **Client:** **`Sentinel.app`** (macOS) or **`sentinel-gui`** / `sentinel-gui.exe` — GUI client  
-- `scripts/` — Python backends (SEC, screener, candle fetch); installs via `uv sync` inside this directory when packaging  
+- `scripts/` — Python backends (SEC, candle fetch); installs via `uv sync` inside this directory when packaging  
 - `config/` — server and client config
 - `certs/` — TLS certs (generate with `certs/gen-certs.sh` if missing)

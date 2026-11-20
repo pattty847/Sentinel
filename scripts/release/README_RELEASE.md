@@ -54,6 +54,6 @@ Missing or invalid TLS files and a stream port already in use leave the server p
 ## Known limitations
 
 - **Unsigned / ad-hoc** bundles may trigger macOS security prompts until explicitly allowed.
-- **Python-backed** features (`scripts/` — SEC overlays, candles, some screener paths) rely on **`uv`** and **`uv sync`** in `scripts/`. Missing `.venv`/deps → those panels report errors rather than crashing the GUI.
+- **Python-backed** features (`scripts/` — SEC overlays, candles) rely on **`uv`** and **`uv sync`** in `scripts/`. Missing `.venv`/deps → those panels report errors rather than crashing the GUI.
 - **`copetech-edgar`**: If the overlay depends on EDG tooling, releases bundle it as a wheel in **`third_party/wheels/`**, built from a tagged CopeTech-Edgar release (see `docs/RELEASE_CHECKLIST.md`) — no adjacent git checkout is needed.
 - **Smoke / CI parity**: Maintainers validate against extracted zips **`smoke_macos.sh --clean-room`**; end users only need `./run.sh` + **README_RELEASE.md**.

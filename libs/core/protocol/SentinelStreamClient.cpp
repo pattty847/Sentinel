@@ -745,24 +745,6 @@ void SentinelStreamClient::requestCandleHistory(const std::string &symbol, int64
     });
 }
 
-void SentinelStreamClient::requestScreenerData(const std::string& asset,
-                                               int limit,
-                                               double minVolume) {
-    nlohmann::json msg = {
-        {"type",       "screener_request"},
-        {"asset",      asset.empty() ? "crypto" : asset},
-        {"limit",      limit > 0 ? limit : 50},
-        {"min_volume", minVolume},
-    };
-    std::string str = msg.dump();
-    net::post(m_strand, [this, payload = std::move(str)]() mutable {
-        m_writeQueue.push_back(std::move(payload));
-        if (m_isConnected && m_writeQueue.size() == 1) {
-            doWrite();
-        }
-    });
-}
-
 void SentinelStreamClient::sendTradeCommand(const trading::TradeCommand& command) {
     nlohmann::json msg = {
         {"type", "trade_command"},
@@ -946,9 +928,6 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
             case protocol::MessageType::RiskOrderUpdate:
                 handleRiskOrderUpdateMessage(msg);
                 return;
-            case protocol::MessageType::ScreenerUpdate:
-                handleScreenerUpdateMessage(msg);
-                return;
             case protocol::MessageType::VolumeProfileSlice:
                 handleVolumeProfileSliceMessage(msg);
                 return;
@@ -966,9 +945,6 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                     const auto message = QString::fromStdString(msg.value("message", ""));
                     emit flowHistoryFailed(msg.value("req", uint64_t(0)), message,
                                            classifyFlowHistoryError(message));
-                }
-                if (msg.value("context", "") == "screener_request") {
-                    emit screenerRequestError(QString::fromStdString(msg.value("message", "")));
                 }
                 if (msg.value("context", "") == "subscribe" &&
                     (msg.value("code", "") == "connection_cap" || msg.value("code", "") == "invalid_product" ||
@@ -1182,14 +1158,6 @@ void SentinelStreamClient::handleRiskOrderUpdateMessage(const nlohmann::json& ms
     if (!update.symbol.empty()) {
         emit riskOrderUpdated(update);
     }
-}
-
-void SentinelStreamClient::handleScreenerUpdateMessage(const nlohmann::json& msg) {
-    const std::string asset = msg.value("asset", "crypto");
-    const int rowCount = msg.value("row_count", 0);
-    const auto& rows = msg.contains("rows") ? msg["rows"] : nlohmann::json::array();
-    const QByteArray rowsJson = QByteArray::fromStdString(rows.dump());
-    emit screenerUpdateReceived(QString::fromStdString(asset), rowCount, rowsJson);
 }
 
 void SentinelStreamClient::handleTpoSliceMessage(const nlohmann::json& msg) {

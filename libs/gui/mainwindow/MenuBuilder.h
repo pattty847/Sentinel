@@ -21,7 +21,6 @@ class ChartDock;
 class SecFilingDock;
 class CopenetFeedDock;
 class WatchlistDock;
-class ScreenerDock;
 class StockChartDock;
 class OrderBookDock;
 
@@ -34,7 +33,6 @@ public:
         SecFilingDock* secDock = nullptr;
         CopenetFeedDock* copenetDock = nullptr;
         WatchlistDock* watchlistDock = nullptr;
-        ScreenerDock* screenerDock = nullptr;
         StockChartDock* stockChartDock = nullptr;
         OrderBookDock* orderBookDock = nullptr;
         QDockWidget* paperTradingDock = nullptr;

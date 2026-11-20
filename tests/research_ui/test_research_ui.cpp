@@ -221,7 +221,7 @@ TEST(StockResearch, EmptyHintNamesTheTickerFieldAndHeaderAndFooterWaitForData) {
     auto* header = root->findChild<QQuickItem*>("stockHeader");
     auto* footer = root->findChild<QQuickItem*>("stockFooter");
     ASSERT_TRUE(header && footer);
-    EXPECT_EQ(root->property("statusMsg").toString(), "Type a ticker above or pick one in the Screener");
+    EXPECT_EQ(root->property("statusMsg").toString(), "Type a ticker above or pick one in the Watchlist");
     EXPECT_FALSE(header->isVisible());
     EXPECT_FALSE(footer->isVisible());
     EXPECT_EQ(header->height(), 0);
