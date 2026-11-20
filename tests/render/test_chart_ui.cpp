@@ -502,6 +502,14 @@ TEST(ChartToolbar, TickTextHasNoExponent) {
     EXPECT_EQ(TopToolbar::tickText(500, 100), "$5");
     EXPECT_EQ(TopToolbar::tickText(10000, 100), "$100");
     EXPECT_EQ(TopToolbar::tickText(250000, 100), "$2,500");
+    // Thousands separators apply to fractional values too, whatever the system locale.
+    const QLocale previous;
+    QLocale::setDefault(QLocale(QLocale::German, QLocale::Germany));
+    EXPECT_EQ(TopToolbar::fixedText(123456.789), "123,456.789");
+    EXPECT_EQ(TopToolbar::fixedText(1234.5), "1,234.5");
+    EXPECT_EQ(TopToolbar::fixedText(1e6), "1,000,000");
+    EXPECT_EQ(TopToolbar::tickText(12345678, 100), "$123,456.78");
+    QLocale::setDefault(previous);
     for (const int64_t units : {1, 3, 7, 25})
         for (const double scale : {1e8, 1e10, 1e12})
             EXPECT_FALSE(TopToolbar::tickText(units, scale).contains('e')) << units << "/" << scale;

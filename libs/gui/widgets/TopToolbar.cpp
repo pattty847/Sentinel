@@ -1193,12 +1193,12 @@ void TopToolbar::setLayerToggleStates(bool heatmapEnabled,
 QString TopToolbar::fixedText(double value) {
     // The amount grammar of LiquidityRangeSlider::amountText (fixed notation,
     // thousands separators, never an exponent) without its 3-digit rounding and
-    // floor: a tick is exact, so it keeps up to 12 significant digits.
+    // floor: a tick is exact, so it keeps up to 12 significant digits. The explicit
+    // US locale groups whole and fractional values alike ("123,456.789"), whatever
+    // the system locale.
     if (!std::isfinite(value) || value <= 0) return QStringLiteral("0");
-    if (value >= 1000 && std::abs(value - std::round(value)) < 1e-9)
-        return QLocale(QLocale::English, QLocale::UnitedStates).toString(std::round(value), 'f', 0);
     const int decimals = std::clamp(11 - int(std::floor(std::log10(value))), 0, 12);
-    QString text = QString::number(value, 'f', decimals);
+    QString text = QLocale(QLocale::English, QLocale::UnitedStates).toString(value, 'f', decimals);
     if (text.contains(QLatin1Char('.'))) {
         while (text.endsWith(QLatin1Char('0'))) text.chop(1);
         if (text.endsWith(QLatin1Char('.'))) text.chop(1);
