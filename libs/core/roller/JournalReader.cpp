@@ -69,17 +69,23 @@ void registerJournalMetrics(metrics::MetricsRegistry& registry, const std::strin
         "Distinct corrupt journal blocks or framing regions skipped by this process.", {{"product", product}},
         [state] { return static_cast<double>(state->count.value()); });
 }
-JournalReader::JournalReader(std::filesystem::path root, std::string product, std::optional<JournalPos> start)
+JournalReader::JournalReader(std::filesystem::path root, std::string product,
+                             std::optional<JournalPos> start, std::stop_token stop,
+                             std::function<void()> afterHeaderForTest)
     : product_(std::move(product)), start_(std::move(start)) {
     // Validate the safe union before using a directory name; readHeader then
     // enforces the actual venue rules for every file.
     capture::validateSymbol(product_, Venue::Kalshi);
     if (std::filesystem::is_directory(root / product_)) root /= product_;
     for (const auto& e : std::filesystem::recursive_directory_iterator(root)) {
+        if (stop.stop_requested()) throw std::runtime_error("journal catalog cancelled");
         if (!e.is_regular_file() || e.path().extension() != ".rawl2") continue;
         auto h = capture::readHeader(QString::fromStdString(e.path().string()));
+        if (afterHeaderForTest) afterHeaderForTest();
+        if (stop.stop_requested()) throw std::runtime_error("journal catalog cancelled");
         if (h.at("product_metadata").at("product_id") == product_) files_.push_back({e.path(), std::move(h)});
     }
+    if (stop.stop_requested()) throw std::runtime_error("journal catalog cancelled");
     std::sort(files_.begin(), files_.end(), [](const auto& a, const auto& b) { return order(a.header) < order(b.header); });
     if (files_.empty()) throw NoJournalFiles(product_);
     for (size_t i = 0; i < files_.size(); ++i) {

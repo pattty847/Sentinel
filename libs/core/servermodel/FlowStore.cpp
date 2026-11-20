@@ -761,21 +761,28 @@ std::shared_ptr<roller::JournalReader> FlowStore::catalogFor(const std::string &
     const auto knownBefore = dayFloor(options_.nowMs());
     std::map<int64_t, int64_t> days;
     try {
-        auto catalog = std::make_shared<roller::JournalReader>(options_.journalRoot, symbol);
+        auto catalog = std::make_shared<roller::JournalReader>(options_.journalRoot, symbol,
+                                                                std::nullopt, stop);
         for (const auto &file : catalog->files()) {
+            checkStop(stop);
             const auto opened = file.header.at("opened_system_ns").get<int64_t>() / 1'000'000;
             auto [it, added] = days.try_emplace(dayFloor(opened), opened);
             if (!added) it->second = std::min(it->second, opened);
         }
         if (options_.afterCatalogConstructForTest) options_.afterCatalogConstructForTest();
+        checkStop(stop);
         cached = std::move(catalog);
     } catch (const roller::NoJournalFiles &) {
+        checkStop(stop);
         // JournalReader may fall back to the root if the product directory
         // disappears during construction. That is not an empty inventory.
         journalDirectory(symbol);
         std::lock_guard indexLock(indexMutex_);
         sourceDays_[symbol] = {};
         sourceKnownBeforeDay_[symbol] = knownBefore;
+        throw;
+    } catch (...) {
+        checkStop(stop);
         throw;
     }
     std::lock_guard indexLock(indexMutex_);
@@ -791,10 +798,10 @@ FlowStore::SourceState FlowStore::sourceState(const std::string &symbol, int64_t
     const auto known = sourceDays_.find(symbol);
     if (known == sourceDays_.end() || day >= sourceKnownBeforeDay_.at(symbol)) return SourceState::Unknown;
     if (const auto first = known->second.find(day); first != known->second.end()) {
-        // A leading hour cannot be filled by a later first segment. Require an
-        // absent previous day too, so older replay/warmup sources stay possible.
+        // On the first journal day, hours ending at or before the first segment opens
+        // are unrecorded. An earlier day's segment still permits warmup replay.
         const auto hourEnd = ((to - 1) / Hour + 1) * Hour;
-        if (!known->second.contains(day - Day) && hourEnd + TradeTail < first->second)
+        if (!known->second.contains(day - Day) && hourEnd <= first->second)
             return SourceState::Absent;
         return SourceState::Present;
     }
@@ -1128,7 +1135,20 @@ FlowStore::Reply FlowStore::buildWindow(const std::string &symbol, int64_t from,
         for (auto first = from; first < to;) {
             const auto day = dayFloor(first), end = std::min(to, day + Day);
             const auto index = indexFor(symbol, day);
-            if (!index.file.present && !index.state.present && sourceState(symbol, first, end) == SourceState::Absent) {
+            const auto path = filePath(symbol, day);
+            const bool readable = index.valid && stamp(path) == index.file &&
+                                  stamp(path.string() + ".state") == index.state;
+            bool noStoredHours = !index.file.present && !index.state.present;
+            if (!noStoredHours && readable) {
+                noStoredHours = true;
+                for (auto hour = first / Hour * Hour; hour < end; hour += Hour) {
+                    if (index.hours & (1u << ((hour - day) / Hour))) {
+                        noStoredHours = false;
+                        break;
+                    }
+                }
+            }
+            if (noStoredHours && sourceState(symbol, first, end) == SourceState::Absent) {
                 reply.ranges.push_back({first, end, "unrecorded", {}});
                 first = end;
                 continue;
