@@ -5,6 +5,7 @@
 #include "protocol/SentinelStreamClient.hpp"
 #include <QCoreApplication>
 #include <QTemporaryDir>
+#include <QFile>
 #include <QDateTime>
 #include <openssl/pem.h>
 #include <future>
@@ -116,8 +117,11 @@ struct CandleFixture {
     std::unique_ptr<ServerDataModel> model;
     std::unique_ptr<Authenticator> auth;
     std::unique_ptr<SentinelStreamServer> server;
-    // rollups: timeframes above 1 m to configure as well.
-    explicit CandleFixture(bool hundred = true, unsigned short port = 0, const std::vector<int64_t> &rollups = {}) {
+    // rollups: timeframes above 1 m to configure as well. keepTlsFrom: a directory
+    // holding fixture.crt/.key to reuse, so a restarted server on the same port
+    // still verifies against the CA its clients already loaded.
+    explicit CandleFixture(bool hundred = true, unsigned short port = 0, const std::vector<int64_t> &rollups = {},
+                           const QString &keepTlsFrom = {}) {
         if (!dir.isValid()) throw std::runtime_error("scratch directory failed");
         config.recording.enabled = false;
         config.rollerShadow.enabled = false;
@@ -128,8 +132,13 @@ struct CandleFixture {
         config.chart.historyBars = {{100, 18000}};
         config.tls.certFile = (dir.path() + "/fixture.crt").toStdString();
         config.tls.keyFile = (dir.path() + "/fixture.key").toStdString();
-        if (!writeSelfSignedCert(config.tls.certFile, config.tls.keyFile))
+        if (!keepTlsFrom.isEmpty()) {
+            if (!QFile::copy(keepTlsFrom + "/fixture.crt", QString::fromStdString(config.tls.certFile)) ||
+                !QFile::copy(keepTlsFrom + "/fixture.key", QString::fromStdString(config.tls.keyFile)))
+                throw std::runtime_error("reused certificate copy failed");
+        } else if (!writeSelfSignedCert(config.tls.certFile, config.tls.keyFile)) {
             throw std::runtime_error("scratch certificate failed");
+        }
         restStub.open(tcp::v4());
         restStub.bind({net::ip::make_address("127.0.0.1"), 0});
         model = std::make_unique<ServerDataModel>(config);

@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
 #include <QScopeGuard>
+#include <QStringList>
 #include <openssl/pem.h>
 #include <condition_variable>
 #include <future>
@@ -11,6 +12,28 @@
 
 using namespace std::chrono_literals;
 namespace beast = boost::beast;
+
+namespace {
+// A self-signed certificate unrelated to the fixture server's key.
+bool writeUnrelatedCa(const std::string& path) {
+    std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> key(EVP_RSA_gen(2048), EVP_PKEY_free);
+    std::unique_ptr<X509, decltype(&X509_free)> cert(X509_new(), X509_free);
+    std::unique_ptr<X509_NAME, decltype(&X509_NAME_free)> name(X509_NAME_new(), X509_NAME_free);
+    if (!key || !cert || !name) return false;
+    X509_set_version(cert.get(), 2);
+    ASN1_INTEGER_set(X509_get_serialNumber(cert.get()), 2);
+    X509_gmtime_adj(X509_getm_notBefore(cert.get()), -60);
+    X509_gmtime_adj(X509_getm_notAfter(cert.get()), 3600);
+    X509_set_pubkey(cert.get(), key.get());
+    X509_NAME_add_entry_by_txt(name.get(), "CN", MBSTRING_ASC,
+        reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0);
+    X509_set_subject_name(cert.get(), name.get());
+    X509_set_issuer_name(cert.get(), name.get());
+    if (X509_sign(cert.get(), key.get(), EVP_sha256()) <= 0) return false;
+    std::unique_ptr<BIO, decltype(&BIO_free)> pem(BIO_new_file(path.c_str(), "w"), BIO_free);
+    return pem && PEM_write_bio_X509(pem.get(), cert.get()) == 1;
+}
+} // namespace
 
 // Real TLS/WebSocket peer, with executor scheduling that deterministically gives
 // the old handshake drain a second write kick before the first completion.
@@ -27,6 +50,7 @@ struct SentinelStreamClientWriteTest : testing::Test {
     std::vector<std::string> messages;
     std::atomic_bool stallRead{false};
     std::atomic<unsigned> dropHandshakes{0};
+    std::atomic<unsigned> accepts{0}, serverHandshakes{0};
     struct Peer : std::enable_shared_from_this<Peer> {
         beast::websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws;
         beast::flat_buffer buffer;
@@ -55,10 +79,12 @@ struct SentinelStreamClientWriteTest : testing::Test {
         auto p = std::make_shared<Peer>(*this);
         acceptor.async_accept(beast::get_lowest_layer(p->ws).socket(), [this, p](beast::error_code ec) {
             if (ec) return;
+            ++accepts;
             peers.push_back(p);
             accept();
             p->ws.next_layer().async_handshake(ssl::stream_base::server, [this, p](beast::error_code ec) {
                 if (ec) return;
+                ++serverHandshakes;
                 p->ws.async_accept([this, p](beast::error_code ec) {
                     if (ec) return;
                     if (dropHandshakes > 0) {
@@ -141,6 +167,7 @@ struct SentinelStreamClientWriteTest : testing::Test {
         return SentinelStreamClient::reconnectDelayMs(attempt, jitter);
     }
     static void deliver(SentinelStreamClient& c, const std::string& message) { c.handleMessage(message); }
+    static bool started(SentinelStreamClient& c) { return c.m_running || c.m_thread.joinable(); }
     void expectDrained(SentinelStreamClient& c) {
         EXPECT_FALSE(c.m_writeInFlight);
         EXPECT_TRUE(c.m_writeQueue.empty());
@@ -361,4 +388,70 @@ TEST_F(SentinelStreamClientWriteTest, HandshakeThenCloseKeepsGrowingBackoffAcros
     while (errors == 0 && std::chrono::steady_clock::now() < reportDeadline)
         std::this_thread::sleep_for(1ms);
     EXPECT_EQ(errors.load(), 1u);
+}
+
+// W-0084: no CA, a missing CA file or an unreadable one must never fall back to an
+// unverified session. connectToServer reports the reason at once and never
+// starts the worker or opens a socket.
+TEST_F(SentinelStreamClientWriteTest, MissingOrUnloadableCaRefusesToConnect) {
+    const std::string garbage = dir.path().toStdString() + "/garbage.pem";
+    {
+        std::unique_ptr<BIO, decltype(&BIO_free)> file(BIO_new_file(garbage.c_str(), "w"), BIO_free);
+        ASSERT_TRUE(file);
+        ASSERT_GT(BIO_puts(file.get(), "not a certificate\n"), 0);
+    }
+    const std::string missing = dir.path().toStdString() + "/missing.pem";
+    for (const std::string& caFile : {std::string{}, missing, garbage}) {
+        SCOPED_TRACE("caFile=" + caFile);
+        SentinelStreamClient c("127.0.0.1", std::to_string(acceptor.local_endpoint().port()), caFile);
+        unsigned ups = 0, downs = 0;
+        QStringList errors;
+        QObject::connect(&c, &SentinelStreamClient::connected, &c, [&] { ++ups; }, Qt::DirectConnection);
+        QObject::connect(&c, &SentinelStreamClient::disconnected, &c, [&] { ++downs; }, Qt::DirectConnection);
+        QObject::connect(&c, &SentinelStreamClient::errorOccurred, &c,
+                         [&](const QString& e) { errors << e; }, Qt::DirectConnection);
+        c.connectToServer();
+        EXPECT_FALSE(started(c)) << "the client started a connection without a verified CA";
+        ASSERT_EQ(errors.size(), 1);
+        EXPECT_TRUE(errors[0].contains("client.server.ca_file")) << errors[0].toStdString();
+        EXPECT_TRUE(errors[0].contains("refusing to connect")) << errors[0].toStdString();
+        if (!caFile.empty()) EXPECT_TRUE(errors[0].contains(QString::fromStdString(caFile)));
+        EXPECT_EQ(downs, 1u);
+        EXPECT_EQ(ups, 0u);
+        c.connectToServer(); // a retry reports again; it still never connects
+        EXPECT_FALSE(started(c));
+        EXPECT_EQ(errors.size(), 2);
+        c.disconnectFromServer();
+    }
+    std::this_thread::sleep_for(100ms); // let a stray connect reach the acceptor if one were made
+    EXPECT_EQ(accepts.load(), 0u);
+}
+
+// A loadable CA that did not sign the server certificate fails the TLS handshake:
+// the session is never reported as connected.
+TEST_F(SentinelStreamClientWriteTest, UnrelatedCaFailsTheHandshake) {
+    const std::string other = dir.path().toStdString() + "/other-ca.pem";
+    ASSERT_TRUE(writeUnrelatedCa(other));
+    SentinelStreamClient c("127.0.0.1", std::to_string(acceptor.local_endpoint().port()), other);
+    std::atomic<unsigned> ups{0}, errors{0};
+    std::mutex errorMutex;
+    QString error;
+    QObject::connect(&c, &SentinelStreamClient::connected, &c, [&] { ++ups; }, Qt::DirectConnection);
+    QObject::connect(&c, &SentinelStreamClient::errorOccurred, &c, [&](const QString& e) {
+        std::lock_guard lock(errorMutex);
+        error = e;
+        ++errors;
+    }, Qt::DirectConnection);
+    const auto stopClient = qScopeGuard([&] { c.disconnectFromServer(); });
+    c.connectToServer();
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (errors == 0 && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
+    ASSERT_EQ(errors.load(), 1u);
+    {
+        std::lock_guard lock(errorMutex);
+        EXPECT_TRUE(error.startsWith("SSL:")) << error.toStdString();
+    }
+    c.disconnectFromServer();
+    EXPECT_EQ(ups.load(), 0u);
+    EXPECT_EQ(serverHandshakes.load(), 0u);
 }

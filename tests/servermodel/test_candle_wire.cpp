@@ -30,7 +30,8 @@ class CandleWire : public testing::Test {
     std::shared_ptr<Session> session;
     void SetUp() override {
         fixture.start();
-        client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(fixture.port()));
+        client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(fixture.port()),
+                                                        fixture.config.tls.certFile);
         QObject::connect(client.get(), &SentinelStreamClient::connected, &app,
                          [this] { client->subscribe("BTC-USD"); });
         QObject::connect(client.get(), &SentinelStreamClient::candleBarUpdateReceived, &app,

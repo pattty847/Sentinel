@@ -8,6 +8,7 @@
 #include <QRandomGenerator>
 #include <array>
 #include <cstdint>
+#include <filesystem>
 
 namespace {
 
@@ -158,20 +159,24 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     , m_host(host)
     , m_port(port)
 {
-    if (!caFile.empty()) {
+    // Fail closed: without a loadable CA the client never connects, so a
+    // missing or broken certificate cannot silently downgrade to an
+    // unverified TLS session. A relative path resolves against the working
+    // directory, as the config file path itself does.
+    m_sslCtx.set_verify_mode(ssl::verify_peer);
+    if (caFile.empty()) {
+        m_tlsConfigError = "TLS: no client.server.ca_file configured; refusing to connect "
+                           "without server certificate verification";
+    } else {
         boost::system::error_code sslEc;
         m_sslCtx.load_verify_file(caFile, sslEc);
         if (sslEc) {
-            sLog_Warning("SentinelStreamClient: could not load CA cert '"
-                         << caFile << "': " << sslEc.message()
-                         << " - TLS peer verification disabled (dev mode)");
-            m_sslCtx.set_verify_mode(ssl::verify_none);
-        } else {
-            m_sslCtx.set_verify_mode(ssl::verify_peer);
+            std::error_code pathEc;
+            const auto resolved = std::filesystem::absolute(caFile, pathEc);
+            m_tlsConfigError = "TLS: could not load client.server.ca_file '" + caFile + "' (resolved: "
+                + (pathEc ? caFile : resolved.string()) + "): " + sslEc.message()
+                + "; refusing to connect without server certificate verification";
         }
-    } else {
-        sLog_Warning("SentinelStreamClient: no ca_file configured - TLS peer verification disabled");
-        m_sslCtx.set_verify_mode(ssl::verify_none);
     }
 
     qRegisterMetaType<BookLevelUpdate>("BookLevelUpdate");
@@ -200,6 +205,15 @@ SentinelStreamClient::~SentinelStreamClient() {
 
 void SentinelStreamClient::connectToServer() {
     if (m_running) return;
+    if (!m_tlsConfigError.empty()) {
+        // Not retried: the CA is loaded once, so only a restart can fix it.
+        sLog_Error("SentinelStreamClient not connecting: host=" << m_host << " port=" << m_port
+                   << " reason=" << m_tlsConfigError);
+        m_connectionError = QString::fromStdString(m_tlsConfigError);
+        emit errorOccurred(m_connectionError);
+        emit disconnected();
+        return;
+    }
     m_ws = std::make_unique<WebSocket>(m_strand, m_sslCtx);
     m_ws->read_message_max(protocol::SentinelProtocol::kTradeHistoryMaxFrameBytes);
     {

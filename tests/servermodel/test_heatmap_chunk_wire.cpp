@@ -351,7 +351,7 @@ protected:
         server->start();
         const auto port = HeatmapChunkWireTest::port(*server);
         ASSERT_NE(port, 0) << "server is not listening";
-        client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(port));
+        client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(port), config.tls.certFile);
         inbox.attach(*client);
         client->connectToServer();
         ASSERT_TRUE(inbox.waitFor([&] { return inbox.connected; }));
@@ -550,7 +550,8 @@ TEST_F(ChunkWire, OpenChunksCarryCommittedThroughAndOrderedRevisions) {
 TEST_F(ChunkWire, OldServerAvailabilityIsRefusedBeforeItsFieldsAreParsed) {
     useControlledWatermarks(); // fixed availability: no v3 push after the v2 one
     ASSERT_TRUE(server->start());
-    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(HeatmapChunkWireTest::port(*server)));
+    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(HeatmapChunkWireTest::port(*server)),
+                                                  config.tls.certFile);
     inbox.attach(*client);
     protocol::SentinelStreamClientTransport transport(*client);
     heatmap::ChunkStore store;
@@ -767,7 +768,7 @@ TEST_F(ChunkWire, InProgressDecodeCannotCrossDisconnectOrReconnect) {
     server->start();
     const auto port = HeatmapChunkWireTest::port(*server);
     ASSERT_NE(port, 0) << "server is not listening";
-    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(port));
+    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(port), config.tls.certFile);
     inbox.attach(*client);
     client->connectToServer();
     ASSERT_TRUE(inbox.waitFor([&] { return inbox.connected; }));
@@ -837,7 +838,7 @@ TEST_F(ChunkWire, SessionTeardownWithRequestsInFlight) {
     server->start();
     const auto restartedPort = HeatmapChunkWireTest::port(*server);
     ASSERT_NE(restartedPort, 0) << "restarted server is not listening";
-    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(restartedPort));
+    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(restartedPort), config.tls.certFile);
     Inbox second;
     second.attach(*client);
     client->connectToServer();
@@ -1154,7 +1155,7 @@ TEST_F(ChunkWire, AutomaticReconnectRearmsExistingChunkFetcherAndLiveInterest) {
     useLiveClock();
     ASSERT_TRUE(server->start());
     const auto port = HeatmapChunkWireTest::port(*server);
-    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(port));
+    client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(port), config.tls.certFile);
     inbox.attach(*client);
     protocol::SentinelStreamClientTransport transport(*client);
     heatmap::ChunkStore store;

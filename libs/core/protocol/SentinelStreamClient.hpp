@@ -105,6 +105,9 @@ public:
     static constexpr size_t kMaxDecodeBacklogBytes = 64U * 1024U * 1024U;
     static constexpr size_t kMaxDecodeBacklogFrames = 256;
 
+    // caFile is the PEM CA that verifies the server certificate chain. Empty or
+    // unloadable: connectToServer() emits errorOccurred and disconnected and
+    // never opens a socket (no unverified fallback).
     explicit SentinelStreamClient(const std::string& host, const std::string& port,
                                   const std::string& caFile = "", QObject* parent = nullptr);
     ~SentinelStreamClient();
@@ -272,6 +275,7 @@ private:
     ConnectionClock::time_point m_disconnectedAt;
     ConnectionClock::time_point m_nextOutageLogAt;
     QString m_connectionError;
+    std::string m_tlsConfigError; // set once by the constructor; non-empty refuses every connect
     bool m_outageReported = false; // survives handshakes until a connection stays up 10 s
     
     ssl::context m_sslCtx{ssl::context::tlsv13_client};

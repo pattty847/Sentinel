@@ -6,6 +6,7 @@
 #include <boost/beast.hpp>
 #include <boost/beast/ssl.hpp>
 #include <openssl/pem.h>
+#include <openssl/x509v3.h>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -38,6 +39,11 @@ protected:
     void SetUp() override {
         ASSERT_TRUE(directory.isValid());
         caFile = directory.path().toStdString() + "/ca.pem";
+        installCertificate("IP:127.0.0.1");
+    }
+    // Self-signed server certificate, also written as the client's only CA, so the
+    // chain always verifies and only the subjectAltName decides the host check.
+    void installCertificate(const char* subjectAltName) {
         std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> generator(
             EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr), EVP_PKEY_CTX_free);
         ASSERT_TRUE(generator);
@@ -60,6 +66,14 @@ protected:
             reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0), 1);
         ASSERT_EQ(X509_set_subject_name(cert.get(), subject.get()), 1);
         ASSERT_EQ(X509_set_issuer_name(cert.get(), subject.get()), 1);
+        X509V3_CTX extensionContext;
+        X509V3_set_ctx_nodb(&extensionContext);
+        X509V3_set_ctx(&extensionContext, cert.get(), cert.get(), nullptr, nullptr, 0);
+        std::unique_ptr<X509_EXTENSION, decltype(&X509_EXTENSION_free)> san(
+            X509V3_EXT_conf_nid(nullptr, &extensionContext, NID_subject_alt_name, subjectAltName),
+            X509_EXTENSION_free);
+        ASSERT_TRUE(san);
+        ASSERT_EQ(X509_add_ext(cert.get(), san.get(), -1), 1);
         ASSERT_GT(X509_sign(cert.get(), key.get(), EVP_sha256()), 0);
         ASSERT_EQ(SSL_CTX_use_certificate(tls.native_handle(), cert.get()), 1);
         ASSERT_EQ(SSL_CTX_use_PrivateKey(tls.native_handle(), key.get()), 1);
@@ -138,6 +152,18 @@ TEST_F(CoinbaseRestDeadline, ParsesCandlesWithoutWaitingForTlsShutdown) {
     EXPECT_DOUBLE_EQ(result.candles[0].high, 12);
     EXPECT_DOUBLE_EQ(result.candles[0].volume, 3);
     EXPECT_TRUE(request.target().starts_with("/api/v3/brokerage/market/products/BTC-USD/candles?"));
+}
+// The certificate chains to the trusted CA but names another host: the client
+// must refuse it during the handshake and never send the request.
+TEST_F(CoinbaseRestDeadline, CertificateForAnotherHostIsRefused) {
+    installCertificate("DNS:api.coinbase.example");
+    serve(Reply::Candles);
+    const auto result = fetch(2s);
+    EXPECT_FALSE(result.ok);
+    EXPECT_TRUE(result.candles.empty());
+    EXPECT_NE(result.error.find("TLS handshake"), std::string::npos) << result.error;
+    EXPECT_TRUE(accepted.load());
+    EXPECT_FALSE(receivedRequest.load()) << "the request was sent over an unverified host";
 }
 TEST_F(CoinbaseRestDeadline, HttpFailureKeepsErrorContractWithoutWaitingForTlsShutdown) {
     serve(Reply::HttpError);
