@@ -202,8 +202,8 @@ struct ClientTpoConfig {
 struct ClientServerConfig {
     std::string host = "127.0.0.1";
     std::string port = "8080";
-    // Path to the server's self-signed cert to use as a trusted CA.
-    // Set to empty string to disable cert verification (insecure, for dev only).
+    // Path to the server's self-signed cert to use as a trusted CA (relative to
+    // the working directory). Required: empty or unloadable means no connection.
     std::string caFile = "certs/sentinel-server.crt";
 };
 

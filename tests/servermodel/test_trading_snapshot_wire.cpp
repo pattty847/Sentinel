@@ -49,7 +49,8 @@ class TradingSnapshotWire : public testing::Test {
     void SetUp() override {
         qRegisterMetaType<trading::TradingSnapshot>("trading::TradingSnapshot");
         fixture->start();
-        client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(fixture->port()));
+        client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(fixture->port()),
+                                                        fixture->config.tls.certFile);
         QObject::connect(client.get(), &SentinelStreamClient::connected, &app, [this] { ++connects; });
         QObject::connect(client.get(), &SentinelStreamClient::disconnected, &app, [this] { ++disconnects; });
         QObject::connect(client.get(), &SentinelStreamClient::tradingSnapshotReceived, &app,
@@ -114,7 +115,8 @@ TEST_F(TradingSnapshotWire, ConnectThenAlgoAcksThenServerRestartClearsEverything
     // A second connection sees the whole state at once, equal to the server's.
     {
         std::vector<trading::TradingSnapshot> late;
-        SentinelStreamClient other("127.0.0.1", std::to_string(fixture->port()));
+        SentinelStreamClient other("127.0.0.1", std::to_string(fixture->port()),
+                                   fixture->config.tls.certFile);
         QObject::connect(&other, &SentinelStreamClient::tradingSnapshotReceived, &app,
                          [&late](const trading::TradingSnapshot &s) { late.push_back(s); });
         other.connectToServer();

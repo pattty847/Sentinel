@@ -466,7 +466,7 @@ libs/core/marketdata/
 
 ## Transport security (TLS / WSS)
 
-The internal stream server (`SentinelStreamServer`) serves only `wss://` (default `wss://127.0.0.1:8080`): every session is TLS, and the stream listener will not start without a loadable certificate and private key (`tls.cert_file` / `tls.key_file`, defaulting to `certs/sentinel-server.crt` and `.key`). A listener failure is logged while the server process continues recording. The stream is encrypted; a loadable client CA file enables certificate-chain verification, but the client does not install a hostname-verification callback.
+The internal stream server (`SentinelStreamServer`) serves only `wss://` (default `wss://127.0.0.1:8080`): every session is TLS, and the stream listener will not start without a loadable certificate and private key (`tls.cert_file` / `tls.key_file`, defaulting to `certs/sentinel-server.crt` and `.key`). A listener failure is logged while the server process continues recording. The stream is encrypted, and the client always verifies the certificate chain against `client.server.ca_file`; it does not install a hostname-verification callback. A client without a loadable CA file does not connect.
 
 **Encrypted:** `server_config`, binary heatmap chunks and raw live tails, l2 snapshots/updates, `market_trades`, candle and TPO history, `trade_command`, `order_update`, `position_update`, and control messages (e.g. `subscribe`).
 
@@ -496,7 +496,7 @@ totals; the GUI replica applies them as absolute quantities.
 
 **Handshake:** TCP connect → TLS 1.3 ClientHello/ServerHello (the supplied scripts generate a self-signed EC cert with SANs for localhost/127.0.0.1) → TLS Finished → HTTP WebSocket upgrade → WebSocket stream messages (`subscribe`, `server_config`, binary heatmap chunks and raw live tails).
 
-**Certificates:** Generate with `certs/gen-certs.ps1` (Windows) or `certs/gen-certs.sh` (Linux/macOS). Outputs `certs/sentinel-server.crt` and `certs/sentinel-server.key` (gitignored). Configure in `server_config.yaml` under `tls.cert_file` / `tls.key_file` and in `client_config.yaml` under `client.server.ca_file`. If `ca_file` is missing or invalid, the client falls back to `verify_none` with a log warning (acceptable for local dev only).
+**Certificates:** Generate with `certs/gen-certs.ps1` (Windows) or `certs/gen-certs.sh` (Linux/macOS). Outputs `certs/sentinel-server.crt` and `certs/sentinel-server.key` (gitignored). Configure in `server_config.yaml` under `tls.cert_file` / `tls.key_file` and in `client_config.yaml` under `client.server.ca_file`. A relative `ca_file` resolves against the working directory (the checkout or bundle root, like `config/` itself). If `ca_file` is empty, missing or not a loadable PEM certificate, the client logs an error naming the resolved path, emits `errorOccurred` and `disconnected`, and never opens a socket; there is no unverified fallback.
 
 **Future:** Client authentication (e.g. HMAC-SHA256 of server nonce) can gate `trade_command` after the WSS handshake; the existing `Authenticator` in `libs/core/marketdata/auth/` can be used for signing.
 

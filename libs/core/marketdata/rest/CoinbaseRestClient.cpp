@@ -6,6 +6,7 @@
 #include <boost/beast/ssl.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl/error.hpp>
+#include <boost/asio/ssl/host_name_verification.hpp>
 #include <boost/asio/ssl/stream.hpp>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -167,6 +168,9 @@ CoinbaseRestClient::JsonResult CoinbaseRestClient::requestJson(
         }
 
         stream.set_verify_mode(ssl::verify_peer);
+        // Chain verification alone accepts any trusted certificate; also require
+        // that it names m_host (DNS name or IP literal).
+        stream.set_verify_callback(ssl::host_name_verification(m_host));
         stage = "TLS handshake";
         await([&](auto complete) { stream.async_handshake(ssl::stream_base::client, std::move(complete)); });
 

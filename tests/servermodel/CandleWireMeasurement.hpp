@@ -56,7 +56,7 @@ inline int run(QCoreApplication &app, bool hundred) {
     if (sessions.size() != 1 || !spinUntil([&] { return fixture.subscribed(sessions.front()); }))
         throw std::runtime_error("stalled subscriber was not admitted");
     auto stalledSession = sessions.front();
-    SentinelStreamClient paging("127.0.0.1", std::to_string(fixture.port()));
+    SentinelStreamClient paging("127.0.0.1", std::to_string(fixture.port()), fixture.config.tls.certFile);
     int64_t cursor = epoch - 100;
     const int64_t tf = hundred ? 100 : 1000;
     uint64_t pages = 0;

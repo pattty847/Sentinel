@@ -219,8 +219,9 @@ start capture first.
 The stream listens on `127.0.0.1:8080` and has no client authentication; read
 [docs/CONFIG.md](docs/CONFIG.md) before you change `bind_address`. Without the TLS pair the server
 logs `SentinelStreamServer start failed` and keeps recording, but clients cannot connect. TLS 1.3
-is always used. The client verifies the certificate chain when `client.server.ca_file` loads;
-a missing or unreadable CA file disables peer verification with a warning (it does not disable TLS). Each run
+is always used. The client verifies the server certificate chain against `client.server.ca_file`
+(relative to the working directory); if that file is unset, missing or unreadable, the client logs an
+error and does not connect. Each run
 writes a log file (macOS: `~/Library/Logs/Sentinel/`). Capture options, verification and shutdown
 are in [docs/RAW_CAPTURE.md](docs/RAW_CAPTURE.md).
 
