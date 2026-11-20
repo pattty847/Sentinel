@@ -180,20 +180,24 @@ TEST(AgentApiDocks, SavedLayoutWithRetiredDocksKeepsSurvivingDocks) {
     {
         QMainWindow old;
         QDockWidget heatmap("Heatmap", &old), watchlist("Watchlist", &old), lab("Lab", &old),
-                    aiCommentary("AI Commentary", &old), screener("Screener", &old);
+                    aiCommentary("AI Commentary", &old), screener("Screener", &old),
+                    stockChart("Stock Chart", &old);
         heatmap.setObjectName("ChartDock");
         watchlist.setObjectName("WatchlistDock");
         lab.setObjectName("LabDock");
         aiCommentary.setObjectName("AICommentaryFeedDock");
         screener.setObjectName("ScreenerDock");
+        stockChart.setObjectName("StockChartDock");
         old.addDockWidget(Qt::LeftDockWidgetArea, &heatmap);
         old.addDockWidget(Qt::RightDockWidgetArea, &watchlist);
         old.addDockWidget(Qt::RightDockWidgetArea, &lab);
         old.addDockWidget(Qt::RightDockWidgetArea, &aiCommentary);
         old.addDockWidget(Qt::RightDockWidgetArea, &screener);
+        old.addDockWidget(Qt::RightDockWidgetArea, &stockChart);
         old.tabifyDockWidget(&watchlist, &lab);
         old.tabifyDockWidget(&watchlist, &aiCommentary);
         old.tabifyDockWidget(&watchlist, &screener);
+        old.tabifyDockWidget(&watchlist, &stockChart);
         oldState = old.saveState();
     }
     {
@@ -202,20 +206,21 @@ TEST(AgentApiDocks, SavedLayoutWithRetiredDocksKeepsSurvivingDocks) {
         settings.setValue("layouts/old/state", oldState);
     }
     QMainWindow current;
-    QDockWidget heatmap("Heatmap", &current), watchlist("Watchlist", &current), screener("Screener", &current);
+    QDockWidget heatmap("Heatmap", &current), watchlist("Watchlist", &current), stockChart("Stock Chart", &current);
     heatmap.setObjectName("ChartDock");
     watchlist.setObjectName("WatchlistDock");
-    screener.setObjectName("ScreenerDock");
+    stockChart.setObjectName("StockChartDock");
     current.addDockWidget(Qt::LeftDockWidgetArea, &heatmap);
     current.addDockWidget(Qt::RightDockWidgetArea, &watchlist);
-    current.addDockWidget(Qt::RightDockWidgetArea, &screener);
+    current.addDockWidget(Qt::BottomDockWidgetArea, &stockChart);
     ASSERT_TRUE(LayoutManager::restoreLayout(&current, "old"));
     EXPECT_EQ(current.dockWidgetArea(&heatmap), Qt::LeftDockWidgetArea);
     EXPECT_EQ(current.dockWidgetArea(&watchlist), Qt::RightDockWidgetArea);
-    EXPECT_EQ(current.dockWidgetArea(&screener), Qt::RightDockWidgetArea);
-    EXPECT_TRUE(current.tabifiedDockWidgets(&watchlist).contains(&screener));
+    EXPECT_EQ(current.dockWidgetArea(&stockChart), Qt::RightDockWidgetArea);
+    EXPECT_TRUE(current.tabifiedDockWidgets(&watchlist).contains(&stockChart));
     EXPECT_TRUE(current.findChildren<QDockWidget*>("LabDock").isEmpty());
     EXPECT_TRUE(current.findChildren<QDockWidget*>("AICommentaryFeedDock").isEmpty());
+    EXPECT_TRUE(current.findChildren<QDockWidget*>("ScreenerDock").isEmpty());
     QByteArray migrated;
     {
         QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Sentinel", "SentinelTerminal");
@@ -224,21 +229,23 @@ TEST(AgentApiDocks, SavedLayoutWithRetiredDocksKeepsSurvivingDocks) {
     }
     QMainWindow nextSession;
     QDockWidget nextHeatmap("Heatmap", &nextSession), nextWatchlist("Watchlist", &nextSession),
-                nextScreener("Screener", &nextSession), retiredProbe("Retired Lab", &nextSession),
-                retiredAIProbe("Retired AI", &nextSession);
+                nextStockChart("Stock Chart", &nextSession), retiredProbe("Retired Lab", &nextSession),
+                retiredAIProbe("Retired AI", &nextSession), retiredScreenerProbe("Retired Screener", &nextSession);
     nextHeatmap.setObjectName("ChartDock");
     nextWatchlist.setObjectName("WatchlistDock");
-    nextScreener.setObjectName("ScreenerDock");
+    nextStockChart.setObjectName("StockChartDock");
     retiredProbe.setObjectName("LabDock");
     retiredAIProbe.setObjectName("AICommentaryFeedDock");
+    retiredScreenerProbe.setObjectName("ScreenerDock");
     nextSession.addDockWidget(Qt::LeftDockWidgetArea, &nextHeatmap);
     nextSession.addDockWidget(Qt::RightDockWidgetArea, &nextWatchlist);
-    nextSession.addDockWidget(Qt::RightDockWidgetArea, &nextScreener);
+    nextSession.addDockWidget(Qt::RightDockWidgetArea, &nextStockChart);
     ASSERT_TRUE(nextSession.restoreState(migrated));
     EXPECT_EQ(nextSession.dockWidgetArea(&nextWatchlist), Qt::RightDockWidgetArea);
-    EXPECT_TRUE(nextSession.tabifiedDockWidgets(&nextWatchlist).contains(&nextScreener));
+    EXPECT_TRUE(nextSession.tabifiedDockWidgets(&nextWatchlist).contains(&nextStockChart));
     EXPECT_FALSE(nextSession.restoreDockWidget(&retiredProbe)); // no saved Lab placeholder
     EXPECT_FALSE(nextSession.restoreDockWidget(&retiredAIProbe)); // no saved AI placeholder
+    EXPECT_FALSE(nextSession.restoreDockWidget(&retiredScreenerProbe)); // no saved Screener placeholder
     EXPECT_TRUE(LayoutManager::restoreLayout(&current, "old"));
     EXPECT_EQ(current.dockWidgetArea(&watchlist), Qt::RightDockWidgetArea);
     QSettings::setDefaultFormat(previousFormat);

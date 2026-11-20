@@ -32,7 +32,7 @@ Rectangle {
     property string ticker:    ""
     property string company:   ""
     property string period:    "5y"
-    property string statusMsg: "Type a ticker above or pick one in the Screener"
+    property string statusMsg: "Type a ticker above or pick one in the Watchlist"
     // Header and footer describe loaded data; until candles arrive the centred hint stands alone.
     readonly property bool hasData: root.candleData.length > 0
     property bool   loading:   false

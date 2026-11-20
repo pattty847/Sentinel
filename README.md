@@ -33,12 +33,12 @@ grouped rows.
 ![TPO profiles: three days of BTC-USD on 15m candles with 24h TPO sessions in collapsed mode, one letter per period coloured by time, beside the Order Book dock](docs/assets/readme/tpo-2026-10-28.png)
 
 TPO (2026-10-28): 24-hour sessions over 15m candles in collapsed mode. Each letter is one time
-period at that price, coloured by when it printed. The two below were captured with a March 2026
-build, and their controls have changed since.
+period at that price, coloured by when it printed. The one below was captured with a March 2026
+build, and its controls have changed since.
 
-| Stock Chart with SEC insider signals | Screener |
-| --- | --- |
-| ![Stock chart insider signals demo](docs/assets/gifs/stock-chart-insiders.gif) | ![Stock screener demo](docs/assets/gifs/stock-screener.gif) |
+| Stock Chart with SEC insider signals |
+| --- |
+| ![Stock chart insider signals demo](docs/assets/gifs/stock-chart-insiders.gif) |
 
 ---
 
@@ -85,8 +85,7 @@ build, and their controls have changed since.
 - Shared market health in the status bar and docks; Tools → Show explanatory tooltips enables
   extra help (off by default).
 - Stock Chart dock (daily equity candles) with SEC Form 4 insider overlays from EDGAR.
-- TradingView screener dock for crypto and stocks; watchlists. Crypto rows open on the main chart,
-  stocks on the Stock Chart.
+- Watchlists for crypto and stocks. Crypto rows open on the main chart, stocks on the Stock Chart.
 
 ### Paper trading and backtests
 
@@ -183,7 +182,7 @@ Binaries land in `build/<preset>/apps/<name>/` (plus `<Config>/` with Visual Stu
 `build/mac-clang/apps/sentinel-server/sentinel-server`. `hmc2_diff` shares the `sentinel-roll`
 build directory.
 
-**Python backends** (SEC, screener, stock candles) use [uv](https://docs.astral.sh/uv/) and a
+**Python backends** (SEC, stock candles) use [uv](https://docs.astral.sh/uv/) and a
 sibling `CopeTech-Edgar` checkout; see [scripts/README.md](scripts/README.md):
 
 ```bash

@@ -98,7 +98,7 @@ BIN_SRV="${STAGE}/SentinelServer.app/Contents/MacOS/sentinel-server"
 [[ -f "${STAGE}/README_RELEASE.md" ]] || echo "WARN: README_RELEASE.md missing (older bundle?)"
 [[ -f "${STAGE}/scripts/uv.lock" ]] || echo "WARN: scripts/uv.lock missing (uv lock may change dependency pin behavior)"
 [[ -f "${STAGE}/LICENSE" ]] || echo "WARN: LICENSE missing from bundle"
-[[ -d "${STAGE}/scripts/.venv" ]] || echo "WARN: scripts/.venv missing — run uv in scripts/ before shipping SEC/screener/candles"
+[[ -d "${STAGE}/scripts/.venv" ]] || echo "WARN: scripts/.venv missing — run uv in scripts/ before shipping SEC/candles"
 
 # Clean-room only: refuse obvious embeds of **this repository's** clone path into the downloadable tree.
 if [[ "$CLEAN_ROOM" == true ]]; then

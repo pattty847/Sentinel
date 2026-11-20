@@ -23,7 +23,7 @@ public:
     void onSymbolChanged(const QString& symbol) override {}
     QSize minimumSizeHint() const override { return {480, 320}; }
 
-    // Called externally (e.g. screener stock row click)
+    // Called externally (e.g. a watchlist stock row click)
     void loadSymbol(const QString& ticker, const QString& companyName = {});
     QQuickView* qquickView() const { return m_quickView; }
     QWidget* qmlContainer() const { return m_qmlContainer; }

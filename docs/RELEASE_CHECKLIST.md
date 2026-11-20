@@ -57,7 +57,6 @@ Run server then GUI (or platform launcher). Subscribe to **`BTC-USD`** (Coinbase
 | Coinbase stream connects | REST sanity in smoke; WebSocket lifecycle not scripted | Subscribe to `BTC-USD` in GUI |
 | Heatmap renders | — | Visible grid after subscribe |
 | Stock chart opens | — | Workspace / chart dock |
-| Screener opens | — | Screener UI + server invokes `scripts/screener/` |
 | SEC overlay loads | Depends on Python + `copetech-edgar`; may need CopeTech-Edgar | Stock chart ticker + SEC widgets |
 | DOM / order book view opens | — | DOM dock |
 | Config load/save | — | Settings / persisted client config |

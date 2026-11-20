@@ -211,9 +211,9 @@ class HostTrust(unittest.TestCase):
 
     # ---- screenshots
     def test_shot_refuses_screen_grabs_and_bad_names(self):
-        for target in ("main", "lab", "aiCommentary", "screen", "heatmap/../x", "settings:", "settings:Nope", "heatmap\n", "MAIN"):
+        for target in ("main", "lab", "aiCommentary", "screener", "screen", "heatmap/../x", "settings:", "settings:Nope", "heatmap\n", "MAIN"):
             self.assertRefused("bad_target", gh.shot, {"name": "a", "target": target})
-        for target in ("window", "heatmap", "orderBook", "watchlist", "screener", "stockChart", "paperTrading",
+        for target in ("window", "heatmap", "orderBook", "watchlist", "stockChart", "paperTrading",
                        "sec", "copenet", "telemetry", "statusBar", "toolbar", "chartmenu",
                        "settings", "settings:TPO"):
             self.assertIsNotNone(gh.SHOT_TARGETS.fullmatch(target), target)

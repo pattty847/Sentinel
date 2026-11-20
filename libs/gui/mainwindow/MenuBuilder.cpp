@@ -7,7 +7,6 @@
 #include "../widgets/SecFilingDock.hpp"
 #include "../widgets/CopenetFeedDock.hpp"
 #include "../widgets/WatchlistDock.hpp"
-#include "../widgets/ScreenerDock.hpp"
 #include "../widgets/StockChartDock.hpp"
 #include "../widgets/OrderBookDock.hpp"
 #include <QInputDialog>
@@ -40,9 +39,6 @@ void MenuBuilder::buildViewMenu(const DockWidgets& docks, const Callbacks& callb
     }
     if (docks.copenetDock) {
         m_viewMenu->addAction(docks.copenetDock->toggleViewAction());
-    }
-    if (docks.screenerDock) {
-        m_viewMenu->addAction(docks.screenerDock->toggleViewAction());
     }
     if (docks.stockChartDock) {
         m_viewMenu->addAction(docks.stockChartDock->toggleViewAction());

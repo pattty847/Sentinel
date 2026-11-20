@@ -38,12 +38,8 @@
 #include <unordered_set>
 #include <nlohmann/json.hpp>
 #include <QByteArray>
-#include <QCoreApplication>
-#include <QDir>
-#include <QFileInfo>
 #include <QHostAddress>
 #include <QNetworkInterface>
-#include <QProcess>
 #include <QtEndian>
 #include <cstdio>
 #include "../marketdata/auth/Authenticator.hpp"
@@ -54,11 +50,6 @@
 #include "Cpp20Utils.hpp"
 
 #include <filesystem>
-#ifdef Q_OS_UNIX
-#include <cerrno>
-#include <csignal>
-#include <unistd.h>
-#endif
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
@@ -67,67 +58,6 @@ namespace net = boost::asio;            // from <boost/asio.hpp>
 using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
 
 namespace {
-// Allow uv startup, tvscreener's own 30-second HTTP timeout, and serialization.
-constexpr auto kScreenerProcessBudget = std::chrono::seconds(90);
-constexpr auto kProcessTerminationGrace = std::chrono::milliseconds(250);
-
-void terminateProcessTree(QProcess& process) {
-#ifdef Q_OS_UNIX
-    // The child modifier makes the launched process its group's leader before
-    // exec. Keep the pgid even if uv exits during the grace period: Python may
-    // still be alive. Signal the whole group, then reap the direct child.
-    const auto group = static_cast<pid_t>(process.processId());
-    if (group > 0) ::kill(-group, SIGTERM);
-    std::this_thread::sleep_for(kProcessTerminationGrace);
-    if (group > 0) ::kill(-group, SIGKILL);
-#else
-    process.terminate();
-    process.waitForFinished(static_cast<int>(kProcessTerminationGrace.count()));
-#endif
-    // Also handles cancellation during startup, before setpgid has run.
-    process.kill();
-    process.waitForFinished(1000);
-}
-
-struct ProcessResult { std::string output, error; };
-ProcessResult runBoundedProcess(const QString& program, const QStringList& arguments,
-                               const QString& directory, const std::function<bool()>& stopped,
-                               std::chrono::milliseconds budget = kScreenerProcessBudget) {
-    ProcessResult result;
-    if (stopped()) { result.error = "process cancelled"; return result; }
-    QProcess process;
-#ifdef Q_OS_UNIX
-    // Do not let the screener inherit server sockets or files (a hung child
-    // would otherwise hold the listen port across a server restart).
-    process.setUnixProcessParameters(QProcess::UnixProcessFlag::CloseFileDescriptors);
-    process.setChildProcessModifier([&process] {
-        if (::setpgid(0, 0) == -1) process.failChildProcessModifier("setpgid", errno);
-    });
-#endif
-    process.setWorkingDirectory(directory);
-    process.setProcessChannelMode(QProcess::MergedChannels);
-    const auto deadline = std::chrono::steady_clock::now() + budget;
-    process.start(program, arguments);
-    while (process.state() != QProcess::NotRunning) {
-        if (stopped() || std::chrono::steady_clock::now() >= deadline) {
-            terminateProcessTree(process);
-            result.error = stopped() ? "process cancelled" : "process deadline exceeded";
-            return result;
-        }
-        process.waitForFinished(50);
-        result.output += process.readAll().toStdString();
-        if (result.output.size() > 8 * 1024 * 1024) {
-            terminateProcessTree(process);
-            result.error = "process output budget exceeded";
-            return result;
-        }
-    }
-    if (process.error() == QProcess::FailedToStart || process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
-        result.error = "process failed: " + process.errorString().toStdString();
-    return result;
-}
-
-
 int64_t tradeTimestampMs(const Trade& trade) {
     return static_cast<int64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count());
@@ -1411,93 +1341,6 @@ public:
                  });
                  sLog_Data("Client unsubscribe: peer=" << peer_ << " symbol=" << symbol
                            << " removed=" << removed << " subscriptions=" << subscriptions_.size());
-            } else if (type == "screener_request") {
-                const std::string asset   = j.value("asset", "crypto");
-                const int         limit   = j.value("limit", 50);
-                const double      minVol  = j.value("min_volume", 0.0);
-
-                auto self = shared_from_this();
-                const bool queued = owner_->submitHistoryTask([self, asset, limit, minVol]() {
-                    const auto stopped = [&] {
-                        return self->closing_.load() || self->closePosted_.load() || !self->owner_->m_running.load();
-                    };
-                    if (stopped()) return;
-                    sentinel::logging::setCurrentThreadName("screener");
-                    // Locate scripts/ dir relative to the server binary.
-                    // Binary is at <repo>/build/<preset>/apps/sentinel-server/Debug/
-                    // scripts/ is at <repo>/scripts/  (5 levels up)
-                    const QString appDir = QCoreApplication::applicationDirPath();
-                    QString scriptsDir;
-                    const QStringList dirCandidates = {
-                        QDir(appDir).absoluteFilePath("../../../../../scripts"),
-                        QDir(appDir).absoluteFilePath("../../../../scripts"),
-                        QDir(appDir).absoluteFilePath("../../../scripts"),
-                        QDir(appDir).absoluteFilePath("../../scripts"),
-                        QDir(appDir).absoluteFilePath("../scripts"),
-                        QDir(appDir).absoluteFilePath("scripts"),
-                    };
-                    for (const auto& c : dirCandidates) {
-                        if (QFileInfo::exists(QDir(c).absoluteFilePath("screener/screener_fetch.py"))) {
-                            scriptsDir = QDir(c).absolutePath();
-                            break;
-                        }
-                    }
-
-                    if (scriptsDir.isEmpty()) {
-                        sLog_Error("Screener: could not locate scripts/ dir from appDir=" << appDir);
-                        self->send_error("screener_request", "", "scripts/ dir not found (checked relative to server binary)");
-                        return;
-                    }
-
-                    const QString scriptPath = QDir(scriptsDir).absoluteFilePath("screener/screener_fetch.py");
-                    sLog_App("Screener: running " << scriptPath << " asset=" << QString::fromStdString(asset));
-
-                    // Blocking QProcess APIs work without a Qt event loop. Keep
-                    // the subprocess bounded/cancellable so joining cannot hang.
-                    const auto process = runBoundedProcess("uv",
-                        {"run", "python", scriptPath, "--asset", QString::fromStdString(asset),
-                         "--limit", QString::number(limit), "--min-volume", QString::number(minVol)},
-                        scriptsDir, stopped);
-                    if (stopped()) return;
-                    if (!process.error.empty()) {
-                        self->send_error("screener_request", "", process.error);
-                        return;
-                    }
-                    const auto& output = process.output;
-
-                    sLog_App("Screener: output length=" << output.size());
-
-                    const std::string marker = "SCREENER_DATA:";
-                    const auto idx = output.find(marker);
-                    if (idx == std::string::npos) {
-                        sLog_Error("Screener: no SCREENER_DATA marker. Output: " << QString::fromStdString(output.substr(0, 500)));
-                        self->send_error("screener_request", "",
-                                         "no SCREENER_DATA in output: " + output.substr(0, 200));
-                        return;
-                    }
-
-                    // Trim to just the JSON after the marker
-                    std::string dataStr = output.substr(idx + marker.size());
-                    // Strip trailing whitespace/newlines
-                    while (!dataStr.empty() && (dataStr.back() == '\n' || dataStr.back() == '\r' || dataStr.back() == ' '))
-                        dataStr.pop_back();
-
-                    nlohmann::json data = nlohmann::json::parse(dataStr, nullptr, false);
-                    if (data.is_discarded()) {
-                        sLog_Error("Screener: JSON parse failed. Raw: " << QString::fromStdString(dataStr.substr(0, 200)));
-                        self->send_error("screener_request", "", "failed to parse screener JSON");
-                        return;
-                    }
-
-                    nlohmann::json response;
-                    response["type"]      = "screener_update";
-                    response["asset"]     = data.value("asset", asset);
-                    response["rows"]      = data.value("rows", nlohmann::json::array());
-                    response["row_count"] = static_cast<int>(response["rows"].size());
-                    sLog_App("Screener: sending " << response["row_count"].get<int>() << " rows to client");
-                    self->do_write(response.dump());
-                });
-                if (!queued) send_error("screener_request", "", "history worker queue is full");
             }
         } catch (const std::exception& e) {
             sLog_Error("Server message parse error: peer=" << peer_ << " bytes=" << msg.size()

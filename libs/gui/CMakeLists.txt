@@ -178,7 +178,6 @@ set(WIDGET_SOURCES
     "widgets/LeanGaugeWidget.cpp"
     "widgets/SecApiClient.cpp"
     "widgets/SecFilingDock.cpp"
-    "widgets/ScreenerDock.cpp"
     "widgets/ServiceLocator.cpp"
     "widgets/StatusBar.cpp"
     "widgets/HeatmapSettingsDialog.cpp"

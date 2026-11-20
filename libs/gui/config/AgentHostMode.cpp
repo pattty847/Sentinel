@@ -107,7 +107,7 @@ QString startupSymbol(const QString& preferred) {
 
 bool screenshotTargetAllowed(const QString& target) {
     if (!g_active) return true;
-    if (target == "window" || target == "heatmap" || target == "orderBook" || target == "watchlist" || target == "screener" ||
+    if (target == "window" || target == "heatmap" || target == "orderBook" || target == "watchlist" ||
         target == "stockChart" || target == "paperTrading" || target == "sec" || target == "copenet" ||
         target == "telemetry" || target == "statusBar" ||
         target == "toolbar" || target == "chartmenu" || target == "settings")

@@ -1,7 +1,6 @@
 #include "widgets/DockablePanel.hpp"
 #include "widgets/WatchlistDock.hpp"
 #include "widgets/TopToolbar.hpp"
-#include "widgets/ScreenerDock.hpp"
 #include "widgets/OrderBookDock.hpp"
 #include "widgets/SecFilingDock.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
@@ -13,7 +12,6 @@
 #include <QHoverEvent>
 #include <QHeaderView>
 #include <QTableWidget>
-#include <QComboBox>
 #include <QApplication>
 #include <QMainWindow>
 #include "widgets/StatusBar.hpp"
@@ -37,16 +35,14 @@ public:
     void buildUi() override {}
 };
 TEST(ShellChrome, TablesShareRowGeometryAndHeaderTypography) {
-    ScreenerDock screener;
     SecFilingDock sec;
     OrderBookDock dom;
     HeatmapGradientEditor gradient("gradient");
     gradient.setStops({{0.0, "#000000"}, {1.0, "#ffffff"}});
-    QList<QTableView*> tables = screener.findChildren<QTableView*>();
-    tables.append(sec.findChildren<QTableView*>());
+    QList<QTableView*> tables = sec.findChildren<QTableView*>();
     tables.append(dom.findChildren<QTableView*>());
     tables.append(gradient.table());
-    ASSERT_EQ(tables.size(), 5);
+    ASSERT_EQ(tables.size(), 4);
     for (auto* table : tables) {
         table->ensurePolished();
         auto* header = table->horizontalHeader();
@@ -59,15 +55,6 @@ TEST(ShellChrome, TablesShareRowGeometryAndHeaderTypography) {
         EXPECT_TRUE(header->styleSheet().contains("#93a1af"));
     }
     EXPECT_EQ(gradient.table()->rowHeight(0), 22);
-    auto* screen = screener.findChild<QTableView*>("screenerRows");
-    for (int asset : {0, 1}) {
-        screener.findChild<QComboBox*>("screenerAsset")->setCurrentIndex(asset);
-        for (int column = 0; column < screen->model()->columnCount(); ++column) {
-            const bool number = (column >= 2 && column <= 6) || (asset == 1 && (column == 7 || column == 8));
-            EXPECT_EQ(screen->model()->headerData(column, Qt::Horizontal, Qt::TextAlignmentRole).toInt(),
-                      int((number ? Qt::AlignRight : Qt::AlignLeft) | Qt::AlignVCenter));
-        }
-    }
     auto* tx = sec.findChild<QTableView*>("secTransactions");
     EXPECT_EQ(tx->model()->headerData(3, Qt::Horizontal, Qt::TextAlignmentRole).toInt(), int(Qt::AlignRight | Qt::AlignVCenter));
     WatchlistDock watch;

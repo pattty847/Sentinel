@@ -437,8 +437,8 @@ History uses binary chunks requested by `heatmap_chunk_request`, with the raw
 live tail on `heatmap_live_subscribe` (contracts below). The legacy HMCL
 `heatmap_slice`, JSON/base64 history pages and band-projected live views are
 removed. The server never opens or changes existing `data/heatmap` archives.
-The bounded history worker pool remains shared by chunks, candle history,
-trade overlays and screener work; shutdown joins it before destroying I/O.
+The bounded history worker pool remains shared by chunks, candle history
+and trade overlays; shutdown joins it before destroying I/O.
 
 ## Volume profile stream
 

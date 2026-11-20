@@ -5,7 +5,6 @@
 #include "widgets/FontSettingsDialog.hpp"
 #include "widgets/HeatmapTelemetryDock.hpp"
 #include "widgets/PaperTradingDock.hpp"
-#include "widgets/ScreenerDock.hpp"
 #include "widgets/StatusBar.hpp"
 #include "widgets/WatchlistDock.hpp"
 #include "marketdata/model/TradeData.h"
@@ -16,17 +15,10 @@
 #include <QDir>
 #include <QFontDatabase>
 #include <QFontInfo>
-#include <QHeaderView>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
-#include <QScrollBar>
 #include <QSettings>
-#include <QStandardItemModel>
-#include <QTableView>
 #include <QTableWidget>
 #include <QTabWidget>
 #include <QTemporaryDir>
@@ -56,40 +48,6 @@ void expectLabels(QWidget& widget, const QString& family, int chromePixels = -1,
             EXPECT_DOUBLE_EQ(label->font().pointSizeF(), 10.0);
         }
     }
-}
-
-void updateScreener(ScreenerDock& dock, const QJsonArray& rows,
-                    const QString& asset = QStringLiteral("crypto")) {
-    ASSERT_TRUE(QMetaObject::invokeMethod(&dock, "onScreenerUpdate", Qt::DirectConnection,
-        Q_ARG(QString, asset), Q_ARG(int, rows.size()),
-        Q_ARG(QByteArray, QJsonDocument(rows).toJson(QJsonDocument::Compact))));
-}
-
-void dragColumnToWidth(QTableView* table, int column, int desiredWidth) {
-    auto* header = table->horizontalHeader();
-    ASSERT_NE(header, nullptr);
-    if (table->model()->rowCount() > 0) table->scrollTo(table->model()->index(0, column));
-    settle();
-    const int currentWidth = header->sectionSize(column);
-    const QPoint handle(header->sectionViewportPosition(column) + currentWidth - 2, header->height() / 2);
-    ASSERT_GE(handle.x(), 0);
-    ASSERT_LT(handle.x(), header->viewport()->width());
-    const QPoint destination(handle.x() + desiredWidth - currentWidth, handle.y());
-    QTest::mousePress(header->viewport(), Qt::LeftButton, Qt::NoModifier, handle);
-    QTest::mouseMove(header->viewport(), destination);
-    QTest::mouseRelease(header->viewport(), Qt::LeftButton, Qt::NoModifier, destination);
-    settle();
-}
-
-void doubleClickHeaderHandle(QTableView* table, int column) {
-    auto* header = table->horizontalHeader();
-    ASSERT_NE(header, nullptr);
-    const QPoint handle(header->sectionViewportPosition(column) + header->sectionSize(column) - 2,
-                        header->height() / 2);
-    ASSERT_GE(handle.x(), 0);
-    ASSERT_LT(handle.x(), header->viewport()->width());
-    QTest::mouseDClick(header->viewport(), Qt::LeftButton, Qt::NoModifier, handle);
-    settle();
 }
 
 TEST(FontWidgets, SavedUncuratedFamilyAndCloseRemainLiveSaved) {
@@ -168,9 +126,8 @@ TEST(FontWidgets, InheritedPixelFontRemainsReadableAndSelectionRestoresPointBase
 TEST(FontWidgets, PaperTradingRuntimeAndHiddenWidgetsInheritSelectedFont) {
     PaperTradingDock paper;
     WatchlistDock watch;
-    ScreenerDock screener;
     paper.setSymbol(QStringLiteral("BTC-USD"));
-    paper.show(); watch.show(); screener.show(); settle();
+    paper.show(); watch.show(); settle();
 
     for (const QString& requested : {testFamilies.front(), savedInstalledFamily}) {
         SCOPED_TRACE(requested.toStdString());
@@ -178,11 +135,9 @@ TEST(FontWidgets, PaperTradingRuntimeAndHiddenWidgetsInheritSelectedFont) {
         const QString family = FontManager::instance().currentFontFamily();
         expectLabels(paper, family, -1, true);
         expectLabels(watch, family);
-        expectLabels(screener, family);
         for (QWidget* view : {static_cast<QWidget*>(paper.findChild<QTableWidget*>("paperOrderLog")),
                               static_cast<QWidget*>(paper.findChild<QPlainTextEdit*>()),
-                              static_cast<QWidget*>(watch.findChild<QTreeView*>("watchRows")),
-                              static_cast<QWidget*>(screener.findChild<QTableView*>("screenerRows"))}) {
+                              static_cast<QWidget*>(watch.findChild<QTreeView*>("watchRows"))}) {
             ASSERT_NE(view, nullptr);
             EXPECT_EQ(QFontInfo(view->font()).family(), family);
             EXPECT_DOUBLE_EQ(view->font().pointSizeF(), 10.0);
@@ -231,140 +186,16 @@ TEST(FontWidgets, PaperTradingRuntimeAndHiddenWidgetsInheritSelectedFont) {
         EXPECT_TRUE(foundError);
         watch.setChartSwitchState(QStringLiteral("BTC-USD"), {}, QStringLiteral("ETH-USD"),
                                   QStringLiteral("Synthetic refusal"));
-        screener.showServiceError(QStringLiteral("Synthetic service error"));
         expectLabels(watch, family);
-        expectLabels(screener, family);
-        EXPECT_TRUE(screener.findChild<QLabel*>("screenerStatus")->styleSheet().contains(QStringLiteral("#ef5c55")));
-        paper.hide(); watch.hide(); screener.hide();
+        paper.hide(); watch.hide();
     }
     ASSERT_TRUE(FontManager::instance().applyFontFamily(testFamilies.front(), qApp)); settle();
-    paper.show(); watch.show(); screener.show(); settle();
+    paper.show(); watch.show(); settle();
     const QString family = FontManager::instance().currentFontFamily();
-    expectLabels(paper, family, -1, true); expectLabels(watch, family); expectLabels(screener, family);
-    PaperTradingDock newPaper; WatchlistDock newWatch; ScreenerDock newScreener;
-    newPaper.ensurePolished(); newWatch.ensurePolished(); newScreener.ensurePolished();
-    expectLabels(newPaper, family, -1, true); expectLabels(newWatch, family); expectLabels(newScreener, family);
-}
-
-TEST(FontWidgets, ScreenerFontChangeRemeasuresDefaultsAndPreservesUserContext) {
-    ASSERT_TRUE(FontManager::instance().applyFontFamily(testFamilies.front(), qApp));
-    ScreenerDock dock;
-    dock.resize(920, 340); dock.show(); settle();
-    auto* table = dock.findChild<QTableView*>("screenerRows");
-    ASSERT_NE(table, nullptr);
-    QJsonArray rows;
-    for (int i = 0; i < 35; ++i) {
-        rows.append(QJsonObject{{"symbol", QStringLiteral("ASSET%1-USD").arg(i, 2, 10, QLatin1Char('0'))},
-            {"Name", QStringLiteral("Reference market pair number %1").arg(i)},
-            {"Price", 12345.67 + i}, {"Change %", 1.25}, {"Volume", 123456.0}});
-    }
-    updateScreener(dock, rows); settle();
-    auto* model = qobject_cast<QStandardItemModel*>(table->model());
-    ASSERT_NE(model, nullptr);
-    ASSERT_EQ(model->rowCount(), rows.size());
-    const int defaultSymbolWidth = table->columnWidth(0);
-    const int defaultNameWidth = table->columnWidth(1);
-    const int defaultPriceWidth = table->columnWidth(2);
-    dragColumnToWidth(table, 2, 173);
-    const int manualPriceWidth = table->columnWidth(2);
-    ASSERT_NE(manualPriceWidth, defaultPriceWidth);
-    table->sortByColumn(2, Qt::DescendingOrder);
-    table->selectRow(12);
-    const QString selected = table->currentIndex().siblingAtColumn(0).data().toString();
-    table->verticalScrollBar()->setValue(7);
-    table->horizontalScrollBar()->setValue(25);
-    const int vertical = table->verticalScrollBar()->value();
-    const int horizontal = table->horizontalScrollBar()->value();
-
-    ASSERT_TRUE(FontManager::instance().applyFontFamily(savedInstalledFamily, qApp)); settle();
-    EXPECT_EQ(table->columnWidth(2), manualPriceWidth);
-    EXPECT_NE(table->columnWidth(0), defaultSymbolWidth);
-    EXPECT_NE(table->columnWidth(1), defaultNameWidth);
-    EXPECT_EQ(table->currentIndex().siblingAtColumn(0).data().toString(), selected);
-    EXPECT_EQ(table->horizontalHeader()->sortIndicatorSection(), 2);
-    EXPECT_EQ(table->horizontalHeader()->sortIndicatorOrder(), Qt::DescendingOrder);
-    EXPECT_EQ(table->verticalScrollBar()->value(), vertical);
-    EXPECT_EQ(table->horizontalScrollBar()->value(), horizontal);
-
-    dragColumnToWidth(table, 1, 210);
-    const int manualNameWidth = table->columnWidth(1);
-    dock.hide();
-    ASSERT_TRUE(FontManager::instance().applyFontFamily(testFamilies.front(), qApp)); settle();
-    EXPECT_EQ(table->columnWidth(1), manualNameWidth);
-    EXPECT_EQ(table->columnWidth(2), manualPriceWidth);
-    dock.show(); settle();
-    EXPECT_EQ(table->columnWidth(1), manualNameWidth);
-    EXPECT_EQ(table->currentIndex().siblingAtColumn(0).data().toString(), selected);
-}
-
-TEST(FontWidgets, NewlyVisibleStockColumnsMeasureContentAndSelectedFont) {
-    ASSERT_TRUE(FontManager::instance().applyFontFamily(testFamilies.front(), qApp));
-    ScreenerDock dock;
-    dock.resize(1000, 400); dock.show(); settle();
-    auto* table = dock.findChild<QTableView*>("screenerRows");
-    ASSERT_NE(table, nullptr);
-    dock.findChild<QComboBox*>("screenerAsset")->setCurrentIndex(1); settle();
-    const QString sector = QStringLiteral("Synthetic diversified industrial materials sector");
-    updateScreener(dock, QJsonArray{QJsonObject{{"symbol", "LONG"}, {"Name", "Long market name"},
-        {"Price", 123.45}, {"Sector", sector}, {"Exchange", "NASDAQ"}}}, QStringLiteral("stock"));
-    settle();
-    ASSERT_FALSE(table->isColumnHidden(9));
-    const int firstWidth = table->columnWidth(9);
-    EXPECT_GE(firstWidth, table->fontMetrics().horizontalAdvance(sector));
-    ASSERT_TRUE(FontManager::instance().applyFontFamily(savedInstalledFamily, qApp)); settle();
-    EXPECT_GE(table->columnWidth(9), table->fontMetrics().horizontalAdvance(sector));
-    EXPECT_NE(table->columnWidth(9), firstWidth);
-}
-
-TEST(FontWidgets, HiddenManualStockColumnSurvivesAssetAndFontRoundTrip) {
-    ASSERT_TRUE(FontManager::instance().applyFontFamily(testFamilies.front(), qApp));
-    ScreenerDock dock;
-    dock.resize(1000, 400); dock.show(); settle();
-    auto* table = dock.findChild<QTableView*>("screenerRows");
-    ASSERT_NE(table, nullptr);
-    auto* asset = dock.findChild<QComboBox*>("screenerAsset");
-    ASSERT_NE(asset, nullptr);
-    asset->setCurrentIndex(1);
-    updateScreener(dock, QJsonArray{QJsonObject{{"symbol", "LONG"}, {"Sector", "Industrials"}}},
-                   QStringLiteral("stock"));
-    dragColumnToWidth(table, 9, 240);
-    const int manualSectorWidth = table->columnWidth(9);
-    ASSERT_GE(manualSectorWidth, 200);
-    asset->setCurrentIndex(0);
-    updateScreener(dock, QJsonArray{QJsonObject{{"symbol", "BTC-USD"}, {"Price", 71023.0}}});
-    ASSERT_TRUE(FontManager::instance().applyFontFamily(savedInstalledFamily, qApp)); settle();
-    asset->setCurrentIndex(1); settle();
-    updateScreener(dock, QJsonArray{QJsonObject{{"symbol", "LONG"}, {"Sector", "Industrials"}}},
-                   QStringLiteral("stock"));
-    EXPECT_EQ(table->columnWidth(9), manualSectorWidth);
-}
-
-TEST(FontWidgets, HeaderDoubleClickReplacesEarlierDragWidth) {
-    ASSERT_TRUE(FontManager::instance().applyFontFamily(testFamilies.front(), qApp));
-    ScreenerDock dock;
-    dock.resize(1000, 400); dock.show(); settle();
-    auto* table = dock.findChild<QTableView*>("screenerRows");
-    ASSERT_NE(table, nullptr);
-    updateScreener(dock, QJsonArray{QJsonObject{{"symbol", "BTC-USD"},
-        {"Name", "Bitcoin"}, {"Price", 71023.125}, {"Volume", 18002342.0}}});
-    dragColumnToWidth(table, 1, 300);
-    const int draggedWidth = table->columnWidth(1);
-    ASSERT_GE(draggedWidth, 250);
-    doubleClickHeaderHandle(table, 1);
-    const int autoFitWidth = table->columnWidth(1);
-    ASSERT_GT(autoFitWidth, 0);
-    ASSERT_LT(autoFitWidth, draggedWidth);
-    ASSERT_TRUE(FontManager::instance().applyFontFamily(savedInstalledFamily, qApp)); settle();
-    EXPECT_EQ(table->columnWidth(1), autoFitWidth);
-    auto* asset = dock.findChild<QComboBox*>("screenerAsset");
-    ASSERT_NE(asset, nullptr);
-    asset->setCurrentIndex(1);
-    updateScreener(dock, QJsonArray{QJsonObject{{"symbol", "AAPL"}, {"Name", "Apple"}}},
-                   QStringLiteral("stock"));
-    EXPECT_EQ(table->columnWidth(1), autoFitWidth);
-    asset->setCurrentIndex(0);
-    updateScreener(dock, QJsonArray{QJsonObject{{"symbol", "BTC-USD"}, {"Name", "Bitcoin"}}});
-    EXPECT_EQ(table->columnWidth(1), autoFitWidth);
+    expectLabels(paper, family, -1, true); expectLabels(watch, family);
+    PaperTradingDock newPaper; WatchlistDock newWatch;
+    newPaper.ensurePolished(); newWatch.ensurePolished();
+    expectLabels(newPaper, family, -1, true); expectLabels(newWatch, family);
 }
 
 TEST(FontWidgets, NativeVisualFixtures) {
@@ -429,18 +260,6 @@ TEST(FontWidgets, NativeRetainedFontFixtures) {
     auto* paperTabs = paper.findChild<QTabWidget*>();
     ASSERT_NE(paperTabs, nullptr);
 
-    QWidget screenerFrame;
-    QVBoxLayout screenerLayout(&screenerFrame);
-    screenerLayout.addWidget(new QLabel(QStringLiteral("Synthetic font fixture — Screener rows"), &screenerFrame));
-    ScreenerDock screener(&screenerFrame);
-    screenerLayout.addWidget(&screener);
-    QJsonArray rows;
-    for (int i = 0; i < 30; ++i)
-        rows.append(QJsonObject{{"symbol", QStringLiteral("PAIR%1-USD").arg(i, 2, 10, QLatin1Char('0'))},
-            {"Name", QStringLiteral("Synthetic market pair %1 with a longer name").arg(i)},
-            {"Price", 71023.125 + i}, {"Change %", 2.37}, {"Volume", 18002342.0}});
-    updateScreener(screener, rows);
-
     QWidget watchFrame;
     QVBoxLayout watchLayout(&watchFrame);
     watchLayout.addWidget(new QLabel(QStringLiteral("Synthetic font fixture — Watch rail state"), &watchFrame));
@@ -458,14 +277,12 @@ TEST(FontWidgets, NativeRetainedFontFixtures) {
         const QString prefix = requested.simplified().replace(' ', '-');
         for (int width : {520, 1000}) {
             paperFrame.resize(width, 650); paperFrame.show();
-            screenerFrame.resize(width, 650); screenerFrame.show();
             paperTabs->setCurrentIndex(0);
             ASSERT_TRUE(save(paperFrame, prefix + "-paper-manual-" + QString::number(width)));
             paperTabs->setCurrentIndex(1);
             ASSERT_TRUE(save(paperFrame, prefix + "-paper-algo-" + QString::number(width)));
             paperTabs->setCurrentIndex(2);
             ASSERT_TRUE(save(paperFrame, prefix + "-paper-backtest-" + QString::number(width)));
-            ASSERT_TRUE(save(screenerFrame, prefix + "-screener-" + QString::number(width)));
         }
         watchFrame.resize(280, 620); watchFrame.show();
         ASSERT_TRUE(save(watchFrame, prefix + "-watch-280"));

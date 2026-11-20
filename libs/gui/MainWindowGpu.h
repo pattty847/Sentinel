@@ -33,7 +33,6 @@ class StatusBar;
 class SecFilingDock;
 class CopenetFeedDock;
 class WatchlistDock;
-class ScreenerDock;
 class StockChartDock;
 class OrderBookDock;
 class PaperTradingDock;
@@ -79,7 +78,7 @@ private slots:
     void onSubscribe();
     void onConnectionStatusChanged(bool connected);
     void resetLayoutToDefault();
-    // Shared routing slot for screener and watchlist symbol selections.
+    // Routing slot for watchlist symbol selections.
     void onAssetSymbolSelected(const QString& symbol, const QString& assetType);
 
 protected:
@@ -151,7 +150,6 @@ private:
     SecFilingDock* m_secDock = nullptr;
     CopenetFeedDock* m_copenetDock = nullptr;
     WatchlistDock* m_watchlistDock = nullptr;
-    ScreenerDock* m_screenerDock = nullptr;
     StockChartDock* m_stockChartDock = nullptr;
     OrderBookDock* m_orderBookDock = nullptr;
     PaperTradingDock* m_paperTradingDock = nullptr;

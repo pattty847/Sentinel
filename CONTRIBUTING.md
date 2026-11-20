@@ -133,7 +133,7 @@ Look before you claim a visual or performance result. The GUI Agent API (state, 
 screenshots) is in [docs/AGENT_API.md](docs/AGENT_API.md).
 
 - Run an isolated GUI: the GUI host (`scripts/dev/gui-host.py` with the client `scripts/dev/gui-shot.sh`), or launch `sentinel-gui` with `--agent-host <scratch dir>`, its own `--api-port` and its own scratch directory. Headless Linux: `scripts/dev/cloud-gui.sh`.
-- Allowed targets: `window`, `heatmap`, a retained dock ID (`orderBook`, `watchlist`, `screener`, `stockChart`, `paperTrading`, `sec`, `copenet`, `telemetry`), `statusBar`, `toolbar`, `chartmenu`, `settings[:Tab]`. Show or focus a hidden dock through the dock API first.
+- Allowed targets: `window`, `heatmap`, a retained dock ID (`orderBook`, `watchlist`, `stockChart`, `paperTrading`, `sec`, `copenet`, `telemetry`), `statusBar`, `toolbar`, `chartmenu`, `settings[:Tab]`. Show or focus a hidden dock through the dock API first.
 - Never use `target=main`: it captures whatever window covers the GUI, including other apps' private content. If any shot shows something that is not Sentinel, delete it at once and report it. This includes `scripts/dev/cloud-gui.sh`: pass `window` explicitly, because its `shot` defaults to `main`.
 - Never run the GUI binary with `--help` (it starts a full GUI).
 - Do not add a native-format `QSettings("org","app")` to the GUI: use `QSettings(QSettings::defaultFormat(), QSettings::UserScope, "org", "app")` (a test enforces it).
