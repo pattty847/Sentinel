@@ -607,8 +607,14 @@ TEST_F(FlowStoreTest, TornStatePreservesRevisionHintAndScaleVersionRebuilds) {
     path += ".state";
     QFile file(QString::fromStdString(path.string()));
     ASSERT_TRUE(file.open(QIODevice::ReadWrite));
+    // Flip the last byte (the SHA-256 tail) rather than overwrite it: the digest covers
+    // journal mtimes, so a fixed replacement byte equals the original 1 run in 256 and
+    // leaves the sidecar intact.
     ASSERT_TRUE(file.seek(file.size() - 1));
-    ASSERT_EQ(file.write("x", 1), 1);
+    const char last = file.read(1).at(0);
+    ASSERT_TRUE(file.seek(file.size() - 1));
+    const char flipped = char(last ^ 1);
+    ASSERT_EQ(file.write(&flipped, 1), 1);
     file.close();
     FlowStore repaired(options());
     ASSERT_EQ(repaired.runPass().built, 2);
