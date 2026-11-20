@@ -788,18 +788,19 @@ TEST_F(FlowStoreTest, FirstJournalAt0453LeavesLeadingClosedHoursUnrecorded) {
     for (const auto& range : leading.ranges) EXPECT_EQ(range.status, "unrecorded");
     EXPECT_EQ(store.window("BTC-USD", day + 4 * Hour, day + 5 * Hour).ranges.front().status, "complete");
 }
-TEST_F(FlowStoreTest, LeadingHourProofRequiresAbsentPreviousDayAndStrictReceiveTail) {
+TEST_F(FlowStoreTest, LeadingHourProofRequiresAbsentPreviousDay) {
     Journal j(journal);
-    j.snapshot(-20 * Hour + Minute); j.close(); // 04:01, exactly one tail after 04:00.
+    j.snapshot(-20 * Hour + Minute); j.close(); // First segment opens at 04:01.
     through = 0;
     FlowStore store(options());
     ASSERT_EQ(store.runPass().failed, 0u);
     constexpr auto day = Epoch - 24 * Hour;
-    EXPECT_EQ(store.window("BTC-USD", day + 3 * Hour, day + 4 * Hour).ranges.front().status, "building");
+    EXPECT_EQ(store.window("BTC-USD", day + 3 * Hour, day + 4 * Hour).ranges.front().status, "unrecorded");
     EXPECT_EQ(store.window("BTC-USD", day + 2 * Hour, day + 3 * Hour).ranges.front().status, "unrecorded");
     Journal previous(journal);
     previous.snapshot(-25 * Hour); previous.close();
     ASSERT_EQ(store.runPass().failed, 0u);
+    EXPECT_EQ(store.window("BTC-USD", day + 3 * Hour, day + 4 * Hour).ranges.front().status, "building");
     EXPECT_EQ(store.window("BTC-USD", day + 2 * Hour, day + 3 * Hour).ranges.front().status, "building");
 }
 TEST_F(FlowStoreTest, MissingPreviouslyInventoriedProductDirectoryWithdrawsProof) {

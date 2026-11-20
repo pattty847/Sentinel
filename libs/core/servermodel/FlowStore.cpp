@@ -798,10 +798,10 @@ FlowStore::SourceState FlowStore::sourceState(const std::string &symbol, int64_t
     const auto known = sourceDays_.find(symbol);
     if (known == sourceDays_.end() || day >= sourceKnownBeforeDay_.at(symbol)) return SourceState::Unknown;
     if (const auto first = known->second.find(day); first != known->second.end()) {
-        // A leading hour cannot be filled by a later first segment. Require an
-        // absent previous day too, so older replay/warmup sources stay possible.
+        // On the first journal day, hours ending at or before the first segment opens
+        // are unrecorded. An earlier day's segment still permits warmup replay.
         const auto hourEnd = ((to - 1) / Hour + 1) * Hour;
-        if (!known->second.contains(day - Day) && hourEnd + TradeTail < first->second)
+        if (!known->second.contains(day - Day) && hourEnd <= first->second)
             return SourceState::Absent;
         return SourceState::Present;
     }
@@ -1132,17 +1132,15 @@ FlowStore::Reply FlowStore::buildWindow(const std::string &symbol, int64_t from,
             std::lock_guard lock(catalogMutex_);
             hmcPaths_[symbol] = grids;
         }
-        const auto firstJournalMs = catalog->files().front().header.at("opened_system_ns").get<int64_t>() / 1'000'000;
         for (auto first = from; first < to;) {
             const auto day = dayFloor(first), end = std::min(to, day + Day);
             const auto index = indexFor(symbol, day);
             if (!index.file.present && !index.state.present && sourceState(symbol, first, end) == SourceState::Absent) {
-                // The first journal day has no proven prefix for 1 s replay.
-                // A later segment cannot prove that its leading seconds had no trades.
-                reply.ranges.push_back({first, end, day == dayFloor(firstJournalMs) ? "partial" : "unrecorded", {}});
+                reply.ranges.push_back({first, end, "unrecorded", {}});
                 first = end;
                 continue;
             }
+            const auto firstJournalMs = catalog->files().front().header.at("opened_system_ns").get<int64_t>() / 1'000'000;
             if (firstJournalMs >= end) {
                 reply.ranges.push_back({first, end, "partial", {}});
                 first = end;
