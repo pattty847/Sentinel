@@ -22,8 +22,10 @@
 #include <QJsonObject>
 #include <QObject>
 #include <QPointer>
+#include <QString>
 #include <functional>
 #include <optional>
+#include <string>
 #include <utility>
 
 class UnifiedGridRenderer;
@@ -111,6 +113,9 @@ private:
     double m_shownScale = 0;
     bool m_shownManual = false;
     bool m_sensitivityContextUpdating = false;
+    // The layer's symbol as a QString for PriceUnits (tickSelectorState runs on view changes).
+    mutable std::string m_unitSymbol;
+    mutable QString m_unitSymbolText;
     struct AppliedLadder {
         bool showLadder = false;
         int ladderWidthPx = 0;

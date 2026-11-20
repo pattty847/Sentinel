@@ -274,14 +274,22 @@ void HeatmapGpuLayer::setTone(PaletteTone tone) {
 void HeatmapGpuLayer::setTickMemory(const ManualTickMemory &memory) {
     tickMemory_ = memory;
     invalidateTickProposal();
-    restoreTick();
+    // Same symbol and timeframe: a Manual fallback already resolved to the drawn
+    // tick stays locked unless the new memory names a tick for them.
+    const bool keepResolved = manualMode_ && manualFallback_ && manualFallbackResolved_ &&
+                              !tickMemory_.get(symbol_, tfMs_);
+    if (!keepResolved) restoreTick();
     noteLimits();
 }
 
-void HeatmapGpuLayer::refreshStyle() {
+HeatmapGpuLayer::SensitivityRange HeatmapGpuLayer::drawnSensitivity() const {
     const double fallbackScale = settings_.sensitivityReady ? 1.0 : displayScale_.floor / recording::SizeScale{}.floor;
-    const auto window = codeWindow(settings_.sensitivityMin * fallbackScale, settings_.sensitivityMax * fallbackScale,
-                                   displayScale_.floor, displayScale_.codesPerOctave);
+    return {settings_.sensitivityMin * fallbackScale, settings_.sensitivityMax * fallbackScale};
+}
+
+void HeatmapGpuLayer::refreshStyle() {
+    const auto drawn = drawnSensitivity();
+    const auto window = codeWindow(drawn.min, drawn.max, displayScale_.floor, displayScale_.codesPerOctave);
     style_.codeFloor = window.floor;
     style_.codeRange = window.range;
     style_.opacity = float(std::clamp(settings_.opacity, 0.0, 1.0));

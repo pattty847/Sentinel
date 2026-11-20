@@ -494,14 +494,19 @@ bool SpanSourceCache::request(SpanSourceInput input, int priority, size_t reserv
             s.reservedBytes -= job->reserved;
             s.dropRefs(job->keys);
             // Cancellation removes waiters, not useful completed work. A worker
-            // that finished before observing the flag still warms the shared cache.
-            if (build) {
+            // that finished before observing the flag still warms the shared cache,
+            // unless a replacement for its key finished first: then it is redundant,
+            // and must not bring back a CPU image a node has already uploaded.
+            const auto held = s.live.find(key);
+            const bool superseded = job->cancelled.load(std::memory_order_relaxed) &&
+                                    (s.uploaded.contains(key) || (held != s.live.end() && !held->second.expired()));
+            if (build && !superseded) {
                 s.uploaded.erase(key); // a new image (a rebuild after a loss)
                 s.lru.insert(key, build, build->bytes);
                 s.live[key] = build;
                 s.hints[{key.span, key.source}] = {build->bytes, build->uploadBytes};
                 if (s.hints.size() > 16384) s.hints.clear(); // size hints only; rebuilt on demand
-            } else if (!job->cancelled.load(std::memory_order_relaxed)) {
+            } else if (!build && !job->cancelled.load(std::memory_order_relaxed)) {
                 ++s.stats.failures;
             }
             // Keep the job discoverable during delivery: a callback may remove
