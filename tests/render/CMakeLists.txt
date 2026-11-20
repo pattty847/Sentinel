@@ -444,6 +444,10 @@ target_include_directories(test_LadderBadges PRIVATE ${CMAKE_SOURCE_DIR}/libs/gu
 target_link_libraries(test_LadderBadges PRIVATE GTest::gtest sentinel_gui_lib sentinel_lab_lib Qt6::Quick)
 add_test(NAME LadderBadgeTests COMMAND test_LadderBadges)
 set_tests_properties(LadderBadgeTests PROPERTIES LABELS "render;ui" TIMEOUT 300)
+# FM-167: every test main() using lab::OffscreenQuick selects the scene graph first.
+add_test(NAME QuickSceneGraphMainGuard
+    COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/check_quick_scene_graph_main.cmake)
+set_tests_properties(QuickSceneGraphMainGuard PROPERTIES LABELS "render;fast;lint")
 
 add_executable(test_LayerVisibility test_layer_visibility.cpp)
 target_include_directories(test_LayerVisibility PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
