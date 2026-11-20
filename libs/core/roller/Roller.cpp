@@ -599,16 +599,21 @@ json roll(const RollOptions& o) {
             if (o.afterFenceForTest) o.afterFenceForTest();
             const auto stats = recorder->stats();
             if (stats.diskErrors) throw std::runtime_error("roller recorder failed; checkpoint not advanced");
-            // An open UTC day has no valid .shr files. Its live minute writer
-            // must not depend on the availability of the derived store.
+            // Only closed UTC days need derived-file invalidation. A replay
+            // that re-offers stored columns may repeat it: columnsWritten
+            // counts offers, and removing the same files again is safe.
             if (stats.columnsWritten != checkpointColumns && day + Day <= QDateTime::currentMSecsSinceEpoch()) {
-                if (!rollupRoot) {
-                    auto root = recording::rollupRootFor(o.rollupRoot.string(), o.outputRoot);
-                    if (root.empty())
-                        throw std::runtime_error("roller rollup root must be disjoint from the HMC2 root");
-                    rollupRoot = std::move(root);
+                try {
+                    if (!rollupRoot)
+                        rollupRoot = recording::rollupRootFor(o.rollupRoot.string(), o.outputRoot);
+                    // A refused root means there is no usable derived store.
+                    if (!rollupRoot->empty()) invalidateRollups(*rollupRoot, o.product, day);
+                } catch (const std::exception& e) {
+                    if (!o.rollupInvalidationBestEffort) throw;
+                    if (o.rollupInvalidationFailuresCounter) o.rollupInvalidationFailuresCounter->inc();
+                    sLog_Error("Roller rollup invalidation failed product=" << o.product
+                               << " dayMs=" << day << " reason=" << e.what());
                 }
-                invalidateRollups(*rollupRoot, o.product, day);
             }
             const bool metadataChanged = gridVenue == Venue::Kalshi && !completedCheckpoint && cp["days"].contains(key) &&
                 cp["days"].value(key,json::object()).value("instrumentHistory",json::array()) != instrumentHistory;

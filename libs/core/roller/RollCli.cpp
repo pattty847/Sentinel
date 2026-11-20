@@ -69,12 +69,19 @@ int rollMain(int argc,char** argv) {
         // A product-scoped repair of the served tree must invalidate the same
         // derived store as the server. Unrelated scratch outputs use their own
         // sibling store, never the standard config's live rollup directory.
-        if (foundServerConfig && !effective.rollerShadow.outputRoot.empty() &&
-            std::filesystem::weakly_canonical(o.outputRoot) ==
-                std::filesystem::weakly_canonical(effective.rollerShadow.outputRoot))
-            o.rollupRoot = effective.recording.rollupDir;
-        if (config && config["recording"] && config["recording"]["rollup_dir"])
-            o.rollupRoot = config["recording"]["rollup_dir"].as<std::string>();
+        std::string servedRoot;
+        if (foundServerConfig && effective.recording.source == "roller")
+            servedRoot = effective.rollerShadow.outputRoot;
+        else if (!foundServerConfig && config && config["recording"] &&
+                 config["recording"]["source"] && config["recording"]["source"].as<std::string>() == "roller" &&
+                 config["roller_shadow"] && config["roller_shadow"]["dir"])
+            servedRoot = config["roller_shadow"]["dir"].as<std::string>();
+        if (!servedRoot.empty() && std::filesystem::weakly_canonical(o.outputRoot) ==
+                                     std::filesystem::weakly_canonical(servedRoot)) {
+            if (foundServerConfig) o.rollupRoot = effective.recording.rollupDir;
+            if (config && config["recording"] && config["recording"]["rollup_dir"])
+                o.rollupRoot = config["recording"]["rollup_dir"].as<std::string>();
+        }
         for (const auto& p : products) validateOutputProduct(o.outputRoot, p);
         QTemporaryDir scratch;
         if (rebuild) {

@@ -7,6 +7,7 @@
 #include "servermodel/ChunkService.hpp"
 #include "servermodel/RollupStore.hpp"
 #include "roller/Roller.hpp"
+#include "metrics/MetricsRegistry.hpp"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QProcess>
@@ -847,6 +848,40 @@ TEST_F(RollerRollupTest, CliBackfillUsesConfiguredRollupDirectory) {
     EXPECT_EQ(store.runPass().built, 2u);
 }
 
+TEST_F(RollerRollupTest, CliScratchOutputNeverDeletesConfiguredServedRollups) {
+    RollupStore served(storeOptions());
+    ASSERT_EQ(served.runPass().built, 2u);
+    auto scratchPrefix = rollOptions();
+    scratchPrefix.outputRoot = root() / "scratch-hmc2";
+    scratchPrefix.toMs = start + minute;
+    sentinel::roller::roll(scratchPrefix);
+    auto scratchOptions = storeOptions();
+    scratchOptions.hmc2Root = scratchPrefix.outputRoot;
+    scratchOptions.root = rollupRootFor("", scratchOptions.hmc2Root);
+    RollupStore scratch(scratchOptions);
+    ASSERT_EQ(scratch.runPass().built, 2u);
+    const auto previous = fs::current_path();
+    struct Restore { fs::path path; ~Restore() { fs::current_path(path); } } restore{previous};
+    fs::create_directories(root() / "config");
+    const auto config = root() / "repair.yaml";
+    std::ofstream(config)
+        << "recording:\n  source: roller\n  dir: '" << (root() / "unused-primary").string()
+        << "'\n  rollup_dir: '" << served.root().string()
+        << "'\nroller_shadow:\n  dir: '" << (root() / "hmc2").string() << "'\n";
+    fs::current_path(root());
+    std::vector<std::string> args{"sentinel-roll", (root() / "raw").string(), scratchPrefix.outputRoot.string(),
+        "--products", "BTC-USD", "--from", "2020-01-01", "--to", "2020-01-01T00:04:00Z",
+        "--config", config.string(), "--product-lease", "--no-anchors"};
+    std::vector<char*> argv;
+    for (auto& arg : args) argv.push_back(arg.data());
+    ASSERT_EQ(sentinel::roller::rollMain(int(argv.size()), argv.data()), 0);
+    for (const auto* layer : {"near", "deep"})
+        for (const auto level : {hour, day}) {
+            EXPECT_TRUE(fs::exists(served.filePath("BTC-USD", layer, level, start)));
+            EXPECT_FALSE(fs::exists(scratch.filePath("BTC-USD", layer, level, start)));
+        }
+}
+
 TEST_F(RollerRollupTest, LinkedRollupDirectoryFailsWithoutAdvancingCheckpointAndRetries) {
     RollupStore store(storeOptions());
     ASSERT_EQ(store.runPass().built, 2u);
@@ -860,7 +895,7 @@ TEST_F(RollerRollupTest, LinkedRollupDirectoryFailsWithoutAdvancingCheckpointAnd
         return std::string(std::istreambuf_iterator<char>(in), {});
     };
     const auto before = bytes(checkpoint);
-    auto o = rollOptions();
+    auto o = rollOptions(); // offline remains fail-closed
     EXPECT_THROW(sentinel::roller::roll(o), std::runtime_error);
     EXPECT_EQ(bytes(checkpoint), before);
     EXPECT_TRUE(fs::exists(outside / "3600000" / "2020-01-01.shr"));
@@ -870,6 +905,53 @@ TEST_F(RollerRollupTest, LinkedRollupDirectoryFailsWithoutAdvancingCheckpointAnd
     EXPECT_NO_THROW(sentinel::roller::roll(o));
     EXPECT_FALSE(fs::exists(store.filePath("BTC-USD", "near", hour, start)));
     EXPECT_FALSE(fs::exists(store.filePath("BTC-USD", "deep", day, start)));
+}
+
+TEST_F(RollerRollupTest, LiveLinkedDirectoryKeepsCheckpointAndComposesFreshMinutes) {
+    RollupStore store(storeOptions());
+    ASSERT_EQ(store.runPass().built, 2u);
+    Hmc2Reader reader(root() / "hmc2");
+    const ChunkKey key{"BTC-USD", "hmc2.near", hour, start};
+    const auto old = store.serve(key, reader);
+    ASSERT_TRUE(old.wire);
+    const auto near = store.root() / "BTC-USD" / "near";
+    const auto outside = root() / "outside";
+    fs::rename(near, outside);
+    fs::create_directory_symlink(outside, near);
+    const auto checkpoint = root() / "hmc2" / "BTC-USD" / "roller.json";
+    const auto bytes = [](const fs::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const auto before = bytes(checkpoint);
+    sentinel::metrics::MetricsRegistry registry;
+    auto& failures = registry.counter("sentinel_roller_rollup_invalidation_failures_total", "", {{"product", "BTC-USD"}});
+    auto o = rollOptions();
+    o.productWriterLease = true;
+    o.nextRecord = [](sentinel::roller::JournalReader& source, sentinel::roller::JournalRecord& input) {
+        return source.next(input);
+    };
+    o.rollupInvalidationBestEffort = true;
+    o.rollupInvalidationFailuresCounter = &failures;
+    EXPECT_NO_THROW(sentinel::roller::roll(o));
+    EXPECT_NE(bytes(checkpoint), before);
+    EXPECT_GT(failures.value(), 0u);
+    EXPECT_NE(registry.render().find("sentinel_roller_rollup_invalidation_failures_total{product=\"BTC-USD\"} "), std::string::npos);
+    EXPECT_TRUE(fs::exists(outside / "3600000" / "2020-01-01.shr"));
+    const auto reply = store.serve(key, reader);
+    ASSERT_TRUE(reply.wire);
+    EXPECT_TRUE(reply.fallback);
+    EXPECT_NE(*reply.wire, *old.wire);
+    fs::remove(near);
+    fs::rename(outside, near);
+    EXPECT_EQ(store.runPass().built, 2u);
+}
+
+TEST_F(RollerRollupTest, RefusedRollupRootMeansNoDerivedStore) {
+    auto o = rollOptions();
+    o.rollupRoot = o.outputRoot;
+    EXPECT_NO_THROW(sentinel::roller::roll(o));
+    EXPECT_EQ(Hmc2Store::readRange(o.outputRoot, "BTC-USD", "near", minute, start, start + 4 * minute).size(), 4u);
 }
 
 TEST_F(RollerRollupTest, ShadowStyleBackfillUsesCustomRootAndDryRunDoesNotDelete) {

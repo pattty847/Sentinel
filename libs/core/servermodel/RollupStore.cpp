@@ -254,8 +254,8 @@ std::optional<std::vector<uint8_t>> readRollupFrame(const std::filesystem::path&
 }
 
 namespace {
-// Serving checks only the requested days' metadata. Do not stat every minute
-// file in a multi-year series on each chunk request.
+// Serving still enumerates the layer directory, but stats only minute files
+// in the requested day range instead of every file in a multi-year series.
 std::map<int64_t, MinuteDay> scanMinuteFingerprints(const std::filesystem::path& hmc2Root,
     const std::string& symbol, const std::string& layer, int64_t from, int64_t to) {
     std::map<int64_t, std::vector<std::tuple<std::string, uint64_t, int64_t>>> files;
