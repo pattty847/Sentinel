@@ -651,8 +651,28 @@ The normalized `size_increment` must be a positive integer multiple of 0.01,
 validated as an exact decimal without converting it to a storage size floor.
 Values such as 0.02, 1 and 1.23 are accepted; 0.001 and 0.015 are refused with a
 `Kalshi grid:` error naming the 0.01 limit.
-A new unrepresentable header stops replay before applying its first record,
-leaving previously committed columns valid.
+Markets quoting finer than 0.001 are refused by design. Real markets with the
+`center_centi_edge_centi_cent` structure can quote in 0.0001 steps; they are not
+supported. This refusal is permanent for that product under the current grid
+policy: retrying cannot make its unsupported structure representable, and
+support requires a grid-policy change.
+
+An unrepresentable header or off-grid level stops replay before admitting the
+offending record. Before raising the error, the roller drains accepted work and
+runs its normal checkpoint fence, committing the complete prefix already past
+the recorder's lateness cutoff. It does not tick at the rejected record, invent
+time at EOF, or commit the open minute. Retrying reproduces the same committed
+prefix and error. For example, an accepted tick at 00:05:40 followed by refusal
+at 00:05:50 commits through 00:05:00 (last minute 00:04), never minute 00:05.
+
+Records received at or after the next UTC midnight are not validated or applied
+to this day's book. Feed lifecycle and gap handling still apply, and actual
+receive timestamps advance the recorder clock until the prior day's lateness
+tail commits; policy and price refusal
+belong to the next day's roll. A record at 00:00:01 alone is still short of the
+default two-second lateness cutoff; a later record at 00:00:03 proves midnight
+can commit. No following-day levels or instrument-history entries enter the
+previous day.
 
 Band schedules and `size_increment` are viewer metadata. Any representable
 instrument change, within or between UTC days, preserves the roller config
@@ -666,8 +686,9 @@ bytes remain unchanged.
 Each Kalshi `roller.json` day entry and stdout day report includes `venue` and
 `instrumentHistory`: an ordered list of `{fromMs, instrument}` entries with
 normalized decimal strings. The first entry describes the policy at the start
-of replay; a policy warmed up before midnight starts at midnight. Each later
-entry uses the receive time of the first record carrying the changed policy.
+of replay; a policy warmed up before midnight starts at midnight. For viewers,
+the first entry is in force from the start of the day even when its `fromMs`
+is later than day start. Each later entry uses the receive time of the first record carrying the changed policy.
 Changes before the day replace its initial warmup policy; following-day tail
 records do not enter the preceding day's history. Equivalent decimal spellings
 such as `0.01` and `0.0100` do not add an entry. Anchors carry this history and
@@ -695,7 +716,9 @@ the current normalized instrument block and instrument history. Their envelope i
 reject the envelope version. Coinbase envelopes and payload bytes stay version 1,
 with their required positive reference mid and Coinbase increment metadata.
 Venue participates in anchor identity; the actual journal cursor's venue and
-recorder grid are checked before state installation; any representable instrument difference is compatible. Missing or rejected anchors
+instrument representability are checked before state installation. The Kalshi
+grid is constant, so any representable instrument difference is compatible.
+Missing or rejected anchors
 fall back to journal snapshot replay. Checkpoint fences, lateness, commit bounds,
 and crash recovery otherwise use the shared driver unchanged.
 

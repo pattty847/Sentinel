@@ -176,7 +176,7 @@ TEST(KalshiRecovery, NoCheckpointAnchorAcceptsBandsAndRejectsVenue) {
         ASSERT_FALSE(fs::exists(o.outputRoot / Product / "roller.json"));
         const auto report = roll(o);
         if (coinbase) {
-            EXPECT_EQ(report["days"][0]["anchorRejection"],"anchor venue/instrument mismatch") << report;
+            EXPECT_EQ(report["days"][0]["anchorRejection"],"anchor venue mismatch") << report;
             EXPECT_FALSE(report["days"][0].contains("anchorBoundaryMs"));
         } else {
             EXPECT_FALSE(report["days"][0].contains("anchorRejection")) << report;
@@ -357,5 +357,127 @@ TEST(KalshiRecovery, OffGridSnapshotAndDeltaStopBeforeQuantization) {
         }
         EXPECT_EQ(files(o.outputRoot),prefix);
         EXPECT_EQ(read(o.outputRoot / Product / "roller.json"),checkpoint);
+    }
+}
+
+// The first following-day record is below the two-second lateness fence;
+// the second proves midnight committed without inventing an EOF tick.
+TEST(KalshiRecovery, FollowingDayRefusalDoesNotStrandPreviousDay) {
+    for (const auto* failure : {"header","snapshot","delta"}) {
+        SCOPED_TRACE(failure);
+        const bool badHeader = std::string_view(failure) == "header";
+        const bool delta = std::string_view(failure) == "delta";
+        QTemporaryDir temp; const fs::path root = temp.path().toStdString();
+        const auto midnight = Epoch + Day, start = midnight - 10 * Minute;
+        {
+            capture::Writer writer(config(root / "raw"),header(spec()));
+            append(writer,start,snapshot());
+            for (auto t = start + 20'000; t < midnight; t += 20'000)
+                append(writer,t,json::object(),capture::Kind::CaptureStarted);
+            if (delta) {
+                append(writer,midnight + 1000,{{"type","orderbook_delta"},{"sid",1},{"seq",2},
+                    {"msg",{{"market_ticker",Product},{"price_dollars","0.0005"},{"delta_fp","1.00"},{"side","yes"}}}});
+                append(writer,midnight + 3000,json::object(),capture::Kind::CaptureStarted);
+            }
+            writer.close();
+        }
+        if (!delta) {
+            capture::Writer writer(config(root / "raw"),header(spec(badHeader ? "0.0005" : "0.01")));
+            auto bad = snapshot();
+            if (!badHeader) bad["msg"]["yes_dollars_fp"] = json::array({{"0.0005","1.00"}});
+            append(writer,midnight + 1000,bad);
+            append(writer,midnight + 3000,json::object(),capture::Kind::CaptureStarted);
+            writer.close();
+        }
+        RollOptions o{root / "raw",root / "out",Product,start,midnight};
+        int64_t applied = 0;
+        o.onApplied = [&](const JournalRecord& r) { applied = r.record.time.systemNs / 1'000'000; };
+        o.onCommitted = [&](int64_t through) {
+            if (through == midnight) EXPECT_GE(applied,midnight + 3000);
+        };
+        json report;
+        try { report = roll(o); }
+        catch (const std::exception& e) { ADD_FAILURE() << e.what(); continue; }
+        EXPECT_EQ(report["days"][0]["committedThroughMs"],midnight);
+        const auto prefix = files(o.outputRoot);
+        ASSERT_EQ(prefix.size(),3u); // both minute layers and the deep hour
+        for (const auto* layer : {"near","deep"}) {
+            const auto rows = recording::Hmc2Store::readRange(o.outputRoot,Product,layer,Minute,start,midnight);
+            ASSERT_EQ(rows.size(),10u);
+            EXPECT_EQ(rows.back().bucketStartMs,midnight - Minute);
+            // A new run ends observation at the last good receive (23:59:40).
+            // A same-run delta keeps the preceding minute fully observed.
+            EXPECT_EQ(rows.back().observedMs,delta ? Minute : 40'000);
+        }
+        const auto checkpoint = read(o.outputRoot / Product / "roller.json");
+        EXPECT_NO_THROW(roll(o)); EXPECT_EQ(files(o.outputRoot),prefix);
+        EXPECT_EQ(read(o.outputRoot / Product / "roller.json"),checkpoint);
+        o.fromMs = midnight; o.toMs = midnight + Minute; o.outputRoot = root / "next-day";
+        try { roll(o); FAIL() << "accepted following-day refusal"; }
+        catch (const std::exception& e) {
+            EXPECT_EQ(std::string(e.what()),badHeader ?
+                "Kalshi grid: band price/step must be an integer multiple of 0.001" :
+                "Kalshi grid: price 0.0005 is finer than 0.001");
+        }
+        EXPECT_TRUE(files(o.outputRoot).empty());
+        EXPECT_FALSE(fs::exists(o.outputRoot / Product / "roller.json"));
+    }
+}
+
+TEST(KalshiRecovery, FatalRefusalFencesCompletePrefixAndRepeatsIdentically) {
+    for (const auto* failure : {"header","snapshot","delta"}) for (bool anchors : {false,true}) {
+        SCOPED_TRACE(failure);
+        SCOPED_TRACE(anchors);
+        QTemporaryDir temp; const fs::path root = temp.path().toStdString();
+        const auto stop = Epoch + 5 * Minute + 50'000;
+        {
+            capture::Writer writer(config(root / "raw"),header(spec()));
+            append(writer,Epoch,snapshot());
+            for (auto t = Epoch + 20'000; t < stop; t += 20'000)
+                append(writer,t,json::object(),capture::Kind::CaptureStarted);
+            if (std::string_view(failure) != "header") {
+                auto bad = snapshot(); bad["seq"] = 2;
+                bad["msg"]["yes_dollars_fp"] = json::array({{"0.0005","1.00"}});
+                if (std::string_view(failure) == "delta") bad = {{"type","orderbook_delta"},{"sid",1},{"seq",2},
+                    {"msg",{{"market_ticker",Product},{"price_dollars","0.0005"},{"delta_fp","1.00"},{"side","yes"}}}};
+                append(writer,stop,bad); ticks(writer,6,10);
+            }
+            writer.close();
+        }
+        if (std::string_view(failure) == "header") {
+            capture::Writer writer(config(root / "raw"),header(spec("0.0005")));
+            append(writer,stop,json::object(),capture::Kind::CaptureStarted); ticks(writer,6,10); writer.close();
+        }
+        RollOptions o{root / "raw",root / "out",Product,Epoch,Epoch + 10 * Minute};
+        o.useAnchors = o.writeAnchors = anchors;
+        int64_t lastApplied = 0;
+        o.onApplied = [&](const JournalRecord& r) { lastApplied = r.record.time.systemNs / 1'000'000; };
+        const auto expectStop = [&] {
+            try { roll(o); FAIL() << "accepted refused record"; }
+            catch (const std::exception& e) {
+                EXPECT_EQ(std::string(e.what()),std::string_view(failure) == "header" ?
+                    "Kalshi grid: band price/step must be an integer multiple of 0.001" :
+                    "Kalshi grid: price 0.0005 is finer than 0.001");
+            }
+        };
+        expectStop();
+        EXPECT_EQ(lastApplied,Epoch + 5 * Minute + 40'000);
+        const auto checkpoint = read(o.outputRoot / Product / "roller.json");
+        // 00:04 is complete and past lateness at the accepted 00:05:40 tick.
+        // 00:05 is still open when 00:05:50 is refused and must not be written.
+        EXPECT_EQ(checkpoint["committedThroughMs"],Epoch + 5 * Minute);
+        EXPECT_EQ(checkpoint["days"][std::to_string(Epoch)]["receiveThroughMs"],lastApplied);
+        for (const auto* layer : {"near","deep"}) {
+            const auto rows = recording::Hmc2Store::readRange(o.outputRoot,Product,layer,Minute,Epoch,o.toMs);
+            ASSERT_EQ(rows.size(),5u);
+            EXPECT_EQ(rows.back().bucketStartMs,Epoch + 4 * Minute);
+            EXPECT_EQ(rows.back().observedMs,Minute);
+        }
+        const auto prefix = files(o.outputRoot);
+        expectStop(); EXPECT_EQ(files(o.outputRoot),prefix);
+        EXPECT_EQ(read(o.outputRoot / Product / "roller.json"),checkpoint);
+        auto control = o; control.outputRoot = root / "control"; control.toMs = Epoch + 5 * Minute;
+        control.onApplied = {}; EXPECT_NO_THROW(roll(control));
+        EXPECT_EQ(files(control.outputRoot),prefix);
     }
 }

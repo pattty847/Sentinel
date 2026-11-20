@@ -234,8 +234,17 @@ json roll(const RollOptions& o) {
                 writeCheckpoint(cpPath, cp);
             }
         };
+        // Installed before replay starts. A rejected Kalshi batch must fence
+        // accepted work without admitting the batch or inventing a tick.
+        std::function<void()> kalshiStopFence;
+        bool kalshiDayTail = false;
+        const auto checkPrices = [&](const std::vector<recording::Level>& levels) {
+            try { checkKalshiPrices(levels); }
+            catch (...) { kalshiStopFence(); throw; }
+        };
         feed.onSnapshot = [&](int64_t exchange, int64_t local, std::vector<recording::Level> levels) {
-            if (input.venue == Venue::Kalshi) checkKalshiPrices(levels);
+            if (kalshiDayTail) return;
+            if (input.venue == Venue::Kalshi) checkPrices(levels);
             if (!o.anchorBook) book.snapshot(exchange,levels);
             if (!gridReady) {
                 Grid grid;
@@ -274,7 +283,8 @@ json roll(const RollOptions& o) {
             if (recorder) recorder->onSnapshotAt(o.product,exchange,local,std::move(levels));
         };
         feed.onUpdates = [&](int64_t t,int64_t local,std::vector<recording::Level> levels) {
-            if (input.venue == Venue::Kalshi) checkKalshiPrices(levels);
+            if (kalshiDayTail) return;
+            if (input.venue == Venue::Kalshi) checkPrices(levels);
             if (!o.anchorBook) book.apply(t,levels);
             if (recorder) recorder->onUpdatesAt(o.product,t,local,std::move(levels));
         };
@@ -347,11 +357,12 @@ json roll(const RollOptions& o) {
                     throw std::runtime_error("anchor durable position unavailable");
                 if (cursor.venue != a.identity.venue ||
                     (cursor.venue == Venue::Kalshi && (state.at("feed").at("version") != 2 || state.at("feed").at("venue") != "kalshi")))
-                    throw std::runtime_error("anchor venue/instrument mismatch");
+                    throw std::runtime_error("anchor venue mismatch");
                 json candidateHistory = json::array();
                 if (cursor.venue == Venue::Kalshi) {
-                    if (configHash(deriveKalshiGrid(cursor.instrument).config(o.outputRoot)) != expectedHash)
-                        throw std::runtime_error("anchor grid mismatch");
+                    // The grid is constant; validate representability, not
+                    // instrument identity, before installing a candidate.
+                    (void)deriveKalshiGrid(cursor.instrument);
                     candidateHistory = state.at("instrumentHistory");
                     if (!candidateHistory.is_array() || candidateHistory.empty())
                         throw std::runtime_error("anchor instrument history missing");
@@ -360,8 +371,7 @@ json roll(const RollOptions& o) {
                         const auto policy = deriveKalshiGrid(entry.at("instrument"));
                         if (time < day || time >= day + Day ||
                             time > std::max(day,state.at("receiveThroughMs").get<int64_t>()) ||
-                            entry.at("instrument") != policy.instrument ||
-                            configHash(policy.config(o.outputRoot)) != expectedHash)
+                            entry.at("instrument") != policy.instrument)
                             throw std::runtime_error("anchor instrument history invalid");
                     }
                 }
@@ -547,10 +557,26 @@ json roll(const RollOptions& o) {
             savedThrough = through; checkpointColumns = stats.columnsWritten;
             if (o.onCommitted) o.onCommitted(through);
         };
+        kalshiStopFence = fence;
         while ((!recorder || o.nextRecord || savedThrough < end) && (!o.cancelled || !o.cancelled()) &&
                (o.nextRecord ? o.nextRecord(*reader, input) : reader->next(input))) {
             // No synthetic EOF tick: only actual journal records prove elapsed time.
             // Warmup is read in journal order; receipt clock need not be monotonic.
+            const auto local = input.record.time.systemNs / 1'000'000;
+            kalshiDayTail = input.venue == Venue::Kalshi && local >= day + Day;
+            if (kalshiDayTail) {
+                // Keep lifecycle/gap invalidation and actual receive ticks for
+                // the lateness tail, but admit no following-day policy or levels.
+                // No anchor may cache this deliberately incomplete book state.
+                feed.apply(input); applied = input.pos; ++records;
+                receiveThrough = std::max(receiveThrough,local);
+                if (o.onApplied) o.onApplied(input);
+                if (input.record.kind == capture::Kind::Frame) bytes += input.record.payload.size();
+                if (o.afterRecordForTest) o.afterRecordForTest(records);
+                fence();
+                if (!gridReady || savedThrough >= end || (o.dryRun && local >= end + latenessMs)) break;
+                continue;
+            }
             if (recorder && nextBoundary == day && input.record.time.systemNs / 1'000'000 >= day) {
                 // Midnight is the state before today's first record. Its exact
                 // inclusive position may be in yesterday, but resumeAt lives in
@@ -558,20 +584,21 @@ json roll(const RollOptions& o) {
                 // silent interval across midnight without losing its minutes.
                 saveAnchor(day,&input); nextBoundary += Quarter;
             }
+            std::optional<Grid> changedPolicy;
             if (input.venue == Venue::Kalshi && lastInstrumentHeader != input.instrument) {
-                // Validate every new header, even lifecycle records before a
-                // snapshot. Band schedules are metadata, not storage identity.
-                const auto policy = deriveKalshiGrid(input.instrument);
-                const auto local = input.record.time.systemNs / 1'000'000;
-                lastInstrumentHeader = input.instrument;
-                if (local < day + Day) {
-                    gridInstrument = policy.instrument;
-                    if (local < day) instrumentHistory = json::array({{{"fromMs",day},{"instrument",gridInstrument}}});
-                    else if (instrumentHistory.empty() || instrumentHistory.back().at("instrument") != gridInstrument)
-                        instrumentHistory.push_back({{"fromMs",local},{"instrument",gridInstrument}});
-                }
+                // Validate lifecycle headers too; history changes only after
+                // admission, so a refused price cannot enter the saved prefix.
+                try { changedPolicy = deriveKalshiGrid(input.instrument); }
+                catch (...) { fence(); throw; }
             }
             feed.apply(input); applied = input.pos; ++records;
+            if (changedPolicy) {
+                lastInstrumentHeader = input.instrument;
+                gridInstrument = changedPolicy->instrument;
+                if (local < day) instrumentHistory = json::array({{{"fromMs",day},{"instrument",gridInstrument}}});
+                else if (instrumentHistory.empty() || instrumentHistory.back().at("instrument") != gridInstrument)
+                    instrumentHistory.push_back({{"fromMs",local},{"instrument",gridInstrument}});
+            }
             receiveThrough = std::max(receiveThrough,input.record.time.systemNs / 1'000'000);
             if (o.onApplied) o.onApplied(input);
             if (input.record.kind == capture::Kind::Frame) bytes += input.record.payload.size();

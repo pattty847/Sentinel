@@ -24,11 +24,21 @@ def check(pattern):
 
 
 MUTATIONS = [
+    ('following-day admission boundary', 'Roller.cpp', 'kalshiDayTail = input.venue == Venue::Kalshi && local >= day + Day;',
+     'kalshiDayTail = false;', 'KalshiRecovery.FollowingDayRefusalDoesNotStrandPreviousDay'),
+    ('following-day continuity', 'Roller.cpp',
+     'feed.apply(input); applied = input.pos; ++records;\n                receiveThrough',
+     'if (recorder) recorder->onTick(local); applied = input.pos; ++records;\n                receiveThrough',
+     'KalshiRecovery.FollowingDayRefusalDoesNotStrandPreviousDay'),
+    ('fatal header prefix fence', 'Roller.cpp', 'catch (...) { fence(); throw; }',
+     'catch (...) { throw; }', 'KalshiRecovery.FatalRefusalFencesCompletePrefixAndRepeatsIdentically'),
+    ('fatal price prefix fence', 'Roller.cpp', 'catch (...) { kalshiStopFence(); throw; }',
+     'catch (...) { throw; }', 'KalshiRecovery.FatalRefusalFencesCompletePrefixAndRepeatsIdentically'),
     ('changed header representability', 'Roller.cpp', 'if (input.venue == Venue::Kalshi && lastInstrumentHeader != input.instrument)',
      'if (input.venue == Venue::Kalshi && lastInstrumentHeader.is_null())', 'KalshiRecovery.MiddayUnrepresentableInstrumentPreservesPrefix'),
     ('canonical instrument metadata', 'Grid.cpp', 'return normalized;',
      'return instrument;', 'KalshiRecovery.EquivalentDecimalHeadersShareIdentityAndPersistNormalizedInstrument'),
-    ('anchor journal header guard', 'Roller.cpp', 'throw std::runtime_error("anchor venue/instrument mismatch");',
+    ('anchor journal header guard', 'Roller.cpp', 'throw std::runtime_error("anchor venue mismatch");',
      '(void)0;', 'KalshiRecovery.NoCheckpointAnchorAcceptsBandsAndRejectsVenue'),
     ('checkpoint instrument metadata', 'Roller.cpp', 'cp["days"][key]["instrumentHistory"] = instrumentHistory;',
      '', 'KalshiRecovery.EquivalentDecimalHeadersShareIdentityAndPersistNormalizedInstrument'),
