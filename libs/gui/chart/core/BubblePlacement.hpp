@@ -8,6 +8,7 @@
 #include <memory>
 #include <span>
 #include <string_view>
+#include <utility>
 
 namespace chart::bubbles {
 enum class Mode { Individual, Auto, Slot };
@@ -55,6 +56,20 @@ inline bool consecutiveIds(std::string_view a, std::string_view b) {
 inline bool joinsSweep(const Execution& a, const Execution& b) {
     return validExecution(b) && a.timeMs == b.timeMs && a.exchangeNs == b.exchangeNs &&
            a.side == b.side && consecutiveIds(a.id, b.id);
+}
+// Summed notional and base size of the sweep that starts at the valid row rows[i]
+// (rows before `limit` only); leaves i after it.
+template<class Rows> std::pair<double, double> sweepTotals(const Rows& rows, size_t& i, size_t limit) {
+    auto t = rows[i++];
+    double notional = t.price * t.size, size = t.size;
+    for (; i < rows.size() && i < limit; ++i) {
+        const auto next = rows[i];
+        if (!joinsSweep(t, next)) break;
+        notional += next.price * next.size;
+        size += next.size;
+        t = next;
+    }
+    return {notional, size};
 }
 class PlacementMode {
 public:
@@ -133,17 +148,8 @@ public:
         const double cutoff = minimum < 0 ? median : minimum;
         size_t visible = 0;
         for (size_t i = 0; i < rows.size() && i < Capacity && visible < Capacity;) {
-            auto t = rows[i++];
-            if (!validExecution(t)) continue;
-            double n = t.price * t.size, size = t.size;
-            while (i < rows.size() && i < Capacity) {
-                const auto next = rows[i];
-                if (!joinsSweep(t, next)) break;
-                n += next.price * next.size;
-                size += next.size;
-                t = next;
-                ++i;
-            }
+            if (!validExecution(rows[i])) { ++i; continue; }
+            const auto [n, size] = sweepTotals(rows, i, Capacity);
             if (std::isfinite(n) && n > 0 && n >= cutoff && size >= minBaseSize)
                 scratch_[visible++] = n;
         }
