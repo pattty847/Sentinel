@@ -263,7 +263,7 @@ trading:
 |-----|------|---------|---------|
 | `tls.cert_file` | `server_config.yaml` | `certs/sentinel-server.crt` | Server certificate chain (PEM). The stream listener does not start without a loadable certificate and key. |
 | `tls.key_file` | `server_config.yaml` | `certs/sentinel-server.key` | Server private key (PEM). |
-| `client.server.ca_file` | `client_config.yaml` | `certs/sentinel-server.crt` | CA file the client uses to verify the server. If it is empty or cannot be loaded, the client logs a warning and disables peer verification (local dev only). |
+| `client.server.ca_file` | `client_config.yaml` | `certs/sentinel-server.crt` | CA file the client uses to verify the server. If it is empty, missing or cannot be loaded, the client refuses to connect and logs an error naming the configured and resolved path; there is no unverified fallback. |
 
 `ConfigLoader` does not resolve these paths: it copies the string as written. A relative path is therefore opened relative to the process working directory (not the config file's directory), so the default `certs/...` works only when the process starts from the repository root. Use absolute paths when launching from elsewhere. Generate certificates with `certs/gen-certs.sh` (or `gen-certs.ps1` on Windows).
 
