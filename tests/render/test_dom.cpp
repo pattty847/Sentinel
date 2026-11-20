@@ -673,6 +673,7 @@ TEST(DomModel, ExecutionsUseContainingBucketAndGridChangesRebucketTheRawRing) {
 }
 
 TEST(DomModel, ServerQuantisedSnapshotsNeverAdvertiseFalsePrecision) {
+    LearningMode learning; // reads the full aggregation and summary forms
     RemoteGridDataSource source{"127.0.0.1", "1"}; // No network: real production snapshot/delta slots.
     OrderBookDock dock(nullptr, &source);
     dock.resize(650, 600);
@@ -719,6 +720,10 @@ TEST(DomModel, ServerQuantisedSnapshotsNeverAdvertiseFalsePrecision) {
             EXPECT_EQ(model->rowCount(), 0);
             EXPECT_EQ(aggregation, QString("Server aggregation 0.1 USD is too coarse for %1").arg(symbol));
             EXPECT_TRUE(summary.isEmpty());
+            // The coarse reason is live state: quiet tooltips keep it, without the trade window.
+            TooltipHelp::instance().setExplanatory(false);
+            EXPECT_EQ(dock.findChild<QLabel*>("domAggregation")->toolTip(), aggregation);
+            TooltipHelp::instance().setExplanatory(true);
             EXPECT_FALSE(dock.findChild<QLabel*>("domFreshness")->text().contains("Waiting for book"));
         } else {
             EXPECT_EQ(model->rowCount(), DomModel::Rows);
@@ -1590,7 +1595,10 @@ TEST_F(DomPulseDock, QuietBookTotalsExpireOnScheduleFedEveryTick) {
     const auto footer = dock.findChild<QLabel*>("domPulseFooter");
     ASSERT_TRUE(footer->isVisible());
     EXPECT_EQ(footer->text(), "Ask pull 0 eat 0 · Bid pull 5 eat 0 · max pull 5 @ 199.9");
-    EXPECT_TRUE(footer->toolTip().contains("last 10 s"));
+    {
+        LearningMode learning;
+        EXPECT_TRUE(footer->toolTip().contains("last 10 s"));
+    }
     // The bar scale decays in wall time: let it settle so only the pulse clock moves.
     QTest::qWait(700);
     // No book change for ten seconds: the totals still move, from the timer alone.
@@ -3007,6 +3015,59 @@ TEST_F(DomPulseDock, FooterWithLongFractionalTotalsNeverCutsANumber) {
         }
         if (width == 180) EXPECT_GE(text.count('\n'), 1) << text.toStdString();
     }
+}
+
+TEST_F(DomPulseDock, QuietTooltipsKeepLiveValuesAndDropExplanations) {
+    // W-0188: off, a tooltip keeps live state the label hides and drops the explanation;
+    // it is empty when it would repeat the label. On restores the explanatory text.
+    auto& help = TooltipHelp::instance();
+    help.setExplanatory(false);
+    source.update({{true, 199.9, 0}});
+    tick();
+    auto* footer = dock.findChild<QLabel*>("domPulseFooter");
+    auto* aggregation = dock.findChild<QLabel*>("domAggregation");
+    auto* summary = dock.findChild<QLabel*>("domBookSummary");
+    auto* strip = dock.findChild<QWidget*>("domLeanStrip");
+    ASSERT_TRUE(footer && aggregation && summary && strip);
+    ASSERT_EQ(footer->text(), "Ask pull 0 eat 0 · Bid pull 5 eat 0 · max pull 5 @ 199.9");
+    EXPECT_EQ(footer->toolTip(), "Added: asks 0 · bids 0 BTC"); // the footer never shows additions
+    EXPECT_TRUE(aggregation->toolTip().isEmpty()) << aggregation->toolTip().toStdString(); // the label says it
+    ASSERT_EQ(summary->text(), "Spr 0.1");
+    EXPECT_EQ(summary->toolTip(), "Bid 200.0 · Ask 200.1 · Bucketed spread 0.1 USD"); // behind the narrow form
+    EXPECT_TRUE(table->toolTip().isEmpty()); // "Order book price ladder" repeated the dock
+    EXPECT_TRUE(strip->toolTip().isEmpty()) << strip->toolTip().toStdString();
+    auto* menu = dock.findChild<QMenu*>("domGroupingMenu");
+    ASSERT_NE(menu, nullptr);
+    const auto autoTip = [&] {
+        emit menu->aboutToShow();
+        for (QAction* action : menu->actions())
+            if (action->text() == "Auto") return action->toolTip();
+        return QStringLiteral("<missing>");
+    };
+    EXPECT_EQ(autoTip(), "Auto"); // Qt falls back to the action text
+    // A narrow dock drops the biggest pull from the footer: quiet keeps every value.
+    dock.resize(330, 600);
+    QCoreApplication::processEvents();
+    tick();
+    if (footer->text() != "Ask pull 0 eat 0 · Bid pull 5 eat 0 · max pull 5 @ 199.9")
+        EXPECT_EQ(footer->toolTip(), "Ask pull 0 eat 0 · Bid pull 5 eat 0 · max pull 5 @ 199.9\nAdded: asks 0 · bids 0 BTC");
+    dock.resize(650, 600);
+    QCoreApplication::processEvents();
+    tick();
+    {
+        LearningMode learning;
+        EXPECT_TRUE(footer->toolTip().startsWith("Book changes over the last 10 s")) << footer->toolTip().toStdString();
+        EXPECT_TRUE(footer->toolTip().contains("Added: asks 0 · bids 0 BTC. Pulled = cancelled"));
+        EXPECT_TRUE(aggregation->toolTip().startsWith("Aggregation: 0.1 USD")) << aggregation->toolTip().toStdString();
+        EXPECT_TRUE(aggregation->toolTip().contains("Traded volume in BTC"));
+        EXPECT_TRUE(summary->toolTip().startsWith("Bid 200.0 · Ask 200.1 · Bucketed spread 0.1 USD\nTraded volume"));
+        EXPECT_TRUE(table->toolTip().startsWith("2,001 contiguous price buckets"));
+        EXPECT_TRUE(strip->toolTip().startsWith("Lean: (bid size")) << strip->toolTip().toStdString();
+        EXPECT_TRUE(autoTip().startsWith("The smallest row size at which")) << autoTip().toStdString();
+    }
+    EXPECT_EQ(footer->toolTip(), "Added: asks 0 · bids 0 BTC");
+    EXPECT_TRUE(strip->toolTip().isEmpty());
+    EXPECT_TRUE(table->toolTip().isEmpty());
 }
 
 TEST_F(DomPulseDock, FooterNeverCutsANumberAt180To400) {

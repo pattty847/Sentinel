@@ -1,4 +1,5 @@
 #include "TopToolbar.hpp"
+#include "../config/TooltipHelp.hpp"
 #include "SentinelLogging.hpp"
 #include "themes/ThemePalette.hpp"
 #include <QAction>
@@ -1022,7 +1023,7 @@ void TopToolbar::applyEnabled() {
         const QString reason = !tickLayerOn() ? QStringLiteral("Enable the heatmap or footprint layer to change its tick")
                                                : state.disabledReason;
         m_tickModeCombo->setToolTip(reason);
-        m_tickPresetCombo->setToolTip(reason);
+        TooltipHelp::instance().setToolTip(m_tickPresetCombo, reason, reason);
         return;
     }
     m_tickModeCombo->setToolTip(state.manual
@@ -1033,7 +1034,12 @@ void TopToolbar::applyEnabled() {
                                : QStringLiteral("Drawn tick %1 (Auto). Pick a preset to lock it (Manual).")
                                      .arg(tickText(state.drawnUnits, state.priceScale, state.unit));
     if (!state.indicator.isEmpty()) tip += QStringLiteral("\n") + state.indicator;
-    m_tickPresetCombo->setToolTip(m_tickPresetCombo->currentText() + QStringLiteral("\n") + tip);
+    // Quiet tooltips keep the live state: the full tick (the combo may elide it) and the
+    // veil indicator; the Auto/Manual explanation needs learning mode.
+    const QString current = m_tickPresetCombo->currentText();
+    TooltipHelp::instance().setToolTip(m_tickPresetCombo,
+        state.indicator.isEmpty() ? current : current + QStringLiteral("\n") + state.indicator,
+        current + QStringLiteral("\n") + tip);
 }
 
 TopToolbar::ControlVisibility TopToolbar::shownControls() const {

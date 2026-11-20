@@ -1,5 +1,6 @@
 #include "LeanGaugeWidget.hpp"
 #include "OrderBookDock.hpp"
+#include "../config/TooltipHelp.hpp"
 #include "../themes/ThemePalette.hpp"
 #include <QPainter>
 #include <QEvent>
@@ -30,7 +31,8 @@ LeanGaugeWidget::LeanGaugeWidget(const sentinel::book::LeanGauge& gauge, QWidget
     setAccessibleName("Book imbalance, cumulative depth and two minute history");
     setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     updateMetrics();
-    setToolTip("Lean: (bid size − ask size) / (bid size + ask size). Positive = bids (left).\n"
+    // The strip draws every value; the formula and band meanings need learning mode.
+    TooltipHelp::instance().setToolTip(this, {}, "Lean: (bid size − ask size) / (bid size + ask size). Positive = bids (left).\n"
                "Bands are quote-price distances from the native book midpoint, independent of ladder rows:\n"
                "near ±5 and ±15 on the left, far ±50 and ±100 on the right.\n"
                "Depth: cumulative size from mid to ±100. History: ±15 over the last two minutes.\n"

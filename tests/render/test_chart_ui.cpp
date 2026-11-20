@@ -6,7 +6,9 @@
 // test_ugr_gpu) on the selected QRhi backend and skip with the reason when it
 // cannot create one: a skipped case is no result. Toolbar/menu cases need no GPU.
 // Every QSettings is a temporary INI file (never the owner's).
+#include <QScopeGuard>
 #include "UnifiedGridRenderer.h"
+#include "config/TooltipHelp.hpp"
 #include "marketdata/model/TradeData.h"
 #include "datasources/RemoteGridDataSource.hpp"
 #include "chart/feeds/BookLadderFeed.hpp"
@@ -681,6 +683,32 @@ TEST(ChartToolbar, NarrowTickMenuRetainsUnavailableValueAndResolutionWarning) {
     EXPECT_TRUE(current->isEnabled());
     EXPECT_TRUE(tickMenu->findChildren<QAction *>("controlsTickIndicator").isEmpty());
     EXPECT_FALSE(tickMenu->menuAction()->toolTip().contains("veiled")); // Qt falls back to the action text.
+}
+
+TEST(ChartToolbar, QuietTickPresetTooltipKeepsTheTickAndVeilAndDropsTheModeHelp) {
+    // W-0188: quiet, the preset tooltip names the full (possibly elided) tick and its veil
+    // warning; the Auto/Manual explanation is learning-mode help.
+    auto &help = TooltipHelp::instance();
+    help.setExplanatory(false);
+    const auto restore = qScopeGuard([&] { help.setExplanatory(false); });
+    TopToolbar toolbar;
+    TopToolbar::TickSelectorState state;
+    state.enabled = true;
+    state.drawnUnits = 10;
+    state.offeredUnits = {10, 20};
+    toolbar.setTickSelectorState(state);
+    auto *combo = toolbar.tickPresetCombo();
+    EXPECT_EQ(combo->toolTip(), "$0.1");
+    help.setExplanatory(true);
+    EXPECT_EQ(combo->toolTip(), "$0.1\nDrawn tick $0.1 (Auto). Pick a preset to lock it (Manual).");
+    help.setExplanatory(false);
+    state.indicator = "Drawn tick $0.1: columns are veiled";
+    toolbar.setTickSelectorState(state);
+    EXPECT_EQ(combo->toolTip(), "$0.1\nDrawn tick $0.1: columns are veiled");
+    toolbar.setModeState({false, false, false, false, false}); // no heatmap or footprint
+    EXPECT_EQ(combo->toolTip(), "Enable the heatmap or footprint layer to change its tick");
+    help.setExplanatory(true);
+    EXPECT_EQ(combo->toolTip(), "Enable the heatmap or footprint layer to change its tick");
 }
 
 TEST(ChartToolbar, RealOverflowRestoresInlineControlsAcrossWidthModeAndFontChanges) {

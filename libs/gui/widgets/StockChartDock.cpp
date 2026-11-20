@@ -1,5 +1,6 @@
 // Sentinel — StockChartDock
 #include "StockChartDock.hpp"
+#include "../config/TooltipHelp.hpp"
 
 #include "../themes/ThemePalette.hpp"
 #include <QVBoxLayout>
@@ -129,7 +130,13 @@ void StockChartDock::buildUi() {
         m_quickView->setSource(QUrl::fromLocalFile(local));
     }
 
-    if (auto* root = qmlRoot()) root->setProperty("uiFont", QApplication::font());
+    if (auto* root = qmlRoot()) {
+        root->setProperty("uiFont", QApplication::font());
+        root->setProperty("explanatoryTooltips", TooltipHelp::instance().explanatory());
+    }
+    connect(&TooltipHelp::instance(), &TooltipHelp::changed, this, [this](bool on) {
+        if (auto* root = qmlRoot()) root->setProperty("explanatoryTooltips", on);
+    });
 
     m_qmlContainer = QWidget::createWindowContainer(m_quickView, m_contentWidget);
     m_qmlContainer->setFocusPolicy(Qt::StrongFocus);

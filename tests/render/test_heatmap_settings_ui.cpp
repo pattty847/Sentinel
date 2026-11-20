@@ -5,6 +5,7 @@
 // owner's). GPU cases (a UnifiedGridRenderer over the synthetic HMC2 recording,
 // as test_ugr_gpu) skip with the reason when no QRhi can be created.
 #include "UnifiedGridRenderer.h"
+#include "config/TooltipHelp.hpp"
 #include "render/CandlestickOverlayItem.hpp"
 #include "render/CandlePixelGeometry.hpp"
 #include "chart/core/FootprintLod.hpp"
@@ -44,6 +45,7 @@
 #include <QPushButton>
 #include <QQuickWindow>
 #include <QScreen>
+#include <QScopeGuard>
 #include <QSettings>
 #include <QSGGeometry>
 #include <QSGGeometryNode>
@@ -1700,6 +1702,9 @@ TEST(HeatmapSettingsDialogTest, ResetRangeToAutoFitsVisibleLiquidity) {
 }
 
 TEST(HeatmapSettingsDialogTest, EveryVisibleEnabledControlHasATooltip) {
+    // Field descriptions are learning-mode help: with it on, every control explains itself.
+    TooltipHelp::instance().setExplanatory(true);
+    const auto quiet = qScopeGuard([] { TooltipHelp::instance().setExplanatory(false); });
     TempStore t;
     HeatmapSettingsModel model(t.store, "main", t.config);
     UnifiedGridRenderer renderer;
@@ -1749,6 +1754,65 @@ TEST(HeatmapSettingsDialogTest, EveryVisibleEnabledControlHasATooltip) {
             }
         }
     }
+}
+
+TEST(HeatmapSettingsDialogTest, QuietTooltipsDropFieldDescriptionsAndKeepTheDisabledReason) {
+    // W-0188: with learning mode off a field's description is empty (its label names it); a
+    // dialog built quiet gains every description, on label and field alike, when learning
+    // mode turns on, and loses them again when it turns off.
+    TooltipHelp::instance().setExplanatory(false);
+    const auto quiet = qScopeGuard([] { TooltipHelp::instance().setExplanatory(false); });
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    HeatmapSettingsDialog dialog(&model, nullptr);
+    TopToolbar::TickSelectorState ticks;
+    ticks.enabled = true;
+    ticks.priceScale = 100;
+    dialog.setTickSelectorState(ticks); // no presets: the reason is live state
+    dialog.show();
+    QCoreApplication::processEvents();
+    auto *gpuCap = dialog.findChild<QSpinBox *>("gpuCapBytes");
+    auto *opacity = dialog.findChild<QWidget *>("opacity");
+    auto *manualTick = dialog.findChild<QComboBox *>("manualTick");
+    ASSERT_NE(gpuCap, nullptr);
+    ASSERT_NE(opacity, nullptr);
+    ASSERT_NE(manualTick, nullptr);
+    const QString noPresets = "No loaded data offers presets yet (the GPU renderer loads them).";
+    const auto labelOf = [](QWidget *field) {
+        for (auto *form : field->parentWidget()->findChildren<QFormLayout *>())
+            if (auto *label = form->labelForField(field)) return label;
+        return static_cast<QWidget *>(nullptr);
+    };
+    ASSERT_NE(labelOf(gpuCap), nullptr);
+    EXPECT_TRUE(gpuCap->toolTip().isEmpty()) << gpuCap->toolTip().toStdString();
+    EXPECT_TRUE(labelOf(gpuCap)->toolTip().isEmpty());
+    EXPECT_TRUE(opacity->toolTip().isEmpty()) << opacity->toolTip().toStdString();
+    EXPECT_EQ(manualTick->toolTip(), noPresets);
+    TooltipHelp::instance().setExplanatory(true);
+    EXPECT_TRUE(gpuCap->toolTip().startsWith("GPU heatmap cache budget")) << gpuCap->toolTip().toStdString();
+    EXPECT_EQ(labelOf(gpuCap)->toolTip(), gpuCap->toolTip());
+    EXPECT_TRUE(opacity->toolTip().startsWith("GPU heatmap opacity")) << opacity->toolTip().toStdString();
+    EXPECT_EQ(manualTick->toolTip(), noPresets);
+    ticks.offeredUnits = {100, 500};
+    ticks.drawnUnits = 100;
+    dialog.setTickSelectorState(ticks);
+    EXPECT_EQ(manualTick->toolTip(), "Presets some loaded data can build. Picking one locks Manual.");
+    TooltipHelp::instance().setExplanatory(false);
+    EXPECT_TRUE(gpuCap->toolTip().isEmpty());
+    EXPECT_TRUE(labelOf(gpuCap)->toolTip().isEmpty());
+    EXPECT_TRUE(manualTick->toolTip().isEmpty());
+    // Unnamed rows copy their field's tooltip into the label column and follow it.
+    int unnamed = 0;
+    TooltipHelp::instance().setExplanatory(true);
+    for (auto *form : dialog.findChildren<QFormLayout *>())
+        for (int row = 0; row < form->rowCount(); ++row) {
+            auto *label = form->itemAt(row, QFormLayout::LabelRole) ? qobject_cast<QLabel *>(form->itemAt(row, QFormLayout::LabelRole)->widget()) : nullptr;
+            auto *field = form->itemAt(row, QFormLayout::FieldRole) ? form->itemAt(row, QFormLayout::FieldRole)->widget() : nullptr;
+            if (!label || !field || !label->text().isEmpty() || field->objectName() == "settingsHelp") continue;
+            ++unnamed;
+            EXPECT_EQ(label->toolTip(), field->toolTip()) << field->objectName().toStdString();
+        }
+    EXPECT_GT(unnamed, 0);
 }
 
 TEST(HeatmapSettingsDialogTest, ShortDialogScrollsToLookControlsWithoutChangingPersistence) {

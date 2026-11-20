@@ -511,7 +511,7 @@ void OrderBookDock::buildLadder(QVBoxLayout* layout)
     m_table->setObjectName("domLadder");
     m_table->setModel(m_model);
     m_table->setAccessibleName("Order book price ladder");
-    TooltipHelp::instance().setToolTip(m_table, QStringLiteral("Order book price ladder"), "2,001 contiguous price buckets. Scroll to inspect; Recenter / follow moves the window to the market.");
+    TooltipHelp::instance().setToolTip(m_table, {}, "2,001 contiguous price buckets. Scroll to inspect; Recenter / follow moves the window to the market.");
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSelectionMode(QAbstractItemView::NoSelection);
     m_table->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -731,11 +731,13 @@ void OrderBookDock::fillGroupMenu()
         connect(action, &QAction::triggered, this, std::move(apply));
         return action;
     };
+    // The menu is rebuilt on every open, so the learning-mode choice is read here.
     add("Auto", m_groupMode == Grouping::Auto, [this] { setGrouping(Grouping::Auto); })
-        ->setToolTip(QStringLiteral("The smallest row size at which %1% of the %2 rows each side of the touch hold size; "
-                                    "a new size applies after %3 s.")
-                         .arg(int(dom::AutoGroupRule::TargetFill * 100)).arg(dom::AutoGroupRule::RowsPerSide)
-                         .arg(dom::GroupHold::HoldMs / 1000.0));
+        ->setToolTip(TooltipHelp::instance().text({},
+            QStringLiteral("The smallest row size at which %1% of the %2 rows each side of the touch hold size; "
+                           "a new size applies after %3 s.")
+                .arg(int(dom::AutoGroupRule::TargetFill * 100)).arg(dom::AutoGroupRule::RowsPerSide)
+                .arg(dom::GroupHold::HoldMs / 1000.0)));
     add("Link to heatmap tick", m_groupMode == Grouping::Link, [this] { setGrouping(Grouping::Link); });
     m_groupMenu->addSeparator();
     const double native = m_groupNative;
@@ -1242,10 +1244,15 @@ void OrderBookDock::updateSummary()
     }
     m_status->setText(fullStatus);
     m_status->setMaximumWidth(m_status->fontMetrics().horizontalAdvance(m_status->text()) + 2);
-    m_aggregation->setText(m_model->aggregation(true));
-    m_aggregation->setToolTip(m_model->aggregation() + "\n" + m_model->executionSummary());
-    m_summary->setText(m_model->summary(!wide));
-    m_summary->setToolTip(m_model->summary() + "\n" + m_model->executionSummary());
+    // Quiet tooltips keep only what the label hides: a coarse-aggregation reason, and the
+    // bid and ask behind the narrow "Spr" form. The trade-window summary needs learning mode.
+    auto& help = TooltipHelp::instance();
+    const QString aggregation = m_model->aggregation(), compact = m_model->aggregation(true);
+    m_aggregation->setText(compact);
+    help.setToolTip(m_aggregation, m_model->aggregationIssue(), aggregation + "\n" + m_model->executionSummary());
+    const QString summary = m_model->summary(), shown = m_model->summary(!wide);
+    m_summary->setText(shown);
+    help.setToolTip(m_summary, shown == summary ? QString() : summary, summary + "\n" + m_model->executionSummary());
     updatePulseFooter();
 }
 
@@ -1279,9 +1286,12 @@ void OrderBookDock::updatePulseFooter()
     }
     m_pulseFooter->setText(text);
     const auto& totals = m_model->pulseTotals();
-    m_pulseFooter->setToolTip(QStringLiteral("Book changes over the last %1 s in the rows on screen (plus %2 rows each way), all sizes:\n%3\n"
-                                             "Added: asks %4 · bids %5 %6. Pulled = cancelled before price got there; eaten = removed by trades.")
-        .arg(DomModel::PulseWindowMs / 1000).arg(DomModel::PulseMarginRows).arg(full)
-        .arg(m_model->shownSize(totals.side[1].added), m_model->shownSize(totals.side[0].added),
-             m_symbol.section('-', 0, 0)));
+    const QString added = QStringLiteral("Added: asks %1 · bids %2 %3")
+        .arg(m_model->shownSize(totals.side[1].added), m_model->shownSize(totals.side[0].added), m_symbol.section('-', 0, 0));
+    // Quiet: every value (the footer may drop the biggest pull or a field) and the added
+    // totals the footer never shows; the window and the pulled/eaten meanings need learning mode.
+    TooltipHelp::instance().setToolTip(m_pulseFooter, text == full ? added : full + QLatin1Char('\n') + added,
+        QStringLiteral("Book changes over the last %1 s in the rows on screen (plus %2 rows each way), all sizes:\n%3\n"
+                       "%4. Pulled = cancelled before price got there; eaten = removed by trades.")
+            .arg(DomModel::PulseWindowMs / 1000).arg(DomModel::PulseMarginRows).arg(full, added));
 }

@@ -25,6 +25,8 @@ Rectangle {
     property string asOf: "Unknown"
     property string retrievedAt: "Unknown"
     property string secStatus: "SEC insiders idle"
+    // Set by StockChartDock from TooltipHelp (learning mode).
+    property bool explanatoryTooltips: false
 
     // Set by C++ dock via rootObject()->setProperty(...)
     property string ticker:    ""
@@ -248,6 +250,11 @@ Rectangle {
     function zeroValueNoteText(marker) {
         if (!hasZeroValueNote(marker)) return ""
         return "$0 on some neutral/derivative rows means the filing did not report a clean cash value for that leg."
+    }
+
+    // The signal card's explanatory note, only in learning mode (Tools > Show explanatory tooltips).
+    function signalNoteText(marker) {
+        return explanatoryTooltips ? zeroValueNoteText(marker) : ""
     }
 
     // ── Nice-number helper (mirrors PriceAxisModel::calculateNicePriceStep) ──
@@ -733,7 +740,7 @@ Rectangle {
 
                     Text {
                         font.family: root.uiFont.family
-                        text:           root.zeroValueNoteText(root.hoveredSignal)
+                        text:           root.signalNoteText(root.hoveredSignal)
                         color:          theme.textDim
                         font.pixelSize: 9 * root.fontScale
                         wrapMode:       Text.WordWrap

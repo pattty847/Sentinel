@@ -130,6 +130,8 @@ public:
     QString summary(bool compact = false) const;
     QString executionSummary() const;
     QString aggregation(bool compact = false) const;
+    // Why the rows are coarser than asked (empty when they are not): live state, not help.
+    const QString& aggregationIssue() const { return m_aggregationIssue; }
     static QString priceText(double price, double tick);
     // priceText in this symbol's display unit (PriceUnits: PEPE 5.04 for 0.00000504).
     QString shownPrice(double price, double tick) const;
