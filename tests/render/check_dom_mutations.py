@@ -3,6 +3,8 @@
 
 python3 tests/render/check_dom_mutations.py [build/mac-clang]
 DOM_MUTANTS=pulse_ limits the run to mutants whose name starts with that prefix.
+DOM_MUTANT_TIMEOUT=<seconds> caps each behavior-test run (default 300). A mutant whose test does not
+finish in time counts as killed: a hung mutant must not hold the build queue.
 Uses installed dependencies; each mutant must COMPILE and fail its behavior test.
 """
 from pathlib import Path
@@ -497,7 +499,25 @@ mutants = [
 ]
 env = dict(os.environ, CCACHE_READONLY='1', CCACHE_TEMPDIR='/tmp')
 output = build / 'dom-validation'
-output.mkdir(exist_ok=True)
+test_timeout = float(os.environ.get('DOM_MUTANT_TIMEOUT', '300'))
+
+
+def run_behavior_test(command, timeout, **kwargs):
+    """Run one behavior test. Returns (returncode, output); returncode is None when it timed out."""
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                timeout=timeout, **kwargs)
+        return result.returncode, result.stdout
+    except subprocess.TimeoutExpired as expired:  # subprocess.run kills the child before it raises
+        partial = expired.stdout or ''
+        if isinstance(partial, bytes):
+            partial = partial.decode(errors='replace')
+        return None, partial + f'\nTIMEOUT: killed after {timeout:g} s\n'
+
+
+def mutant_killed(returncode, text):
+    """A mutant is killed when its test fails (gtest exit 1 with a FAILED line) or does not finish."""
+    return returncode is None or (returncode == 1 and '[  FAILED  ]' in text)
 
 
 def compile_target(name):
@@ -507,29 +527,36 @@ def compile_target(name):
                        cwd=root, env=env, stdout=stream, stderr=subprocess.STDOUT, check=True)
 
 
-mutants = [m for m in mutants if m[0].startswith(os.environ.get('DOM_MUTANTS', ''))]
-try:
-    for name, path, replacements, test in mutants:
-        changed = original[path]
-        for before, after in replacements:
-            assert changed.count(before) == 1, (name, before)
-            changed = changed.replace(before, after)
-        path.write_text(changed)
-        compile_target(name)
-        binary = ('tests/marketdata/test_lean_gauge' if test.startswith('LeanFixture.') else
-                  'tests/render/test_heatmap_settings_ui' if test.startswith('LadderControls.') else 'tests/render/test_dom')
-        result = subprocess.run([str(build / binary), f'--gtest_filter={test}'],
-                                cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        (output / f'{name}-test.txt').write_text(result.stdout)
-        assert result.returncode == 1 and '[  FAILED  ]' in result.stdout, (name, result.returncode, result.stdout)
-        print(f'MUTATION_REJECTED {name}: compiled; behavior test failed as required', flush=True)
-        path.write_text(original[path])
-finally:
-    for path, content in original.items():
-        path.write_text(content)
-    compile_target('restored')
+def main():
+    output.mkdir(exist_ok=True)
+    selected = [m for m in mutants if m[0].startswith(os.environ.get('DOM_MUTANTS', ''))]
+    try:
+        for name, path, replacements, test in selected:
+            changed = original[path]
+            for before, after in replacements:
+                assert changed.count(before) == 1, (name, before)
+                changed = changed.replace(before, after)
+            path.write_text(changed)
+            compile_target(name)
+            binary = ('tests/marketdata/test_lean_gauge' if test.startswith('LeanFixture.') else
+                      'tests/render/test_heatmap_settings_ui' if test.startswith('LadderControls.') else 'tests/render/test_dom')
+            returncode, text = run_behavior_test([str(build / binary), f'--gtest_filter={test}'], test_timeout,
+                                                 cwd=root, env=env)
+            (output / f'{name}-test.txt').write_text(text)
+            assert mutant_killed(returncode, text), (name, returncode, text)
+            how = 'timed out (counts as killed)' if returncode is None else 'behavior test failed as required'
+            print(f'MUTATION_REJECTED {name}: compiled; {how}', flush=True)
+            path.write_text(original[path])
+    finally:
+        for path, content in original.items():
+            path.write_text(content)
+        compile_target('restored')
 
-subprocess.run([str(build / 'tests/render/test_dom')], cwd=root, env=env, check=True)
-subprocess.run([str(build / 'tests/marketdata/test_lean_gauge')], cwd=root, env=env, check=True)
-subprocess.run([str(build / 'tests/render/test_heatmap_settings_ui'), '--gtest_filter=LadderControls.*'], cwd=root, env=env, check=True)
-print(f'MUTATION_SUMMARY {len(mutants)}/{len(mutants)} rejected; restored suite passed', flush=True)
+    subprocess.run([str(build / 'tests/render/test_dom')], cwd=root, env=env, check=True)
+    subprocess.run([str(build / 'tests/marketdata/test_lean_gauge')], cwd=root, env=env, check=True)
+    subprocess.run([str(build / 'tests/render/test_heatmap_settings_ui'), '--gtest_filter=LadderControls.*'], cwd=root, env=env, check=True)
+    print(f'MUTATION_SUMMARY {len(selected)}/{len(selected)} rejected; restored suite passed', flush=True)
+
+
+if __name__ == '__main__':
+    main()
