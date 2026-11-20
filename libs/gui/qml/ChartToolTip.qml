@@ -25,14 +25,14 @@ ToolTip {
 
     contentItem: Label {
         text: tooltip.text
-        color: "#B6C2CF"
+        color: ChartTheme.tooltipText
         font.family: "Roboto Mono"
         font.pixelSize: 11
         wrapMode: Text.Wrap
     }
     background: Rectangle {
-        color: "#20252B"
-        border.color: "#2B3138"
+        color: ChartTheme.tooltipBackground
+        border.color: ChartTheme.tooltipBorder
         border.width: 1
         radius: 3
     }

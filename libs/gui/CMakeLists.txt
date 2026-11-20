@@ -346,6 +346,7 @@ qt6_add_qml_module(sentinel_gui_lib
     VERSION 1.0
     NO_PLUGIN
     SOURCES
+        render/ChartTheme.hpp
         render/TradeBubbleOverlayItem.hpp
         render/TradeBubbleOverlayItem.cpp
         render/CandlestickOverlayItem.hpp
