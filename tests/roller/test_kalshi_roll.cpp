@@ -72,7 +72,7 @@ struct Oracle {
             for (bool ask : {false, true}) for (const auto& row : book.at(ask ? "no_bids" : "yes_bids")) {
                 const auto p = atoms(row[0]);
                 const auto price = ask ? 10000 - p : p;
-                sums[{price / 100, ask}] += static_cast<long double>(atoms(row[1])) / 100 * dt;
+                sums[{price / 10, ask}] += static_cast<long double>(atoms(row[1])) / 100 * dt;
             }
         }
         clock = t;
@@ -98,24 +98,29 @@ TEST(KalshiRoll, GridTableAndMalformedPoliciesWriteNothing) {
     auto mixed = instrument("0.005");
     mixed["price_ranges"] = {{{"start", "0"}, {"end", "0.5"}, {"step", "0.005"}},
         {{"start", "0.5"}, {"end", "1"}, {"step", "0.01"}}};
-    struct Case { json spec; double scale, near; int64_t rows; };
-    for (const auto& c : std::vector<Case>{{instrument(), 100, .01, 100},
-             {instrument("0.001"), 1000, .001, 1000}, {tapered, 1000, .001, 1000}, {mixed, 1000, .005, 200}}) {
-        const auto g = deriveKalshiGrid(c.spec);
-        EXPECT_EQ(g.priceScale, c.scale); EXPECT_EQ(g.nearTick, c.near); EXPECT_EQ(g.deepTick, .01);
+    std::vector<json> valid{tapered,mixed};
+    for (const auto* step : {"0.001","0.002","0.004","0.005","0.008","0.01","0.02","0.05","0.1"})
+        valid.push_back(instrument(step));
+    for (const auto& spec : valid) {
+        const auto g = deriveKalshiGrid(spec);
+        EXPECT_EQ(g.priceScale, 1000); EXPECT_EQ(g.nearTick, .001); EXPECT_EQ(g.deepTick, .01);
         const auto cfg = g.config("unused");
         ASSERT_TRUE(cfg.priceBounds); EXPECT_EQ(cfg.priceBounds->lower, 0); EXPECT_EQ(cfg.priceBounds->upper, 1);
         ASSERT_EQ(cfg.layers.size(), 2u);
         ASSERT_TRUE(cfg.layers[0].absoluteRows); EXPECT_EQ(cfg.layers[0].absoluteRows->low, 0);
-        EXPECT_EQ(cfg.layers[0].absoluteRows->high, c.rows);
+        EXPECT_EQ(cfg.layers[0].absoluteRows->high, 1000);
         EXPECT_EQ(cfg.layers[1].absoluteRows->high, 100);
         EXPECT_EQ(cfg.sizeScale.floor, .01); EXPECT_FALSE(cfg.layers[0].hourlyRollup); EXPECT_TRUE(cfg.layers[1].hourlyRollup);
     }
     std::vector<json> malformed;
     auto bad = mixed; bad["price_ranges"][1]["step"] = "0.007"; malformed.push_back(bad);
     bad = instrument("0.003"); malformed.push_back(bad);
-    bad = instrument("0.004"); malformed.push_back(bad);
-    bad = instrument("0.008"); malformed.push_back(bad);
+    bad = instrument("0.0005"); malformed.push_back(bad);
+    bad = instrument("0.0025"); malformed.push_back(bad);
+    for (const auto* step : {"0.0005","0.0025"}) {
+        try { deriveKalshiGrid(instrument(step)); FAIL() << step; }
+        catch (const std::runtime_error& e) { EXPECT_NE(std::string(e.what()).find("0.001"),std::string::npos); }
+    }
     bad = mixed; bad["price_ranges"][1]["start"] = "0.51"; malformed.push_back(bad);
     bad = mixed; bad["price_ranges"][0]["end"] = "0.501"; bad["price_ranges"][1]["start"] = "0.501"; malformed.push_back(bad);
     bad = instrument(); bad["price_ranges"][0]["end"] = "0.99"; malformed.push_back(bad);
@@ -144,7 +149,7 @@ TEST(KalshiRoll, OneSidedAndEmptyStartUseBoundsIncludingExtendedTickers) {
             for (const auto& row : rows) {
                 EXPECT_EQ(row.observedMs, Minute); EXPECT_DOUBLE_EQ(row.midOpen, empty ? .5 : .78);
                 EXPECT_EQ(row.bidRowLo, 0); EXPECT_EQ(row.askRowLo, 0);
-                EXPECT_EQ(row.bidRowHi, 100); EXPECT_EQ(row.askRowHi, 100);
+                EXPECT_EQ(row.bidRowHi, std::string_view(layer) == "near" ? 1000 : 100); EXPECT_EQ(row.askRowHi, row.bidRowHi);
                 EXPECT_EQ(row.entries.empty(), empty);
             }
         }
@@ -188,21 +193,24 @@ TEST(KalshiRoll, RealCaptureBothTickersIndependentWeightedRowsAndMidOhlc) {
         const auto report = roll(o);
         EXPECT_EQ(report["days"][0]["committedThroughMs"], end);
         EXPECT_EQ(hmcFiles(o.outputRoot).size(), 2u);
+        std::cout << "KALSHI_FIXTURE_DAY " << read(o.outputRoot / product / "roller.json")["days"].begin().value().dump() << '\n';
         std::cout << "KALSHI_FIXTURE_REPORT " << report.dump() << '\n';
         for (const auto& [name, bytes] : hmcFiles(o.outputRoot)) std::cout << "KALSHI_HMC2 " << name << '\n';
         for (const auto* layer : {"near", "deep"}) {
             const auto rows = recording::Hmc2Store::readRange(o.outputRoot, product, layer, Minute, from, end);
             ASSERT_EQ(rows.size(), 1u); const auto& row = rows[0];
-            EXPECT_EQ(row.header.priceScale, 100); EXPECT_EQ(row.header.rowTickUnits, 1);
-            EXPECT_EQ(row.bidRowLo, 0); EXPECT_EQ(row.bidRowHi, 100); EXPECT_EQ(row.askRowLo, 0); EXPECT_EQ(row.askRowHi, 100);
+            const int64_t tick = std::string_view(layer) == "near" ? 1 : 10;
+            EXPECT_EQ(row.header.priceScale, 1000); EXPECT_EQ(row.header.rowTickUnits, tick);
+            EXPECT_EQ(row.bidRowLo, 0); EXPECT_EQ(row.bidRowHi, 1000 / tick);
+            EXPECT_EQ(row.askRowLo, 0); EXPECT_EQ(row.askRowHi, 1000 / tick);
             EXPECT_EQ(row.observedMs, oracle.observed);
             EXPECT_DOUBLE_EQ(row.midOpen, oracle.open); EXPECT_DOUBLE_EQ(row.midClose, oracle.close);
             EXPECT_DOUBLE_EQ(row.midMin, oracle.low); EXPECT_DOUBLE_EQ(row.midMax, oracle.high);
             std::map<std::pair<int64_t, bool>, double> actual;
             for (const auto& e : row.entries) actual[{e.row, e.isAsk}] = recording::decodeSize(e.twapCode, row.header.sizeScale);
-            for (int64_t price = 0; price <= 100; ++price) for (bool ask : {false, true}) {
+            for (int64_t price = 0; price <= 1000 / tick; ++price) for (bool ask : {false, true}) {
                 const auto key = std::pair(price, ask);
-                const auto expected = double(oracle.sums[key] / oracle.observed);
+                const auto expected = double(oracle.sums[{price * tick,ask}] / oracle.observed);
                 // Nearest logarithmic code: at most half a code step, plus FP noise.
                 const auto tolerance = expected * std::expm1(std::log(2.) / (2 * row.header.sizeScale.codesPerOctave)) + 1e-9;
                 EXPECT_NEAR(actual[key], expected, tolerance) << product << ' ' << layer << ' ' << price << ' ' << ask;
@@ -241,16 +249,14 @@ TEST(KalshiRoll, CrashResumeMatchesUninterrupted) {
     EXPECT_EQ(hmcFiles(o.outputRoot), expected);
 }
 
-TEST(KalshiRoll, BandIdentityRejectsCheckpointAndVenueMismatch) {
+TEST(KalshiRoll, SizeIdentityRejectsCheckpointAndVenueMismatch) {
     QTemporaryDir temp; const fs::path root = temp.path().toStdString();
-    auto other = instrument();
-    other["price_ranges"] = {{{"start", "0"}, {"end", "0.5"}, {"step", "0.01"}},
-        {{"start", "0.5"}, {"end", "1"}, {"step", "0.02"}}};
+    auto other = instrument(); other["size_increment"] = "0.02";
     simple(root / "raw", A, instrument()); simple(root / "other", A, other);
     RollOptions o{root / "raw", root / "out", A, Epoch, Epoch + 4 * Minute};
     roll(o);
     const auto first = read(o.outputRoot / A / "roller.json").at("configHash");
-    EXPECT_EQ(first, 15407106172843635619ull); // Exact policy JSON/FNV pin, bounds and instrument included.
+    EXPECT_EQ(first, 2008262871172219430ull); // Fixed grid, bounds and size floor; no band metadata.
     const auto bytes = hmcFiles(o.outputRoot);
     auto otherOptions = o; otherOptions.journalRoot = root / "other"; otherOptions.outputRoot = root / "other-out";
     roll(otherOptions);
@@ -312,11 +318,12 @@ TEST(KalshiRoll, MidnightAnchorAndOldJournalSnapshotHaveIdenticalNextDayBytes) {
     roll(o); EXPECT_EQ(hmcFiles(o.outputRoot), expected);
 }
 
-TEST(KalshiRoll, TickChangeBetweenDaysChangesGridAndHmcPolicy) {
+TEST(KalshiRoll, SizeChangeBetweenDaysChangesGridAndHmcPolicy) {
     QTemporaryDir temp; const fs::path root = temp.path().toStdString();
     for (int d = 0; d < 2; ++d) {
         capture::WriterConfig cfg; cfg.root = QString::fromStdString((root / "raw").string()); cfg.symbol = A; cfg.fsyncBlocks = 0;
-        auto h = header(A, instrument(d ? "0.001" : "0.01"));
+        auto spec = instrument(); spec["size_increment"] = d ? "0.02" : "0.01";
+        auto h = header(A, spec);
         capture::Writer writer(cfg, h);
         append(writer, Epoch + d * Day, snapshot(A));
         append(writer, Epoch + d * Day + Minute + 3000, json::object(), capture::Kind::CaptureStarted);
@@ -324,8 +331,8 @@ TEST(KalshiRoll, TickChangeBetweenDaysChangesGridAndHmcPolicy) {
     }
     RollOptions o{root / "raw", root / "out", A, Epoch, Epoch + Day + Minute};
     const auto report = roll(o);
-    EXPECT_EQ(report["days"][0]["grid"]["nearTick"], .01);
-    EXPECT_EQ(report["days"][1]["grid"]["nearTick"], .001);
+    EXPECT_EQ(report["days"][0]["grid"]["sizeFloor"], .01);
+    EXPECT_EQ(report["days"][1]["grid"]["sizeFloor"], .02);
     const auto cp = read(o.outputRoot / A / "roller.json");
     EXPECT_NE(cp["days"][std::to_string(Epoch)]["configHash"], cp["days"][std::to_string(Epoch + Day)]["configHash"]);
     for (const auto* layer : {"near", "deep"}) {
@@ -334,83 +341,6 @@ TEST(KalshiRoll, TickChangeBetweenDaysChangesGridAndHmcPolicy) {
         ASSERT_EQ(before.size(), 1u); ASSERT_EQ(after.size(), 1u);
         EXPECT_NE(before[0].header.configHash, after[0].header.configHash);
         EXPECT_EQ(after[0].header.priceScale, 1000);
-    }
-}
-
-TEST(KalshiRoll, BandOnlyChangeKeepsHmcGenerationButRejectsPriorInstrumentAnchor) {
-    QTemporaryDir temp; const fs::path root = temp.path().toStdString();
-    const auto midnight = Epoch + Day;
-    auto other = instrument();
-    other["price_ranges"] = {{{"start", "0"}, {"end", "0.5"}, {"step", "0.01"}},
-        {{"start", "0.5"}, {"end", "1"}, {"step", "0.02"}}};
-    // Both histories begin with the first instrument. Only the mixed history
-    // subscribes with the new band schedule at the second day's boundary.
-    for (const auto* history : {"mixed", "old"}) {
-        capture::WriterConfig cfg; cfg.root = QString::fromStdString((root / history).string());
-        cfg.symbol = A; cfg.fsyncBlocks = 0;
-        {
-            capture::Writer writer(cfg, header(A, instrument()));
-            append(writer, midnight - 2 * Minute, snapshot(A));
-            append(writer, midnight - Minute + 3000, json::object(), capture::Kind::CaptureStarted);
-            if (std::string_view(history) == "old") {
-                for (int i = 0; i <= 30; ++i)
-                    append(writer, midnight + i * Minute + 3000, json::object(), capture::Kind::CaptureStarted);
-            }
-            writer.close();
-        }
-        if (std::string_view(history) == "mixed") {
-            capture::Writer writer(cfg, header(A, other));
-            append(writer, midnight, snapshot(A));
-            for (int i = 1; i <= 30; ++i)
-                append(writer, midnight + i * Minute + 3000, json::object(), capture::Kind::CaptureStarted);
-            writer.close();
-        }
-    }
-    RollOptions old{root / "old", root / "old-out", A, midnight, midnight + 30 * Minute};
-    roll(old);
-    const auto priorAnchor = AnchorStore::load(old.outputRoot / A / "anchors/2026-10-25/0000.anchor");
-    EXPECT_EQ(priorAnchor.instrument, instrument());
-
-    RollOptions o{root / "mixed", root / "out", A, midnight - 2 * Minute, midnight + 15 * Minute};
-    o.writeAnchors = false;
-    roll(o);
-    const auto cp = read(o.outputRoot / A / "roller.json");
-    const auto firstHash = cp["days"][std::to_string(Epoch)]["configHash"];
-    const auto secondHash = cp["days"][std::to_string(midnight)]["configHash"];
-    EXPECT_NE(firstHash, secondHash);
-    EXPECT_EQ(priorAnchor.identity.configHash, firstHash);
-    auto expected = priorAnchor.identity;
-    expected.configHash = secondHash.get<uint64_t>();
-    std::string rejection;
-    const auto stale = AnchorStore::path(o.outputRoot, priorAnchor);
-    AnchorStore::write(o.outputRoot, priorAnchor);
-    EXPECT_FALSE(AnchorStore::read(stale, expected, midnight, {}, &rejection));
-    EXPECT_NE(rejection.find("identity"), std::string::npos) << rejection;
-
-    const auto prefix = hmcFiles(o.outputRoot, "2026-10-25");
-    ASSERT_EQ(prefix.size(), 2u);
-    o.fromMs = midnight; o.toMs = midnight + 30 * Minute;
-    const auto resumed = roll(o);
-    EXPECT_FALSE(resumed["days"][0].contains("anchorBoundaryMs"));
-    EXPECT_EQ(resumed["days"][0]["anchorRejection"], "anchor checkpoint identity mismatch");
-    EXPECT_EQ(resumed["days"][0]["grid"]["instrument"], other);
-    EXPECT_EQ(resumed["days"][0]["committedThroughMs"], o.toMs);
-    const auto extended = hmcFiles(o.outputRoot, "2026-10-25");
-    ASSERT_EQ(extended.size(), prefix.size());
-    for (const auto& [name, bytes] : prefix) {
-        ASSERT_TRUE(extended.contains(name));
-        EXPECT_GT(extended.at(name).size(), bytes.size());
-        EXPECT_TRUE(extended.at(name).starts_with(bytes));
-    }
-    for (const auto* layer : {"near", "deep"}) {
-        const auto before = recording::Hmc2Store::readRange(o.outputRoot, A, layer, Minute, midnight - 2 * Minute, midnight);
-        const auto after = recording::Hmc2Store::readRange(o.outputRoot, A, layer, Minute, midnight, o.toMs);
-        ASSERT_EQ(before.size(), 2u); ASSERT_EQ(after.size(), 30u);
-        for (const auto& row : after) EXPECT_EQ(row.header.configHash, before.front().header.configHash);
-        std::set<std::string> files;
-        for (const auto& file : fs::directory_iterator(o.outputRoot / A / (std::string(layer) + "-60000")))
-            if (file.path().extension() == ".hmc2") files.insert(file.path().filename().string());
-        EXPECT_EQ(files, (std::set<std::string>{"2026-10-24.hmc2", "2026-10-25.hmc2"}));
     }
 }
 
@@ -433,7 +363,7 @@ TEST(KalshiRoll, CliDryAndRealReports) {
         EXPECT_EQ(report.at("dryRun"), dry);
         EXPECT_EQ(report["days"][0]["grid"]["venue"], "kalshi");
         EXPECT_EQ(report["days"][0]["grid"]["priceBounds"], json::array({0, 1}));
-        EXPECT_EQ(report["days"][0]["grid"]["nearRows"], json::array({0, 100}));
+        EXPECT_EQ(report["days"][0]["grid"]["nearRows"], json::array({0, 1000}));
         if (dry) EXPECT_FALSE(fs::exists(root / "out"));
         else EXPECT_EQ(hmcFiles(root / "out").size(), 2u);
     }

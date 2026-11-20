@@ -11,6 +11,7 @@
 #include <fstream>
 #include <numeric>
 #include <chrono>
+#include <cmath>
 
 namespace sentinel::roller {
 using nlohmann::json;
@@ -53,7 +54,7 @@ void writeCheckpoint(const fs::path& path, const json& j) {
         throw std::runtime_error("checkpoint durable rename failed");
 }
 namespace {
-uint64_t configHash(const recording::RecorderConfig& c, const json& instrument = nullptr) {
+uint64_t configHash(const recording::RecorderConfig& c) {
     // Roller checkpoint identity is frozen: this literal belongs to existing
     // checkpoints and anchors, not a live setting. The one-sided policy lives
     // in replay-state policy; a change there falls back to journal replay.
@@ -65,10 +66,26 @@ uint64_t configHash(const recording::RecorderConfig& c, const json& instrument =
         j["layers"].push_back(std::move(layer));
     }
     if (c.priceBounds) j["priceBounds"] = {c.priceBounds->lower,c.priceBounds->upper};
-    if (!instrument.is_null()) j["instrument"] = instrument;
     uint64_t h = 14695981039346656037ull;
     for (unsigned char ch : j.dump()) { h ^= ch; h *= 1099511628211ull; }
     return h;
+}
+// KalshiDecoder emits exactly p / 10000 for 0 <= p <= 10000. Binary64
+// multiplication error here is far below half an integer unit, so llround
+// recovers that original integer (also checked by the inverse conversion).
+// Admission uses integer divisibility; it never rounds onto the recorder grid.
+void checkKalshiPrices(const std::vector<recording::Level>& levels) {
+    for (const auto& level : levels) {
+        const auto units = std::llround(level.price * 10000);
+        if (units < 0 || units > 10000 || double(units) / 10000 != level.price)
+            throw std::runtime_error("Kalshi grid: price is outside the decoder integer domain");
+        if (units % 10) {
+            const auto fraction = std::to_string(units % 10000);
+            const auto price = std::to_string(units / 10000) + "." +
+                std::string(4 - fraction.size(), '0') + fraction;
+            throw std::runtime_error("Kalshi grid: price " + price + " is finer than 0.001");
+        }
+    }
 }
 uint64_t outputBytes(const fs::path& root, const std::string& product) {
     uint64_t n = 0;
@@ -121,6 +138,8 @@ json roll(const RollOptions& o) {
         const auto key = std::to_string(day);
         std::optional<JournalPos> checkpoint;
         int64_t targetBoundary = day;
+        const bool completedCheckpoint = cp["days"].contains(key) &&
+            cp["days"][key].at("committedThroughMs").get<int64_t>() >= end;
         if (cp["days"].contains(key)) {
             const auto& saved = cp["days"][key];
             checkpoint = saved.at("pos").get<JournalPos>();
@@ -168,7 +187,8 @@ json roll(const RollOptions& o) {
         int64_t restoreLocal = 0;
         std::optional<double> referenceMid;
         json gridMetadata, gridInstrument;
-        json lastInstrumentHeader, normalizedInstrumentHeader;
+        json lastInstrumentHeader;
+        json instrumentHistory = json::array();
         Venue gridVenue = Venue::Coinbase;
         JournalBook book;
         bool bookUp = true;
@@ -198,8 +218,7 @@ json roll(const RollOptions& o) {
                 dayReport["grid"].update({{"venue","kalshi"},{"referenceMid",nullptr},
                     {"priceBounds",{cfg.priceBounds->lower,cfg.priceBounds->upper}},
                     {"nearRows",{cfg.layers[0].absoluteRows->low,cfg.layers[0].absoluteRows->high}},
-                    {"deepRows",{cfg.layers[1].absoluteRows->low,cfg.layers[1].absoluteRows->high}},
-                    {"instrument",gridInstrument}});
+                    {"deepRows",{cfg.layers[1].absoluteRows->low,cfg.layers[1].absoluteRows->high}}});
             }
             if (o.onGrid) o.onGrid(day, grid, gridMetadata);
         };
@@ -216,6 +235,7 @@ json roll(const RollOptions& o) {
             }
         };
         feed.onSnapshot = [&](int64_t exchange, int64_t local, std::vector<recording::Level> levels) {
+            if (input.venue == Venue::Kalshi) checkKalshiPrices(levels);
             if (!o.anchorBook) book.snapshot(exchange,levels);
             if (!gridReady) {
                 Grid grid;
@@ -234,7 +254,7 @@ json roll(const RollOptions& o) {
                 gridSnapshot = input.pos; gridMetadata = input.metadata;
                 gridVenue = input.venue; gridInstrument = grid.instrument;
                 auto cfg = grid.config(o.outputRoot);
-                hash = configHash(cfg,gridInstrument);
+                hash = configHash(cfg);
                 if (cp["days"].contains(key)) {
                     const auto& saved = cp["days"][key];
                     if (saved.at("configHash") != hash || saved.at("fromMs") != from)
@@ -254,6 +274,7 @@ json roll(const RollOptions& o) {
             if (recorder) recorder->onSnapshotAt(o.product,exchange,local,std::move(levels));
         };
         feed.onUpdates = [&](int64_t t,int64_t local,std::vector<recording::Level> levels) {
+            if (input.venue == Venue::Kalshi) checkKalshiPrices(levels);
             if (!o.anchorBook) book.apply(t,levels);
             if (recorder) recorder->onUpdatesAt(o.product,t,local,std::move(levels));
         };
@@ -292,7 +313,7 @@ json roll(const RollOptions& o) {
                     throw std::runtime_error("Kalshi grid: overrides are not supported; use the instrument block");
                 const auto grid = a.identity.venue == Venue::Kalshi ? deriveKalshiGrid(a.instrument) :
                     deriveGrid(a.metadata,*a.referenceMid,o.overrides);
-                const auto expectedHash = configHash(grid.config(o.outputRoot),grid.instrument);
+                const auto expectedHash = configHash(grid.config(o.outputRoot));
                 const AnchorIdentity expected{o.product,day,from,end,expectedHash,a.identity.venue};
                 if (a.identity != expected &&
                     !(o.allowGrowingEnd && a.identity.product == expected.product &&
@@ -325,9 +346,25 @@ json roll(const RollOptions& o) {
                 if (!present || cursor.pos != cursorPos)
                     throw std::runtime_error("anchor durable position unavailable");
                 if (cursor.venue != a.identity.venue ||
-                    (cursor.venue == Venue::Kalshi && (normalizeKalshiInstrument(cursor.instrument) != grid.instrument ||
-                        state.at("feed").at("version") != 2 || state.at("feed").at("venue") != "kalshi")))
+                    (cursor.venue == Venue::Kalshi && (state.at("feed").at("version") != 2 || state.at("feed").at("venue") != "kalshi")))
                     throw std::runtime_error("anchor venue/instrument mismatch");
+                json candidateHistory = json::array();
+                if (cursor.venue == Venue::Kalshi) {
+                    if (configHash(deriveKalshiGrid(cursor.instrument).config(o.outputRoot)) != expectedHash)
+                        throw std::runtime_error("anchor grid mismatch");
+                    candidateHistory = state.at("instrumentHistory");
+                    if (!candidateHistory.is_array() || candidateHistory.empty())
+                        throw std::runtime_error("anchor instrument history missing");
+                    for (const auto& entry : candidateHistory) {
+                        const auto time = entry.at("fromMs").get<int64_t>();
+                        const auto policy = deriveKalshiGrid(entry.at("instrument"));
+                        if (time < day || time >= day + Day ||
+                            time > std::max(day,state.at("receiveThroughMs").get<int64_t>()) ||
+                            entry.at("instrument") != policy.instrument ||
+                            configHash(policy.config(o.outputRoot)) != expectedHash)
+                            throw std::runtime_error("anchor instrument history invalid");
+                    }
+                }
                 JournalFeed candidateFeed(o.product); candidateFeed.importState(state.at("feed"));
                 auto candidateBook = JournalBook::fromState(state.at("book"));
                 const bool candidateUp = state.at("up");
@@ -387,6 +424,7 @@ json roll(const RollOptions& o) {
                 gridReady = true; hash = expectedHash; recorderFloor = floor;
                 referenceMid = a.referenceMid; gridSnapshot = a.gridSnapshot; gridMetadata = a.metadata;
                 gridVenue = a.identity.venue; gridInstrument = grid.instrument;
+                instrumentHistory = std::move(candidateHistory);
                 applied = a.pos; restoreCursor = cursorPos; restoreCursorApplied = !before;
                 nextBoundary = a.boundaryMs + Quarter;
                 receiveThrough = candidateReceive; restoreLocal = lastLocal;
@@ -444,7 +482,7 @@ json roll(const RollOptions& o) {
             // Snapshot fallback may be warming up below an existing output
             // floor. Such a state cannot replace a standalone midnight anchor
             // or an older cache with a different committed prefix.
-            if (!o.writeAnchors || !recorder || boundary < savedThrough ||
+            if (!o.writeAnchors || !recorder || (gridVenue == Venue::Kalshi && completedCheckpoint) || boundary < savedThrough ||
                 (boundary == day && recorderFloor != from)) return;
             bool degraded = false;
             try {
@@ -462,9 +500,11 @@ json roll(const RollOptions& o) {
                 a.identity = {o.product,day,from,end,hash,gridVenue}; a.boundaryMs = boundary; a.pos = applied;
                 a.gridSnapshot = gridSnapshot; a.referenceMid = referenceMid; a.metadata = gridMetadata;
                 a.instrument = gridInstrument;
-                a.feed.bytes = json::to_cbor({{"feed",feed.exportState()},{"book",book.exportState()},
+                json feedState = {{"feed",feed.exportState()},{"book",book.exportState()},
                     {"up",bookUp},{"recorderFloor",recorderFloor},{"receiveThroughMs",receiveThrough},
-                    {"resumeAt",resume ? json(resume->pos) : json()},{"resumeGap",resume && resume->gapBefore}});
+                    {"resumeAt",resume ? json(resume->pos) : json()},{"resumeGap",resume && resume->gapBefore}};
+                if (gridVenue == Venue::Kalshi) feedState["instrumentHistory"] = instrumentHistory;
+                a.feed.bytes = json::to_cbor(feedState);
                 const auto exportMs = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
                 const auto written = AnchorStore::write(anchorRoot,a);
                 dayReport["anchorBytes"] = written.encodedBytes;
@@ -488,16 +528,18 @@ json roll(const RollOptions& o) {
             recorder->drain();
             const auto stats = recorder->stats();
             if (stats.diskErrors) throw std::runtime_error("roller recorder failed; checkpoint not advanced");
-            if (!o.productWriterLease && stats.columnsWritten == checkpointColumns) return;
+            const bool metadataChanged = gridVenue == Venue::Kalshi && !completedCheckpoint && cp["days"].contains(key) &&
+                cp["days"].value(key,json::object()).value("instrumentHistory",json::array()) != instrumentHistory;
+            if (!o.productWriterLease && !metadataChanged && stats.columnsWritten == checkpointColumns) return;
             auto through = end;
             for (const auto* layer : {"near","deep"})
                 through = std::min(through,recorder->watermarks(o.product,layer).minuteThroughMs);
             if (through < savedThrough ||
-                (through == savedThrough && stats.columnsWritten == checkpointColumns)) return;
+                (through == savedThrough && !metadataChanged && stats.columnsWritten == checkpointColumns)) return;
             cp["days"][key] = {{"pos",applied},{"committedThroughMs",through},{"configHash",hash},{"fromMs",from},{"receiveThroughMs",receiveThrough}};
             if (gridVenue == Venue::Kalshi) {
                 cp["days"][key]["venue"] = "kalshi";
-                cp["days"][key]["instrument"] = gridInstrument;
+                cp["days"][key]["instrumentHistory"] = instrumentHistory;
             }
             // Also expose the newest checkpoint in the plan's flat schema.
             cp["pos"] = applied; cp["committedThroughMs"] = through; cp["configHash"] = hash;
@@ -507,18 +549,6 @@ json roll(const RollOptions& o) {
         };
         while ((!recorder || o.nextRecord || savedThrough < end) && (!o.cancelled || !o.cancelled()) &&
                (o.nextRecord ? o.nextRecord(*reader, input) : reader->next(input))) {
-            // Reject before feed callbacks, cache export or recorder advancement.
-            // A following UTC day's records may close this day's lateness tail;
-            // its new policy belongs to that day's separate recorder instead.
-            if (gridReady && input.venue == Venue::Kalshi &&
-                input.record.time.systemNs / 1'000'000 < day + Day) {
-                if (lastInstrumentHeader != input.instrument) {
-                    normalizedInstrumentHeader = normalizeKalshiInstrument(input.instrument);
-                    lastInstrumentHeader = input.instrument;
-                }
-                if (normalizedInstrumentHeader != gridInstrument)
-                    throw std::runtime_error("Kalshi grid: instrument changed within the UTC day");
-            }
             // No synthetic EOF tick: only actual journal records prove elapsed time.
             // Warmup is read in journal order; receipt clock need not be monotonic.
             if (recorder && nextBoundary == day && input.record.time.systemNs / 1'000'000 >= day) {
@@ -527,6 +557,19 @@ json roll(const RollOptions& o) {
                 // today's file and is replayed once. This also handles a long
                 // silent interval across midnight without losing its minutes.
                 saveAnchor(day,&input); nextBoundary += Quarter;
+            }
+            if (input.venue == Venue::Kalshi && lastInstrumentHeader != input.instrument) {
+                // Validate every new header, even lifecycle records before a
+                // snapshot. Band schedules are metadata, not storage identity.
+                const auto policy = deriveKalshiGrid(input.instrument);
+                const auto local = input.record.time.systemNs / 1'000'000;
+                lastInstrumentHeader = input.instrument;
+                if (local < day + Day) {
+                    gridInstrument = policy.instrument;
+                    if (local < day) instrumentHistory = json::array({{{"fromMs",day},{"instrument",gridInstrument}}});
+                    else if (instrumentHistory.empty() || instrumentHistory.back().at("instrument") != gridInstrument)
+                        instrumentHistory.push_back({{"fromMs",local},{"instrument",gridInstrument}});
+                }
             }
             feed.apply(input); applied = input.pos; ++records;
             receiveThrough = std::max(receiveThrough,input.record.time.systemNs / 1'000'000);
@@ -560,6 +603,10 @@ json roll(const RollOptions& o) {
             saveAnchor(end);
         if (recorder) columns += recorder->stats().columnsWritten - importedColumns;
         dayReport["committedThroughMs"] = savedThrough;
+        if (gridVenue == Venue::Kalshi) {
+            dayReport["venue"] = "kalshi";
+            dayReport["instrumentHistory"] = completedCheckpoint ? cp["days"][key].at("instrumentHistory") : instrumentHistory;
+        }
         decoded += reader->decodedRecords();
         if (o.writeAnchors && !o.dryRun) {
             try {

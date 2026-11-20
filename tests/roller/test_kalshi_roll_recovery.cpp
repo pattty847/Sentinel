@@ -79,7 +79,7 @@ void oneRun(const fs::path& root, const json& h, bool coinbase = false) {
 }
 }
 
-TEST(KalshiRecovery, MiddayInstrumentChangeRefusesBeforeCallbacksAndPreservesPrefix) {
+TEST(KalshiRecovery, MiddayUnrepresentableInstrumentPreservesPrefix) {
     QTemporaryDir temp; const fs::path root = temp.path().toStdString();
     {
         capture::Writer writer(config(root / "raw"),header(spec()));
@@ -90,7 +90,7 @@ TEST(KalshiRecovery, MiddayInstrumentChangeRefusesBeforeCallbacksAndPreservesPre
     ASSERT_FALSE(prefix.empty());
     const auto checkpoint = read(o.outputRoot / Product / "roller.json");
     {
-        capture::Writer writer(config(root / "raw"),header(tapered()));
+        capture::Writer writer(config(root / "raw"),header(spec("0.0005")));
         // Refuse the first record of the new policy, even before its snapshot.
         append(writer,Epoch + 5 * Minute + 5000,json::object(),capture::Kind::CaptureStarted);
         auto book = snapshot();
@@ -102,7 +102,7 @@ TEST(KalshiRecovery, MiddayInstrumentChangeRefusesBeforeCallbacksAndPreservesPre
     int64_t lastApplied = 0;
     o.onApplied = [&](const JournalRecord& r) { lastApplied = r.record.time.systemNs / 1'000'000; };
     try { roll(o); FAIL() << "silently accepted a changed intra-day instrument"; }
-    catch (const std::runtime_error& e) { EXPECT_STREQ(e.what(),"Kalshi grid: instrument changed within the UTC day"); }
+    catch (const std::runtime_error& e) { EXPECT_NE(std::string(e.what()).find("Kalshi grid:"),std::string::npos); EXPECT_NE(std::string(e.what()).find("0.001"),std::string::npos); }
     EXPECT_LT(lastApplied,Epoch + 5 * Minute + 5000);
     EXPECT_EQ(files(o.outputRoot),prefix);
     EXPECT_EQ(read(o.outputRoot / Product / "roller.json"),checkpoint);
@@ -125,9 +125,9 @@ TEST(KalshiRecovery, EquivalentDecimalHeadersShareIdentityAndPersistNormalizedIn
         }
         RollOptions o{raw,root / (std::string(history) + "-out"),Product,Epoch,Epoch + 20 * Minute};
         const auto report = roll(o);
-        EXPECT_EQ(report["days"][0]["grid"]["instrument"],canonical);
+        EXPECT_EQ(report["days"][0]["instrumentHistory"],json::array({{{"fromMs",Epoch},{"instrument",canonical}}}));
         const auto day = read(o.outputRoot / Product / "roller.json")["days"][std::to_string(Epoch)];
-        EXPECT_EQ(day.at("venue"),"kalshi"); EXPECT_EQ(day.at("instrument"),canonical);
+        EXPECT_EQ(day.at("venue"),"kalshi"); EXPECT_EQ(day.at("instrumentHistory"),report["days"][0]["instrumentHistory"]);
         const auto anchor = AnchorStore::load(o.outputRoot / Product / "anchors/2026-10-24/0015.anchor");
         EXPECT_EQ(anchor.instrument,canonical);
         const auto expected = files(o.outputRoot);
@@ -141,7 +141,7 @@ TEST(KalshiRecovery, EquivalentDecimalHeadersShareIdentityAndPersistNormalizedIn
               read(root / "textual-out" / Product / "roller.json")["configHash"]);
 }
 
-TEST(KalshiRecovery, NoCheckpointAnchorGuardRejectsInstrumentAndVenueBeforeFallback) {
+TEST(KalshiRecovery, NoCheckpointAnchorAcceptsBandsAndRejectsVenue) {
     QTemporaryDir temp; const fs::path root = temp.path().toStdString();
     oneRun(root / "raw",header(spec()));
     RollOptions baseline{root / "raw",root / "baseline",Product,Epoch,Epoch + 4 * Minute};
@@ -156,15 +156,23 @@ TEST(KalshiRecovery, NoCheckpointAnchorGuardRejectsInstrumentAndVenueBeforeFallb
         roll(other);
         auto offered = AnchorStore::load(other.outputRoot / Product / "anchors/2026-10-24/0000.anchor");
         // Make the durable cursor available in the actual journal. All policy
-        // identity checks pass without a checkpoint; the journal-header guard
-        // must reject before importing the mismatched opaque feed/recorder state.
+        // identity checks pass without a checkpoint. Band differences are accepted;
+        // a foreign venue is rejected before importing its feed/recorder state.
         offered.pos = original.pos; offered.gridSnapshot = original.gridSnapshot;
+        auto state = json::from_cbor(offered.feed.bytes);
+        state["feed"]["run"] = original.pos.run;
+        offered.feed.bytes = json::to_cbor(state);
         auto o = baseline; o.outputRoot = source / "fallback";
         AnchorStore::write(o.outputRoot,offered);
         ASSERT_FALSE(fs::exists(o.outputRoot / Product / "roller.json"));
         const auto report = roll(o);
-        EXPECT_EQ(report["days"][0]["anchorRejection"],"anchor venue/instrument mismatch") << report;
-        EXPECT_FALSE(report["days"][0].contains("anchorBoundaryMs"));
+        if (coinbase) {
+            EXPECT_EQ(report["days"][0]["anchorRejection"],"anchor venue/instrument mismatch") << report;
+            EXPECT_FALSE(report["days"][0].contains("anchorBoundaryMs"));
+        } else {
+            EXPECT_FALSE(report["days"][0].contains("anchorRejection")) << report;
+            EXPECT_EQ(report["days"][0]["anchorBoundaryMs"],Epoch);
+        }
         EXPECT_EQ(files(o.outputRoot),expected);
     }
 }
@@ -227,4 +235,109 @@ TEST(KalshiRecovery, ThreeHourDeltasOneSidedMidnightAndHourCrashHaveIdenticalByt
     const auto recovered = roll(crash);
     EXPECT_TRUE(recovered["days"][1].contains("anchorBoundaryMs"));
     EXPECT_EQ(files(crash.outputRoot),uninterrupted);
+}
+
+TEST(KalshiRecovery, BandChangesKeepGridCheckpointAnchorsAndDeterministicHistory) {
+    QTemporaryDir temp; const fs::path root = temp.path().toStdString();
+    const auto midnight = Epoch + Day, end = midnight + 30 * Minute;
+    const auto old = spec(), fine = spec("0.001"), coarse = spec("0.004");
+    const json expected = json::array({{{"fromMs",midnight},{"instrument",old}},
+        {{"fromMs",midnight + 3000},{"instrument",fine}},
+        {{"fromMs",midnight + 5 * Minute + 3000},{"instrument",coarse}},
+        {{"fromMs",midnight + 17 * Minute + 3000},{"instrument",old}}});
+    for (bool changing : {false,true}) {
+        const auto raw = root / (changing ? "mixed-raw" : "constant-raw");
+        {
+            capture::Writer writer(config(raw),header(old));
+            append(writer,midnight - 2 * Minute,snapshot());
+            append(writer,midnight - Minute + 3000,json::object(),capture::Kind::CaptureStarted);
+            writer.close();
+        }
+        for (int run = 0; run < 3; ++run) {
+            const int first = run == 0 ? 0 : run == 1 ? 5 : 17;
+            const int last = run == 0 ? 4 : run == 1 ? 16 : 30;
+            capture::Writer writer(config(raw),header(changing ? (run == 0 ? fine : run == 1 ? coarse : old) : old));
+            append(writer,midnight + first * Minute + 3000,json::object(),capture::Kind::CaptureStarted);
+            append(writer,midnight + first * Minute + 4000,snapshot());
+            for (int i = first + 1; i <= last; ++i)
+                append(writer,midnight + i * Minute + 3000,json::object(),capture::Kind::CaptureStarted);
+            writer.close();
+        }
+    }
+    RollOptions o{root / "mixed-raw",root / "full",Product,midnight - 2 * Minute,end};
+    const auto report = roll(o);
+    const auto checkpoint = read(o.outputRoot / Product / "roller.json");
+    EXPECT_EQ(checkpoint["days"][std::to_string(midnight)]["instrumentHistory"],expected);
+    EXPECT_EQ(report["days"][1]["instrumentHistory"],expected);
+    EXPECT_EQ(checkpoint["days"][std::to_string(Epoch)]["configHash"],checkpoint["days"][std::to_string(midnight)]["configHash"]);
+    const auto same = roll(o); // Completed checkpoint must not truncate its history to an older anchor.
+    EXPECT_EQ(same["days"][1]["instrumentHistory"],expected);
+    EXPECT_EQ(read(o.outputRoot / Product / "roller.json"),checkpoint);
+    auto constant = o; constant.journalRoot = root / "constant-raw"; constant.outputRoot = root / "constant";
+    roll(constant);
+    EXPECT_EQ(files(o.outputRoot),files(constant.outputRoot));
+    EXPECT_EQ(checkpoint["configHash"],read(constant.outputRoot / Product / "roller.json")["configHash"]);
+    for (const auto* layer : {"near","deep"}) {
+        const auto rows = recording::Hmc2Store::readRange(o.outputRoot,Product,layer,Minute,o.fromMs,end);
+        ASSERT_FALSE(rows.empty());
+        for (const auto& row : rows) EXPECT_EQ(row.header.configHash,rows.front().header.configHash);
+    }
+    // Restore an old-band midnight anchor against a new-band journal cursor,
+    // with no checkpoint and no prior-day journal available.
+    const auto anchor = AnchorStore::load(o.outputRoot / Product / "anchors/2026-10-25/0000.anchor");
+    EXPECT_EQ(anchor.instrument,old);
+    JournalReader inventory(o.journalRoot,Product); fs::create_directories(root / "day2");
+    for (const auto& file : inventory.files()) if (file.header.at("opened_system_ns").get<int64_t>() / 1'000'000 >= midnight)
+        fs::copy_file(file.path,root / "day2" / file.path.filename());
+    auto resumed = o; resumed.fromMs = midnight; resumed.journalRoot = root / "day2"; resumed.outputRoot = root / "anchor-only";
+    AnchorStore::write(resumed.outputRoot,anchor);
+    const auto restored = roll(resumed);
+    EXPECT_EQ(restored["days"][0]["anchorBoundaryMs"],midnight);
+    EXPECT_EQ(restored["days"][0]["instrumentHistory"],expected);
+    EXPECT_EQ(files(resumed.outputRoot),files(o.outputRoot,"2026-10-25"));
+    // Both journal fallback and quarter-anchor recovery cross metadata changes;
+    // the persisted list must have exactly the uninterrupted entries.
+    for (bool anchors : {false,true}) {
+        auto crash = o; crash.outputRoot = root / (anchors ? "crash-anchor" : "crash-journal"); crash.useAnchors = anchors;
+        int64_t applied = 0;
+        crash.onApplied = [&](const JournalRecord& r) { applied = r.record.time.systemNs / 1'000'000; };
+        crash.afterRecordForTest = [&](uint64_t) { if (applied >= midnight + (anchors ? 16 : 19) * Minute) throw std::runtime_error("metadata crash"); };
+        EXPECT_THROW(roll(crash),std::runtime_error);
+        crash.onApplied = {}; crash.afterRecordForTest = {};
+        const auto recovered = roll(crash);
+        EXPECT_EQ(recovered["days"][1]["instrumentHistory"],expected);
+        EXPECT_EQ(read(crash.outputRoot / Product / "roller.json")["days"][std::to_string(midnight)]["instrumentHistory"],expected);
+        EXPECT_EQ(files(crash.outputRoot),files(o.outputRoot));
+        if (anchors) EXPECT_EQ(recovered["days"][1]["anchorBoundaryMs"],midnight + 15 * Minute);
+    }
+}
+
+TEST(KalshiRecovery, OffGridSnapshotAndDeltaStopBeforeQuantization) {
+    for (bool update : {false,true}) for (bool no : {false,true}) {
+        QTemporaryDir temp; const fs::path root = temp.path().toStdString();
+        {
+            capture::Writer writer(config(root / "raw"),header(spec()));
+            append(writer,Epoch,snapshot()); ticks(writer,1,5); writer.close();
+        }
+        RollOptions o{root / "raw",root / "out",Product,Epoch,Epoch + 5 * Minute};
+        roll(o); const auto prefix = files(o.outputRoot);
+        const auto checkpoint = read(o.outputRoot / Product / "roller.json");
+        {
+            capture::Writer writer(config(root / "raw"),header(spec()));
+            // Re-anchor the new run without advancing beyond the saved prefix.
+            append(writer,Epoch + 5 * Minute + 3001,snapshot());
+            auto bad = snapshot(); bad["seq"] = 2;
+            bad["msg"][no ? "no_dollars_fp" : "yes_dollars_fp"] = json::array({{"0.0005","1.00"}});
+            if (update) bad = {{"type","orderbook_delta"},{"sid",1},{"seq",2},
+                {"msg",{{"market_ticker",Product},{"price_dollars","0.0005"},{"delta_fp","1.00"},{"side",no ? "no" : "yes"}}}};
+            append(writer,Epoch + 5 * Minute + 3002,bad); ticks(writer,6,10); writer.close();
+        }
+        o.toMs = Epoch + 10 * Minute;
+        try { roll(o); FAIL() << "quantized an off-grid level"; }
+        catch (const std::logic_error& e) {
+            EXPECT_EQ(std::string(e.what()),no ? "Kalshi grid: price 0.9995 is finer than 0.001" : "Kalshi grid: price 0.0005 is finer than 0.001");
+        }
+        EXPECT_EQ(files(o.outputRoot),prefix);
+        EXPECT_EQ(read(o.outputRoot / Product / "roller.json"),checkpoint);
+    }
 }

@@ -621,64 +621,71 @@ as described below. The capture verifier's Kalshi semantic refusal remains.
 
 ## Kalshi offline grids and replay
 
-The journal's instrument block is the grid policy. No reference mid or additional
-CLI flag is required. The first selected-market snapshot initializes the recorder,
-including a YES-only, NO-only or empty snapshot. Missing bids use 0 and missing
-asks use 1 for the midpoint; both missing gives 0.5. Actual crossed/locked books
-retain the recorder's existing invalid/unobserved behavior. Decoder prices have
-already been complemented in integer units; the roller never complements doubles.
+Every Kalshi market uses the same fixed price grid, independent of its band
+schedule. No reference mid or additional CLI flag is required. The first
+selected-market snapshot initializes the recorder, including a YES-only,
+NO-only or empty snapshot. Missing bids use 0 and missing asks use 1 for the
+midpoint; both missing gives 0.5. Actual crossed/locked books retain the
+recorder's existing invalid/unobserved behavior.
 
-Both retained layer names cover the complete inclusive 0..1 range:
+Both retained layer names cover the complete inclusive 0..1 range, with
+`priceScale = 1000` and recorder `priceBounds = [0, 1]`:
 
-| Finest band step | Price scale | near row tick units | deep row tick units | near rows | deep rows |
-| --- | ---: | ---: | ---: | --- | --- |
-| 0.01 | 100 | 1 | 1 | 0..100 | 0..100 |
-| 0.001 | 1000 | 1 | 10 | 0..1000 | 0..100 |
-| 0.005 | 1000 | 5 | 10 | 0..200 | 0..100 |
+| Layer | Row price tick | Row tick units | Absolute rows | Columns |
+| --- | ---: | ---: | --- | --- |
+| near | 0.001 (0.1 cent) | 1 | 0..1000 (1,001 rows) | minutes |
+| deep | 0.01 (1 cent) | 10 | 0..100 (101 rows) | minutes and hourly rollup |
 
-Near writes minutes only. Deep writes minutes and the recorder's hourly rollup.
-The duplicate grids of a one-cent market are intentional. Price scale is the
-smallest decimal power of ten representing the finest step as integer units.
-Size floor is `size_increment`. Absolute row bounds and midpoint bounds come
-from this same validated policy; relative window factors are zero.
+HMC2 stores occupied rows, so a one-cent market does not fill the intervening
+near rows. The size floor is the instrument's `size_increment`; relative window
+factors are zero. Coinbase overrides retain their existing behavior; Kalshi
+rejects overrides because its fixed policy and instrument size increment own
+these values.
 
-Validation uses exact normalized decimal strings and integer divisibility, with
-at most 15 fractional places. Bounds must be exactly 0..1, bands must cover the
-whole range without gaps, band endpoints must align to their band's step, every
-step must be a multiple of the finest step, the deep tick must be an integer
-multiple of the near tick, and 1 must be a multiple of both layer ticks.
-Unsupported policies fail with `Kalshi grid:` before recorder or
-output creation. Coinbase grid overrides retain their existing behavior; Kalshi
-rejects overrides because its instrument block owns all four grid values.
+The instrument is validated with exact normalized decimals: bounds must be
+exactly 0..1, bands must cover that range without gaps, endpoints must align to
+their band's step, and every step must be an integer multiple of 0.001.
+Steps 0.002, 0.004, 0.005, 0.008, 0.01, 0.02, 0.05 and 0.1 are representable;
+0.0005 and 0.0025 are refused with a `Kalshi grid:` error naming the 0.001 limit.
+A new unrepresentable header stops replay before applying its first record,
+leaving previously committed columns valid.
 
-HMC2 identity and generation change only when the recorder grid changes: price
-scale, a layer tick, row bounds, price bounds or size floor.
-Different band schedules that derive the same recorder grid retain the same
-HMC2 identity and generation, with normal UTC day-file rollover.
-The roller's checkpoint/anchor hash still conditionally includes absolute rows,
-price bounds and the normalized instrument JSON, so bands-only changes refuse
-mismatched checkpoints and anchors; Coinbase hashes append none of these fields
-and remain identical.
+Band schedules are viewer metadata. A representable band-only change, within
+or between UTC days, preserves both the roller checkpoint/anchor identity and
+the HMC2 identity and generation. These identities depend on the recorder grid
+(scale, layer ticks, absolute rows, price bounds and size floor), so changing
+`size_increment` changes both identities. Coinbase identities and bytes remain
+unchanged.
 
-Instrument decimal strings are normalized before identity and equality checks,
-so `0.01` and `0.0100` describe the same policy. Each Kalshi `roller.json` day
-entry also stores `venue: kalshi` and that normalized `instrument`, including
-the complete band schedule for readers; Coinbase checkpoint bytes are unchanged.
-A different instrument encountered within the UTC day stops the product roll
-with `Kalshi grid: instrument changed within the UTC day` before that record
-reaches the feed or recorder. Earlier committed columns remain valid; supporting
-mid-day tick changes requires a later slice.
+Each Kalshi `roller.json` day entry and stdout day report includes `venue` and
+`instrumentHistory`: an ordered list of `{fromMs, instrument}` entries with
+normalized decimal strings. The first entry describes the policy at the start
+of replay; a policy warmed up before midnight starts at midnight. Each later
+entry uses the receive time of the first record carrying the changed policy.
+Changes before the day replace its initial warmup policy; following-day tail
+records do not enter the preceding day's history. Equivalent decimal spellings
+such as `0.01` and `0.0100` do not add an entry. Anchors carry this history and
+resume appends subsequent changes, preserving the uninterrupted list without
+duplicates; completed checkpoints retain their full history.
+
+Wire levels must also lie on the 0.001 grid, even when their header claims a
+coarser tick. The decoder complements NO prices in integer 1/10000 units before
+emitting levels. The roller recovers those integers from the decoder's exact
+`units / 10000` conversion, verifies the round trip, and checks divisibility by
+10 using integer arithmetic before sending a snapshot or delta to the recorder.
+An off-grid level stops the product with `Kalshi grid: price <p> is finer than
+0.001`; no such level is rounded onto a recorder row.
 
 Journal anchor search recognizes `orderbook_snapshot` for the selected ticker
 and searches earlier hours and runs using the same ordering and damage handling
 as Coinbase. Snapshots need not repeat hourly. Midnight replay anchors retain
 Kalshi feed version-2 integer state, the native book, recorder integration state,
-and the normalized instrument block. Their envelope is version 2 under the existing
+the current normalized instrument block and instrument history. Their envelope is version 2 under the existing
 `SANCHR01` framing, with `venue: kalshi` and `referenceMid: null`. Old readers
 reject the envelope version. Coinbase envelopes and payload bytes stay version 1,
 with their required positive reference mid and Coinbase increment metadata.
 Venue participates in anchor identity; the actual journal cursor's venue and
-instrument are checked before state installation. Missing or rejected anchors
+recorder grid are checked before state installation; a band-only difference is compatible. Missing or rejected anchors
 fall back to journal snapshot replay. Checkpoint fences, lateness, commit bounds,
 and crash recovery otherwise use the shared driver unchanged.
 
@@ -688,7 +695,8 @@ receive clocks. Decoded sizes allow half a logarithmic size-code step plus
 floating-point noise. Mid OHLC, observation duration and row bounds are checked
 separately. Synthetic cases cover grid validation, empty/one-sided starts,
 checkpoint/venue identity, midnight restore without the previous day's snapshot,
-snapshot fallback, a daily tick change, crash/resume and CLI reports.
+snapshot fallback, band-history changes and recovery, size-floor identity changes,
+off-grid refusal, crash/resume and CLI reports.
 `coinbase_roll_6910fc11.json` pins SHA-256 of every HMC2, checkpoint and anchor
 file from the unmodified base executable on both existing Coinbase captures;
 the manifest records the exact ranges and roller config hash.
