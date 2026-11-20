@@ -1533,6 +1533,7 @@ struct ShadowRoller::Impl {
         if (restoreEnabled() && !std::exchange(p.candlesRestored, true))
           restoreCandles(p, source, tap);
         RollOptions o{cfg.journalRoot, cfg.outputRoot, p.name, day, day + Day};
+        o.rollupRoot = cfg.rollupRoot;
         o.publisher = cfg.publisher;
         if (tap.enabled() && cfg.model.grid)
           o.onGrid = [&, product = p.name](int64_t dayStartMs, const Grid& grid,

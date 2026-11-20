@@ -1,3 +1,6 @@
+// Source fingerprints must be checked before wire-cache hits as well as during
+// reconciliation: a roller may crash after a durable append and before .shr
+// invalidation. Header results are reusable only within a reconciliation pass.
 #include "RollupStore.hpp"
 #include "SessionManager.hpp"
 #include "../heatmap/TimeComposer.hpp"
@@ -250,8 +253,11 @@ std::optional<std::vector<uint8_t>> readRollupFrame(const std::filesystem::path&
     return frame;
 }
 
-std::map<int64_t, MinuteDay> minuteFingerprints(const std::filesystem::path& hmc2Root, const std::string& symbol,
-                                                const std::string& layer) {
+namespace {
+// Serving checks only the requested days' metadata. Do not stat every minute
+// file in a multi-year series on each chunk request.
+std::map<int64_t, MinuteDay> scanMinuteFingerprints(const std::filesystem::path& hmc2Root,
+    const std::string& symbol, const std::string& layer, int64_t from, int64_t to) {
     std::map<int64_t, std::vector<std::tuple<std::string, uint64_t, int64_t>>> files;
     std::error_code ec;
     const auto dir = hmc2Root / symbol / (layer + "-60000");
@@ -259,7 +265,7 @@ std::map<int64_t, MinuteDay> minuteFingerprints(const std::filesystem::path& hmc
         const auto name = it->path().filename().string();
         if (name.size() < 15 || name.substr(name.size() - 5) != ".hmc2" || (name[10] != '.')) continue;
         const auto day = parseDay(name);
-        if (!day) continue;
+        if (!day || *day < from || *day >= to) continue;
         std::error_code fileError;
         const auto size = it->file_size(fileError);
         const auto time = it->last_write_time(fileError);
@@ -274,6 +280,20 @@ std::map<int64_t, MinuteDay> minuteFingerprints(const std::filesystem::path& hmc
         out[day] = {h | 1}; // nonzero: 0 means "no minute files"
     }
     return out;
+}
+uint64_t fingerprintFor(const std::map<int64_t, MinuteDay>& days, int64_t day) {
+    const auto it = days.find(day);
+    return it == days.end() ? 0 : it->second.fingerprint;
+}
+bool currentHeader(const std::filesystem::path& path, uint64_t fingerprint) {
+    const auto header = readRollupHeader(path);
+    return fingerprint && header && header->sourceFingerprint == fingerprint;
+}
+} // namespace
+
+std::map<int64_t, MinuteDay> minuteFingerprints(const std::filesystem::path& hmc2Root, const std::string& symbol,
+                                                const std::string& layer) {
+    return scanMinuteFingerprints(hmc2Root, symbol, layer, INT64_MIN, INT64_MAX);
 }
 
 std::filesystem::path rollupRootFor(const std::string& configured, const std::filesystem::path& hmc2Root) {
@@ -452,8 +472,7 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
     };
     auto current = [&](int64_t day, uint64_t fp) {
         for (const int64_t level : {kHourMs, kDayMs}) {
-            const auto header = readRollupHeader(filePath(symbol, layer, level, day));
-            if (!header || header->sourceFingerprint != fp) return false;
+            if (!currentHeader(filePath(symbol, layer, level, day), fp)) return false;
         }
         return true;
     };
@@ -482,7 +501,10 @@ void RollupStore::passSeries(Hmc2Reader& reader, const std::string& symbol, cons
         const auto fp = minutes.fingerprint;
         // A day without minute files is a recorder gap: it needs no files (a
         // request composes it, all gaps, from the absent minutes at no cost).
-        bool built = !fp || (!suspects.contains(day) && current(day, fp));
+        // The initial pending set already checked both headers. Reuse that
+        // result for this pass; a later deletion is safe on serve and will be
+        // found by the next pass, without opening every current header twice.
+        bool built = !pendingDays.contains(day);
         if (!built && options_.buildMissing) {
             const auto started = std::chrono::steady_clock::now();
             try {
@@ -632,7 +654,12 @@ RollupStore::Reply RollupStore::serveHour(const ChunkKey& key, const std::string
     if (day + kDayMs > dayFloor(options_.minuteThrough(key.symbol, layer)))
         return {nullptr, heatmap::ChunkError::Unavailable, "rollup day is not closed"};
     const auto path = filePath(key.symbol, layer, kHourMs, day);
-    if (const auto identity = fileIdentity(path)) {
+    // Check the source before even a warm wire-cache hit. A roller can die
+    // after its durable minute append but before it removes the old .shr.
+    const auto fingerprints = scanMinuteFingerprints(options_.hmc2Root, key.symbol, layer, day, day + kDayMs);
+    const auto sourceFingerprint = fingerprintFor(fingerprints, day);
+    if (const auto fileId = fileIdentity(path); fileId && currentHeader(path, sourceFingerprint)) {
+        const auto identity = fnv(fileId, sourceFingerprint);
         if (auto hit = cached(key, identity)) return {std::move(hit)};
         if (auto frame = readRollupFrame(path, key)) {
             auto wire = std::make_shared<const std::vector<uint8_t>>(std::move(*frame));
@@ -640,7 +667,7 @@ RollupStore::Reply RollupStore::serveHour(const ChunkKey& key, const std::string
             return {std::move(wire)};
         }
     }
-    // Missing or corrupt: the day's minutes give the same picture.
+    // Missing, corrupt or stale: the day's minutes give the current picture.
     const auto minutes = expectFile(key, layer, day);
     ReadControl control;
     const auto rollup = composeDay(reader, key.symbol, layer, day, control);
@@ -661,10 +688,14 @@ RollupStore::Reply RollupStore::serveDay(const ChunkKey& key, const std::string&
     std::vector<std::pair<int64_t, uint64_t>> days;
     uint64_t identity = fnv(fnv(fnv(kFnvSeed, uint64_t(scanFrom)), uint64_t(scanTo)), uint64_t(firstDay));
     bool allPresent = true;
+    const auto fingerprints = scanMinuteFingerprints(options_.hmc2Root, key.symbol, layer,
+                                                     std::max(scanFrom, firstDay), scanTo);
     for (int64_t day = std::max(scanFrom, firstDay); day < scanTo; day += kDayMs) {
-        const auto id = fileIdentity(filePath(key.symbol, layer, kDayMs, day));
+        const auto path = filePath(key.symbol, layer, kDayMs, day);
+        const auto id = currentHeader(path, fingerprintFor(fingerprints, day)) ? fileIdentity(path) : 0;
         allPresent = allPresent && id;
         identity = fnv(identity, id);
+        identity = fnv(identity, fingerprintFor(fingerprints, day));
         days.emplace_back(day, id);
     }
     if (allPresent)
@@ -704,7 +735,7 @@ MinuteDay RollupStore::expectFile(const ChunkKey& key, const std::string& layer,
     if (it == days.end()) return {};
     markSuspect(key.symbol, layer, dayMs);
     counters_.fallbackServes.fetch_add(1, std::memory_order_relaxed);
-    sLog_Warning("Rollup file missing or corrupt; composing minutes symbol=" << key.symbol << " layer=" << layer
+    sLog_Warning("Rollup file missing, corrupt or stale; composing minutes symbol=" << key.symbol << " layer=" << layer
                  << " level=" << key.levelMs << " day=" << dayString(dayMs));
     return it->second;
 }
