@@ -154,6 +154,11 @@ TEST(KalshiRecovery, NoCheckpointAnchorAcceptsBandsAndRejectsVenue) {
         oneRun(source / "raw",h,coinbase);
         RollOptions other{source / "raw",source / "out",Product,Epoch,Epoch + 4 * Minute};
         roll(other);
+        if (!coinbase) {
+            EXPECT_EQ(read(other.outputRoot / Product / "roller.json")["configHash"],
+                      read(baseline.outputRoot / Product / "roller.json")["configHash"]);
+            EXPECT_EQ(files(other.outputRoot),expected);
+        }
         auto offered = AnchorStore::load(other.outputRoot / Product / "anchors/2026-10-24/0000.anchor");
         // Make the durable cursor available in the actual journal. All policy
         // identity checks pass without a checkpoint. Band differences are accepted;

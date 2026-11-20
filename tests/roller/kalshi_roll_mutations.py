@@ -56,7 +56,7 @@ MUTATIONS = [
     ('bounded midpoint', 'Grid.cpp', 'c.priceBounds = recording::PriceBounds{0,1};',
      'c.priceBounds = recording::PriceBounds{0,0.9};', 'KalshiRoll.OneSidedAndEmptyStartUseBoundsIncludingExtendedTickers'),
     ('band-independent roller identity', 'Roller.cpp', 'hash = configHash(cfg);',
-     'hash = configHash(cfg) ^ std::hash<std::string>{}(gridInstrument.dump());', 'KalshiRecovery.BandChangesKeepGridCheckpointAnchorsAndDeterministicHistory'),
+     'hash = configHash(cfg) ^ std::hash<std::string>{}(gridInstrument.dump());', 'KalshiRecovery.NoCheckpointAnchorAcceptsBandsAndRejectsVenue:KalshiRecovery.BandChangesKeepGridCheckpointAnchorsAndDeterministicHistory'),
     ('row policy hash', 'Roller.cpp', 'if (l.absoluteRows) layer.push_back({l.absoluteRows->low,l.absoluteRows->high});',
      '', 'KalshiRoll.SizeIdentityRejectsCheckpointAndVenueMismatch'),
     ('price bounds hash', 'Roller.cpp', 'if (c.priceBounds) j["priceBounds"] = {c.priceBounds->lower,c.priceBounds->upper};',
