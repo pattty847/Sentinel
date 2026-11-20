@@ -26,6 +26,13 @@ class MutantTimeout(unittest.TestCase):
         self.assertIn('started', text, 'output printed before the hang is kept')
         self.assertTrue(runner.mutant_killed(returncode, text))
 
+    def test_child_gets_eof_on_stdin(self):
+        start = time.monotonic()
+        returncode, text = runner.run_behavior_test(py('import sys; sys.stdin.read(); print("eof")'), 30)
+        self.assertLess(time.monotonic() - start, 15, 'the child waited on the runner stdin')
+        self.assertEqual(returncode, 0)
+        self.assertIn('eof', text)
+
     def test_failing_gtest_is_killed(self):
         returncode, text = runner.run_behavior_test(py('import sys; print("[  FAILED  ] X.y"); sys.exit(1)'), 30)
         self.assertEqual(returncode, 1)

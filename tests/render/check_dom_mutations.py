@@ -505,8 +505,8 @@ test_timeout = float(os.environ.get('DOM_MUTANT_TIMEOUT', '300'))
 def run_behavior_test(command, timeout, **kwargs):
     """Run one behavior test. Returns (returncode, output); returncode is None when it timed out."""
     try:
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                timeout=timeout, **kwargs)
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, timeout=timeout, **kwargs)
         return result.returncode, result.stdout
     except subprocess.TimeoutExpired as expired:  # subprocess.run kills the child before it raises
         partial = expired.stdout or ''
