@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace trade_bubbles {
 struct Sample {
@@ -40,18 +41,28 @@ struct Window {
     WindowKey key() const { return rows.empty() ? WindowKey{} : WindowKey{rows.front().sequence, rows.back().sequence, predecessor, rows.size()}; }
 };
 // GUI-thread ingestion; updatePaintNode reads while Qt blocks the GUI thread.
-// A future paged history adapter can feed the same event-time samples and IDs.
+// Live rows append one at a time; a history page merges in one pass (merge).
+// Capacity stays below a 250k trade-history page (kTradeHistoryMaxTrades): every
+// frame's placement and reference scratch is sized by it (about 24 MiB per chart,
+// TradeBubbles.PreallocatedScratchStaysWithinPerChartBudget), and 250k would be
+// about 2.5x that. A larger page keeps its newest Capacity rows by event time.
 class Tape {
 public:
     static constexpr size_t Capacity = 100000;
     Tape() { ids_.reserve(Capacity); }
     bool append(Sample s);
+    // Keeps the newest Capacity rows of tape + page by event time (retained rows
+    // first among equal times), as appending each row would, in O(rows + tape).
+    // Invalid rows and IDs already retained or repeated in the page are skipped.
+    // Returns the number of page rows retained.
+    size_t merge(std::vector<Sample> rows);
     void clear();
     Samples samples() const { return slice(0, count_); }
     Window visible(double startMs, double endMs) const;
     const Sample* storage() const { return rows_.data(); }
     uint64_t revision() const { return revision_; }
 private:
+    static bool valid(const Sample& s);
     Sample& at(size_t i) { return rows_[(head_ + i) % Capacity]; }
     const Sample& at(size_t i) const { return rows_[(head_ + i) % Capacity]; }
     Samples slice(size_t begin, size_t end) const;

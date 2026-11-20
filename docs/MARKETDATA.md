@@ -799,9 +799,11 @@ rejects truncated frames, count/length mismatches, invalid values, out-of-order
 times and trailing bytes before emitting a page. `server_config.flow` announces
 `trade_history: true`, `trade_history_encoding: "TRD1"`,
 `trade_history_max_window_ms: 3600000` and `trade_history_max_trades: 250000`.
-TradeBubbleFeed inserts accepted history rows into the existing 100,000-row
-event-time tape; live and history resends of a retained nonempty ID occupy one
-row. The GUI does not request these pages automatically yet.
+TradeBubbleFeed merges a page into the existing 100,000-row event-time tape in one
+pass (O(page + tape)) and keeps the newest 100,000 rows of both, so a full
+250,000-row page keeps at most its newest 100,000; live and history resends of a
+retained nonempty ID occupy one row. The GUI does not request these pages
+automatically yet.
 
 ## Independent trade-overlay publication
 
