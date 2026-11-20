@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for the subprocess timeout of check_dom_mutations.py (no build, no source edits)."""
 import importlib.util
+import os
 import sys
 import time
 import unittest
@@ -27,9 +28,20 @@ class MutantTimeout(unittest.TestCase):
         self.assertTrue(runner.mutant_killed(returncode, text))
 
     def test_child_gets_eof_on_stdin(self):
-        start = time.monotonic()
-        returncode, text = runner.run_behavior_test(py('import sys; sys.stdin.read(); print("eof")'), 30)
-        self.assertLess(time.monotonic() - start, 15, 'the child waited on the runner stdin')
+        # Keep the runner's own stdin open (a pipe whose write end stays open), so only an explicit
+        # DEVNULL gives the child EOF; with an inherited stdin the child blocks until the timeout.
+        read_end, write_end = os.pipe()
+        saved = os.dup(0)
+        try:
+            os.dup2(read_end, 0)
+            start = time.monotonic()
+            returncode, text = runner.run_behavior_test(py('import sys; sys.stdin.read(); print("eof")'), 8)
+            elapsed = time.monotonic() - start
+        finally:
+            os.dup2(saved, 0)
+            for fd in (saved, read_end, write_end):
+                os.close(fd)
+        self.assertLess(elapsed, 4, 'the child waited on the runner stdin')
         self.assertEqual(returncode, 0)
         self.assertIn('eof', text)
 
