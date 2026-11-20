@@ -1,5 +1,5 @@
 // Payloads reach consumers with typed header venue and exact instrument metadata.
-// Kalshi anchor search remains refused until its grid/recorder path exists.
+// Snapshot search selects the venue's actual book snapshot, across hours/runs.
 #include "JournalReader.hpp"
 #include "SentinelLogging.hpp"
 #include "metrics/MetricsRegistry.hpp"
@@ -186,8 +186,15 @@ std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs) const {
     // File opening times can regress. Walk journal order backwards, never binary
     // search wall time; then choose the last qualifying snapshot in that segment.
     for (auto f = files_.rbegin(); f != files_.rend(); ++f) {
-        if (venueFromHeader(f->header) == Venue::Kalshi)
-            throw std::runtime_error("Kalshi journal anchor search is not supported");
+        const bool kalshi = venueFromHeader(f->header) == Venue::Kalshi;
+        const auto isSnapshot = [&](const capture::Record& r) {
+            if (!kalshi) return snapshot(r, product_);
+            if (r.kind != capture::Kind::Frame || r.payload.find("orderbook_snapshot") == std::string::npos) return false;
+            const auto j = json::parse(r.payload, nullptr, false);
+            return j.is_object() && j.contains("type") && j["type"] == "orderbook_snapshot" &&
+                j.contains("msg") && j["msg"].is_object() && j["msg"].contains("market_ticker") &&
+                j["msg"]["market_ticker"] == product_;
+        };
         if (f->header.at("opened_system_ns").get<int64_t>() / 1'000'000 > receiveMs) continue;
         capture::RecordReader reader(QString::fromStdString(f->path.string()), !f->superseded, {},
             [&](const capture::BlockIndex& block, const char* reason) {
@@ -195,7 +202,7 @@ std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs) const {
             });
         capture::Record r;
         std::optional<JournalPos> found;
-        while (reader.next(r)) if (r.time.systemNs / 1'000'000 <= receiveMs && snapshot(r, product_)) {
+        while (reader.next(r)) if (r.time.systemNs / 1'000'000 <= receiveMs && isSnapshot(r)) {
             found = JournalPos{product_, f->header.at("run_id"), reader.result().recordOrdinal, reader.result().recordIndex};
         }
         anchorDecoded_ += reader.result().decodedRecords;

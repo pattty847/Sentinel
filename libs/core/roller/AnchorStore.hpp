@@ -12,6 +12,7 @@ struct AnchorIdentity {
     std::string product;
     int64_t dayMs = 0, fromMs = 0, toMs = 0;
     uint64_t configHash = 0;
+    Venue venue = Venue::Coinbase;
     bool operator==(const AnchorIdentity&) const = default;
 };
 struct ReplayAnchor {
@@ -19,8 +20,9 @@ struct ReplayAnchor {
     int64_t boundaryMs = 0;
     JournalPos pos; // inclusive: state after this durable record
     JournalPos gridSnapshot; // original exchange snapshot, possibly in day N-1
-    double referenceMid = 0;
+    std::optional<double> referenceMid; // Coinbase only; absent for bounded Kalshi.
     nlohmann::json metadata; // original snapshot's product metadata
+    nlohmann::json instrument; // Kalshi only; envelope v2, never in Coinbase bytes
     AnchorSection feed, book, recorder;
 };
 class AnchorStore {

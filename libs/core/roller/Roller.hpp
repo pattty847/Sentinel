@@ -50,6 +50,8 @@ struct RollOptions {
     std::function<std::vector<uint8_t>(recording::BookRecorder&)> anchorExportForTest;
     std::function<std::unique_ptr<JournalReader>(const JournalPos&)> anchorReaderForTest;
     std::function<bool(JournalReader&, JournalRecord&)> anchorOverlapReadForTest;
+    // Observe recorder drains at checkpoint fences (cadence tests only).
+    std::function<void()> afterFenceForTest;
 
 };
 void registerAnchorMetrics(metrics::MetricsRegistry&, const std::string& product);

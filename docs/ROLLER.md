@@ -1,4 +1,4 @@
-# Offline journal roller (slice A)
+# Offline journal roller
 
 `sentinel-roll` reads RAWL2 v1/v2 and writes the existing HMC2 minute near/deep
 and deep-hour series. It neither opens an exchange connection nor changes the
@@ -336,7 +336,7 @@ db1-mutations,restored-build,restored-tests}.txt`.
 
 ## Daily grids and overrides
 
-Reference price is the two-sided mid of that day's replay-anchor snapshot. The
+For Coinbase, reference price is the two-sided mid of that day's replay-anchor snapshot. The
 nearest arithmetic-distance `{1,2,5} * 10^k` step to one basis point is selected
 (ties round upward), then rounded up to a multiple of the quote increment. It
 never falls below that increment. This remains the default near tick. The default
@@ -615,7 +615,165 @@ are unchanged, including the initial `journal boundary` invalidation.
 
 Kalshi feed state version 2 includes subscription/sequence identity and exact
 integer quantities; import validates before installing and emits no callbacks.
-Coinbase retains its version-1 state bytes and payload behavior. This support
-stops at feed callbacks: Kalshi anchor search explicitly refuses, and fixed
-0..1 grid, recorder wiring, anchor storage integration and HMC2 output remain
-unimplemented. The capture verifier's Kalshi semantic refusal also remains.
+Coinbase retains its version-1 state bytes and payload behavior. Offline
+`roll()` and `sentinel-roll` also support Kalshi HMC2 output and replay anchors,
+as described below. The capture verifier's Kalshi semantic refusal remains.
+
+## Kalshi offline grids and replay
+
+Every Kalshi market uses the same fixed price grid, independent of its band
+schedule. No reference mid or additional CLI flag is required. The first
+selected-market snapshot initializes the recorder, including a YES-only,
+NO-only or empty snapshot. Missing bids use 0 and missing asks use 1 for the
+midpoint; both missing gives 0.5. Actual crossed/locked books retain the
+recorder's existing invalid/unobserved behavior.
+
+Both retained layer names cover the complete inclusive 0..1 range, with
+`priceScale = 1000` and recorder `priceBounds = [0, 1]`:
+
+| Layer | Row price tick | Row tick units | Absolute rows | Columns |
+| --- | ---: | ---: | --- | --- |
+| near | 0.001 (0.1 cent) | 1 | 0..1000 (1,001 rows) | minutes |
+| deep | 0.01 (1 cent) | 10 | 0..100 (101 rows) | minutes and hourly rollup |
+
+HMC2 stores occupied rows, so a one-cent market does not fill the intervening
+near rows. The size floor is always **0.01 contracts**, independently of the
+instrument's `size_increment`; relative window factors are zero. Coinbase
+overrides retain their existing behavior; Kalshi rejects overrides because
+its recorder policy is fixed.
+
+The instrument is validated with exact normalized decimals: bounds must be
+exactly 0..1, bands must cover that range without gaps, endpoints must align to
+their band's step, and every step must be an integer multiple of 0.001.
+Steps 0.002, 0.004, 0.005, 0.008, 0.01, 0.02, 0.05 and 0.1 are representable;
+0.0005 and 0.0025 are refused with a `Kalshi grid:` error naming the 0.001 limit.
+The normalized `size_increment` must be a positive integer multiple of 0.01,
+validated as an exact decimal without converting it to a storage size floor.
+Values such as 0.02, 1 and 1.23 are accepted; 0.001 and 0.015 are refused with a
+`Kalshi grid:` error naming the 0.01 limit.
+Markets quoting finer than 0.001 are refused by design. Real markets with the
+`center_centi_edge_centi_cent` structure can quote in 0.0001 steps; they are not
+supported. This refusal is permanent for that product under the current grid
+policy: retrying cannot make its unsupported structure representable, and
+support requires a grid-policy change.
+
+An unrepresentable header or off-grid level stops replay before admitting the
+offending record. Before raising the error, the roller drains accepted work and
+runs its normal checkpoint fence, committing the complete prefix already past
+the recorder's lateness cutoff. It does not tick at the rejected record, invent
+time at EOF, or commit the open minute. Retrying reproduces the same committed
+prefix and error. For example, an accepted tick at 00:05:40 followed by refusal
+at 00:05:50 commits through 00:05:00 (last minute 00:04), never minute 00:05.
+
+Records received at or after the next UTC midnight can still carry late book
+work for this day. A snapshot or delta with an exchange envelope before midnight
+is applied under the normal lateness rule if both its header and every price are
+representable. An envelope at or after midnight is ignored without grid
+validation; a missing exchange timestamp falls back to receive time and is
+therefore ignored too. Following-day headers never enter this day's instrument
+history, even when their late book work is applied.
+
+An unusable pre-midnight batch received after midnight is discarded in full,
+logged, and counted in the day report's `tailRejectedBatches`. Observation ends
+at the last accepted receive point, as for a journal gap, until a usable snapshot
+restores it. No price is rounded and the bad batch cannot prevent the old day
+from completing; the header or price refusal remains fatal in its own day's
+replay. Feed lifecycle/gap handling and actual receive ticks still run for all
+tail records. Fences drain at most once per second during the tail, plus the
+final drain. Completion requires the recorder watermark to pass midnight after
+its lateness cutoff, including any local-minus-envelope offset; receive time
+alone is not proof of completion. If fencing an in-day refusal's accepted prefix
+also fails, that secondary failure is logged and the original refusal is raised.
+
+Band schedules and `size_increment` are viewer metadata. Any representable
+instrument change, within or between UTC days, preserves the roller config
+hash and the HMC2 identity and generation for that stream. Every Kalshi market
+uses the same recorder grid, including size floor, so no instrument field
+changes the recorder policy. Full HMC2 hashes still include the symbol, layer
+and timeframe under the existing store contract; matching policies do not
+make those distinct streams share a full header hash. Coinbase identities and
+bytes remain unchanged.
+
+Each Kalshi `roller.json` day entry and stdout day report includes `venue` and
+`instrumentHistory`: an ordered list of `{fromMs, instrument}` entries with
+normalized decimal strings. The first entry describes the policy at the start
+of replay; a policy warmed up before midnight starts at midnight. For viewers,
+the first entry is in force from the start of the day even when its `fromMs`
+is later than day start. Each later entry uses the receive time of the first record carrying the changed policy.
+Changes before the day replace its initial warmup policy; following-day tail
+records do not enter the preceding day's history. Equivalent decimal spellings
+such as `0.01` and `0.0100` do not add an entry. Anchors carry this history and
+resume appends subsequent changes, preserving the uninterrupted list without
+duplicates; completed checkpoints retain their full history.
+
+Wire levels must also lie on the 0.001 grid, even when their header claims a
+coarser tick. The decoder complements NO prices in integer 1/10000 units before
+emitting levels. The roller recovers those integers from the decoder's exact
+`units / 10000` conversion, verifies the round trip, and checks divisibility by
+10 using integer arithmetic before sending a snapshot or delta to the recorder.
+An off-grid level stops the product with `Kalshi grid: price <p> is finer than
+0.001`; no such level is rounded onto a recorder row. Quantities need no extra
+roller check: `KalshiDecoder.cpp` parses snapshot quantities with `fixed(..., 2)`
+and deltas with `fixed(..., 2, true)`, integrates integer hundredths, and only
+then converts callback sizes with `units(q, 100)`. Finer quantities cannot reach
+the roller from that decoder.
+
+Journal anchor search recognizes `orderbook_snapshot` for the selected ticker
+and searches earlier hours and runs using the same ordering and damage handling
+as Coinbase. Snapshots need not repeat hourly. Midnight replay anchors retain
+Kalshi feed version-2 integer state, the native book, recorder integration state,
+the current normalized instrument block and instrument history. Their envelope is version 2 under the existing
+`SANCHR01` framing, with `venue: kalshi` and `referenceMid: null`. Old readers
+reject the envelope version. Coinbase envelopes and payload bytes stay version 1,
+with their required positive reference mid and Coinbase increment metadata.
+Venue participates in anchor identity; the actual journal cursor's venue and
+instrument representability are checked before state installation. The Kalshi
+grid is constant, so any representable instrument difference is compatible.
+Missing or rejected anchors
+fall back to journal snapshot replay. Checkpoint fences, lateness, commit bounds,
+and crash recovery otherwise use the shared driver unchanged.
+
+`KalshiRollTests` includes both real captured tickers and an independent TWAP
+calculation from `ws_capture_expected_books.json`, with the same event and
+receive clocks. Decoded sizes allow half a logarithmic size-code step plus
+floating-point noise. Mid OHLC, observation duration and row bounds are checked
+separately. Synthetic cases cover grid validation, empty/one-sided starts,
+checkpoint/venue identity, midnight restore without the previous day's snapshot,
+snapshot fallback, band and size-increment history changes and recovery,
+off-grid refusal, crash/resume and CLI reports. The tail cases cover snapshots
+and deltas before/at/after midnight, receive-time fallback, unusable batches,
+metadata isolation, fence cadence and secondary fence failures.
+`kalshi_tail_6f2226a5.json` pins all three HMC2 files from the late-delta repro
+against that tip; receiving the same delta just before midnight gives identical
+bytes.
+`coinbase_roll_6910fc11.json` pins SHA-256 of every HMC2, checkpoint and anchor
+file from the unmodified base executable on both existing Coinbase captures;
+the manifest records the exact ranges and roller config hash.
+
+### Outside the offline roller
+
+This does not enable a Kalshi live service. `ShadowRoller` still validates names
+with Coinbase rules and its socket fan-out constructs Coinbase-default records
+without instrument metadata. A short Coinbase-compatible Kalshi ticker can pass
+its inventory check, but socket records would change decoder venue and invalidate
+the book. Do not configure it for Kalshi.
+
+`FlowStore` still derives fallback grids from a two-sided mid and Coinbase
+increments; even its HMC2-backed grid calls `flowScales` with `base_increment`.
+Kalshi metadata supplies `size_increment` in the instrument block, so this path
+is not supported. The server's chunk service itself consumes HMC2 native grids
+and retains the same near/deep source mapping; enabling server admission, live
+capture/model wiring and flow support is separate work. The recorder's deep
+hour files are not the server's chunk rollup store.
+
+`hmc2_diff` reads these grids without a venue-specific parser. Its existing
+non-strict mode excludes partial/resynced minutes (including a capture's first
+minute); zero qualifying columns is not proof of parity. Strict comparison and
+complete-file byte comparisons are used for replay acceptance.
+
+The local HMC2/chunk readers can represent the bounded grid, but `sentinel-lab`
+currently pins its visible symbol and local source defaults to BTC-USD. A first
+Kalshi heatmap needs a selectable ticker passed through LabItem, LabData and
+LabSources, the scratch HMC2 root and capture interval, and price-axis/tick
+formatting suitable for 0..1. That UI and native GPU verification are not part
+of offline conversion.

@@ -1,5 +1,7 @@
 #include "Grid.hpp"
+#include "InstrumentSpec.hpp"
 #include <cmath>
+#include <algorithm>
 #include <stdexcept>
 
 namespace sentinel::roller {
@@ -65,7 +67,69 @@ recording::RecorderConfig Grid::config(const std::filesystem::path& root) const 
     c.root = root; c.priceScale = priceScale; c.sizeScale.floor = sizeFloor;
     c.layers = {{"near",std::llround(nearTick*priceScale),.95,1.05,false},
                 {"deep",std::llround(deepTick*priceScale),.25,4.,true}};
+    if (!instrument.is_null()) {
+        c.priceBounds = recording::PriceBounds{0,1};
+        for (auto& layer : c.layers) {
+            layer.lowFrac = layer.highMult = 0;
+            layer.absoluteRows = recording::AbsoluteRowBounds{0, int64_t(priceScale) / layer.rowTickUnits};
+        }
+    }
     c.deterministicResume = true;
     return c;
+}
+
+nlohmann::json normalizeKalshiInstrument(const nlohmann::json& instrument) {
+    (void)InstrumentSpec::fromHeader({{"venue","kalshi"},
+        {"product_metadata",{{"product_id","KALSHI"}}},{"instrument",instrument}});
+    auto normalized = instrument;
+    for (const auto* key : {"price_min", "price_max", "size_increment"})
+        normalized[key] = instrument_detail::decimal(normalized.at(key));
+    for (auto& band : normalized.at("price_ranges"))
+        for (const auto* key : {"start", "end", "step"})
+            band[key] = instrument_detail::decimal(band.at(key));
+    return normalized;
+}
+
+Grid deriveKalshiGrid(const nlohmann::json& instrument) {
+    try {
+        const auto spec = InstrumentSpec::fromHeader({{"venue","kalshi"},
+            {"product_metadata",{{"product_id","KALSHI"}}},{"instrument",instrument}});
+        using instrument_detail::decimal;
+        using instrument_detail::compare;
+        if (decimal(spec.priceBounds->min) != "0" || decimal(spec.priceBounds->max) != "1")
+            throw std::runtime_error("bounds must cover exactly 0..1");
+        // Exact decimal conversion onto the fixed millidollar grid. Normalizing
+        // first accepts trailing zeros without rounding a finer wire policy.
+        const auto units = [&](const std::string& text) {
+            auto s = decimal(text);
+            if (compare(s, "1") > 0) throw std::runtime_error("price or step exceeds 1");
+            const auto d = s.find('.');
+            const auto fraction = d == std::string::npos ? 0 : s.size() - d - 1;
+            if (fraction > 3) throw std::runtime_error("band price/step must be an integer multiple of 0.001");
+            if (d != std::string::npos) s.erase(d, 1);
+            s.append(3 - fraction, '0');
+            return std::stoll(s);
+        };
+        int64_t previous = 0;
+        for (const auto& band : spec.tickBands) {
+            const auto start = units(band.bounds->min), end = units(band.bounds->max), step = units(band.step);
+            if (start != previous || start % step || end % step)
+                throw std::runtime_error("bands must cover tick-aligned 0..1 without gaps");
+            previous = end;
+        }
+        if (previous != 1000) throw std::runtime_error("bands must cover tick-aligned 0..1 without gaps");
+        // Metadata representability only: any positive number with at most
+        // two normalized fractional digits is an exact multiple of 0.01.
+        const auto size = decimal(spec.sizeIncrement);
+        const auto sizeDot = size.find('.');
+        const auto sizeFraction = sizeDot == std::string::npos ? 0 : size.size() - sizeDot - 1;
+        if (sizeFraction > 2)
+            throw std::runtime_error("size increment must be a positive integer multiple of 0.01");
+        Grid grid{1000,.001,.01,.01};
+        grid.instrument = normalizeKalshiInstrument(instrument);
+        return grid;
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("Kalshi grid: ") + e.what());
+    }
 }
 } // namespace sentinel::roller

@@ -5,6 +5,9 @@
 namespace sentinel::roller {
 struct Grid {
     double priceScale = 0, nearTick = 0, deepTick = 0, sizeFloor = 0;
+    // Null preserves the Coinbase policy. Kalshi retains the normalized instrument
+    // block as viewer metadata; it never changes the fixed recorder policy.
+    nlohmann::json instrument;
     recording::RecorderConfig config(const std::filesystem::path& root) const;
 };
 // Reference = latest snapshot at/before the day's start, otherwise the first
@@ -12,4 +15,9 @@ struct Grid {
 // Near and deep share the derived tick unless overridden; BTC retains $1/$5.
 Grid deriveGrid(const nlohmann::json& metadata, double referencePrice,
                 const nlohmann::json& overrides = nlohmann::json::object());
+// Fixed 0..1 grid: scale 1000, near .001, deep .01, size floor .01;
+// no rounding, relative windows, reference mid or Coinbase overrides.
+Grid deriveKalshiGrid(const nlohmann::json& instrument);
+// Canonical decimal spelling for viewer metadata and change detection.
+nlohmann::json normalizeKalshiInstrument(const nlohmann::json& instrument);
 } // namespace sentinel::roller

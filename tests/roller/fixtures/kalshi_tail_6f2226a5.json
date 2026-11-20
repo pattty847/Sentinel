@@ -1,0 +1,9 @@
+{
+  "base": "6f2226a50b6d3426b0ec16945a9d0fb6d606c8ab",
+  "method": "Compiled base Roller.cpp against the unchanged core sources and linked the new synthetic tail test; all three HMC2 files match early and late receive variants.",
+  "sha256": {
+    "KXTAIL-TEST/deep-3600000/2026-10-24.hmc2": "1c38e64bf5c555c03644f527231bd7e0b102c7d670c80d7f8bf938f4719de1ef",
+    "KXTAIL-TEST/deep-60000/2026-10-24.hmc2": "df2c85319eb7251591391217ffb9f6761624e8e8a37973e3337be144d4ae8509",
+    "KXTAIL-TEST/near-60000/2026-10-24.hmc2": "b48f7ac4ebfcb7b13ecc4f78ea90e12054e7f9aa48b4105bd86574351d5f8c39"
+  }
+}

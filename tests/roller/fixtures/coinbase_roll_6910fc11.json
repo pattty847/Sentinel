@@ -1,0 +1,33 @@
+{
+  "base": "6910fc11",
+  "capture": "Unmodified base mac-clang sentinel-roll, anchors enabled, both checked-in captures; SHA-256 of complete files, no normalization.",
+  "runs": [
+    {
+      "fixture": "btc-prefix.rawl2",
+      "from": "2026-10-01T04:53:00Z",
+      "to": "2026-10-01T04:56:00Z",
+      "configHash": 18293455670244139256,
+      "sha256": {
+        "BTC-USD/deep-60000/2026-10-01.hmc2": "6d547533e2c932c243e6132c32065801fc06bb7ea8445cf2bc5a6dda629b099e",
+        "BTC-USD/near-60000/2026-10-01.hmc2": "90caee5c6f23333222b35693fef42baf59b9451385504eb21a231957ea36c6f9",
+        "BTC-USD/roller.json": "28b14546cbe1afdfb036e17895f37e5e47a8439da4e22a45e99628406d6c5e64"
+      }
+    },
+    {
+      "fixture": "btc-hour-boundary.rawl2",
+      "from": "2026-10-01T15:00:00Z",
+      "to": "2026-10-01T16:00:00Z",
+      "configHash": 18293455670244139256,
+      "sha256": {
+        "BTC-USD/anchors/2026-10-01/1500.anchor": "d2e291e334e5d12d97d7f06d0d6f4af3f6a96e189d7facd94cdc8140dd63b2c7",
+        "BTC-USD/anchors/2026-10-01/1515.anchor": "8a2bf95eb6538f85ab1fd38ab461354d9ab8330940983f91a3da3749bf141528",
+        "BTC-USD/anchors/2026-10-01/1530.anchor": "0329a08923109651f85382652bb6bf74da7424df07ba5b30e00c5c35669c28eb",
+        "BTC-USD/anchors/2026-10-01/1545.anchor": "647ddcf294b1c9b0ab647a99ecd52964c522db0c2174206874bf07c6fa5a81d2",
+        "BTC-USD/deep-3600000/2026-10-01.hmc2": "512038ad1e690956439ac99d28d76e4fb70b21168eae1112bd0d277b368cba80",
+        "BTC-USD/deep-60000/2026-10-01.hmc2": "cacddbf1443d549d0274ec7f385fe346bfebf5aeb6dc1c7e20b49ef7949a9d48",
+        "BTC-USD/near-60000/2026-10-01.hmc2": "8edd26cee7b1cb4ed8f16793e0b08599a98dd5011619d71b9839874a890965f7",
+        "BTC-USD/roller.json": "6eb822f6c026dbfea2d0dce67eb15de12113676d4e9677981f9646f46bfa7789"
+      }
+    }
+  ]
+}
