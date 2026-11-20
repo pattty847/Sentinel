@@ -346,6 +346,12 @@ target_link_libraries(test_TradeBubbles PRIVATE sentinel_gui_lib GTest::gtest_ma
 add_test(NAME TradeBubbleTests COMMAND test_TradeBubbles)
 set_tests_properties(TradeBubbleTests PROPERTIES LABELS "render")
 
+# Trade bubbles through the real scene graph and the main chart (GPU; skips without a backend).
+add_executable(test_trade_bubble_gpu test_trade_bubble_gpu.cpp)
+target_include_directories(test_trade_bubble_gpu PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
+target_link_libraries(test_trade_bubble_gpu PRIVATE sentinel_gui_lib sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::Quick)
+add_test(NAME TradeBubbleGpuTests COMMAND test_trade_bubble_gpu)
+set_tests_properties(TradeBubbleGpuTests PROPERTIES LABELS "render" TIMEOUT 120)
 add_executable(test_trade_bubble_history test_trade_bubble_history.cpp)
 target_link_libraries(test_trade_bubble_history PRIVATE sentinel_gui_lib GTest::gtest_main)
 add_test(NAME TradeBubbleHistoryTests COMMAND test_trade_bubble_history)

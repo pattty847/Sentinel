@@ -5,6 +5,7 @@
 #include <algorithm>
 
 namespace {
+constexpr int EmptyVertices = 6;
 struct Vertex { float x, y, u, v, r, g, b, a, halfLength, ringR, ringG, ringB, ringA, ringWidth; };
 const QSGGeometry::AttributeSet& attributes() {
     static const QSGGeometry::Attribute a[] = {
@@ -46,10 +47,12 @@ TradeBubbleNode::TradeBubbleNode()
     geometry_.setVertexDataPattern(QSGGeometry::DynamicPattern);
     // Qt 6.10 can change the draw count without changing capacity. Qt 6.9
     // (the Windows baseline) keeps unused triangles degenerate instead.
-#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
-    geometry_.setVertexCount(0);
-#else
+    // The draw count never reaches 0: the batch renderer leaves a geometry node
+    // that had no vertices out of every batch, and filling it later is never drawn
+    // (TradeBubbleGpu tests). An empty mesh draws one degenerate quad.
     std::memset(geometry_.vertexData(), 0, trade_bubbles::Layout::MaxBubbles * 6 * sizeof(Vertex));
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    geometry_.setVertexCount(EmptyVertices);
 #endif
     clipGeometry_.setDrawingMode(QSGGeometry::DrawTriangleStrip);
     clip_.setGeometry(&clipGeometry_);
@@ -138,7 +141,8 @@ void TradeBubbleNode::sync(const trade_bubbles::Tape& tape, const TimeAxisMappin
         }
     }
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
-    geometry_.setVertexCount(int(count));
+    if (!count) std::fill_n(v, EmptyVertices, Vertex{});
+    geometry_.setVertexCount(std::max(int(count), EmptyVertices));
 #else
     if (int(count) < usedVertexCount_)
         std::fill(v + count, v + usedVertexCount_, Vertex{});
@@ -158,7 +162,8 @@ void TradeBubbleNode::clear() {
     tape_ = nullptr;
     if (!usedVertexCount_) return;
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
-    geometry_.setVertexCount(0);
+    std::fill_n(static_cast<Vertex*>(geometry_.vertexData()), EmptyVertices, Vertex{});
+    geometry_.setVertexCount(EmptyVertices);
 #else
     std::fill_n(static_cast<Vertex*>(geometry_.vertexData()), usedVertexCount_, Vertex{});
 #endif

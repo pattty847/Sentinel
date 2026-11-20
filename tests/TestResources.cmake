@@ -10,7 +10,8 @@ set(_sentinel_gpu_tests
     HeatmapLiveNodeTests LabItemTests ChartGoldenTests UgrGpuTests
     UgrGpuServiceTeardownGuardMalloc HeatmapGpuReadbackTeardownGuardMalloc
     HeatmapTileNodeTeardownGuardMalloc HeatmapSettingsUiTests ChartUiTests
-    AgentApiInputTests MainWindowSymbolLifecycleTests ResearchUiTests)
+    AgentApiInputTests MainWindowSymbolLifecycleTests ResearchUiTests
+    TradeBubbleGpuTests)
 set(_sentinel_server_tests
     CaptureApplicationTests ServerStartupTests LabOutputGuardTests
     RecordingServerStopTests HeatmapChunkWireTests ShadowRollerTests
