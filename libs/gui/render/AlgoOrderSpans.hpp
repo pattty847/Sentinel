@@ -14,6 +14,7 @@
 class AlgoOrderSpans {
 public:
     static constexpr size_t kMaxMarkers = 2000;
+    static constexpr size_t kMaxTerminalSpans = 2000;
 
     struct Span {
         std::string symbol;
@@ -23,6 +24,7 @@ public:
         int64_t closedMs = 0;
         trading::OrderStatus terminalStatus = trading::OrderStatus::New;
         bool active = false;
+        uint64_t closedOrder = 0;
     };
 
     void apply(const trading::AlgoOrderEvent& event);
@@ -41,8 +43,10 @@ public:
     }
 
 private:
+    void trimTerminalSpans();
     std::unordered_map<std::string, Span> m_spans;
     std::deque<trading::AlgoOrderEvent> m_markers;
     std::string m_epoch;
     uint64_t m_retiredEpochs = 0;
+    uint64_t m_nextClosedOrder = 0;
 };

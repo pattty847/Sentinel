@@ -42,6 +42,26 @@
 #include <cmath>
 #include <algorithm>
 
+namespace paper {
+// Pure path policy; the caller checks existence and executability.
+QStringList backtestBinaryCandidates(const QString& appDir, bool windows) {
+    const QString binary = windows ? QStringLiteral("sentinel-backtest.exe")
+                                   : QStringLiteral("sentinel-backtest");
+    const QString leaf = QFileInfo(appDir).fileName();
+    const bool configured = leaf == QStringLiteral("Release") || leaf == QStringLiteral("Debug") ||
+                            leaf == QStringLiteral("RelWithDebInfo") || leaf == QStringLiteral("MinSizeRel");
+    const QString sibling = configured
+        ? QStringLiteral("../../sentinel-backtest/") + leaf + QLatin1Char('/') + binary
+        : QStringLiteral("../sentinel-backtest/") + binary;
+    QStringList paths;
+    for (const auto& rel : {sibling, QStringLiteral("../../sentinel-backtest/") + binary,
+                            QStringLiteral("../../../apps/sentinel-backtest/") + binary,
+                            binary, QStringLiteral("../../apps/sentinel-backtest/") + binary})
+        paths << QDir::cleanPath(appDir + QLatin1Char('/') + rel);
+    return paths;
+}
+}
+
 namespace {
 // The shared palette has no text2 or compact sell-text role yet.
 const QColor kText2("#B6C2CF");
@@ -703,17 +723,13 @@ void PaperTradingDock::buildBacktestTab(QWidget* parent) {
 
         // Locate sentinel-backtest binary relative to the running application.
         const QString appDir = QCoreApplication::applicationDirPath();
-        QStringList candidates;
-        // Dev build layouts.
-        for (const auto& rel : {
-                 QString("../sentinel-backtest/sentinel-backtest"),
-                 QString("../../sentinel-backtest/sentinel-backtest"),
-                 QString("../../../apps/sentinel-backtest/sentinel-backtest"),
-                 QString("sentinel-backtest"),
-                 QString("../../apps/sentinel-backtest/sentinel-backtest"),
-             }) {
-            candidates << QDir(appDir).absoluteFilePath(rel);
-        }
+        const QStringList candidates = paper::backtestBinaryCandidates(appDir,
+#ifdef Q_OS_WIN
+                                                                        true
+#else
+                                                                        false
+#endif
+        );
 
         QString backtestBin;
         for (const auto& c : candidates) {

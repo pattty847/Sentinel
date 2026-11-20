@@ -235,6 +235,54 @@ TEST(AlgoStopGhosts, NewEpochClosesLinesStillOpen) {
     EXPECT_EQ(spans.activeCount(), 0u);
 }
 
+TEST(AlgoOrderSpans, BoundsOldTerminalSpansAndMarkersButKeepsActive) {
+    AlgoOrderSpans spans;
+    trading::AlgoOrderEvent event;
+    event.symbol = "BTC-USD";
+    event.side = trading::OrderSide::Buy;
+    event.price = 100.0;
+    event.status = trading::OrderStatus::Open;
+    event.orderId = "active";
+    event.timestampMs = 1;
+    spans.apply(event);
+    for (size_t i = 0; i < AlgoOrderSpans::kMaxTerminalSpans + 2; ++i) {
+        event.orderId = "closed-" + std::to_string(i);
+        event.timestampMs = static_cast<int64_t>(i + 2);
+        spans.apply(event);
+        event.status = trading::OrderStatus::Filled;
+        spans.apply(event);
+        event.status = trading::OrderStatus::Open;
+    }
+    EXPECT_EQ(spans.activeCount(), 1u);
+    EXPECT_EQ(spans.spans().size(), AlgoOrderSpans::kMaxTerminalSpans + 1);
+    EXPECT_TRUE(spans.spans().contains("active"));
+    EXPECT_FALSE(spans.spans().contains("closed-0"));
+    EXPECT_FALSE(spans.spans().contains("closed-1"));
+    EXPECT_TRUE(spans.spans().contains("closed-2"));
+    EXPECT_EQ(spans.markers().size(), AlgoOrderSpans::kMaxMarkers);
+}
+
+TEST(AlgoOrderSpans, SnapshotClosureAlsoBoundsTerminalHistory) {
+    AlgoOrderSpans spans;
+    trading::TradingSnapshot held;
+    held.epoch = "first";
+    for (size_t i = 0; i < AlgoOrderSpans::kMaxTerminalSpans + 2; ++i) {
+        trading::OrderUpdate order;
+        order.orderId = "order-" + std::to_string(i);
+        order.algoId = "AvendellaMM";
+        order.symbol = "BTC-USD";
+        order.status = trading::OrderStatus::Open;
+        held.openOrders.push_back(order);
+    }
+    spans.reconcile(held, 100);
+    EXPECT_EQ(spans.activeCount(), held.openOrders.size());
+    held.openOrders.clear();
+    spans.reconcile(held, 200);
+    EXPECT_EQ(spans.activeCount(), 0u);
+    EXPECT_EQ(spans.spans().size(), AlgoOrderSpans::kMaxTerminalSpans);
+    EXPECT_TRUE(spans.markers().empty());
+}
+
 TEST(OnAlgoStop, AskPromptsAlwaysFlattensNeverKeeps) {
     using paper::AlgoStopStep;
     using paper::OnAlgoStop;
