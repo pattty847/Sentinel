@@ -21,7 +21,7 @@ trading:
 ```
 
 - `mode` — Currently only `paper` is supported.
-- `slippage_bps` — Basis-point slippage applied to paper fills.
+- `slippage_bps` — Basis-point slippage applied to paper fills (1 bp = 0.01%). Valid range is [0, 10000); default `2`. A value outside the range is ignored with a warning and the default is used.
 
 ## 2. Run server and client
 
