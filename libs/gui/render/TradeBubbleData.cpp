@@ -3,10 +3,21 @@
 #include <cmath>
 
 namespace trade_bubbles {
+static_assert(Tape::Capacity <= chart::bubbles::BubblePlacement::Capacity &&
+              Tape::Capacity <= chart::bubbles::ReferenceStatistics::Capacity,
+              "placement and reference must see every row of a full tape window");
+namespace {
+bool earlier(const Sample& a, const Sample& b) {
+    return a.timeMs < b.timeMs || (a.timeMs == b.timeMs && a.exchangeNs < b.exchangeNs);
+}
+}
+bool Tape::valid(const Sample& s) {
+    return s.timeMs > 0 && std::isfinite(s.price) && std::isfinite(s.size) &&
+           s.price > 0 && s.size > 0 && std::isfinite(s.price * s.size) &&
+           (s.side == AggressorSide::Buy || s.side == AggressorSide::Sell);
+}
 bool Tape::append(Sample s) {
-    if (s.timeMs <= 0 || !std::isfinite(s.price) || !std::isfinite(s.size) ||
-        s.price <= 0 || s.size <= 0 || !std::isfinite(s.price * s.size) ||
-        (s.side != AggressorSide::Buy && s.side != AggressorSide::Sell)) return false;
+    if (!valid(s)) return false;
     if (!s.tradeId.empty() && ids_.contains(s.tradeId)) return false;
     // Keep the newest Capacity executions by event time, including late arrivals.
     if (count_ == Capacity) {
@@ -25,9 +36,47 @@ bool Tape::append(Sample s) {
         at(pos) = std::move(at(pos-1));
         --pos;
     }
+    rowWrites_ += count_ - pos + 1;
     at(pos) = std::move(s);
     ++count_;
     return true;
+}
+size_t Tape::merge(std::vector<Sample> rows) {
+    size_t k = 0;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (!valid(rows[i])) continue;
+        if (!rows[i].tradeId.empty() && !ids_.insert(rows[i].tradeId).second) continue;
+        if (k != i) rows[k] = std::move(rows[i]);
+        ++k;
+    }
+    rows.resize(k);
+    if (!std::is_sorted(rows.begin(), rows.end(), earlier)) std::stable_sort(rows.begin(), rows.end(), earlier);
+    // The oldest rows of the merged order that do not fit, from either side.
+    const size_t drop = count_ + k > Capacity ? count_ + k - Capacity : 0;
+    size_t dropOld = 0, dropNew = 0;
+    while (dropOld + dropNew < drop) {
+        if (dropOld < count_ && (dropNew == k || !earlier(rows[dropNew], at(dropOld)))) ++dropOld;
+        else ++dropNew;
+    }
+    for (size_t i = 0; i < dropOld; ++i) {
+        if (!at(i).tradeId.empty()) ids_.erase(at(i).tradeId);
+        at(i) = Sample{};
+    }
+    head_ = (head_ + dropOld) % Capacity;
+    count_ -= dropOld;
+    for (size_t j = 0; j < dropNew; ++j)
+        if (!rows[j].tradeId.empty()) ids_.erase(rows[j].tradeId);
+    for (size_t j = dropNew; j < k; ++j) rows[j].sequence = ++revision_;
+    // Merge from the back: only retained rows newer than the page's oldest move.
+    const size_t added = k - dropNew;
+    size_t i = count_, j = k, w = count_ + added;
+    while (j > dropNew) {
+        if (i > 0 && earlier(rows[j-1], at(i-1))) at(--w) = std::move(at(--i));
+        else at(--w) = std::move(rows[--j]);
+        ++rowWrites_;
+    }
+    count_ += added;
+    return added;
 }
 void Tape::clear() {
     for (size_t i = 0; i < count_; ++i) at(i) = Sample{};

@@ -8,6 +8,7 @@
 #include <memory>
 #include <span>
 #include <string_view>
+#include <utility>
 
 namespace chart::bubbles {
 enum class Mode { Individual, Auto, Slot };
@@ -37,6 +38,39 @@ struct Mark {
     double radiusCap = MaxRadius;
     double baseSize = 0; // Sum of every fill; retained through sweeps and Slot aggregation.
 };
+// One execution, and whether the next row continues its sweep: the same instant,
+// side and exchange time with the next numeric trade ID (one aggressor order).
+inline bool validExecution(const Execution& t) {
+    return std::isfinite(t.timeMs) && t.timeMs > 0 && std::isfinite(t.price * t.size) &&
+           t.price > 0 && t.size > 0 && (t.side == 0 || t.side == 1);
+}
+inline bool consecutiveIds(std::string_view a, std::string_view b) {
+    if (a.empty() || b.empty()) return false;
+    uint64_t x = 0, y = 0;
+    const auto ra = std::from_chars(a.data(), a.data() + a.size(), x);
+    const auto rb = std::from_chars(b.data(), b.data() + b.size(), y);
+    return ra.ec == std::errc{} && rb.ec == std::errc{} &&
+           ra.ptr == a.data() + a.size() && rb.ptr == b.data() + b.size() &&
+           x != std::numeric_limits<uint64_t>::max() && y == x + 1;
+}
+inline bool joinsSweep(const Execution& a, const Execution& b) {
+    return validExecution(b) && a.timeMs == b.timeMs && a.exchangeNs == b.exchangeNs &&
+           a.side == b.side && consecutiveIds(a.id, b.id);
+}
+// Summed notional and base size of the sweep that starts at the valid row rows[i]
+// (rows before `limit` only); leaves i after it.
+template<class Rows> std::pair<double, double> sweepTotals(const Rows& rows, size_t& i, size_t limit) {
+    auto t = rows[i++];
+    double notional = t.price * t.size, size = t.size;
+    for (; i < rows.size() && i < limit; ++i) {
+        const auto next = rows[i];
+        if (!joinsSweep(t, next)) break;
+        notional += next.price * next.size;
+        size += next.size;
+        t = next;
+    }
+    return {notional, size};
+}
 class PlacementMode {
 public:
     Mode select(Mode requested, double columnPx, double tfMs) {
@@ -109,18 +143,24 @@ public:
         if (!count) return {};
         const double median = select(scratch_.get(), count, (count-1)/2);
         const double fallbackP95 = select(scratch_.get(), count, size_t(std::ceil(.95*double(count)))-1);
-        const double cutoff = minimum < 0 ? median : minimum;
-        size_t visible = 0;
-        for (size_t i = 0; i < rows.size() && visible < Capacity; ++i) {
-            const auto t = rows[i];
-            const double n = t.price * t.size;
-            if (std::isfinite(n) && n > 0 && n >= cutoff && t.size >= minBaseSize)
-                scratch_[visible++] = n;
-        }
+        // p95 is taken over what Individual placement draws: whole sweeps (BubblePlacement
+        // merges a sweep's fills into one mark) at or above both display minimums.
+        const size_t visible = drawnSweeps(rows, minimum < 0 ? median : minimum, minBaseSize);
         return {median, visible ? select(scratch_.get(), visible, size_t(std::ceil(.95*double(visible)))-1)
                                 : fallbackP95, 1};
     }
 private:
+    // Notionals of the sweeps at or above both minimums into scratch_; returns their count.
+    template<class Rows> size_t drawnSweeps(const Rows& rows, double cutoff, double minBaseSize) {
+        size_t visible = 0;
+        for (size_t i = 0; i < rows.size() && i < Capacity && visible < Capacity;) {
+            if (!validExecution(rows[i])) { ++i; continue; }
+            const auto [n, size] = sweepTotals(rows, i, Capacity);
+            if (std::isfinite(n) && n > 0 && n >= cutoff && size >= minBaseSize)
+                scratch_[visible++] = n;
+        }
+        return visible;
+    }
     bool defer(bool changed, Mode mode, bool urgent, int64_t nowMs) {
         const int64_t remaining = interval(mode, active_.aggregateP95, urgent) - (nowMs-lastUpdateMs_);
         pending_ = initialized_ && changed && remaining > 0;
@@ -196,7 +236,7 @@ public:
         Bar bar;
         for (size_t i = 0; i < rows.size() && i < Capacity;) {
             const auto first = rows[i];
-            if (!valid(first)) { ++i; continue; }
+            if (!validExecution(first)) { ++i; continue; }
             auto mark = sweep(rows, i, previousPrice);
             if (options.mode == Mode::Slot) {
                 const double start = std::floor(mark.timeMs / tfMs) * tfMs;
@@ -218,23 +258,6 @@ private:
         std::array<size_t, 2> counts{};
         std::array<Mark, NotableCount + 2> notable{};
     };
-    static bool valid(const Execution& t) {
-        return std::isfinite(t.timeMs) && t.timeMs > 0 && std::isfinite(t.price * t.size) &&
-               t.price > 0 && t.size > 0 && (t.side == 0 || t.side == 1);
-    }
-    static bool consecutive(std::string_view a, std::string_view b) {
-        if (a.empty() || b.empty()) return false;
-        uint64_t x = 0, y = 0;
-        const auto ra = std::from_chars(a.data(), a.data() + a.size(), x);
-        const auto rb = std::from_chars(b.data(), b.data() + b.size(), y);
-        return ra.ec == std::errc{} && rb.ec == std::errc{} &&
-               ra.ptr == a.data() + a.size() && rb.ptr == b.data() + b.size() &&
-               x != std::numeric_limits<uint64_t>::max() && y == x + 1;
-    }
-    static bool joins(const Execution& a, const Execution& b) {
-        return valid(b) && a.timeMs == b.timeMs && a.exchangeNs == b.exchangeNs &&
-               a.side == b.side && consecutive(a.id, b.id);
-    }
     template<class Rows> Mark sweep(const Rows& rows, size_t& i, double& previousPrice) {
         auto t = rows[i];
         Mark mark{t.timeMs, t.price, 0, t.price, t.price, t.side, false};
@@ -252,7 +275,7 @@ private:
             hasPrevious = true;
             previousPrice = t.price;
             scratch_[levels++] = t.price;
-        } while (i < rows.size() && i < Capacity && joins(t, rows[i]));
+        } while (i < rows.size() && i < Capacity && joinsSweep(t, rows[i]));
         std::sort(scratch_.get(), scratch_.get() + levels);
         mark.sweepLevels = size_t(std::unique(scratch_.get(), scratch_.get() + levels) - scratch_.get());
         mark.baseSize = size;

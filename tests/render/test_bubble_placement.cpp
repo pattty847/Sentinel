@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include <new>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -119,6 +121,41 @@ TEST(BubblePlacement, ReferenceExcludesTradesBelowDrawnMinimum) {
     EXPECT_LT(radius(drawn[1].notional, filtered.p95), radius(drawn[2].notional, filtered.p95));
     EXPECT_LT(radius(drawn[2].notional, filtered.p95), MaxRadius);
     EXPECT_DOUBLE_EQ(stats.reference(rows, 0, 2).p95, 400);
+}
+// Individual placement draws one mark per sweep (consecutive trade IDs at one instant),
+// so p95 is taken over sweeps, not their fills: over $100 fills every sweep of 4+ fills
+// sat at the 18 px cap (W-0145).
+TEST(BubblePlacement, ReferenceIsTakenOverDrawnSweepsNotFills) {
+    std::vector<std::string> ids;
+    std::vector<Execution> rows;
+    ids.reserve(1000); rows.reserve(1000);
+    uint64_t id = 1000;
+    for (int k = 1; k <= 40; ++k) {
+        for (int f = 0; f < k; ++f) ids.push_back(std::to_string(id++));
+        id += 10; // the next sweep is another order
+    }
+    size_t next = 0;
+    for (int k = 1; k <= 40; ++k)
+        for (int f = 0; f < k; ++f) rows.push_back({1000. + k, 100, 1, k % 2, ids[next++]});
+    ReferenceStatistics stats;
+    BubblePlacement placement;
+    const auto saturated = [&](double minimum, const Reference& reference) {
+        size_t count = 0, marks = 0;
+        for (const auto& mark : placement.build(rows, {Mode::Individual, reference, minimum}, 60'000)) {
+            ++marks;
+            count += radius(mark.notional, reference.p95) == MaxRadius;
+        }
+        return std::pair{count, marks};
+    };
+    const auto all = stats.reference(rows);
+    EXPECT_DOUBLE_EQ(all.p95, 3800) << "38th of 40 sweeps of $100..$4000";
+    EXPECT_EQ(saturated(0, all), std::pair(size_t(0), size_t(40)));
+    // Sweeps of sub-minimum fills are drawn, so they set the reference too.
+    const auto aboveMinimum = stats.reference(rows, 250);
+    EXPECT_DOUBLE_EQ(aboveMinimum.p95, 3900) << "37th of 38 sweeps of $300..$4000";
+    EXPECT_EQ(saturated(250, aboveMinimum), std::pair(size_t(0), size_t(38)));
+    // The base-size minimum applies to the whole sweep as well.
+    EXPECT_DOUBLE_EQ(stats.reference(rows, 0, 3).p95, 3900);
 }
 TEST(BubblePlacement, SweepIsFilteredAfterMergeAndSlotsIncludeAllSideNotional) {
     BubblePlacement p;

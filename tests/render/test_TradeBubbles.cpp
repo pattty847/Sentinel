@@ -9,6 +9,7 @@
 #include "render/heatmap/HeatmapSettingsStore.hpp"
 #include <QTemporaryDir>
 #include <QSettings>
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <unordered_set>
@@ -33,7 +34,12 @@ using namespace trade_bubbles;
 namespace {
 void expectDrawCount(const TradeBubbleNode& node) {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
-    EXPECT_EQ(node.geometry()->vertexCount(), node.usedVertexCount());
+    // An empty mesh keeps one degenerate quad (the batch renderer drops a 0-vertex node).
+    EXPECT_EQ(node.geometry()->vertexCount(), std::max(node.usedVertexCount(), 6));
+    if (!node.usedVertexCount()) {
+        const auto* empty = static_cast<const float*>(node.geometry()->vertexData());
+        for (int i = 0; i < 6 * 14; ++i) EXPECT_EQ(empty[i], 0);
+    }
 #else
     EXPECT_EQ(node.geometry()->vertexCount(), int(Layout::MaxBubbles * 6));
     if (node.usedVertexCount() < node.geometry()->vertexCount()) {

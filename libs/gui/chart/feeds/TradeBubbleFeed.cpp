@@ -34,13 +34,13 @@ size_t TradeBubbleFeed::appendHistory(const protocol::tradewire::Page& page) {
     if (page.status == "refused") return 0;
     selectProduct(page.symbol);
     if (!page.rows.empty()) notePrice(page.rows.back().price, page.rows.back().exchangeMs);
-    size_t added = 0;
+    std::vector<trade_bubbles::Sample> rows;
+    rows.reserve(page.rows.size());
     for (const auto& row : page.rows) {
         if (row.exchangeMs > INT64_MAX / 1'000'000) continue;
-        if (tape_->append({row.exchangeMs, row.price, row.size, row.side, row.id,
-                           row.exchangeMs * 1'000'000})) ++added;
+        rows.push_back({row.exchangeMs, row.price, row.size, row.side, row.id, row.exchangeMs * 1'000'000});
     }
-    return added;
+    return tape_->merge(std::move(rows));
 }
 void TradeBubbleFeed::setSettings(const heatmap::HeatmapChartSettings& settings, const std::function<void()>& notify) {
     selectProduct(settings.sensitivitySymbol);
