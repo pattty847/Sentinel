@@ -242,9 +242,29 @@ json roll(const RollOptions& o) {
             try { checkKalshiPrices(levels); }
             catch (...) { kalshiStopFence(); throw; }
         };
+        const auto admitKalshiBatch = [&](int64_t exchange, const std::vector<recording::Level>& levels) {
+            if (!kalshiDayTail) { checkPrices(levels); return true; }
+            // Receive time separates daily metadata; exchange time separates
+            // book buckets. Missing exchange timestamps fall back to receive.
+            if (exchange >= day + Day) return false;
+            try {
+                (void)deriveKalshiGrid(input.instrument);
+                checkKalshiPrices(levels);
+            } catch (const std::runtime_error& e) {
+                // An unusable following-day batch must not strand this day.
+                // End observation at the last accepted receive point, exactly
+                // like a journal gap; only a full snapshot can restore it.
+                const auto previousLocal = feed.exportState().at("lastLocal").get<int64_t>();
+                feed.onInvalid(previousLocal, e.what());
+                dayReport["tailRejectedBatches"] = dayReport.value("tailRejectedBatches",uint64_t{}) + 1;
+                sLog_Warning("Roller Kalshi tail batch rejected product=" << o.product
+                    << " exchangeMs=" << exchange << " error=" << e.what());
+                return false;
+            }
+            return true;
+        };
         feed.onSnapshot = [&](int64_t exchange, int64_t local, std::vector<recording::Level> levels) {
-            if (kalshiDayTail) return;
-            if (input.venue == Venue::Kalshi) checkPrices(levels);
+            if (input.venue == Venue::Kalshi && !admitKalshiBatch(exchange,levels)) return;
             if (!o.anchorBook) book.snapshot(exchange,levels);
             if (!gridReady) {
                 Grid grid;
@@ -283,8 +303,7 @@ json roll(const RollOptions& o) {
             if (recorder) recorder->onSnapshotAt(o.product,exchange,local,std::move(levels));
         };
         feed.onUpdates = [&](int64_t t,int64_t local,std::vector<recording::Level> levels) {
-            if (kalshiDayTail) return;
-            if (input.venue == Venue::Kalshi) checkPrices(levels);
+            if (input.venue == Venue::Kalshi && !admitKalshiBatch(t,levels)) return;
             if (!o.anchorBook) book.apply(t,levels);
             if (recorder) recorder->onUpdatesAt(o.product,t,local,std::move(levels));
         };
@@ -536,6 +555,7 @@ json roll(const RollOptions& o) {
         const auto fence = [&] {
             if (!recorder) return;
             recorder->drain();
+            if (o.afterFenceForTest) o.afterFenceForTest();
             const auto stats = recorder->stats();
             if (stats.diskErrors) throw std::runtime_error("roller recorder failed; checkpoint not advanced");
             const bool metadataChanged = gridVenue == Venue::Kalshi && !completedCheckpoint && cp["days"].contains(key) &&
@@ -557,7 +577,27 @@ json roll(const RollOptions& o) {
             savedThrough = through; checkpointColumns = stats.columnsWritten;
             if (o.onCommitted) o.onCommitted(through);
         };
-        kalshiStopFence = fence;
+        kalshiStopFence = [&] {
+            // Preserve the original grid refusal if committing its prefix also
+            // fails. Normal fences still propagate their own failures.
+            try { fence(); }
+            catch (const std::exception& e) {
+                sLog_Warning("Roller Kalshi refusal checkpoint fence failed product=" << o.product << " error=" << e.what());
+            } catch (...) {
+                sLog_Warning("Roller Kalshi refusal checkpoint fence failed product=" << o.product << " error=unknown exception");
+            }
+        };
+        const auto fenceAt = [&](int64_t local) {
+            const auto minute = local / Minute;
+            const auto second = local / 1000;
+            // The lateness tail normally closes seconds after the range. Waiting
+            // for the next minute fence adds an unnecessary minute to restart.
+            const bool tailFence = second >= end / 1000 && second != lastTailFence;
+            if (minute != lastFence || tailFence) {
+                fence(); lastFence = minute;
+                if (tailFence) lastTailFence = second;
+            }
+        };
         while ((!recorder || o.nextRecord || savedThrough < end) && (!o.cancelled || !o.cancelled()) &&
                (o.nextRecord ? o.nextRecord(*reader, input) : reader->next(input))) {
             // No synthetic EOF tick: only actual journal records prove elapsed time.
@@ -566,14 +606,15 @@ json roll(const RollOptions& o) {
             kalshiDayTail = input.venue == Venue::Kalshi && local >= day + Day;
             if (kalshiDayTail) {
                 // Keep lifecycle/gap invalidation and actual receive ticks for
-                // the lateness tail, but admit no following-day policy or levels.
-                // No anchor may cache this deliberately incomplete book state.
+                // the lateness tail. Callbacks admit usable pre-midnight levels
+                // without importing following-day instrument history. No anchor
+                // may cache this deliberately filtered book state.
                 feed.apply(input); applied = input.pos; ++records;
                 receiveThrough = std::max(receiveThrough,local);
                 if (o.onApplied) o.onApplied(input);
                 if (input.record.kind == capture::Kind::Frame) bytes += input.record.payload.size();
                 if (o.afterRecordForTest) o.afterRecordForTest(records);
-                fence();
+                fenceAt(local);
                 if (!gridReady || savedThrough >= end || (o.dryRun && local >= end + latenessMs)) break;
                 continue;
             }
@@ -589,7 +630,7 @@ json roll(const RollOptions& o) {
                 // Validate lifecycle headers too; history changes only after
                 // admission, so a refused price cannot enter the saved prefix.
                 try { changedPolicy = deriveKalshiGrid(input.instrument); }
-                catch (...) { fence(); throw; }
+                catch (...) { kalshiStopFence(); throw; }
             }
             feed.apply(input); applied = input.pos; ++records;
             if (changedPolicy) {
@@ -610,15 +651,7 @@ json roll(const RollOptions& o) {
                 }
             }
             if (o.afterRecordForTest) o.afterRecordForTest(records);
-            const auto minute = input.record.time.systemNs / 1'000'000 / Minute;
-            const auto second = input.record.time.systemNs / 1'000'000 / 1000;
-            // The lateness tail normally closes seconds after the range. Waiting
-            // for the next minute fence adds an unnecessary minute to restart.
-            const bool tailFence = second >= end / 1000 && second != lastTailFence;
-            if (minute != lastFence || tailFence) {
-                fence(); lastFence = minute;
-                if (tailFence) lastTailFence = second;
-            }
+            fenceAt(local);
             // Receive time can lead the recorder's envelope-based integration
             // clock. Only a drained, committed watermark proves range completion.
             if (recorder && savedThrough >= end) break;

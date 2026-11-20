@@ -665,14 +665,25 @@ time at EOF, or commit the open minute. Retrying reproduces the same committed
 prefix and error. For example, an accepted tick at 00:05:40 followed by refusal
 at 00:05:50 commits through 00:05:00 (last minute 00:04), never minute 00:05.
 
-Records received at or after the next UTC midnight are not validated or applied
-to this day's book. Feed lifecycle and gap handling still apply, and actual
-receive timestamps advance the recorder clock until the prior day's lateness
-tail commits; policy and price refusal
-belong to the next day's roll. A record at 00:00:01 alone is still short of the
-default two-second lateness cutoff; a later record at 00:00:03 proves midnight
-can commit. No following-day levels or instrument-history entries enter the
-previous day.
+Records received at or after the next UTC midnight can still carry late book
+work for this day. A snapshot or delta with an exchange envelope before midnight
+is applied under the normal lateness rule if both its header and every price are
+representable. An envelope at or after midnight is ignored without grid
+validation; a missing exchange timestamp falls back to receive time and is
+therefore ignored too. Following-day headers never enter this day's instrument
+history, even when their late book work is applied.
+
+An unusable pre-midnight batch received after midnight is discarded in full,
+logged, and counted in the day report's `tailRejectedBatches`. Observation ends
+at the last accepted receive point, as for a journal gap, until a usable snapshot
+restores it. No price is rounded and the bad batch cannot prevent the old day
+from completing; the header or price refusal remains fatal in its own day's
+replay. Feed lifecycle/gap handling and actual receive ticks still run for all
+tail records. Fences drain at most once per second during the tail, plus the
+final drain. Completion requires the recorder watermark to pass midnight after
+its lateness cutoff, including any local-minus-envelope offset; receive time
+alone is not proof of completion. If fencing an in-day refusal's accepted prefix
+also fails, that secondary failure is logged and the original refusal is raised.
 
 Band schedules and `size_increment` are viewer metadata. Any representable
 instrument change, within or between UTC days, preserves the roller config
@@ -729,7 +740,12 @@ floating-point noise. Mid OHLC, observation duration and row bounds are checked
 separately. Synthetic cases cover grid validation, empty/one-sided starts,
 checkpoint/venue identity, midnight restore without the previous day's snapshot,
 snapshot fallback, band and size-increment history changes and recovery,
-off-grid refusal, crash/resume and CLI reports.
+off-grid refusal, crash/resume and CLI reports. The tail cases cover snapshots
+and deltas before/at/after midnight, receive-time fallback, unusable batches,
+metadata isolation, fence cadence and secondary fence failures.
+`kalshi_tail_6f2226a5.json` pins all three HMC2 files from the late-delta repro
+against that tip; receiving the same delta just before midnight gives identical
+bytes.
 `coinbase_roll_6910fc11.json` pins SHA-256 of every HMC2, checkpoint and anchor
 file from the unmodified base executable on both existing Coinbase captures;
 the manifest records the exact ranges and roller config hash.
