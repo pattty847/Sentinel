@@ -61,6 +61,8 @@ public:
     Window visible(double startMs, double endMs) const;
     const Sample* storage() const { return rows_.data(); }
     uint64_t revision() const { return revision_; }
+    // Rows written into the ring by append and merge, ever: ingestion work for tests.
+    uint64_t rowWrites() const { return rowWrites_; }
 private:
     static bool valid(const Sample& s);
     Sample& at(size_t i) { return rows_[(head_ + i) % Capacity]; }
@@ -70,7 +72,7 @@ private:
     // IDs allocate only during ingestion, never during render; bounded by the ring.
     std::unordered_set<std::string> ids_;
     size_t head_ = 0, count_ = 0;
-    uint64_t revision_ = 0;
+    uint64_t revision_ = 0, rowWrites_ = 0;
 };
 // Converts tape storage to the Qt-free policy without copying strings or rows.
 struct PolicyRows {

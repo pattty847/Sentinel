@@ -36,6 +36,7 @@ bool Tape::append(Sample s) {
         at(pos) = std::move(at(pos-1));
         --pos;
     }
+    rowWrites_ += count_ - pos + 1;
     at(pos) = std::move(s);
     ++count_;
     return true;
@@ -72,6 +73,7 @@ size_t Tape::merge(std::vector<Sample> rows) {
     while (j > dropNew) {
         if (i > 0 && earlier(rows[j-1], at(i-1))) at(--w) = std::move(at(--i));
         else at(--w) = std::move(rows[--j]);
+        ++rowWrites_;
     }
     count_ += added;
     return added;
