@@ -53,7 +53,7 @@ public:
     // Invalid addresses throw; other listener failures return false so recording continues.
     bool start();
     void stop();
-    // Rollup builder metrics (ops/monitoring/README.md); no-op without recording.
+    // Listener and rollup builder metrics (ops/monitoring/README.md).
     void registerMetrics(sentinel::metrics::MetricsRegistry& registry);
 
 signals:
@@ -72,6 +72,7 @@ public:
     CoinbaseRestClient& restClient();
     const ServerConfig& serverConfig() const { return m_serverConfig; }
     void processTradeCommand(const trading::TradeCommand& command);
+    void broadcastTradeRejection(const trading::TradeRejection& rejection);
     void broadcastOrderUpdate(const trading::OrderUpdate& update);
     void broadcastPositionUpdate(const trading::PositionUpdate& update);
     void broadcastRiskOrderUpdate(const trading::RiskOrderUpdate& update);
@@ -125,6 +126,8 @@ private:
     static constexpr std::chrono::milliseconds kAcceptBackoffMax{1000};
     std::thread m_thread;
     std::atomic<bool> m_running{false};
+    // Shared atomic lets a metrics registry safely outlive this server.
+    std::shared_ptr<std::atomic_bool> m_listening = std::make_shared<std::atomic_bool>(false);
     std::unique_ptr<trading::LiveTradingSession> m_tradingSession;
 
     static constexpr size_t kHistoryWorkerCount = 2;

@@ -96,6 +96,15 @@ struct OrderUpdate {
     std::string algoId;
 };
 
+// A refused command or triggered risk exit; no order is created.
+struct TradeRejection {
+    std::string symbol;
+    std::string commandId; // empty for a tick-triggered exit
+    std::string reason; // stable snake_case token
+    std::string algoId;
+    int64_t timestampMs = 0;
+};
+
 struct PositionUpdate {
     std::string symbol;
     double positionQty = 0.0;

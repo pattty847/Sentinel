@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 
 #include "trading/AlgoEngine.hpp"
 #include "trading/AvendellaMM.hpp"
@@ -559,8 +560,13 @@ TEST(LiveTradingSessionClose, StopRestartSameAlgoIdIsClean) {
 TEST(LiveTradingSessionClose, UnknownActionThroughSessionIsRejected) {
     trading::LiveTradingSession session([](const std::string&) { return 100.0; }, 0.0);
     std::size_t callbacks = 0;
-    session.setResultCallback([&callbacks](trading::TradingResult, std::vector<trading::AlgoOrderEvent>) {
+    session.setResultCallback([&callbacks](trading::TradingResult result, std::vector<trading::AlgoOrderEvent>) {
         ++callbacks;
+        EXPECT_TRUE(result.orderUpdates.empty());
+        EXPECT_TRUE(result.positionUpdates.empty());
+        ASSERT_EQ(result.rejections.size(), 1u);
+        EXPECT_EQ(result.rejections[0].reason, "unknown_action");
+        EXPECT_EQ(result.rejections[0].commandId, "bogus-1");
     });
     const auto cmd = trading::parseTradeCommandJson(
         R"({"type":"trade_command","command_id":"bogus-1","action":"BOGUS","symbol":"BTC-USD",)"
@@ -568,7 +574,7 @@ TEST(LiveTradingSessionClose, UnknownActionThroughSessionIsRejected) {
     ASSERT_EQ(cmd.action, trading::TradeAction::Unknown);
     session.processTradeCommand(cmd);
 
-    EXPECT_EQ(callbacks, 0u) << "an unknown action must not produce order or position updates";
+    EXPECT_EQ(callbacks, 1u) << "an unknown action must publish its refusal without trading";
     EXPECT_DOUBLE_EQ(sessionNetQty(session, "BTC-USD"), 0.0) << "an unknown action must not trade";
 }
 
@@ -591,4 +597,35 @@ TEST(LiveTradingSessionClose, CommandRejectReasons) {
 
     trading::TradeCommand unknown;
     EXPECT_EQ(engine.onCommand(unknown).rejectReason, "unknown_action");
+}
+
+TEST(LiveTradingSessionClose, RiskTickRejectionSurvivesBrokerAndSession) {
+    trading::LiveTradingSession session([](const std::string&) { return 100.0; }, 10000.0);
+    trading::TradeCommand buy;
+    buy.action = trading::TradeAction::PlaceOrder;
+    buy.symbol = "BTC-USD"; buy.side = trading::OrderSide::Buy;
+    buy.orderType = trading::OrderType::Market; buy.qty = 1;
+    session.processTradeCommand(buy);
+    trading::TradeCommand risk;
+    risk.action = trading::TradeAction::SetAttachedRisk;
+    risk.symbol = "BTC-USD"; risk.hasStopLoss = true; risk.stopLossPrice = 150;
+    session.processTradeCommand(risk);
+    std::vector<trading::TradeRejection> rejected;
+    session.setResultCallback([&](trading::TradingResult result, auto) {
+        rejected.insert(rejected.end(), result.rejections.begin(), result.rejections.end());
+        EXPECT_TRUE(result.orderUpdates.empty());
+        EXPECT_TRUE(result.riskOrderUpdates.empty());
+    });
+    session.onTradeTick("BTC-USD", 140, 1234);
+    session.onTradeTick("BTC-USD", 139, 1235);
+    ASSERT_EQ(rejected.size(), 1u);
+    EXPECT_EQ(rejected[0].reason, "invalid_fill_price");
+    EXPECT_EQ(rejected[0].symbol, "BTC-USD");
+    EXPECT_EQ(rejected[0].timestampMs, 1234);
+    EXPECT_TRUE(rejected[0].commandId.empty());
+    EXPECT_DOUBLE_EQ(sessionNetQty(session, "BTC-USD"), 1);
+    const auto history = session.broker().buildResult({});
+    EXPECT_EQ(std::count_if(history.executionEvents.begin(), history.executionEvents.end(), [](const auto& event) {
+        return event.type == trading::ExecutionEventType::TradeRejected && event.rejection.has_value();
+    }), 1);
 }

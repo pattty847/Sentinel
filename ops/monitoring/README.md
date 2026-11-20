@@ -129,6 +129,7 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `sentinel_candle_history_restore_failures_total` | counter | product | Startup candle rebuilds that failed, refused products included (the product serves an empty window). Expected 0; resets with the process. |
 | `sentinel_candle_history_restore_partial_total` | counter | product | Startup candle rebuilds whose single replay (from 2 h before the oldest needed bucket, at most 4 files for the 100 ms / 1 s window, 32 with open bars) holds no bar before the window or the oldest open bucket (installed; bars begin at the first trade the read holds). Expected 0 except on a journal younger than that or a product with no trade in the margin. |
 | `sentinel_exchange_clock_offset_ms` | gauge | - | Smoothed local clock minus exchange clock. 0 means not yet measured. |
+| `sentinel_stream_listening` | gauge | - | 1 while the client stream listener is serving; 0 before start, after setup failure, after listener closure or during stop. Present even without recording. |
 | `sentinel_stream_sessions` | gauge | - | Open client stream sessions (GUIs). |
 | `sentinel_server_event_loop_lag_ms` | gauge | quantile | Main-thread queue wait in ms over the last 60 s; quantile=`0.5`, `0.95`, `0.99` or `max`. Absent until a probe is delivered, or if no delivered sample remains in the window. |
 | `sentinel_server_event_loop_late_ticks_total` | counter | - | Delivered probe calls with queue wait greater than 100 ms; resets on server restart. |

@@ -268,7 +268,6 @@ private:
     std::unordered_map<std::string, std::deque<RetainedTradeSample>> m_recentTrades;
     std::unordered_map<std::string, int64_t> m_tradeHistoryFloorMs;
     std::unordered_set<std::string> m_tradeHistoryAwaitingResume;
-    std::unordered_set<std::string> m_tradeHistoryHasResumeBoundary;
     int64_t m_tradeRetentionMs = 300'000;
     // Recording v2 (null when recording.enabled is false or no usable dir).
     std::shared_ptr<recording::LiveService> m_recordingLive;

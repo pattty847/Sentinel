@@ -35,6 +35,22 @@ struct HeatmapChunkWireTest {
     static bool submit(SentinelStreamServer& server, std::function<void()> task) {
         return server.submitHistoryTask(std::move(task));
     }
+    static void installTrading(SentinelStreamServer& server, std::function<void(trading::TradingResult)> sink) {
+        auto done = std::make_shared<std::promise<void>>();
+        auto future = done->get_future();
+        net::post(server.m_ioc, [&server, sink = std::move(sink), done] {
+            server.m_tradingSession = std::make_unique<trading::LiveTradingSession>(
+                [](const std::string&) { return 100.0; }, 0);
+            trading::TradeCommand buy;
+            buy.action = trading::TradeAction::PlaceOrder;
+            buy.symbol = "BTC-USD"; buy.side = trading::OrderSide::Buy;
+            buy.orderType = trading::OrderType::Market; buy.qty = 1;
+            server.m_tradingSession->processTradeCommand(buy);
+            server.m_tradingSession->setResultCallback([sink](auto result, auto) { sink(std::move(result)); });
+            done->set_value();
+        });
+        ASSERT_EQ(future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    }
     static bool busy(const SentinelStreamServer& server) { return server.m_tradeHistoryBusy.load(); }
     static std::thread::id ioThread(const std::shared_ptr<Session>& session) {
         auto promise = std::make_shared<std::promise<std::thread::id>>();
@@ -321,13 +337,14 @@ TEST_F(TradeHistory, JournalAboveTradeCapIsRefusedEarly) {
 }
 
 TEST_F(TradeHistory, LateLiveRowsAreSortedAndInvalidOnesAreSkipped) {
-    live(2000, "later"); live(1000, "earlier");
+    live(1000, "first"); live(2000, "later"); live(1500, "earlier");
     TradeOverlayModelTest::invalid(*model, 1500 + Epoch);
     const auto page = request(1, Epoch + 1000, Epoch + 3000);
     ASSERT_EQ(page.status, "partial");
-    ASSERT_EQ(page.rows.size(), 2u);
-    EXPECT_EQ(page.rows[0].id, "earlier");
-    EXPECT_EQ(page.rows[1].id, "later");
+    ASSERT_EQ(page.rows.size(), 3u);
+    EXPECT_EQ(page.rows[0].id, "first");
+    EXPECT_EQ(page.rows[1].id, "earlier");
+    EXPECT_EQ(page.rows[2].id, "later");
 }
 
 TEST_F(TradeHistory, StaleLateTradeCannotLowerRetentionFloor) {
@@ -421,4 +438,64 @@ TEST(TradeHistoryWire, ClientAcceptsValidAndRejectsMalformedFrames) {
     TradeHistoryWireClientTest::decode(client, oversized);
     EXPECT_EQ(accepted, 1);
     EXPECT_EQ(rejected, 3);
+}
+
+TEST_F(TradeHistory, PreJournalWindowIsPartialWithEmptyBoundedCoverage) {
+    journal();
+    const auto page = request(1, Epoch - 5000, Epoch - 1000);
+    EXPECT_EQ(page.status, "partial");
+    EXPECT_TRUE(page.rows.empty());
+    EXPECT_GE(page.coveredFromMs, page.startMs);
+    EXPECT_LE(page.coveredToMs, page.endMs);
+    EXPECT_EQ(page.coveredFromMs, page.coveredToMs);
+}
+
+TEST_F(TradeHistory, LateTradeBeforeFirstResumeCannotClaimMissingPrefix) {
+    journal();
+    live(3000, "c");
+    live(1000, "a"); // receiving an old row does not prove the intervening gap
+    const auto snapshot = model->tradeHistorySnapshot("BTC-USD", Epoch, Epoch + 5000, 10);
+    EXPECT_EQ(snapshot.retainedFromMs, Epoch + 3000);
+    const auto page = request(1, Epoch, Epoch + 5000);
+    ASSERT_EQ(page.status, "complete");
+    ASSERT_EQ(page.rows.size(), 3u);
+    EXPECT_EQ(page.rows[1].id, "b"); // only the journal can supply this row
+}
+
+TEST_F(TradeHistory, SnapshotReservesBoundedWindowBeforeSkippingInvalidRows) {
+    live(1000, "a"); live(2000, "b");
+    TradeOverlayModelTest::invalid(*model, Epoch + 1500);
+    const auto snapshot = model->tradeHistorySnapshot("BTC-USD", Epoch, Epoch + 3000, 5);
+    EXPECT_EQ(snapshot.rows.size(), 2u);
+    EXPECT_EQ(snapshot.invalidRows, 3u);
+    EXPECT_EQ(snapshot.rows.capacity(), 5u);
+    const auto bounded = model->tradeHistorySnapshot("BTC-USD", Epoch, Epoch + 3000, 3);
+    EXPECT_EQ(bounded.rows.capacity(), 3u);
+    EXPECT_TRUE(bounded.exceededLimit);
+    const auto narrow = model->tradeHistorySnapshot("BTC-USD", Epoch + 2000, Epoch + 3000, 100);
+    EXPECT_EQ(narrow.rows.capacity(), 1u);
+}
+
+TEST_F(TradeHistory, SharedTradingAdvancesOnceIndependentlyOfSessionDelivery) {
+    auto ticks = std::make_shared<std::atomic<int>>(0);
+    HeatmapChunkWireTest::installTrading(*server, [ticks](const trading::TradingResult& result) {
+        *ticks += int(result.pnlSnapshots.size());
+    });
+    auto other = HeatmapChunkWireTest::additional(*server, *model, [](auto, auto) {});
+    for (int clients : {0, 1, 2}) {
+        ticks->store(0);
+        Trade trade{std::chrono::system_clock::time_point(std::chrono::milliseconds(Epoch + 1000 + clients)),
+                    "BTC-USD", "tick", AggressorSide::Buy, 101, 1};
+        model->onTrade(trade); // the shared account receives the actual model signal
+        auto done = std::make_shared<std::promise<void>>();
+        auto future = done->get_future();
+        net::post(RecordingServerStopTest::io(*server), [=, this] {
+            // Deliver the same model event through each real Session's trade handler.
+            if (clients >= 1) session->on_trade(trade);
+            if (clients >= 2) other->on_trade(trade);
+            done->set_value();
+        });
+        ASSERT_EQ(future.wait_for(10s), std::future_status::ready);
+        EXPECT_EQ(ticks->load(), 1) << "clients=" << clients;
+    }
 }

@@ -146,7 +146,7 @@ void LiveTradingSession::publish(const std::vector<ExecutionEvent>& events, int6
 
     if (cb && (!tradingResult.orderUpdates.empty() || !tradingResult.positionUpdates.empty() ||
                !tradingResult.pnlSnapshots.empty() || !tradingResult.riskOrderUpdates.empty() ||
-               !algoEvents.empty())) {
+               !algoEvents.empty() || !tradingResult.rejections.empty())) {
         cb(std::move(tradingResult), std::move(algoEvents));
     }
 }
@@ -202,7 +202,7 @@ void LiveTradingSession::onTradeTick(const std::string& symbol, double lastTrade
     }
     if (cb && (!combined.orderUpdates.empty() || !combined.positionUpdates.empty() ||
                !combined.pnlSnapshots.empty() || !combined.riskOrderUpdates.empty() ||
-               !algoEvents.empty())) {
+               !algoEvents.empty() || !combined.rejections.empty())) {
         cb(std::move(combined), std::move(algoEvents));
     }
 }
@@ -241,6 +241,7 @@ void LiveTradingSession::appendTradingResult(TradingResult& dst, const TradingRe
     dst.positionUpdates.insert(dst.positionUpdates.end(), src.positionUpdates.begin(), src.positionUpdates.end());
     dst.pnlSnapshots.insert(dst.pnlSnapshots.end(), src.pnlSnapshots.begin(), src.pnlSnapshots.end());
     dst.riskOrderUpdates.insert(dst.riskOrderUpdates.end(), src.riskOrderUpdates.begin(), src.riskOrderUpdates.end());
+    dst.rejections.insert(dst.rejections.end(), src.rejections.begin(), src.rejections.end());
 }
 
 TradingResult LiveTradingSession::tradingResultFromExecutionEvents(const std::vector<ExecutionEvent>& events) {
@@ -258,6 +259,7 @@ TradingResult LiveTradingSession::tradingResultFromExecutionEvents(const std::ve
         if (event.riskOrderUpdate.has_value()) {
             result.riskOrderUpdates.push_back(*event.riskOrderUpdate);
         }
+        if (event.rejection) result.rejections.push_back(*event.rejection);
     }
     return result;
 }

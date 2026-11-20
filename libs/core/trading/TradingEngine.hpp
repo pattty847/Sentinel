@@ -19,6 +19,7 @@ struct TradingResult {
     std::vector<PositionUpdate> positionUpdates;
     std::vector<PnlSnapshot> pnlSnapshots;
     std::vector<RiskOrderUpdate> riskOrderUpdates;
+    std::vector<TradeRejection> rejections; // broker events with command/market context
     std::string rejectReason; // non-empty when a command or triggered exit was refused; a stable snake_case token
 };
 
