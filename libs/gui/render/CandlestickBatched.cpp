@@ -84,6 +84,9 @@ inline void addQuad(QSGGeometry::ColoredPoint2D*& v,
 CandlestickBatched::CandlestickBatched(QQuickItem* parent)
     : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
+    // Panned, the edge candles straddle the item's bounds; the price axis sits right
+    // beside it (StockChartView.qml), so nothing may paint past them.
+    setClip(true);
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
 }

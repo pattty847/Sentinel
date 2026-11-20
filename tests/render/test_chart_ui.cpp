@@ -24,6 +24,7 @@
 #include "render/heatmap/HeatmapGpuLayer.hpp"
 #include "render/heatmap/HeatmapSettingsModel.hpp"
 #include "render/PaperTradeOverlayModel.hpp"
+#include "render/CandlestickBatched.hpp"
 #include "widgets/HeatmapSettingsDialog.hpp"
 #include "widgets/TopToolbar.hpp"
 #include "widgets/ChartDock.hpp"
@@ -1774,6 +1775,36 @@ bool barColour(QRgb c) {
 }
 bool labelColour(QRgb c) { return qRed(c) > 180 && qGreen(c) > 180 && qBlue(c) > 180; }
 } // namespace
+
+// The stock chart's candles sit directly left of its price axis (StockChartView.qml):
+// panned right, the newest candle straddles the item's right edge and must not paint
+// past it. Black window, no other items: every lit pixel right of the item is a leak.
+TEST(StockCandlesGpu, APannedCandleDoesNotPaintPastTheRightEdge) {
+    if (const QString why = lab::gpuUnavailableReason(); !why.isEmpty())
+        GTEST_SKIP() << "GPU case skipped: " << why.toStdString();
+    lab::OffscreenQuick scene;
+    QString error;
+    ASSERT_TRUE(scene.create(QSize(200, 100), &error)) << error.toStdString();
+    scene.window()->setColor(Qt::black);
+    auto* candles = new CandlestickBatched(scene.window()->contentItem());
+    candles->setSize(QSizeF(120, 100));
+    for (int i = 0; i < 12; ++i)
+        candles->addCandle(1000 * i, 100 + i, 104 + i, 98 + i, i % 2 ? 99 + i : 103 + i, 10 + i);
+    // 16 px per candle (12 body + 4 gap): +10 puts the newest body at x 114..126.
+    candles->setViewOffset(10);
+    const QImage image = scene.renderFrame(&error);
+    ASSERT_FALSE(image.isNull()) << error.toStdString();
+    const double scale = double(image.width()) / 200.0;
+    const auto lit = [](QRgb c) { return qRed(c) > 40 || qGreen(c) > 40 || qBlue(c) > 40; };
+    int inside = 0, outside = 0;
+    for (int y = 0; y < image.height(); ++y)
+        for (int x = 0; x < image.width(); ++x)
+            if (lit(image.pixel(x, y))) (x < int(std::lround(120 * scale)) ? inside : outside) += 1;
+    EXPECT_GT(inside, 0) << "the candles draw inside the item";
+    EXPECT_EQ(outside, 0) << "no candle pixel past the item's right edge";
+    delete candles;
+    scene.renderFrame(&error);
+}
 
 // The production shell on Metal with the ladder on: $1 rows of a dark heatmap (every
 // fixture cell under the colour floor, no labels), so any bar colour outside the strip
