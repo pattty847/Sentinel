@@ -136,6 +136,24 @@ TEST(FlowBar, QuoteRoundHalfUpUsesExactUnits) {
     EXPECT_EQ(b.bars().front().quoteVolume, 4503599627370497LL);
 }
 
+TEST(FlowBar, KeepsTradeWhenPositiveQuoteRoundsToZero) {
+    FlowBarBuilder b(60'000, 1, 100, 1000, 1);
+    accepted(b, {"tiny-buy", 0, 1, .001, Side::Buy});
+    accepted(b, {"tiny-sell", 1, 1, .001, Side::Sell});
+    const auto bars = b.bars();
+    ASSERT_EQ(bars.size(), 1);
+    const auto& bar = bars.front();
+    EXPECT_EQ(bar.count, 2);
+    EXPECT_EQ(bar.baseVolume, 2);
+    EXPECT_EQ(bar.quoteVolume, 0);
+    EXPECT_EQ(bar.buyVol, 1);
+    EXPECT_EQ(bar.sellVol, 1);
+    ASSERT_EQ(bar.rows.size(), 1);
+    EXPECT_EQ(bar.rows.front(), (Row{0, 1, 1, 1, 1}));
+    EXPECT_TRUE(bar.notable.empty());
+    EXPECT_EQ(decodeFlowBar(encodeFlowBar(bar)), bar);
+}
+
 TEST(FlowBar, RecorderRowFloorAndRejectedInputs) {
     auto b = builder();
     accepted(b, {"1", -1, 100123.6, 1, Side::Buy});
@@ -178,4 +196,22 @@ TEST(FlowBar, CodecRejectsNonfiniteAndInvalidNotable) {
     bar.open = 100;
     std::reverse(bar.notable.begin(), bar.notable.end());
     EXPECT_THROW(encodeFlowBar(bar), std::invalid_argument);
+}
+
+TEST(FlowBar, CodecRejectsRowVolumesThatDisagreeWithSideTotals) {
+    FlowBarBuilder b(60'000, 1, 100, 1, 1);
+    accepted(b, {"buy", 0, 100, 1, Side::Buy});
+    accepted(b, {"sell", 1, 101, 2, Side::Sell});
+    accepted(b, {"unknown", 2, 102, 3, Side::Unknown});
+    const auto original = b.bars().front();
+    EXPECT_EQ(decodeFlowBar(encodeFlowBar(original)), original);
+    for (size_t offset : {size_t(153), size_t(158)}) {
+        auto frame = encodeFlowBar(original);
+        // FLB1's fixed header is 150 bytes; each of these small rows has a two-byte
+        // offset and four one-byte varints. Change only one side's row volume.
+        ++frame[offset];
+        EXPECT_THROW(decodeFlowBar(frame), std::invalid_argument);
+        frame[offset] -= 2;
+        EXPECT_THROW(decodeFlowBar(frame), std::invalid_argument);
+    }
 }
