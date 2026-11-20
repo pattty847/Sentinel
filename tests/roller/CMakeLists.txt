@@ -54,3 +54,9 @@ target_link_libraries(test_kalshi_feed PRIVATE sentinel_core GTest::gtest_main Q
 target_compile_definitions(test_kalshi_feed PRIVATE KALSHI_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 add_test(NAME KalshiFeedTests COMMAND test_kalshi_feed)
 set_tests_properties(KalshiFeedTests PROPERTIES LABELS "roller" TIMEOUT 120)
+
+add_executable(test_kalshi_roll test_kalshi_roll.cpp test_coinbase_roll_bytes.cpp)
+target_link_libraries(test_kalshi_roll PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+target_compile_definitions(test_kalshi_roll PRIVATE KALSHI_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+add_test(NAME KalshiRollTests COMMAND test_kalshi_roll)
+set_tests_properties(KalshiRollTests PROPERTIES LABELS "roller" TIMEOUT 180)
