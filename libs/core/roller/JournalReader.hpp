@@ -5,6 +5,7 @@
 #include "InstrumentSpec.hpp"
 #include <filesystem>
 #include <deque>
+#include <stop_token>
 #include <stdexcept>
 
 namespace sentinel::metrics { class MetricsRegistry; }
@@ -46,7 +47,7 @@ struct JournalRecord {
 class JournalReader {
 public:
     JournalReader(std::filesystem::path root, std::string product,
-                  std::optional<JournalPos> start = {});
+                  std::optional<JournalPos> start = {}, std::stop_token stop = {});
     // A cursor over a previously validated file catalog; does not walk directories.
     JournalReader(const JournalReader& catalog, std::optional<JournalPos> start);
     bool next(JournalRecord& out);

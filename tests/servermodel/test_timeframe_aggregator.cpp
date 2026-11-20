@@ -8,7 +8,9 @@
 #include <chrono>
 #include <cstdio>
 #include <functional>
+#include <future>
 #include <optional>
+#include <thread>
 #include <tuple>
 
 namespace {
@@ -81,6 +83,36 @@ struct WarningCapture {
     }
 };
 } // namespace
+
+TEST(TimeframeAggregatorSignals, CallbacksRunUnlockedAndKeepTradeEventOrder) {
+    TimeframeAggregator aggregator({1'000, 60'000, 300'000});
+    Recorder recorder(aggregator, {1'000, 60'000, 300'000});
+    std::promise<void> finished;
+    auto ready = finished.get_future();
+    std::thread nextTrade;
+    bool unlocked = false;
+    bool started = false;
+    QObject::connect(&aggregator, &TimeframeAggregator::barUpdated,
+                     [&](const QString&, int64_t tf, const OHLCVBar&) {
+        if (tf != 1'000 || started) return;
+        started = true;
+        nextTrade = std::thread([&] {
+            aggregator.onTrade(tradeAt(20, 11, 2));
+            finished.set_value();
+        });
+        unlocked = ready.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    });
+    aggregator.onTrade(tradeAt(10, 10, 1));
+    nextTrade.join();
+    EXPECT_TRUE(unlocked);
+    ASSERT_EQ(recorder.events.size(), 6u);
+    const std::vector<int64_t> expected{1'000, 60'000, 300'000, 1'000, 60'000, 300'000};
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_FALSE(recorder.events[i].closed);
+        EXPECT_EQ(recorder.events[i].tf, expected[i]) << i;
+        EXPECT_EQ(recorder.events[i].bar.count, i < 3 ? 1u : 2u) << i;
+    }
+}
 
 TEST(TimeframeAggregatorRollup, UtcBoundariesAndOhlcv) {
     constexpr int64_t minute = 60'000;

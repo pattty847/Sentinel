@@ -761,21 +761,28 @@ std::shared_ptr<roller::JournalReader> FlowStore::catalogFor(const std::string &
     const auto knownBefore = dayFloor(options_.nowMs());
     std::map<int64_t, int64_t> days;
     try {
-        auto catalog = std::make_shared<roller::JournalReader>(options_.journalRoot, symbol);
+        auto catalog = std::make_shared<roller::JournalReader>(options_.journalRoot, symbol,
+                                                                std::nullopt, stop);
         for (const auto &file : catalog->files()) {
+            checkStop(stop);
             const auto opened = file.header.at("opened_system_ns").get<int64_t>() / 1'000'000;
             auto [it, added] = days.try_emplace(dayFloor(opened), opened);
             if (!added) it->second = std::min(it->second, opened);
         }
         if (options_.afterCatalogConstructForTest) options_.afterCatalogConstructForTest();
+        checkStop(stop);
         cached = std::move(catalog);
     } catch (const roller::NoJournalFiles &) {
+        checkStop(stop);
         // JournalReader may fall back to the root if the product directory
         // disappears during construction. That is not an empty inventory.
         journalDirectory(symbol);
         std::lock_guard indexLock(indexMutex_);
         sourceDays_[symbol] = {};
         sourceKnownBeforeDay_[symbol] = knownBefore;
+        throw;
+    } catch (...) {
+        checkStop(stop);
         throw;
     }
     std::lock_guard indexLock(indexMutex_);
@@ -1125,15 +1132,17 @@ FlowStore::Reply FlowStore::buildWindow(const std::string &symbol, int64_t from,
             std::lock_guard lock(catalogMutex_);
             hmcPaths_[symbol] = grids;
         }
+        const auto firstJournalMs = catalog->files().front().header.at("opened_system_ns").get<int64_t>() / 1'000'000;
         for (auto first = from; first < to;) {
             const auto day = dayFloor(first), end = std::min(to, day + Day);
             const auto index = indexFor(symbol, day);
             if (!index.file.present && !index.state.present && sourceState(symbol, first, end) == SourceState::Absent) {
-                reply.ranges.push_back({first, end, "unrecorded", {}});
+                // The first journal day has no proven prefix for 1 s replay.
+                // A later segment cannot prove that its leading seconds had no trades.
+                reply.ranges.push_back({first, end, day == dayFloor(firstJournalMs) ? "partial" : "unrecorded", {}});
                 first = end;
                 continue;
             }
-            const auto firstJournalMs = catalog->files().front().header.at("opened_system_ns").get<int64_t>() / 1'000'000;
             if (firstJournalMs >= end) {
                 reply.ranges.push_back({first, end, "partial", {}});
                 first = end;

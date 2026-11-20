@@ -53,7 +53,7 @@ void TimeframeAggregator::closeBar(SymbolState& state, const std::string& symbol
     } else {
         if (hist.size() > 10000) hist.erase(hist.begin(), hist.begin() + 1000);
     }
-    emit barClosed(QString::fromStdString(symbol), timeframeMs, bar);
+    m_pendingEvents.push_back({Event::Kind::Closed, QString::fromStdString(symbol), timeframeMs, bar, {}});
     if (timeframeMs == kMinuteMs) addMinuteToRollups(state, symbol, bar);
 }
 
@@ -80,7 +80,7 @@ void TimeframeAggregator::addMinuteToRollups(SymbolState& state, const std::stri
             bar.volume += minute.volume;
             bar.count += minute.count;
         }
-        emit barUpdated(QString::fromStdString(symbol), tf, bar);
+        m_pendingEvents.push_back({Event::Kind::Updated, QString::fromStdString(symbol), tf, bar, {}});
     }
 }
 
@@ -121,7 +121,7 @@ void TimeframeAggregator::updateTradeBar(SymbolState& state, const std::string& 
         bar.volume += trade.size;
         ++bar.count;
     }
-    emit barUpdated(QString::fromStdString(symbol), timeframeMs, bar);
+    m_pendingEvents.push_back({Event::Kind::Updated, QString::fromStdString(symbol), timeframeMs, bar, {}});
     if (timeframeMs == kMinuteMs) publishLiveRollups(state, symbol, bar);
 }
 
@@ -130,7 +130,7 @@ void TimeframeAggregator::updateTradeBar(SymbolState& state, const std::string& 
 // timeframes go out in one signal, so each trade adds one event per client.
 void TimeframeAggregator::publishLiveRollups(const SymbolState& state, const std::string& symbol,
                                              const OHLCVBar& minute) {
-    m_liveScratch.clear();
+    std::vector<TimeframeBar> liveBars;
     for (const int64_t tf : m_timeframesMs) {
         if (tf <= kMinuteMs) continue;
         OHLCVBar live = minute;
@@ -145,28 +145,55 @@ void TimeframeAggregator::publishLiveRollups(const SymbolState& state, const std
             live.volume = closedPart.volume + minute.volume;
             live.count = closedPart.count + minute.count;
         }
-        m_liveScratch.push_back({tf, live});
+        liveBars.push_back({tf, live});
     }
-    if (!m_liveScratch.empty())
-        emit liveRollupsUpdated(QString::fromStdString(symbol), m_liveScratch);
+    if (!liveBars.empty())
+        m_pendingEvents.push_back({Event::Kind::LiveRollups, QString::fromStdString(symbol), 0, {},
+                                   std::move(liveBars)});
 }
 
 void TimeframeAggregator::onTrade(const Trade& trade) {
-    std::unique_lock lock(m_mutex);
-    const int64_t tsMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        trade.timestamp.time_since_epoch()).count();
-    auto& state = m_states[trade.product_id];
-    // The trade's own time closes the buckets before it, carrying quiet
-    // ones, so bars depend only on the delivered sequence.
-    closeElapsed(state, trade.product_id, tsMs);
-    for (size_t i = 0; i < kTradeTimeframes.size(); ++i)
-        if (m_tradeTimeframeOn[i]) updateTradeBar(state, trade.product_id, i, trade, tsMs);
+    {
+        std::unique_lock lock(m_mutex);
+        const int64_t tsMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            trade.timestamp.time_since_epoch()).count();
+        auto& state = m_states[trade.product_id];
+        // The trade's own time closes the buckets before it, carrying quiet
+        // ones, so bars depend only on the delivered sequence.
+        closeElapsed(state, trade.product_id, tsMs);
+        for (size_t i = 0; i < kTradeTimeframes.size(); ++i)
+            if (m_tradeTimeframeOn[i]) updateTradeBar(state, trade.product_id, i, trade, tsMs);
+    }
+    drainEvents();
 }
 
 void TimeframeAggregator::advance(const std::string& symbol, int64_t watermarkMs) {
+    {
+        std::unique_lock lock(m_mutex);
+        const auto state = m_states.find(symbol);
+        if (state != m_states.end()) closeElapsed(state->second, symbol, watermarkMs);
+    }
+    drainEvents();
+}
+
+void TimeframeAggregator::drainEvents() {
     std::unique_lock lock(m_mutex);
-    const auto state = m_states.find(symbol);
-    if (state != m_states.end()) closeElapsed(state->second, symbol, watermarkMs);
+    if (m_emitting) return;
+    m_emitting = true;
+    // Keep the publication owner across callbacks: reentrant or concurrent
+    // updates append behind this batch, preserving the order made under m_mutex.
+    while (!m_pendingEvents.empty()) {
+        Event event = std::move(m_pendingEvents.front());
+        m_pendingEvents.pop_front();
+        lock.unlock();
+        switch (event.kind) {
+        case Event::Kind::Closed: emit barClosed(event.symbol, event.timeframeMs, event.bar); break;
+        case Event::Kind::Updated: emit barUpdated(event.symbol, event.timeframeMs, event.bar); break;
+        case Event::Kind::LiveRollups: emit liveRollupsUpdated(event.symbol, event.liveBars); break;
+        }
+        lock.lock();
+    }
+    m_emitting = false;
 }
 
 // Closes the symbol's bars that end at or before nowMs, carrying quiet buckets.
@@ -200,7 +227,7 @@ void TimeframeAggregator::closeElapsed(SymbolState& state, const std::string& sy
             bar = {};
             bar.timestamp_ms = currentStart;
             bar.open = bar.high = bar.low = bar.close = lastClose;
-            emit barUpdated(QString::fromStdString(symbol), tf, bar);
+            m_pendingEvents.push_back({Event::Kind::Updated, QString::fromStdString(symbol), tf, bar, {}});
         }
         // Close complete rolled groups at the UTC boundary, even if no trade
         // arrives in the first minute of the next group.

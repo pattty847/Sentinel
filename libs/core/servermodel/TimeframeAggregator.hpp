@@ -2,6 +2,7 @@
 #include <QObject>
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <optional>
 #include <shared_mutex>
@@ -106,7 +107,15 @@ private:
     std::vector<int64_t> m_timeframesMs;
     std::map<int64_t, size_t> m_historyBars;
     std::array<bool, 3> m_tradeTimeframeOn{}; // kTradeTimeframes[i] is configured
-    std::vector<TimeframeBar> m_liveScratch; // reused by publishLiveRollups under m_mutex
+    struct Event {
+        enum class Kind { Closed, Updated, LiveRollups } kind;
+        QString symbol;
+        int64_t timeframeMs = 0;
+        OHLCVBar bar;
+        std::vector<TimeframeBar> liveBars;
+    };
+    std::deque<Event> m_pendingEvents; // FIFO under m_mutex; callbacks may reenter
+    bool m_emitting = false; // guarded by m_mutex
 
     static int64_t bucketStart(int64_t timestampMs, int64_t timeframeMs);
     // Index into kTradeTimeframes, or -1.
@@ -115,7 +124,7 @@ private:
                   OHLCVBar& bar);
     void addMinuteToRollups(SymbolState& state, const std::string& symbol,
                             const OHLCVBar& minute);
-    // Emits liveRollupsUpdated for the open minute.
+    // Queues liveRollupsUpdated for the open minute.
     void publishLiveRollups(const SymbolState& state, const std::string& symbol,
                             const OHLCVBar& minute);
     void closeElapsed(SymbolState& state, const std::string& symbol, int64_t nowMs);
@@ -123,4 +132,5 @@ private:
     bool restorable(const std::string& symbol, int64_t timeframeMs) const;
     void updateTradeBar(SymbolState& state, const std::string& symbol, size_t index,
                         const Trade& trade, int64_t tradeTsMs);
+    void drainEvents();
 };
