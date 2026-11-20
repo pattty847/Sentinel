@@ -111,7 +111,7 @@ std::optional<int64_t> quoteUnits(int64_t priceUnits, int64_t baseUnits,
     // Nearest integer, exact half upward, for positive quote amounts.
     remainder.shiftOne();
     const bool roundUp = remainder.atLeast(denominator);
-    if (quotient > uint64_t(INT64_MAX) - roundUp || quotient + roundUp == 0) return {};
+    if (quotient > uint64_t(INT64_MAX) - roundUp) return {};
     return int64_t(quotient + roundUp);
 }
 }
@@ -220,7 +220,7 @@ FlowBar FlowBarBuilder::materialize(int64_t start, Bucket& bucket) const {
             previousId = nextId; ++j;
         }
         n.sweepLevels = static_cast<uint16_t>(std::min<size_t>(prices.size(), UINT16_MAX));
-        pushNotable(bar.notable, std::move(n));
+        if (n.notional > 0) pushNotable(bar.notable, std::move(n));
         i = j;
     }
     bucket.cached = bar; bucket.dirty = false;

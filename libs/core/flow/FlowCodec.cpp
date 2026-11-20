@@ -66,12 +66,19 @@ void validate(const FlowBar& b) {
         throw std::invalid_argument("flow delta disagrees with side totals");
     int last = -1;
     uint64_t knownCount = 0;
+    int64_t bidSum = 0, askSum = 0;
     for (const auto& r : b.rows) {
         if (r.offset < 0 || r.offset <= last) throw std::invalid_argument("invalid flow row offset");
         if (r.bidVol < 0 || r.askVol < 0) throw std::invalid_argument("negative flow row volume");
+        if (r.bidVol > b.sellVol - bidSum || r.askVol > b.buyVol - askSum)
+            throw std::invalid_argument("flow row volume exceeds side total");
+        bidSum += r.bidVol; askSum += r.askVol;
         knownCount += uint64_t(r.bidCount) + r.askCount;
         last = r.offset;
     }
+    if (bidSum != b.sellVol || askSum != b.buyVol ||
+        b.buyVol > b.baseVolume || b.sellVol > b.baseVolume - b.buyVol)
+        throw std::invalid_argument("flow row volumes disagree with bar totals");
     if (knownCount > b.count) throw std::invalid_argument("flow count below known row count");
     for (size_t i = 0; i < b.notable.size(); ++i) {
         const auto& n = b.notable[i];
