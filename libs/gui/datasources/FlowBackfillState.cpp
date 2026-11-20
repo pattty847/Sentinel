@@ -60,8 +60,11 @@ void FlowBackfillState::beginLive(int64_t bucket) {
     m_liveCurrentBucket = bucket;
 }
 void FlowBackfillState::markLiveEdge(int64_t bucket) {
-    if (!m_liveArmed || m_tf < 1000 || bucket < 0 || m_symbol.isEmpty()) return;
+    if (m_tf < 1000 || bucket < 0 || m_symbol.isEmpty()) return;
+    // The clock's edge paces edge pages and sizes cold-replay timeouts from the start;
+    // it is covered only once live delivery is armed (beginLive or observeLive).
     m_liveCurrentBucket = bucket;
+    if (!m_liveArmed) return;
     if (!m_window || bucket < m_start || bucket > m_end) { m_liveTracking = false; return; }
     if (m_liveTracking && m_lastLiveBucket >= 0 && bucket >= m_lastLiveBucket)
         cover(std::max(m_start, m_lastLiveBucket), bucket + m_tf);
@@ -275,5 +278,8 @@ int64_t FlowBackfillState::wakeAtMs(int64_t nowMs) const {
         const int64_t edgeAt = nowMs + 5000;
         at = at == 0 ? edgeAt : std::min(at, edgeAt);
     }
+    // A paced edge page is due even before live is armed: wake for it, or a page held
+    // back by the pace waits for an unrelated event.
+    if (!m_symbol.isEmpty() && !m_pagingStopped && m_window && m_nextEdgePageMs > nowMs) at = at == 0 ? m_nextEdgePageMs : std::min(at, m_nextEdgePageMs);
     return at;
 }

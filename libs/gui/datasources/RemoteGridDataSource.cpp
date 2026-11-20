@@ -688,9 +688,10 @@ void RemoteGridDataSource::subscribeFlowLive(const QString& symbol, int64_t tf) 
     m_flowSymbol = symbol;
     m_flowTimeframeMs = tf;
     m_flowBackfill.select(symbol, tf);
+    // The server never acknowledges a flow subscription and may refuse it. The live edge
+    // counts as covered only once this subscription delivers a live frame
+    // (onFlowBarsReceived -> observeLive); until then, and after a refusal, history pages it.
     m_flowSubscription = m_client.subscribeFlowLive(symbol.toStdString(), tf);
-    if (m_flowSubscription)
-        m_flowBackfill.beginLive(QDateTime::currentMSecsSinceEpoch() / tf * tf);
 }
 
 void RemoteGridDataSource::unsubscribeFlowLive() {
@@ -733,9 +734,12 @@ void RemoteGridDataSource::requestNextFlowPage() {
     if (request) {
         if (!symbolPermitted(request->symbol.toStdString(), "flow history"))
             m_flowBackfill.refuseSelection();
-        else
+        else {
+            sLog_Probe("flow.history", "send id=" << request->id << " symbol=" << request->symbol
+                       << " tfMs=" << request->timeframeMs << " end=" << request->endMs << " limit=" << request->limit);
             m_client.requestFlowHistory(request->id, request->symbol.toStdString(), request->timeframeMs,
                                         request->endMs, request->limit);
+        }
     }
     if (const auto at = m_flowBackfill.wakeAtMs(now); at > now) {
         m_flowTimer.start(int(std::min<int64_t>(at - now, INT_MAX)));
@@ -747,6 +751,8 @@ void RemoteGridDataSource::onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr
     const auto now = m_flowClock.elapsed();
     if (batch->history) {
         if (!m_flowBackfill.accept(*batch, now)) { requestNextFlowPage(); return; }
+        sLog_Probe("flow.history", "applied id=" << batch->id << " symbol=" << batch->symbol
+                   << " bars=" << batch->bars.size() << " oldest=" << batch->oldestMs);
     } else if (!m_flowSubscription || batch->id != m_flowSubscription || batch->symbol != m_flowSymbol ||
                batch->timeframeMs != m_flowTimeframeMs) return;
     if (!batch->history && !batch->bars.empty())

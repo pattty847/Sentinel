@@ -403,6 +403,22 @@ TEST(FlowBackfillState, SlidingWindowRequestsOnlyOneUncoveredBucket) {
     EXPECT_EQ(edge->endMs, 600'000);
     EXPECT_EQ(edge->limit, 1);
 }
+// Before live delivery is armed the clock's edge covers nothing, but it still paces
+// edge pages (one per 5 s), as it did when the subscription armed it unconditionally.
+TEST(FlowBackfillState, UnarmedLiveEdgeCoversNothingButPacesEdgePages) {
+    FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
+    state.markLiveEdge(599'000);
+    const auto first = state.next(0); ASSERT_TRUE(first);
+    EXPECT_EQ(first->endMs, 599'000) << "an unarmed edge is history's to page";
+    EXPECT_TRUE(state.accept(reply(*first, 88'000), 1));
+    state.setWindow(0, 601'000);
+    state.markLiveEdge(600'000);
+    EXPECT_FALSE(state.next(200)) << "the edge page waits for its 5 s pace";
+    EXPECT_EQ(state.wakeAtMs(200), 5000) << "the pager wakes for the held edge page";
+    const auto edge = state.next(5000); ASSERT_TRUE(edge);
+    EXPECT_EQ(edge->endMs, 600'000);
+    EXPECT_EQ(edge->limit, 1);
+}
 TEST(FlowBackfillState, LiveCoveredEdgeDoesNotPageHistory) {
     FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
     state.beginLive(0);
@@ -640,6 +656,80 @@ TEST_F(FlowDataSourceTest, OversizedOneBucketReplyExposesRefusedCoverage) {
     deliver();
     const auto* held = source.flowBuffer().series(60'000); ASSERT_NE(held, nullptr);
     EXPECT_EQ(held->coverage.at(60'000).status, Status::Refused);
+}
+// The server never acknowledges a flow subscription; a refusal is an error frame and
+// nothing more. Until the subscription delivers a live frame, the live edge is not
+// covered, so history pages it (a refused subscription never fills it otherwise).
+TEST_F(FlowDataSourceTest, RefusedSubscriptionLeavesTheLiveEdgeToHistory) {
+    constexpr int64_t tf = 60'000;
+    ready();
+    const int64_t live = QDateTime::currentMSecsSinceEpoch() / tf * tf;
+    source.subscribeFlowLive("BTC-USD", tf);
+    const auto subscribe = requests(); ASSERT_EQ(subscribe.size(), 1u);
+    receiveWire({{"type", "error"}, {"context", "flow_live_subscribe"}, {"sub", subscribe[0]["sub"]},
+                 {"symbol", "BTC-USD"}, {"message", "unsupported flow series or capacity reached"}});
+    deliver();
+    source.requestFlowHistory("BTC-USD", tf, live - 10 * tf, live + tf);
+    if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
+    const auto page = requests(); ASSERT_EQ(page.size(), 1u);
+    EXPECT_EQ(page[0]["type"], "flow_history_request");
+    EXPECT_EQ(page[0]["end_time_ms"], live) << "the undelivered live bucket must be paged";
+}
+// A symbol switch with the view running past the live edge (follow live): one page covers
+// the future buckets, the live bucket and the history below it. With the live bucket
+// covered at subscribe, the first page held only the empty buckets above it and the
+// history below waited for the 5 s edge pace (one footprint column for ~5 s, W-0178).
+TEST_F(FlowDataSourceTest, SwitchPagesHistoryBelowTheLiveEdgeInTheFirstPage) {
+    constexpr int64_t tf = 60'000;
+    ready();
+    const int64_t live = QDateTime::currentMSecsSinceEpoch() / tf * tf;
+    source.subscribeFlowLive("ETH-USD", tf);
+    source.requestFlowHistory("ETH-USD", tf, live - 30 * tf, live + 3 * tf);
+    if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
+    const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
+    EXPECT_EQ(sent[1]["end_time_ms"], live + 2 * tf);
+    EXPECT_EQ(sent[1]["limit"], 66) << "one page reaches the window start (one-view margin included)";
+}
+// A quiet (or refused) subscription: no live frame arms coverage. A bucket that enters
+// the view inside the edge pace must still be paged when the pace ends, by the pager's
+// own timer, with no further viewport change or live delivery.
+TEST_F(FlowDataSourceTest, PacedEdgePageFiresOnItsOwnBeforeLiveArrives) {
+    constexpr int64_t tf = 60'000;
+    ready();
+    const int64_t live = QDateTime::currentMSecsSinceEpoch() / tf * tf;
+    source.subscribeFlowLive("ETH-USD", tf);
+    source.requestFlowHistory("ETH-USD", tf, live - 30 * tf, live + tf);
+    const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
+    emitPage(sent[1]); // covers the window; no provisional bars, no building ranges
+    source.requestFlowHistory("ETH-USD", tf, live - 29 * tf, live + 2 * tf);
+    if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
+    EXPECT_TRUE(requests().empty()) << "the new bucket waits for the 5 s edge pace";
+    QElapsedTimer clock; clock.start();
+    std::vector<Json> page;
+    while (page.empty() && clock.elapsed() < 8000) {
+        QEventLoop loop;
+        QTimer::singleShot(50, &loop, &QEventLoop::quit);
+        loop.exec();
+        page = requests();
+    }
+    ASSERT_EQ(page.size(), 1u) << "the pager must wake for the paced edge page";
+    EXPECT_EQ(page[0]["end_time_ms"], live + tf);
+    EXPECT_EQ(page[0]["limit"], 1);
+    EXPECT_GE(clock.elapsed(), 4000) << "and only once the pace has passed";
+}
+TEST_F(FlowDataSourceTest, DeliveredLiveFrameCoversTheLiveEdge) {
+    constexpr int64_t tf = 60'000;
+    ready();
+    const int64_t live = QDateTime::currentMSecsSinceEpoch() / tf * tf;
+    source.subscribeFlowLive("BTC-USD", tf);
+    const auto subscribe = requests(); ASSERT_EQ(subscribe.size(), 1u);
+    auto frame = batch(bar(1, false, Source::Live, live, tf));
+    frame.id = subscribe[0]["sub"].get<quint64>();
+    client().flowBarsReceived(std::make_shared<const Client::FlowBatch>(frame)); deliver();
+    source.requestFlowHistory("BTC-USD", tf, live - 10 * tf, live + tf);
+    if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
+    const auto page = requests(); ASSERT_EQ(page.size(), 1u);
+    EXPECT_EQ(page[0]["end_time_ms"], live - tf) << "live delivery covers its own bucket";
 }
 
 TEST(FlowSeriesBuffer, RefusedHistoryDoesNotRetreatSealWatermark) {
