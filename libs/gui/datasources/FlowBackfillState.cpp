@@ -60,8 +60,11 @@ void FlowBackfillState::beginLive(int64_t bucket) {
     m_liveCurrentBucket = bucket;
 }
 void FlowBackfillState::markLiveEdge(int64_t bucket) {
-    if (!m_liveArmed || m_tf < 1000 || bucket < 0 || m_symbol.isEmpty()) return;
+    if (m_tf < 1000 || bucket < 0 || m_symbol.isEmpty()) return;
+    // The clock's edge paces edge pages and sizes cold-replay timeouts from the start;
+    // it is covered only once live delivery is armed (beginLive or observeLive).
     m_liveCurrentBucket = bucket;
+    if (!m_liveArmed) return;
     if (!m_window || bucket < m_start || bucket > m_end) { m_liveTracking = false; return; }
     if (m_liveTracking && m_lastLiveBucket >= 0 && bucket >= m_lastLiveBucket)
         cover(std::max(m_start, m_lastLiveBucket), bucket + m_tf);
