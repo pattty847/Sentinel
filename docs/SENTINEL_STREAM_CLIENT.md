@@ -42,7 +42,6 @@ Writes (subscribe, history requests, trade commands) are posted to `m_strand` an
 | `subscribeHeatmapLive(...)` / `unsubscribeHeatmapLive(...)` | `heatmap_live_subscribe` / `heatmap_live_unsubscribe` | The live raw tail |
 | `requestTpoHistory(...)` | `tpo_history_request` | Historical TPO slices |
 | `requestCandleHistory(...)` | `candle_history_request` | OHLCV candle history |
-| `requestScreenerData(...)` | `screener_request` | Screener rows (crypto/stock) |
 | `sendTradeCommand(...)` | `trade_command` | Order placement / modification |
 | `sendAlgoCommand(...)` | `algo_command` | Algo start/stop/params |
 
@@ -68,7 +67,6 @@ The client parses JSON by `type` and dispatches to handler methods. Each handler
 | `volume_profile_slice` | `handleVolumeProfileSliceMessage` | `volumeProfileSliceReceived` | Volume profile bins |
 | `candle_history_chunk` | `handleCandleHistoryChunkMessage` | `candleHistoryReceived` | OHLCV history |
 | `candle_bar_update` / `candle_bar_closed` | `handleCandleBarMessage` | `candleBarUpdateReceived` / `candleBarClosedReceived` | Live candles |
-| `screener_update` | `handleScreenerUpdateMessage` | `screenerUpdateReceived` | Screener table |
 
 ### Trading / System
 

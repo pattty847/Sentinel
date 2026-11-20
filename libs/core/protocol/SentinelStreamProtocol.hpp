@@ -74,8 +74,6 @@ enum class MessageType {
     TpoHistoryChunk,
     VolumeProfileSlice,
     TickDelta, // Maybe for later
-    ScreenerRequest,
-    ScreenerUpdate,
     TradeCommand,
     AlgoCommand,
     OrderUpdate,
@@ -112,8 +110,6 @@ inline std::string toString(MessageType t) {
         case MessageType::TpoHistoryRequest: return "tpo_history_request";
         case MessageType::TpoHistoryChunk: return "tpo_history_chunk";
         case MessageType::VolumeProfileSlice: return "volume_profile_slice";
-        case MessageType::ScreenerRequest: return "screener_request";
-        case MessageType::ScreenerUpdate:  return "screener_update";
         case MessageType::TradeCommand: return "trade_command";
         case MessageType::AlgoCommand: return "algo_command";
         case MessageType::OrderUpdate: return "order_update";
@@ -150,8 +146,6 @@ inline MessageType fromString(const std::string& s) {
     if (s == "tpo_history_request") return MessageType::TpoHistoryRequest;
     if (s == "tpo_history_chunk") return MessageType::TpoHistoryChunk;
     if (s == "volume_profile_slice") return MessageType::VolumeProfileSlice;
-    if (s == "screener_request") return MessageType::ScreenerRequest;
-    if (s == "screener_update")  return MessageType::ScreenerUpdate;
     if (s == "trade_command") return MessageType::TradeCommand;
     if (s == "algo_command") return MessageType::AlgoCommand;
     if (s == "order_update") return MessageType::OrderUpdate;
