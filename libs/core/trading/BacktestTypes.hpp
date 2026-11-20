@@ -73,6 +73,7 @@ enum class ExecutionEventType {
     PositionUpdated,
     PnlSnapshot,
     RiskUpdated,
+    TradeRejected,
 };
 
 struct ExecutionEvent {
@@ -84,6 +85,7 @@ struct ExecutionEvent {
     std::optional<PositionUpdate> positionUpdate;
     std::optional<PnlSnapshot> pnlSnapshot;
     std::optional<RiskOrderUpdate> riskOrderUpdate;
+    std::optional<TradeRejection> rejection;
 };
 
 struct BrokerSnapshot {

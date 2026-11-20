@@ -23,6 +23,10 @@ std::vector<ExecutionEvent> SimulationBroker::onMarketEvent(const MarketEvent& e
     }
 
     auto result = m_executionModel->onMarketEvent(m_engine, event);
+    if (!result.rejectReason.empty()) {
+        const auto symbol = event.trade ? event.trade->symbol : event.book ? event.book->symbol : std::string{};
+        result.rejections.push_back({symbol, {}, result.rejectReason, {}, event.timestampMs});
+    }
     return recordTradingResult(result, event.timestampMs);
 }
 
@@ -38,7 +42,9 @@ std::vector<ExecutionEvent> SimulationBroker::submitIntents(const std::vector<Or
 SimulationBroker::IntentOutcome SimulationBroker::submitIntent(const OrderIntent& intent) {
     auto result = m_executionModel->onIntent(m_engine, intent);
     IntentOutcome outcome;
-    outcome.rejectReason = std::move(result.rejectReason);
+    outcome.rejectReason = result.rejectReason;
+    if (!result.rejectReason.empty())
+        result.rejections.push_back({intent.symbol, intent.intentId, result.rejectReason, intent.algoId, intent.timestampMs});
     outcome.events = recordTradingResult(result, intent.timestampMs);
     return outcome;
 }
@@ -98,7 +104,18 @@ BacktestResult SimulationBroker::buildResult(const BacktestConfig& config) const
 std::vector<ExecutionEvent> SimulationBroker::recordTradingResult(const TradingResult& result, int64_t timestampMs) {
     std::vector<ExecutionEvent> events;
     events.reserve(result.orderUpdates.size() + result.positionUpdates.size() +
-                   result.pnlSnapshots.size() + result.riskOrderUpdates.size());
+                   result.pnlSnapshots.size() + result.riskOrderUpdates.size() + result.rejections.size());
+
+    for (const auto& rejection : result.rejections) {
+        ExecutionEvent event;
+        event.type = ExecutionEventType::TradeRejected;
+        event.timestampMs = rejection.timestampMs;
+        event.symbol = rejection.symbol;
+        event.algoId = rejection.algoId;
+        event.rejection = rejection;
+        m_result.executionEvents.push_back(event);
+        events.push_back(std::move(event));
+    }
 
     for (const auto& update : result.orderUpdates) {
         ExecutionEvent event;

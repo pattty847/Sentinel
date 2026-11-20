@@ -530,7 +530,10 @@ ServerDataModel::TradeHistorySnapshot ServerDataModel::tradeHistorySnapshot(
     if (fallbackFloor) result.retainedFromMs = trades.front().timestampMs;
     const auto first = std::lower_bound(trades.begin(), trades.end(), std::max(fromMs, result.retainedFromMs),
         [](const RetainedTradeSample& row, int64_t ms) { return row.timestampMs < ms; });
-    for (auto row = first; row != trades.end() && row->timestampMs < toMs; ++row) {
+    const auto last = std::lower_bound(first, trades.end(), toMs,
+        [](const RetainedTradeSample& row, int64_t ms) { return row.timestampMs < ms; });
+    result.rows.reserve(std::min(limit, static_cast<size_t>(last - first)));
+    for (auto row = first; row != last; ++row) {
         if (result.rows.size() + result.invalidRows >= limit) {
             result.exceededLimit = true;
             break;
@@ -566,11 +569,10 @@ void ServerDataModel::onTrade(const Trade& trade) {
             if (m_feeds.at(trade.product_id).connected) {
                 historyFloor = exchangeMs;
                 m_tradeHistoryAwaitingResume.erase(trade.product_id);
-                m_tradeHistoryHasResumeBoundary.insert(trade.product_id);
             }
         } else if (!historyFloor) historyFloor = exchangeMs;
-        else if (exchangeMs >= cutoff && !m_tradeHistoryHasResumeBoundary.contains(trade.product_id))
-            historyFloor = std::min(historyFloor, exchangeMs);
+        // A late row does not prove coverage before the first live trade,
+        // including before the first reconnect. Read that prefix from the journal.
         historyFloor = std::max(historyFloor, cutoff);
         while (!trades.empty() && trades.front().timestampMs < cutoff) {
             trades.pop_front();

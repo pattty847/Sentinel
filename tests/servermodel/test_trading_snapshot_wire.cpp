@@ -1,5 +1,15 @@
 #include "CandleWireFixture.hpp"
+#include "protocol/TradeRejectionWire.hpp"
 #include <gtest/gtest.h>
+
+struct HeatmapChunkWireTest {
+    static void closeListener(SentinelStreamServer& server) {
+        net::post(server.m_ioc, [&server] {
+            beast::error_code ignored;
+            server.m_acceptor->close(ignored);
+        });
+    }
+};
 
 // A real server and SentinelStreamClient over TLS/WebSocket: the trading snapshot on
 // connect, as the acknowledgement of an algo command, and after a server restart.
@@ -157,4 +167,168 @@ TEST_F(TradingSnapshotWire, ConnectThenAlgoAcksThenServerRestartClearsEverything
     expectEqualsServer(fresh);
 }
 
+TEST_F(TradingSnapshotWire, SharedTradingTicksOnceWithZeroOneAndTwoClients) {
+    ASSERT_TRUE(spinUntil([&] { return !snapshots.empty(); }));
+    auto ticks = std::make_shared<std::atomic<int>>(0);
+    onServer([&](trading::LiveTradingSession& t) {
+        t.processTradeCommand(limitBuy(100));
+        t.onTradeTick("BTC-USD", 99, 1000); // establish a position for one PnL per tick
+        t.setResultCallback([ticks](trading::TradingResult r, auto) { *ticks += int(r.pnlSnapshots.size()); });
+    });
+    const auto tick = [&](int phase) {
+        ticks->store(0);
+        tradeAt(*fixture->model, 2000 + phase, "BTC-USD", 99);
+        ASSERT_TRUE(fixture->fence());
+        EXPECT_EQ(ticks->load(), 1) << "phase " << phase;
+    };
+    tick(1);
+    SentinelStreamClient other("127.0.0.1", std::to_string(fixture->port()), fixture->config.tls.certFile);
+    bool ready = false;
+    QObject::connect(&other, &SentinelStreamClient::tradingSnapshotReceived, &app,
+                     [&](const auto&) { ready = true; });
+    other.connectToServer();
+    ASSERT_TRUE(spinUntil([&] { return ready; }));
+    tick(2);
+    other.disconnectFromServer();
+    client->disconnectFromServer();
+    ASSERT_TRUE(spinUntil([&] { return fixture->server->sessionCount() == 0; }));
+    tick(3);
+    fixture->server->stop();
+    ASSERT_TRUE(fixture->server->start());
+    tick(4);
+    onServer([](trading::LiveTradingSession& t) { t.setResultCallback({}); });
+}
+
+TEST(StreamListenerMetrics, LifecycleFailureRestartAndDestruction) {
+    int argc = 1;
+    char name[] = "listener-metrics";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    sentinel::metrics::MetricsRegistry registry;
+    auto fixture = std::make_unique<CandleFixture>();
+    fixture->server->registerMetrics(registry);
+    const auto expect = [&](int value) {
+        EXPECT_NE(registry.render().find("sentinel_stream_listening " + std::to_string(value) + "\n"),
+                  std::string::npos);
+    };
+    expect(0);
+    ASSERT_TRUE(fixture->server->start());
+    expect(1);
+    {
+        sentinel::metrics::MetricsRegistry failedRegistry;
+        CandleFixture conflict(true, fixture->port());
+        conflict.server->registerMetrics(failedRegistry);
+        EXPECT_FALSE(conflict.server->start());
+        EXPECT_NE(failedRegistry.render().find("sentinel_stream_listening 0\n"), std::string::npos);
+    }
+    HeatmapChunkWireTest::closeListener(*fixture->server);
+    EXPECT_TRUE(spinUntil([&] {
+        return registry.render().find("sentinel_stream_listening 0\n") != std::string::npos;
+    }));
+    fixture->server->stop();
+    expect(0);
+    ASSERT_TRUE(fixture->server->start());
+    expect(1);
+    fixture.reset();
+    expect(0); // the registry can outlive its listener
+}
+
+TEST(TradingRejectionWire, CommandsAndRiskTicksPublishReasonsWithoutPhantomOrders) {
+    int argc = 1;
+    char name[] = "trading-rejection";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    CandleFixture fixture;
+    fixture.config.trading.slippageBps = 10000;
+    fixture.server = std::make_unique<SentinelStreamServer>(*fixture.model, *fixture.auth, fixture.config, 0);
+    ASSERT_TRUE(fixture.server->start());
+    std::vector<Json> rejected;
+    fixture.server->registerTradingBroadcaster([&](const std::string& bytes) {
+        auto message = Json::parse(bytes);
+        if (message.value("type", "") == "trade_rejected") rejected.push_back(std::move(message));
+    });
+    net::post(RecordingServerStopTest::io(*fixture.server), [&] {
+        auto& t = fixture.server->tradingSession();
+        trading::TradeCommand flatten;
+        flatten.action = trading::TradeAction::Flatten;
+        flatten.commandId = "empty-flatten";
+        flatten.symbol = "BTC-USD";
+        flatten.timestamp = 10;
+        t.processTradeCommand(flatten);
+        t.processTradeCommand(limitBuy(100));
+        t.onTradeTick("BTC-USD", 99, 1000);
+        trading::TradeCommand risk;
+        risk.action = trading::TradeAction::SetAttachedRisk;
+        risk.symbol = "BTC-USD";
+        risk.hasStopLoss = true;
+        risk.stopLossPrice = 90;
+        t.processTradeCommand(risk);
+        t.onTradeTick("BTC-USD", 89, 2000); // sell price would be zero
+        t.onTradeTick("BTC-USD", 88, 3000); // same failed risk is edge-triggered
+        const auto state = t.snapshot();
+        EXPECT_TRUE(state.openOrders.empty());
+        ASSERT_NE(state.positionFor("BTC-USD"), nullptr);
+        EXPECT_EQ(state.positionFor("BTC-USD")->positionQty, 1);
+        EXPECT_EQ(state.riskOrders.size(), 1u);
+    });
+    ASSERT_TRUE(fixture.fence());
+    ASSERT_EQ(rejected.size(), 2u);
+    EXPECT_EQ(rejected[0]["schema_version"], 1);
+    EXPECT_EQ(rejected[0]["command_id"], "empty-flatten");
+    EXPECT_EQ(rejected[0]["reason"], "no_position");
+    EXPECT_EQ(rejected[1]["symbol"], "BTC-USD");
+    EXPECT_EQ(rejected[1]["command_id"], "");
+    EXPECT_EQ(rejected[1]["reason"], "invalid_fill_price");
+    EXPECT_EQ(rejected[1]["timestamp_ms"], 2000);
+}
+
 } // namespace
+
+TEST(TradingRejectionWire, CodecRejectsMalformedOrUnknownSchema) {
+    const trading::TradeRejection rejection{"BTC-USD", "command-1", "no_position", "", 1234};
+    const auto encoded = protocol::tradeRejectionJson(rejection);
+    const auto decoded = protocol::parseTradeRejection(Json::parse(encoded.dump()));
+    ASSERT_TRUE(decoded);
+    EXPECT_EQ(decoded->commandId, rejection.commandId);
+    EXPECT_EQ(decoded->reason, rejection.reason);
+    EXPECT_EQ(decoded->timestampMs, rejection.timestampMs);
+    auto bad = encoded;
+    bad["schema_version"] = 2;
+    EXPECT_FALSE(protocol::parseTradeRejection(bad));
+    bad = encoded; bad.erase("reason");
+    EXPECT_FALSE(protocol::parseTradeRejection(bad));
+    bad = encoded; bad["reason"] = "";
+    EXPECT_FALSE(protocol::parseTradeRejection(bad));
+    bad = encoded; bad["timestamp_ms"] = UINT64_MAX;
+    EXPECT_FALSE(protocol::parseTradeRejection(bad));
+    bad = encoded; bad["timestamp_ms"] = 1.5;
+    EXPECT_FALSE(protocol::parseTradeRejection(bad));
+}
+
+TEST(StreamListenerMetrics, RegistrationAndTlsSetupFailureWithoutBinding) {
+    int argc = 1;
+    char name[] = "listener-metrics-failure";
+    char* argv[] = {name, nullptr};
+    QCoreApplication app(argc, argv);
+    QTemporaryDir scratch;
+    ServerConfig config;
+    config.recording.enabled = false;
+    config.rollerShadow.enabled = false;
+    config.tls.certFile = (scratch.path() + "/missing.crt").toStdString();
+    config.tls.keyFile = (scratch.path() + "/missing.key").toStdString();
+    ServerDataModel model(config);
+    Authenticator auth((scratch.path() + "/no-credentials").toStdString());
+    sentinel::metrics::MetricsRegistry registry;
+    auto server = std::make_unique<SentinelStreamServer>(model, auth, config, 0);
+    server->registerMetrics(registry);
+    const auto down = [&] {
+        EXPECT_NE(registry.render().find("sentinel_stream_listening 0\n"), std::string::npos);
+    };
+    down();
+    EXPECT_FALSE(server->start()); // missing TLS certificate: fails before opening a listener
+    down();
+    server->stop();
+    down();
+    server.reset();
+    down();
+}

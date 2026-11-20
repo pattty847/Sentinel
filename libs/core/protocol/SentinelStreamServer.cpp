@@ -4,6 +4,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include "SentinelStreamProtocol.hpp"
 #include "TradeHistoryWire.hpp"
+#include "TradeRejectionWire.hpp"
 #include "flow/FlowCodec.hpp"
 #include "flow/FlowCompose.hpp"
 #include "capture/RawCapture.hpp"
@@ -1505,13 +1506,6 @@ public:
     }
     
     void on_trade(const Trade& trade) {
-        // Tick live trading session on every trade (even unsubscribed symbols — algos may be running)
-        if (owner_ && owner_->tradingSessionPtr()) {
-            const int64_t tsMs = static_cast<int64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    trade.timestamp.time_since_epoch()).count());
-            owner_->tradingSession().onTradeTick(trade.product_id, trade.price, tsMs);
-        }
         if (subscriptions_.find(trade.product_id) == subscriptions_.end()) return;
         
         nlohmann::json j;
@@ -1796,8 +1790,10 @@ public:
                                 auto journal = snapshot.store->readTrades(page.symbol, page.startMs, journalTo,
                                     budget, combined.get_token());
                                 partial |= journal.partial;
-                                page.coveredFromMs = journal.coveredFromMs;
-                                page.coveredToMs = std::min(through, journal.coveredToMs);
+                                // A window before the journal can report a floor past its end.
+                                // Represent unavailable coverage as an empty interval in the request.
+                                page.coveredFromMs = std::clamp(journal.coveredFromMs, page.startMs, through);
+                                page.coveredToMs = std::clamp(journal.coveredToMs, page.coveredFromMs, through);
                                 page.rows = std::move(journal.rows);
                                 if (page.rows.size() > budget)
                                     throw std::length_error("trade history exceeds 250000 trades");
@@ -2200,6 +2196,19 @@ SentinelStreamServer::SentinelStreamServer(ServerDataModel& model,
     , m_serverConfig(config)
     , m_port(port)
 {
+    // The shared account advances once per model trade, even with no clients.
+    // Keep trading commands and ticks on the same I/O executor; fence restarts.
+    QObject::connect(&model, &ServerDataModel::tradeBroadcast, this, [this](const Trade& trade) {
+        const auto generation = m_acceptGeneration.load(std::memory_order_acquire);
+        if (!m_running.load(std::memory_order_acquire)) return;
+        net::post(m_ioc, [this, generation, symbol = trade.product_id, price = trade.price,
+                          tsMs = tradeTimestampMs(trade)] {
+            if (!m_running.load(std::memory_order_acquire) ||
+                generation != m_acceptGeneration.load(std::memory_order_acquire)) return;
+            if (m_tradingSession)
+                m_tradingSession->onTradeTick(symbol, price, tsMs);
+        });
+    }, Qt::DirectConnection);
     if (model.recordingDir()) {
         m_chunks = std::make_shared<recording::ChunkService>(
             *model.recordingDir(),
@@ -2232,6 +2241,10 @@ SentinelStreamServer::SentinelStreamServer(ServerDataModel& model,
 }
 
 void SentinelStreamServer::registerMetrics(sentinel::metrics::MetricsRegistry& registry) {
+    registry.gaugeFn("sentinel_stream_listening", "1 while the client stream listener is serving, otherwise 0.", {},
+        [listening = m_listening]() -> std::optional<double> {
+            return listening->load(std::memory_order_relaxed) ? 1.0 : 0.0;
+        });
     if (!m_rollups) return;
     // Samplers read relaxed atomics on the scraping (main) thread.
     const auto rollups = m_rollups;
@@ -2332,6 +2345,7 @@ bool SentinelStreamServer::start() {
         m_acceptor->set_option(net::socket_base::reuse_address(true));
         m_acceptor->bind(endpoint);
         m_acceptor->listen();
+        m_listening->store(true, std::memory_order_relaxed);
         if (address.is_unspecified()) {
             sLog_Warning("listening on all interfaces without client auth: address="
                          << address.to_string() << " port=" << m_acceptor->local_endpoint().port());
@@ -2348,6 +2362,7 @@ bool SentinelStreamServer::start() {
             m_tradingSession->registerAlgo(std::make_unique<trading::AvendellaMM>());
             m_tradingSession->setResultCallback(
                 [this](trading::TradingResult result, std::vector<trading::AlgoOrderEvent> events) {
+                    for (const auto& rejection : result.rejections) broadcastTradeRejection(rejection);
                     for (auto& ou : result.orderUpdates) broadcastOrderUpdate(ou);
                     for (auto& pu : result.positionUpdates) broadcastPositionUpdate(pu);
                     for (auto& ru : result.riskOrderUpdates) broadcastRiskOrderUpdate(ru);
@@ -2399,6 +2414,7 @@ bool SentinelStreamServer::start() {
                            ? " (TLS files missing: run `bash certs/gen-certs.sh` from the repo root)"
                            : ""));
         m_running = false;
+        m_listening->store(false, std::memory_order_relaxed);
         beast::error_code ignored;
         if (m_acceptor) m_acceptor->close(ignored);
         if (m_acceptRetryTimer) m_acceptRetryTimer->cancel();
@@ -2419,6 +2435,7 @@ bool SentinelStreamServer::start() {
 }
 
 void SentinelStreamServer::stop() {
+    m_listening->store(false, std::memory_order_relaxed);
     m_flowReplayStop.request_stop();
     if (m_rollups) m_rollups->stop();
     // Live delivery can hold a Session and post to its executor. Join it while
@@ -2502,6 +2519,7 @@ void SentinelStreamServer::doAccept(uint64_t generation) {
 }
 
 void SentinelStreamServer::retryAcceptAfterError(uint64_t generation, const beast::error_code& ec) {
+    if (!m_acceptor->is_open()) m_listening->store(false, std::memory_order_relaxed);
     // One failed connection (on macOS a peer reset before accept returns EINVAL) retries
     // at once. A failure that repeats (descriptor exhaustion, a closed listener)
     // completes at once every time, so further retries wait 10 ms doubling to 1 s
@@ -2622,6 +2640,10 @@ void broadcastJson(std::mutex& mtx,
     for (auto& fn : copy) fn(json);
 }
 } // namespace
+
+void SentinelStreamServer::broadcastTradeRejection(const trading::TradeRejection& rejection) {
+    broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, protocol::tradeRejectionJson(rejection).dump());
+}
 
 void SentinelStreamServer::broadcastOrderUpdate(const trading::OrderUpdate& ou) {
     emit orderUpdateBroadcast(ou);
