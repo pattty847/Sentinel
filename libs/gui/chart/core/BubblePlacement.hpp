@@ -145,7 +145,13 @@ public:
         const double fallbackP95 = select(scratch_.get(), count, size_t(std::ceil(.95*double(count)))-1);
         // p95 is taken over what Individual placement draws: whole sweeps (BubblePlacement
         // merges a sweep's fills into one mark) at or above both display minimums.
-        const double cutoff = minimum < 0 ? median : minimum;
+        const size_t visible = drawnSweeps(rows, minimum < 0 ? median : minimum, minBaseSize);
+        return {median, visible ? select(scratch_.get(), visible, size_t(std::ceil(.95*double(visible)))-1)
+                                : fallbackP95, 1};
+    }
+private:
+    // Notionals of the sweeps at or above both minimums into scratch_; returns their count.
+    template<class Rows> size_t drawnSweeps(const Rows& rows, double cutoff, double minBaseSize) {
         size_t visible = 0;
         for (size_t i = 0; i < rows.size() && i < Capacity && visible < Capacity;) {
             if (!validExecution(rows[i])) { ++i; continue; }
@@ -153,10 +159,8 @@ public:
             if (std::isfinite(n) && n > 0 && n >= cutoff && size >= minBaseSize)
                 scratch_[visible++] = n;
         }
-        return {median, visible ? select(scratch_.get(), visible, size_t(std::ceil(.95*double(visible)))-1)
-                                : fallbackP95, 1};
+        return visible;
     }
-private:
     bool defer(bool changed, Mode mode, bool urgent, int64_t nowMs) {
         const int64_t remaining = interval(mode, active_.aggregateP95, urgent) - (nowMs-lastUpdateMs_);
         pending_ = initialized_ && changed && remaining > 0;
