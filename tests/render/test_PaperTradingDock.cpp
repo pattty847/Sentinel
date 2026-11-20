@@ -39,7 +39,22 @@
 #include <utility>
 #include <gtest/gtest.h>
 
+namespace paper {
+QStringList backtestBinaryCandidates(const QString& appDir, bool windows);
+}
+
 namespace {
+TEST(PaperTicket, BacktestBinaryCandidatesCoverBuildLayouts) {
+    const auto mac = paper::backtestBinaryCandidates("/build/apps/sentinel-gui", false);
+    EXPECT_EQ(mac.front(), "/build/apps/sentinel-backtest/sentinel-backtest");
+    const auto linux = paper::backtestBinaryCandidates("/home/build/apps/sentinel-gui", false);
+    EXPECT_EQ(linux.front(), "/home/build/apps/sentinel-backtest/sentinel-backtest");
+    const auto windows = paper::backtestBinaryCandidates("C:/build/apps/sentinel-gui/Release", true);
+    EXPECT_EQ(windows.front(), "C:/build/apps/sentinel-backtest/Release/sentinel-backtest.exe");
+    const auto debug = paper::backtestBinaryCandidates("C:/build/apps/sentinel-gui/Debug", true);
+    EXPECT_EQ(debug.front(), "C:/build/apps/sentinel-backtest/Debug/sentinel-backtest.exe");
+}
+
 TEST(PaperPositionStyle, BandGeometryOnlyInBandVariant) {
     EXPECT_FALSE(paperPositionBandSpan(false, 40.0f, 75.0f, 100.0f));
     const auto band = paperPositionBandSpan(true, 40.0f, 75.0f, 100.0f);

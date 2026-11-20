@@ -1,6 +1,8 @@
 #include "AlgoOrderSpans.hpp"
 
+#include <algorithm>
 #include <unordered_set>
+#include <vector>
 
 void AlgoOrderSpans::apply(const trading::AlgoOrderEvent& ev) {
     if (ev.orderId.empty()) {
@@ -26,7 +28,9 @@ void AlgoOrderSpans::apply(const trading::AlgoOrderEvent& ev) {
             span.closedMs = ev.timestampMs;
             span.terminalStatus = ev.status;
             span.active = false;
+            span.closedOrder = ++m_nextClosedOrder;
             m_markers.push_back(ev);
+            trimTerminalSpans();
         }
     }
     while (m_markers.size() > kMaxMarkers) m_markers.pop_front();
@@ -41,6 +45,7 @@ void AlgoOrderSpans::reconcile(const trading::TradingSnapshot& snapshot, int64_t
                 span.active = false;
                 span.closedMs = atMs;
                 span.terminalStatus = trading::OrderStatus::Canceled;
+                span.closedOrder = ++m_nextClosedOrder;
             }
             retired.emplace(prefix + id, span);
         }
@@ -67,7 +72,32 @@ void AlgoOrderSpans::reconcile(const trading::TradingSnapshot& snapshot, int64_t
         span.active = false;
         span.closedMs = atMs;
         span.terminalStatus = trading::OrderStatus::Canceled;
+        span.closedOrder = ++m_nextClosedOrder;
     }
+    trimTerminalSpans();
+}
+
+void AlgoOrderSpans::trimTerminalSpans() {
+    size_t count = 0;
+    auto oldest = m_spans.end();
+    for (auto it = m_spans.begin(); it != m_spans.end(); ++it) {
+        if (it->second.active) continue;
+        ++count;
+        if (oldest == m_spans.end() || it->second.closedOrder < oldest->second.closedOrder)
+            oldest = it;
+    }
+    if (count <= kMaxTerminalSpans) return;
+    if (count == kMaxTerminalSpans + 1) {
+        m_spans.erase(oldest);
+        return;
+    }
+    std::vector<std::pair<uint64_t, std::string>> terminal;
+    terminal.reserve(count);
+    for (const auto& [id, span] : m_spans)
+        if (!span.active) terminal.emplace_back(span.closedOrder, id);
+    const auto excess = count - kMaxTerminalSpans;
+    std::nth_element(terminal.begin(), terminal.begin() + excess, terminal.end());
+    for (size_t i = 0; i < excess; ++i) m_spans.erase(terminal[i].second);
 }
 
 size_t AlgoOrderSpans::activeCount() const {
