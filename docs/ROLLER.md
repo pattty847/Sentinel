@@ -650,13 +650,14 @@ layer ticks. Unsupported policies fail with `Kalshi grid:` before recorder or
 output creation. Coinbase grid overrides retain their existing behavior; Kalshi
 rejects overrides because its instrument block owns all four grid values.
 
-The roller checkpoint hash conditionally includes absolute rows, price bounds,
-and the exact instrument JSON (including the complete band schedule). A changed
-band schedule therefore refuses an existing day's checkpoint even if its finest
-step is unchanged. Use a new output root for a changed day's policy. A different
-finest step on a new day produces new grid/header identities; HMC2's existing
-per-day generation naming remains unchanged. Coinbase hashes append none of
-these fields and remain identical.
+HMC2 identity and generation change only when the recorder grid changes: price
+scale, a layer tick, row bounds, price bounds or size floor.
+Different band schedules that derive the same recorder grid retain the same
+HMC2 identity and generation, with normal UTC day-file rollover.
+The roller's checkpoint/anchor hash still conditionally includes absolute rows,
+price bounds and the exact instrument JSON, so bands-only changes refuse
+mismatched checkpoints and anchors; Coinbase hashes append none of these fields
+and remain identical.
 
 Journal anchor search recognizes `orderbook_snapshot` for the selected ticker
 and searches earlier hours and runs using the same ordering and damage handling

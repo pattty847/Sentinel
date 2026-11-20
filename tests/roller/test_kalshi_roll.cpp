@@ -8,6 +8,8 @@
 #include <cmath>
 #include <iostream>
 #include <numeric>
+#include <set>
+#include <string_view>
 
 using namespace sentinel;
 using namespace sentinel::roller;
@@ -330,6 +332,83 @@ TEST(KalshiRoll, TickChangeBetweenDaysChangesGridAndHmcPolicy) {
         ASSERT_EQ(before.size(), 1u); ASSERT_EQ(after.size(), 1u);
         EXPECT_NE(before[0].header.configHash, after[0].header.configHash);
         EXPECT_EQ(after[0].header.priceScale, 1000);
+    }
+}
+
+TEST(KalshiRoll, BandOnlyChangeKeepsHmcGenerationButRejectsPriorInstrumentAnchor) {
+    QTemporaryDir temp; const fs::path root = temp.path().toStdString();
+    const auto midnight = Epoch + Day;
+    auto other = instrument();
+    other["price_ranges"] = {{{"start", "0"}, {"end", "0.5"}, {"step", "0.01"}},
+        {{"start", "0.5"}, {"end", "1"}, {"step", "0.02"}}};
+    // Both histories begin with the first instrument. Only the mixed history
+    // subscribes with the new band schedule at the second day's boundary.
+    for (const auto* history : {"mixed", "old"}) {
+        capture::WriterConfig cfg; cfg.root = QString::fromStdString((root / history).string());
+        cfg.symbol = A; cfg.fsyncBlocks = 0;
+        {
+            capture::Writer writer(cfg, header(A, instrument()));
+            append(writer, midnight - 2 * Minute, snapshot(A));
+            append(writer, midnight - Minute + 3000, json::object(), capture::Kind::CaptureStarted);
+            if (std::string_view(history) == "old") {
+                for (int i = 0; i <= 30; ++i)
+                    append(writer, midnight + i * Minute + 3000, json::object(), capture::Kind::CaptureStarted);
+            }
+            writer.close();
+        }
+        if (std::string_view(history) == "mixed") {
+            capture::Writer writer(cfg, header(A, other));
+            append(writer, midnight, snapshot(A));
+            for (int i = 1; i <= 30; ++i)
+                append(writer, midnight + i * Minute + 3000, json::object(), capture::Kind::CaptureStarted);
+            writer.close();
+        }
+    }
+    RollOptions old{root / "old", root / "old-out", A, midnight, midnight + 30 * Minute};
+    roll(old);
+    const auto priorAnchor = AnchorStore::load(old.outputRoot / A / "anchors/2026-10-25/0000.anchor");
+    EXPECT_EQ(priorAnchor.instrument, instrument());
+
+    RollOptions o{root / "mixed", root / "out", A, midnight - 2 * Minute, midnight + 15 * Minute};
+    o.writeAnchors = false;
+    roll(o);
+    const auto cp = read(o.outputRoot / A / "roller.json");
+    const auto firstHash = cp["days"][std::to_string(Epoch)]["configHash"];
+    const auto secondHash = cp["days"][std::to_string(midnight)]["configHash"];
+    EXPECT_NE(firstHash, secondHash);
+    EXPECT_EQ(priorAnchor.identity.configHash, firstHash);
+    auto expected = priorAnchor.identity;
+    expected.configHash = secondHash.get<uint64_t>();
+    std::string rejection;
+    const auto stale = AnchorStore::path(o.outputRoot, priorAnchor);
+    AnchorStore::write(o.outputRoot, priorAnchor);
+    EXPECT_FALSE(AnchorStore::read(stale, expected, midnight, {}, &rejection));
+    EXPECT_NE(rejection.find("identity"), std::string::npos) << rejection;
+
+    const auto prefix = hmcFiles(o.outputRoot, "2026-10-25");
+    ASSERT_EQ(prefix.size(), 2u);
+    o.fromMs = midnight; o.toMs = midnight + 30 * Minute;
+    const auto resumed = roll(o);
+    EXPECT_FALSE(resumed["days"][0].contains("anchorBoundaryMs"));
+    EXPECT_EQ(resumed["days"][0]["anchorRejection"], "anchor checkpoint identity mismatch");
+    EXPECT_EQ(resumed["days"][0]["grid"]["instrument"], other);
+    EXPECT_EQ(resumed["days"][0]["committedThroughMs"], o.toMs);
+    const auto extended = hmcFiles(o.outputRoot, "2026-10-25");
+    ASSERT_EQ(extended.size(), prefix.size());
+    for (const auto& [name, bytes] : prefix) {
+        ASSERT_TRUE(extended.contains(name));
+        EXPECT_GT(extended.at(name).size(), bytes.size());
+        EXPECT_TRUE(extended.at(name).starts_with(bytes));
+    }
+    for (const auto* layer : {"near", "deep"}) {
+        const auto before = recording::Hmc2Store::readRange(o.outputRoot, A, layer, Minute, midnight - 2 * Minute, midnight);
+        const auto after = recording::Hmc2Store::readRange(o.outputRoot, A, layer, Minute, midnight, o.toMs);
+        ASSERT_EQ(before.size(), 2u); ASSERT_EQ(after.size(), 30u);
+        for (const auto& row : after) EXPECT_EQ(row.header.configHash, before.front().header.configHash);
+        std::set<std::string> files;
+        for (const auto& file : fs::directory_iterator(o.outputRoot / A / (std::string(layer) + "-60000")))
+            if (file.path().extension() == ".hmc2") files.insert(file.path().filename().string());
+        EXPECT_EQ(files, (std::set<std::string>{"2026-10-24.hmc2", "2026-10-25.hmc2"}));
     }
 }
 
