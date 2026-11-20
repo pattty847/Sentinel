@@ -674,6 +674,21 @@ TEST_F(FlowDataSourceTest, RefusedSubscriptionLeavesTheLiveEdgeToHistory) {
     EXPECT_EQ(page[0]["type"], "flow_history_request");
     EXPECT_EQ(page[0]["end_time_ms"], live) << "the undelivered live bucket must be paged";
 }
+// A symbol switch with the view running past the live edge (follow live): one page covers
+// the future buckets, the live bucket and the history below it. With the live bucket
+// covered at subscribe, the first page held only the empty buckets above it and the
+// history below waited for the 5 s edge pace (one footprint column for ~5 s, W-0178).
+TEST_F(FlowDataSourceTest, SwitchPagesHistoryBelowTheLiveEdgeInTheFirstPage) {
+    constexpr int64_t tf = 60'000;
+    ready();
+    const int64_t live = QDateTime::currentMSecsSinceEpoch() / tf * tf;
+    source.subscribeFlowLive("ETH-USD", tf);
+    source.requestFlowHistory("ETH-USD", tf, live - 30 * tf, live + 3 * tf);
+    if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
+    const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
+    EXPECT_EQ(sent[1]["end_time_ms"], live + 2 * tf);
+    EXPECT_EQ(sent[1]["limit"], 66) << "one page reaches the window start (one-view margin included)";
+}
 TEST_F(FlowDataSourceTest, DeliveredLiveFrameCoversTheLiveEdge) {
     constexpr int64_t tf = 60'000;
     ready();
