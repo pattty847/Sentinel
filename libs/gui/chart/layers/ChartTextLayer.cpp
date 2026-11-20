@@ -201,9 +201,12 @@ void ChartTextLayer::buildMsdfAtlas() {
   params.fontFamily = "Roboto Mono";
   params.fontPx = 64;
   params.pxRange = 4.0f;
+  // Append new glyphs at the end: a glyph's atlas cell follows its charset index
+  // (MsdfAtlas.cpp), so appending leaves every existing glyph on the same texels.
   params.charset = QStringLiteral(
       " 0123456789.+-,:/<>"
-      "$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+      "$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+      "\u0394\u00B1\u00B7\u2212\u03A3"); // Delta, plus-minus, middle dot, minus, Sigma
   params.resourceFont =
       QStringLiteral(":/fonts/RobotoMono/RobotoMono-Regular.ttf");
   const QByteArray envFont = qgetenv("SENTINEL_MSDF_FONT");

@@ -4,6 +4,8 @@
 // drawRect, device-pixel snapping at 1x/1.5x/2x, the label gate and the budget.
 // W-0001: the chart text rule (all or none per frame, compact before hide, hysteresis,
 // baseline with the cell) and one number format across chart layers.
+// W-0176: the MSDF atlas layout keeps existing glyph texels when glyphs are appended,
+// and the chart text charset carries the chart symbols.
 #include "render/ChartTextAtlas.hpp"
 #include "render/ChartTextNode.hpp"
 #include "render/ChartTextRenderer.hpp"
@@ -12,21 +14,29 @@
 #include "chart/core/FootprintLod.hpp"
 #include "chart/layers/CvdLayerLayout.hpp"
 #include "chart/layers/LadderBadges.hpp"
+#include "chart/layers/ChartLayers.hpp"
+#include "render/MsdfAtlas.hpp"
 #include "config/AgentHostMode.hpp"
+#include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QImage>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QScopeGuard>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <map>
 #include <random>
 #include <set>
+#include <tuple>
 
 namespace {
 using namespace heatmap;
@@ -813,6 +823,151 @@ TEST_F(LabelLayout, TextSubmissionAndGeometryGrowGeometrically) {
     renderer.beginFrame(&root, nullptr, atlas());
     renderer.submitGlyphs(batch, ChartTextRenderer::Priority::High);
     EXPECT_EQ(renderer.droppedGlyphs(), 0);
+}
+
+// The chart text charset before W-0176 added the chart symbols.
+const QString kOneRowCharset = QStringLiteral(
+    " 0123456789.+-,:/<>$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+const QString kChartSymbols = QStringLiteral("\u0394\u00B1\u00B7\u2212\u03A3");
+
+QString copyBundledFont(const QTemporaryDir& dir) {
+    const QString path = dir.filePath("RobotoMono-Regular.ttf");
+    if (!QFile::exists(path)) QFile::copy(":/fonts/RobotoMono/RobotoMono-Regular.ttf", path);
+    return path;
+}
+
+MsdfAtlas buildMsdf(const QString& font, const QString& charset) {
+    MsdfAtlas atlas;
+    MsdfAtlas::BuildParams p;
+    p.fontFamily = "Roboto Mono";
+    p.fontPath = font;
+    p.charset = charset;
+    p.fontPx = 64;
+    p.pxRange = 4.0f;
+    EXPECT_TRUE(atlas.build(p));
+    return atlas;
+}
+
+// Appending glyphs must leave every existing glyph on the same atlas texels with the
+// same metrics: its rect in texels, its outline and advance, and the pixels of the
+// original row. A different texel rect or row content shifts the sampled distance
+// field and changes rendered chart text (golden 09.labels).
+TEST(MsdfAtlasLayout, AppendingGlyphsKeepsExistingGlyphTexels) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString font = copyBundledFont(dir);
+    ASSERT_TRUE(QFile::exists(font));
+    const QByteArray previousFont = qgetenv("SENTINEL_MSDF_FONT");
+    qputenv("SENTINEL_MSDF_FONT", font.toUtf8());
+    const auto restore = qScopeGuard([&] {
+        if (previousFont.isNull()) qunsetenv("SENTINEL_MSDF_FONT");
+        else qputenv("SENTINEL_MSDF_FONT", previousFont);
+    });
+
+    const MsdfAtlas before = buildMsdf(font, kOneRowCharset);
+    ASSERT_TRUE(before.isBuilt());
+    // The production chart text atlas, as the chart builds it.
+    chart::ChartLayers layers;
+    layers.text.buildMsdfAtlas();
+    ASSERT_TRUE(layers.text.atlasBuilt);
+    const MsdfAtlas& after = layers.text.atlas.atlas();
+    ASSERT_EQ(after.paddingPx(), before.paddingPx());
+
+    const QImage a = before.image().convertToFormat(QImage::Format_RGB888);
+    const QImage b = after.image().convertToFormat(QImage::Format_RGB888);
+    ASSERT_EQ(b.width(), a.width()) << "appending a glyph must not widen the atlas";
+    ASSERT_GE(b.height(), a.height());
+    EXPECT_EQ(b.height() % a.height(), 0);
+    EXPECT_EQ(b.copy(0, 0, a.width(), a.height()), a) << "the original row must keep its pixels";
+
+    const auto texels = [](const MsdfAtlas& atlas, QChar c) {
+        const QRectF uv = atlas.glyph(c).uv;
+        const double w = atlas.image().width();
+        const double h = atlas.image().height();
+        return std::array<double, 4>{uv.x() * w, uv.y() * h, uv.width() * w, uv.height() * h};
+    };
+    for (const QChar c : kOneRowCharset) {
+        SCOPED_TRACE(QString(c).toStdString());
+        EXPECT_EQ(after.glyph(c).bounds, before.glyph(c).bounds);
+        EXPECT_EQ(after.glyph(c).advance, before.glyph(c).advance);
+        EXPECT_EQ(texels(after, c), texels(before, c));
+    }
+
+    // Each chart symbol has its own outline in its own cell below the original row.
+    std::set<std::tuple<double, double, double, double>> shapes;
+    for (const QChar c : kChartSymbols) {
+        SCOPED_TRACE(QString(c).toStdString());
+        const auto& glyph = after.glyph(c);
+        EXPECT_GT(glyph.advance, 0.0f);
+        EXPECT_GT(glyph.bounds.width(), 2.0 * after.paddingPx());
+        EXPECT_GT(glyph.bounds.height(), 2.0 * after.paddingPx());
+        EXPECT_GE(texels(after, c)[1], a.height());
+        shapes.insert({glyph.bounds.x(), glyph.bounds.y(), glyph.bounds.width(), glyph.bounds.height()});
+    }
+    EXPECT_EQ(shapes.size(), size_t(kChartSymbols.size())) << "no shared missing-glyph box";
+
+    // While the row count holds, a further glyph leaves the normalized UVs bit-identical.
+    const QString production = kOneRowCharset + kChartSymbols;
+    const MsdfAtlas more = buildMsdf(font, production + QStringLiteral("#"));
+    ASSERT_EQ(more.image().size(), b.size());
+    for (const QChar c : production) {
+        SCOPED_TRACE(QString(c).toStdString());
+        EXPECT_EQ(more.glyph(c).uv, after.glyph(c).uv);
+    }
+    EXPECT_GT(more.glyph(QChar('#')).advance, 0.0f);
+}
+
+// A cached atlas must round-trip the wrapped layout exactly.
+TEST(MsdfAtlasLayout, CachedAtlasKeepsTheWrappedLayout) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString font = copyBundledFont(dir);
+    const QString charset = kOneRowCharset + kChartSymbols;
+    const MsdfAtlas built = buildMsdf(font, charset);
+    const MsdfAtlas cached = buildMsdf(font, charset);
+    ASSERT_TRUE(cached.isBuilt());
+    EXPECT_EQ(cached.image().convertToFormat(QImage::Format_RGB888),
+              built.image().convertToFormat(QImage::Format_RGB888));
+    for (const QChar c : charset) {
+        SCOPED_TRACE(QString(c).toStdString());
+        EXPECT_EQ(cached.glyph(c).uv, built.glyph(c).uv);
+        EXPECT_EQ(cached.glyph(c).bounds, built.glyph(c).bounds);
+        EXPECT_EQ(cached.glyph(c).advance, built.glyph(c).advance);
+    }
+}
+
+// An atlas cached under the one-row layout (key version msdf_atlas_v11) has every UV
+// normalized to a different atlas size; it must not be loaded for the same charset.
+TEST(MsdfAtlasLayout, OneRowLayoutCacheIsNotReused) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString font = copyBundledFont(dir);
+    const QString charset = kOneRowCharset + kChartSymbols;
+    const QString payload = QString("%1|%2|%3|%4|%5")
+        .arg(font, QString::number(64), charset, QString::number(4.0f, 'f', 3), "msdf_atlas_v11");
+    const QString key = QString::fromLatin1(
+        QCryptographicHash::hash(payload.toUtf8(), QCryptographicHash::Sha1).toHex());
+    const QString cacheDir =
+        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/glyph-cache/msdf";
+    ASSERT_TRUE(QDir().mkpath(cacheDir));
+    const QString base = QDir(cacheDir).filePath(key);
+    QImage stale(4131, 97, QImage::Format_RGB888);
+    stale.fill(Qt::black);
+    ASSERT_TRUE(stale.save(base + ".png"));
+    QFile meta(base + ".json");
+    ASSERT_TRUE(meta.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    meta.write(QJsonDocument(QJsonObject{{"key", key}, {"fontPx", 64}, {"pxRange", 4.0}, {"paddingPx", 6}})
+                   .toJson(QJsonDocument::Compact));
+    meta.close();
+    const auto removeStale = qScopeGuard([&] {
+        QFile::remove(base + ".png");
+        QFile::remove(base + ".json");
+    });
+
+    const MsdfAtlas atlas = buildMsdf(font, charset);
+    ASSERT_TRUE(atlas.isBuilt());
+    EXPECT_NE(atlas.image().size(), stale.size());
+    EXPECT_GT(atlas.glyph(QChar(0x0394)).advance, 0.0f);
 }
 } // namespace
 
