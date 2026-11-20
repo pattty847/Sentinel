@@ -83,6 +83,7 @@ struct ServerFeedAdmissionTest : testing::Test {
     void checkMetadataGate();
     void checkTradeWire();
     void checkRefusal();
+    void checkLegacyScreenerRequest();
     bool sessionHas(const std::shared_ptr<Session>& s, const std::string& symbol) const {
         return s->subscriptions_.contains(symbol);
     }
@@ -331,6 +332,30 @@ void ServerFeedAdmissionTest::checkRefusal() {
     EXPECT_TRUE(sessionHas(s, "BTC-USD"));
 }
 TEST_F(ServerFeedAdmissionTest, UncapturedProductRefusalIsAtomic) { checkRefusal(); }
+
+// The screener is removed: a legacy screener_request must not reach the history
+// pool or a child process. Every path of the removed handler wrote a reply on this
+// session (a queued-work error here, since the fixture server never starts its pool),
+// so an empty write queue and an idle pool mean the request was dropped.
+void ServerFeedAdmissionTest::checkLegacyScreenerRequest() {
+    auto s = session();
+    const auto before = s->write_queue_.size();
+    s->handle_message(nlohmann::json{{"type", "screener_request"}, {"asset", "crypto"},
+                                     {"limit", 50}, {"min_volume", 0.0}}.dump());
+    drain();
+    for (auto it = std::next(s->write_queue_.begin(), static_cast<std::ptrdiff_t>(before));
+         it != s->write_queue_.end(); ++it)
+        ADD_FAILURE() << "reply to a legacy screener_request: " << it->payload;
+    EXPECT_EQ(s->write_queue_.size(), before);
+    EXPECT_EQ(server->m_pendingHistoryTasks.load(), 0u);
+    EXPECT_FALSE(s->closing_.load());
+    request(s, "BTC-USD"); // the same connection still serves a supported request
+    EXPECT_TRUE(sessionHas(s, "BTC-USD"));
+    EXPECT_GT(s->write_queue_.size(), before);
+}
+TEST_F(ServerFeedAdmissionTest, LegacyScreenerRequestStartsNoWorkAndKeepsTheSession) {
+    checkLegacyScreenerRequest();
+}
 
 TEST(ServerFeedAdmissionSource, ServerHasOnlyTheJournalFeed) {
     const auto read = [](const char* path) {
