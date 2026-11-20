@@ -560,13 +560,19 @@ TEST_F(FlowStoreTest, LargeInventoryUsesCachedCatalogAndStopsDuringStatWalk) {
     j.heartbeat(Hour + Minute + 1);
     j.close();
     recordedGrid("BTC-USD", 100, 50, 100000);
-    addInventoryFiles(3000);
+    // 500 files keep the walk long enough to pause mid-walk at file 100 and to show the
+    // catalog is built once. Each file costs several file operations per pass; 3000 of
+    // them took 25 s behind fsync-heavy tests and timed the binary out (0.6 s alone).
+    const auto createStart = std::chrono::steady_clock::now();
+    addInventoryFiles(500);
+    std::cout << "large-inventory create_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - createStart).count() << '\n';
     const auto ctorStart = std::chrono::steady_clock::now();
     sentinel::roller::JournalReader catalog(journal, "BTC-USD");
     const auto ctorMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - ctorStart).count();
     std::cout << "large-inventory constructor_ms=" << ctorMs << " files=" << catalog.files().size() << '\n';
-    ASSERT_GE(catalog.files().size(), 3001u);
+    ASSERT_GE(catalog.files().size(), 501u);
     through = Epoch + Hour;
     auto o = options();
     o.lowerPriority = false;
@@ -607,8 +613,14 @@ TEST_F(FlowStoreTest, TornStatePreservesRevisionHintAndScaleVersionRebuilds) {
     path += ".state";
     QFile file(QString::fromStdString(path.string()));
     ASSERT_TRUE(file.open(QIODevice::ReadWrite));
+    // Flip the last byte (the SHA-256 tail) rather than overwrite it: the digest covers
+    // journal mtimes, so a fixed replacement byte equals the original 1 run in 256 and
+    // leaves the sidecar intact.
     ASSERT_TRUE(file.seek(file.size() - 1));
-    ASSERT_EQ(file.write("x", 1), 1);
+    const char last = file.read(1).at(0);
+    ASSERT_TRUE(file.seek(file.size() - 1));
+    const char flipped = char(last ^ 1);
+    ASSERT_EQ(file.write(&flipped, 1), 1);
     file.close();
     FlowStore repaired(options());
     ASSERT_EQ(repaired.runPass().built, 2);

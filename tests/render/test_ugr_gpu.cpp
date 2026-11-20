@@ -3912,15 +3912,18 @@ TEST(UgrTickCpu, StartupSnapshotCommitsOnlySettledAutoTick) {
 }
 
 TEST(UgrTickCpu, RepeatedSnapshotsDoNotExtendTheFirstTickHold) {
+    // Counts snapshots, not milliseconds: the hold (90 ms) and the snapshot timer (30 ms)
+    // start together, so a hold that snapshots do not re-arm commits while they still
+    // arrive, and one that each snapshot re-arms commits only after the last of ten.
+    // QTimer fires overdue timers in deadline order, so a loaded host cannot reorder that.
     heatmap::gpu::HeatmapGpuLayer layer;
     const heatmap::gpu::ViewWindow view{double(epoch + 2 * kHourMs), double(epoch + 3 * kHourMs),
                                         100120, 100180};
-    QElapsedTimer elapsed;
-    qint64 firstCommitMs = -1;
-    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::tickChanged, &layer,
-                     [&] { if (firstCommitMs < 0) firstCommitMs = elapsed.elapsed(); });
-    QTimer snapshots;
+    int sentAtFirstCommit = -1;
     int sent = 0;
+    QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::tickChanged, &layer,
+                     [&] { if (sentAtFirstCommit < 0) sentAtFirstCommit = sent; });
+    QTimer snapshots;
     QObject::connect(&snapshots, &QTimer::timeout, &layer, [&] {
         if (++sent > 10) { snapshots.stop(); return; }
         QMetaObject::invokeMethod(layer.controller(), "snapshotChanged", Qt::QueuedConnection);
@@ -3929,7 +3932,6 @@ TEST(UgrTickCpu, RepeatedSnapshotsDoNotExtendTheFirstTickHold) {
     QObject::connect(&layer, &heatmap::gpu::HeatmapGpuLayer::snapshotChanged, &layer, [&] {
         if (scripted || !layer.hasCurrentResolution()) return;
         scripted = true;
-        elapsed.start();
         layer.setAutoPriceTick(100);
         layer.chooseTickForView(view);
         QCoreApplication::sendPostedEvents(&layer, QEvent::MetaCall);
@@ -3941,14 +3943,14 @@ TEST(UgrTickCpu, RepeatedSnapshotsDoNotExtendTheFirstTickHold) {
     layer.setView(view, true);
     layer.setService(&lab::LabData::instance().service());
     layer.setActive(true);
-    QElapsedTimer timeout;
-    timeout.start();
-    while ((!scripted || snapshots.isActive()) && timeout.elapsed() < 10'000)
+    QElapsedTimer hang; // bounds a hang only; the assertions below never read time
+    hang.start();
+    while ((!scripted || snapshots.isActive() || sentAtFirstCommit < 0) && hang.elapsed() < 30'000)
         QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
     ASSERT_TRUE(scripted);
     ASSERT_EQ(sent, 11);
-    ASSERT_GE(firstCommitMs, 0);
-    EXPECT_LE(firstCommitMs, 160) << "ten 30 ms snapshots must not postpone the initial tick";
+    ASSERT_GE(sentAtFirstCommit, 0) << "the startup hold never committed a tick";
+    EXPECT_LT(sentAtFirstCommit, 10) << "ten 30 ms snapshots must not postpone the initial tick";
     layer.setService(nullptr);
 }
 

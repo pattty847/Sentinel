@@ -214,8 +214,14 @@ TEST_F(Fixture, MalformedOversizedUnknownAndIdleClientsAreBounded) {
     start(); Peer malformed(server->path()); malformed.send({{"type","hello"},{"version",1},{"product","NOPE-USD"}});
     EXPECT_EQ(malformed.next().first["reason"],"protocol");
     Peer huge(server->path()); huge.socket.write(QByteArray(10000,'x')); huge.socket.waitForBytesWritten(); EXPECT_EQ(huge.next().first["reason"],"protocol");
+    // drop() sends the reason before it decrements the client gauge and bumps the reason
+    // counter, so "clients 1" alone can still count `huge` while `idle` waits unaccepted;
+    // the clock would then advance before `idle` is stamped and its timeout never fires.
+    // Both protocol drops are complete once the counter reads 2.
+    ASSERT_TRUE(eventually([&]{return metric("sentinel_fanout_disconnects_total{reason=\"protocol\"} 2");}));
     Peer idle(server->path()); ASSERT_TRUE(eventually([&]{return metric("sentinel_fanout_clients 1");})); now+=6000000000LL;
-    EXPECT_EQ(idle.next().first["reason"],"handshake_timeout");
+    // The worker sees the advanced clock at its next 1 s poll wakeup; 30 s only bounds a hang.
+    EXPECT_EQ(idle.next(30000).first["reason"],"handshake_timeout");
 }
 TEST_F(Fixture, IdleAllocatesNoPayloadAndRetentionIsIndependentOfClients) {
     start(); EXPECT_TRUE(metric("sentinel_fanout_clients 0"));
