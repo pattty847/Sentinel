@@ -27,21 +27,41 @@
 #include <QWindow>
 #include <QScopedValueRollback>
 #include <QStylePainter>
+#include <QResizeEvent>
+#include <functional>
 
 namespace {
 class ElidedTickCombo final : public QComboBox {
 public:
     using QComboBox::QComboBox;
+    // Called when a size, font or style change may elide the current text or stop eliding it.
+    std::function<void()> geometryChanged;
+    // True when paintEvent shortens the current text to fit the edit field.
+    bool elides() const {
+        QStyleOptionComboBox option;
+        initStyleOption(&option);
+        return fontMetrics().horizontalAdvance(option.currentText) > editField(option).width();
+    }
 protected:
+    QRect editField(const QStyleOptionComboBox& option) const {
+        return style()->subControlRect(QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxEditField, this);
+    }
     void paintEvent(QPaintEvent*) override {
         QStylePainter painter(this);
         QStyleOptionComboBox option;
         initStyleOption(&option);
-        const QRect edit = style()->subControlRect(QStyle::CC_ComboBox, &option,
-                                                   QStyle::SC_ComboBoxEditField, this);
-        option.currentText = fontMetrics().elidedText(option.currentText, Qt::ElideRight, edit.width());
+        option.currentText = fontMetrics().elidedText(option.currentText, Qt::ElideRight, editField(option).width());
         painter.drawComplexControl(QStyle::CC_ComboBox, option);
         painter.drawControl(QStyle::CE_ComboBoxLabel, option);
+    }
+    void resizeEvent(QResizeEvent* event) override {
+        QComboBox::resizeEvent(event);
+        if (geometryChanged) geometryChanged();
+    }
+    void changeEvent(QEvent* event) override {
+        QComboBox::changeEvent(event);
+        if ((event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange) && geometryChanged)
+            geometryChanged();
     }
 };
 }
@@ -217,7 +237,10 @@ TopToolbar::TopToolbar(QWidget* parent)
         sLog_App("ui: toolbar tick mode=" << (index == 1 ? "manual" : "auto"));
         emit tickModeRequested(index == 1);
     });
-    m_tickPresetCombo = new ElidedTickCombo(this);
+    auto* tickPreset = new ElidedTickCombo(this);
+    // The quiet tooltip names the tick only while the combo elides it.
+    tickPreset->geometryChanged = [this] { applyEnabled(); };
+    m_tickPresetCombo = tickPreset;
     m_tickPresetCombo->setObjectName("tickPresetCombo");
     m_tickPresetCombo->setAccessibleName("Heatmap tick size");
     m_tickPresetCombo->setFixedWidth(72);
@@ -1034,12 +1057,14 @@ void TopToolbar::applyEnabled() {
                                : QStringLiteral("Drawn tick %1 (Auto). Pick a preset to lock it (Manual).")
                                      .arg(tickText(state.drawnUnits, state.priceScale, state.unit));
     if (!state.indicator.isEmpty()) tip += QStringLiteral("\n") + state.indicator;
-    // Quiet tooltips keep the live state: the full tick (the combo may elide it) and the
+    // Quiet tooltips keep the live state: the full tick while the combo elides it, and the
     // veil indicator; the Auto/Manual explanation needs learning mode.
     const QString current = m_tickPresetCombo->currentText();
-    TooltipHelp::instance().setToolTip(m_tickPresetCombo,
-        state.indicator.isEmpty() ? current : current + QStringLiteral("\n") + state.indicator,
-        current + QStringLiteral("\n") + tip);
+    QStringList quiet;
+    if (static_cast<const ElidedTickCombo*>(m_tickPresetCombo)->elides()) quiet << current;
+    if (!state.indicator.isEmpty()) quiet << state.indicator;
+    TooltipHelp::instance().setToolTip(m_tickPresetCombo, quiet.join(QLatin1Char('\n')),
+                                       current + QStringLiteral("\n") + tip);
 }
 
 TopToolbar::ControlVisibility TopToolbar::shownControls() const {

@@ -680,14 +680,16 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     form->addRow(candles);
     describe(form, m_showLabels, "Show liquidity sizes on GPU heatmap cells above the range low when text fits. Turn off to reduce clutter.");
     describe(form, currencyRow, "Show liquidity as USD notional or base-asset size. Use USD to compare value, or Asset to compare quantity.");
-    m_labelCurrencySymbol->setToolTip("Show a dollar sign before USD liquidity numbers in heatmap cells.");
+    // After describe(currencyRow): the $ toggle has its own description, also learning-mode help.
+    TooltipHelp::instance().setToolTip(m_labelCurrencySymbol, {}, "Show a dollar sign before USD liquidity numbers in heatmap cells.");
     describe(form, m_tradesAboveCandles, m_tradesAboveCandles->toolTip());
     describe(candleForm, m_candleStyle, "Choose filled candles, hollow up candles, or a line through closes. Use the line for a simpler price view; this session only.");
     describe(candleForm, m_candleUpColor, "Choose the colour for candles that close at or above their open. Change it to make up bars easier to spot.");
     describe(candleForm, m_candleDownColor, "Choose the colour for candles that close below their open. Change it to make down bars easier to spot.");
-    describe(candleForm, wickRow, "Use a fixed wick colour to separate highs and lows from candle bodies, or Use body colour to match each bar.");
-    m_candleWickColor->setToolTip(wickRow->toolTip());
-    m_candleWickAuto->setToolTip(wickRow->toolTip());
+    const QString wickHelp = "Use a fixed wick colour to separate highs and lows from candle bodies, or Use body colour to match each bar.";
+    describe(candleForm, wickRow, wickHelp);
+    TooltipHelp::instance().setToolTip(m_candleWickColor, {}, wickHelp);
+    TooltipHelp::instance().setToolTip(m_candleWickAuto, {}, wickHelp);
     describe(candleForm, m_candleBodyOpacity, "Candle body opacity: 0% = transparent, 100% = solid; also applies to the close-price line. Lower it to see the heatmap underneath.");
     describe(candleForm, m_candleBodyFraction, "Body width as a percentage of its time column (30-100%). Narrow columns keep their existing pixel widths.");
     describe(candleForm, m_candleMaxBodyPx, "Maximum candle body width in logical pixels (5-120), independent of display scale.");

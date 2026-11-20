@@ -685,9 +685,9 @@ TEST(ChartToolbar, NarrowTickMenuRetainsUnavailableValueAndResolutionWarning) {
     EXPECT_FALSE(tickMenu->menuAction()->toolTip().contains("veiled")); // Qt falls back to the action text.
 }
 
-TEST(ChartToolbar, QuietTickPresetTooltipKeepsTheTickAndVeilAndDropsTheModeHelp) {
-    // W-0188: quiet, the preset tooltip names the full (possibly elided) tick and its veil
-    // warning; the Auto/Manual explanation is learning-mode help.
+TEST(ChartToolbar, QuietTickPresetTooltipNamesTheTickOnlyWhenElidedAndKeepsTheVeil) {
+    // W-0188: quiet, the preset tooltip repeats the tick only while the combo elides it,
+    // and always keeps the veil warning; the Auto/Manual explanation is learning-mode help.
     auto &help = TooltipHelp::instance();
     help.setExplanatory(false);
     const auto restore = qScopeGuard([&] { help.setExplanatory(false); });
@@ -697,14 +697,26 @@ TEST(ChartToolbar, QuietTickPresetTooltipKeepsTheTickAndVeilAndDropsTheModeHelp)
     state.drawnUnits = 10;
     state.offeredUnits = {10, 20};
     toolbar.setTickSelectorState(state);
+    toolbar.resize(1920, 48);
+    toolbar.show(); // resize events reach only a visible combo
+    QCoreApplication::processEvents();
     auto *combo = toolbar.tickPresetCombo();
-    EXPECT_EQ(combo->toolTip(), "$0.1");
+    ASSERT_TRUE(combo->isVisible());
+    combo->setFixedWidth(240); // wide: "$0.1" is drawn whole
+    EXPECT_TRUE(combo->toolTip().isEmpty()) << combo->toolTip().toStdString();
     help.setExplanatory(true);
     EXPECT_EQ(combo->toolTip(), "$0.1\nDrawn tick $0.1 (Auto). Pick a preset to lock it (Manual).");
     help.setExplanatory(false);
     state.indicator = "Drawn tick $0.1: columns are veiled";
     toolbar.setTickSelectorState(state);
+    EXPECT_EQ(combo->toolTip(), "Drawn tick $0.1: columns are veiled");
+    combo->setFixedWidth(24); // narrow: the drawn text is elided, so the tooltip names it
     EXPECT_EQ(combo->toolTip(), "$0.1\nDrawn tick $0.1: columns are veiled");
+    state.indicator.clear();
+    toolbar.setTickSelectorState(state);
+    EXPECT_EQ(combo->toolTip(), "$0.1");
+    combo->setFixedWidth(240); // widening again drops the repeat
+    EXPECT_TRUE(combo->toolTip().isEmpty()) << combo->toolTip().toStdString();
     toolbar.setModeState({false, false, false, false, false}); // no heatmap or footprint
     EXPECT_EQ(combo->toolTip(), "Enable the heatmap or footprint layer to change its tick");
     help.setExplanatory(true);

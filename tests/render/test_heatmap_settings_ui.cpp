@@ -1788,7 +1788,16 @@ TEST(HeatmapSettingsDialogTest, QuietTooltipsDropFieldDescriptionsAndKeepTheDisa
     EXPECT_TRUE(labelOf(gpuCap)->toolTip().isEmpty());
     EXPECT_TRUE(opacity->toolTip().isEmpty()) << opacity->toolTip().toStdString();
     EXPECT_EQ(manualTick->toolTip(), noPresets);
+    // Controls whose description is set after describe() on their row stay quiet too.
+    for (const char *name : {"labelCurrencySymbol", "candleWickColor", "candleWickAuto"}) {
+        auto *control = dialog.findChild<QWidget *>(name);
+        ASSERT_NE(control, nullptr) << name;
+        EXPECT_TRUE(control->toolTip().isEmpty()) << name << ": " << control->toolTip().toStdString();
+    }
     TooltipHelp::instance().setExplanatory(true);
+    EXPECT_EQ(dialog.findChild<QWidget *>("labelCurrencySymbol")->toolTip(),
+              "Show a dollar sign before USD liquidity numbers in heatmap cells.");
+    EXPECT_TRUE(dialog.findChild<QWidget *>("candleWickAuto")->toolTip().startsWith("Use a fixed wick colour"));
     EXPECT_TRUE(gpuCap->toolTip().startsWith("GPU heatmap cache budget")) << gpuCap->toolTip().toStdString();
     EXPECT_EQ(labelOf(gpuCap)->toolTip(), gpuCap->toolTip());
     EXPECT_TRUE(opacity->toolTip().startsWith("GPU heatmap opacity")) << opacity->toolTip().toStdString();
@@ -1813,6 +1822,31 @@ TEST(HeatmapSettingsDialogTest, QuietTooltipsDropFieldDescriptionsAndKeepTheDisa
             EXPECT_EQ(label->toolTip(), field->toolTip()) << field->objectName().toStdString();
         }
     EXPECT_GT(unnamed, 0);
+}
+
+TEST(HeatmapSettingsDialogTest, TooltipsMatchWhetherTheModeWasSetBeforeOrAfterConstruction) {
+    // A direct setToolTip() after describe() would show its text in quiet mode for a dialog
+    // built quiet, or lose it on a toggle: every tooltip must depend on the mode only.
+    auto &help = TooltipHelp::instance();
+    const auto quiet = qScopeGuard([&] { help.setExplanatory(false); });
+    TempStore t;
+    HeatmapSettingsModel model(t.store, "main", t.config);
+    const auto tips = [](const HeatmapSettingsDialog &dialog) {
+        QStringList out;
+        for (auto *widget : dialog.findChildren<QWidget *>())
+            out << widget->metaObject()->className() + QStringLiteral(" ") + widget->objectName() + QStringLiteral(": ") + widget->toolTip();
+        return out;
+    };
+    for (bool first : {false, true}) {
+        SCOPED_TRACE(first ? "built in learning mode" : "built quiet");
+        help.setExplanatory(first);
+        HeatmapSettingsDialog toggled(&model, nullptr);
+        help.setExplanatory(!first);
+        HeatmapSettingsDialog fresh(&model, nullptr);
+        const QStringList a = tips(toggled), b = tips(fresh);
+        ASSERT_EQ(a.size(), b.size());
+        for (int i = 0; i < a.size(); ++i) EXPECT_EQ(a[i], b[i]);
+    }
 }
 
 TEST(HeatmapSettingsDialogTest, ShortDialogScrollsToLookControlsWithoutChangingPersistence) {
