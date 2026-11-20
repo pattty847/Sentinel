@@ -1,4 +1,5 @@
 #include "HeatmapSettingsDialog.hpp"
+#include "../config/TooltipHelp.hpp"
 #include "TableChrome.hpp"
 #include "../UnifiedGridRenderer.h"
 #include "../render/heatmap/HeatmapSettingsModel.hpp"
@@ -21,6 +22,7 @@
 #include <QLabel>
 #include <QLinearGradient>
 #include <QPainter>
+#include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -154,7 +156,15 @@ void applyFormGrid(QWidget *page) {
             auto *label = labelItem ? qobject_cast<QLabel *>(labelItem->widget()) : nullptr;
             if (!labelItem) { // a field without a name keeps the label column
                 label = new QLabel;
-                if (field->widget()) label->setToolTip(field->widget()->toolTip());
+                if (QWidget *source = field->widget()) {
+                    label->setToolTip(source->toolTip());
+                    // Follows the field across learning-mode changes: the field's own refresh was
+                    // connected first (describe), so it has its new text when this one runs.
+                    QObject::connect(&TooltipHelp::instance(), &TooltipHelp::changed, label,
+                                     [label, field = QPointer<QWidget>(source)] {
+                                         if (field) label->setToolTip(field->toolTip());
+                                     });
+                }
                 form->setWidget(row, QFormLayout::LabelRole, label);
             }
             if (!label) continue;
@@ -215,15 +225,19 @@ void addHelp(QFormLayout *form, const QString &text, QWidget *parent) {
     });
     form->addRow(QString(), button);
 }
-// A setting's name and control explain the same thing on hover.
-void describe(QFormLayout *form, QWidget *field, const QString &text) {
-    field->setToolTip(text);
-    if (auto *label = form->labelForField(field)) label->setToolTip(text);
+// A setting's name and control explain the same thing on hover. The description is
+// learning-mode help (TooltipHelp): quiet, the label already names the setting, so the
+// tooltip is empty unless `quiet` carries live state (why a control is disabled).
+void describe(QFormLayout *form, QWidget *field, const QString &text, const QString &quiet = {}) {
+    auto &help = TooltipHelp::instance();
+    help.setToolTip(field, quiet, text);
+    if (auto *label = form->labelForField(field)) help.setToolTip(label, quiet, text);
 }
 void describe(QFormLayout *form, QLayout *field, const QString &text) {
-    if (auto *label = form->labelForField(field)) label->setToolTip(text);
+    auto &help = TooltipHelp::instance();
+    if (auto *label = form->labelForField(field)) help.setToolTip(label, {}, text);
     for (int i = 0; i < field->count(); ++i)
-        if (auto *widget = field->itemAt(i)->widget()) widget->setToolTip(text);
+        if (auto *widget = field->itemAt(i)->widget()) help.setToolTip(widget, {}, text);
 }
 QScrollArea *scrollTab(QWidget *content, const char *name) {
     auto *scroll = new QScrollArea;
@@ -666,14 +680,16 @@ QWidget *HeatmapSettingsDialog::buildChartTab() {
     form->addRow(candles);
     describe(form, m_showLabels, "Show liquidity sizes on GPU heatmap cells above the range low when text fits. Turn off to reduce clutter.");
     describe(form, currencyRow, "Show liquidity as USD notional or base-asset size. Use USD to compare value, or Asset to compare quantity.");
-    m_labelCurrencySymbol->setToolTip("Show a dollar sign before USD liquidity numbers in heatmap cells.");
+    // After describe(currencyRow): the $ toggle has its own description, also learning-mode help.
+    TooltipHelp::instance().setToolTip(m_labelCurrencySymbol, {}, "Show a dollar sign before USD liquidity numbers in heatmap cells.");
     describe(form, m_tradesAboveCandles, m_tradesAboveCandles->toolTip());
     describe(candleForm, m_candleStyle, "Choose filled candles, hollow up candles, or a line through closes. Use the line for a simpler price view; this session only.");
     describe(candleForm, m_candleUpColor, "Choose the colour for candles that close at or above their open. Change it to make up bars easier to spot.");
     describe(candleForm, m_candleDownColor, "Choose the colour for candles that close below their open. Change it to make down bars easier to spot.");
-    describe(candleForm, wickRow, "Use a fixed wick colour to separate highs and lows from candle bodies, or Use body colour to match each bar.");
-    m_candleWickColor->setToolTip(wickRow->toolTip());
-    m_candleWickAuto->setToolTip(wickRow->toolTip());
+    const QString wickHelp = "Use a fixed wick colour to separate highs and lows from candle bodies, or Use body colour to match each bar.";
+    describe(candleForm, wickRow, wickHelp);
+    TooltipHelp::instance().setToolTip(m_candleWickColor, {}, wickHelp);
+    TooltipHelp::instance().setToolTip(m_candleWickAuto, {}, wickHelp);
     describe(candleForm, m_candleBodyOpacity, "Candle body opacity: 0% = transparent, 100% = solid; also applies to the close-price line. Lower it to see the heatmap underneath.");
     describe(candleForm, m_candleBodyFraction, "Body width as a percentage of its time column (30-100%). Narrow columns keep their existing pixel widths.");
     describe(candleForm, m_candleMaxBodyPx, "Maximum candle body width in logical pixels (5-120), independent of display scale.");
@@ -1130,11 +1146,13 @@ void HeatmapSettingsDialog::setTickSelectorState(const TopToolbar::TickSelectorS
                                     state.enabled ? QStringLiteral("Loading…") : QStringLiteral("No presets"));
     sizeField(m_manualTick);
     m_manualTick->setEnabled(!state.offeredUnits.empty());
-    m_manualTick->setToolTip(state.offeredUnits.empty()
-        ? QStringLiteral("No loaded data offers presets yet (the GPU renderer loads them).")
-        : QStringLiteral("Presets some loaded data can build. Picking one locks Manual."));
+    // With no presets the reason is live state and stays when tooltips are quiet.
+    const QString none = QStringLiteral("No loaded data offers presets yet (the GPU renderer loads them).");
+    const QString tip = state.offeredUnits.empty() ? none : QStringLiteral("Presets some loaded data can build. Picking one locks Manual.");
+    const QString quiet = state.offeredUnits.empty() ? none : QString();
     auto *form = qobject_cast<QFormLayout *>(m_manualTick->parentWidget()->layout());
-    if (form) describe(form, m_manualTick, m_manualTick->toolTip());
+    if (form) describe(form, m_manualTick, tip, quiet);
+    else TooltipHelp::instance().setToolTip(m_manualTick, quiet, tip);
 }
 
 void HeatmapSettingsDialog::refreshFromModel() {

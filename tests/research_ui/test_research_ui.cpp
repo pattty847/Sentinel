@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "widgets/StockChartDock.hpp"
+#include "config/TooltipHelp.hpp"
 #include "widgets/SecFilingDock.hpp"
 #include "render/CandlestickBatched.hpp"
 #include "themes/ThemeManager.hpp"
@@ -118,6 +119,28 @@ TEST(StockResearch, ClearsOldCandlesAndRejectsOldRequestsIncludingSameTickerRetr
     EXPECT_FALSE(root->property("loading").toBool());
     EXPECT_TRUE(root->property("statusMsg").toString().contains("fixture unavailable"));
     EXPECT_EQ(root->property("asOf").toString(), "Unknown");
+}
+TEST(StockResearch, SignalCardNoteIsLearningModeHelp) {
+    // W-0188: the zero-value explanation in the signal card shows only in learning mode,
+    // and follows the menu toggle on an open dock.
+    auto& help = TooltipHelp::instance();
+    help.setExplanatory(false);
+    const auto restore = qScopeGuard([&] { help.setExplanatory(false); });
+    FixtureProvider provider, sec;
+    StockChartDock dock(nullptr, &provider, &sec);
+    auto* root = dock.qquickView()->rootObject();
+    ASSERT_NE(root, nullptr);
+    const QVariantMap marker{{"key_events", QVariantList{QVariantMap{{"signal_class", "option_exercise"}, {"gross_value", 0}}}}};
+    const auto note = [&] {
+        QVariant text;
+        EXPECT_TRUE(QMetaObject::invokeMethod(root, "signalNoteText", Q_RETURN_ARG(QVariant, text), Q_ARG(QVariant, marker)));
+        return text.toString();
+    };
+    EXPECT_TRUE(note().isEmpty()) << note().toStdString();
+    help.setExplanatory(true);
+    EXPECT_TRUE(note().startsWith("$0 on some neutral/derivative rows")) << note().toStdString();
+    help.setExplanatory(false);
+    EXPECT_TRUE(note().isEmpty());
 }
 TEST(StockResearch, RejectsWrongPayloadIdentityAndIncompletePricesAndSeparatesSecError) {
     FixtureProvider provider, sec;

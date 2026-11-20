@@ -6,7 +6,9 @@
 // test_ugr_gpu) on the selected QRhi backend and skip with the reason when it
 // cannot create one: a skipped case is no result. Toolbar/menu cases need no GPU.
 // Every QSettings is a temporary INI file (never the owner's).
+#include <QScopeGuard>
 #include "UnifiedGridRenderer.h"
+#include "config/TooltipHelp.hpp"
 #include "marketdata/model/TradeData.h"
 #include "datasources/RemoteGridDataSource.hpp"
 #include "chart/feeds/BookLadderFeed.hpp"
@@ -502,6 +504,14 @@ TEST(ChartToolbar, TickTextHasNoExponent) {
     EXPECT_EQ(TopToolbar::tickText(500, 100), "$5");
     EXPECT_EQ(TopToolbar::tickText(10000, 100), "$100");
     EXPECT_EQ(TopToolbar::tickText(250000, 100), "$2,500");
+    // Thousands separators apply to fractional values too, whatever the system locale.
+    const QLocale previous;
+    QLocale::setDefault(QLocale(QLocale::German, QLocale::Germany));
+    EXPECT_EQ(TopToolbar::fixedText(123456.789), "123,456.789");
+    EXPECT_EQ(TopToolbar::fixedText(1234.5), "1,234.5");
+    EXPECT_EQ(TopToolbar::fixedText(1e6), "1,000,000");
+    EXPECT_EQ(TopToolbar::tickText(12345678, 100), "$123,456.78");
+    QLocale::setDefault(previous);
     for (const int64_t units : {1, 3, 7, 25})
         for (const double scale : {1e8, 1e10, 1e12})
             EXPECT_FALSE(TopToolbar::tickText(units, scale).contains('e')) << units << "/" << scale;
@@ -673,6 +683,44 @@ TEST(ChartToolbar, NarrowTickMenuRetainsUnavailableValueAndResolutionWarning) {
     EXPECT_TRUE(current->isEnabled());
     EXPECT_TRUE(tickMenu->findChildren<QAction *>("controlsTickIndicator").isEmpty());
     EXPECT_FALSE(tickMenu->menuAction()->toolTip().contains("veiled")); // Qt falls back to the action text.
+}
+
+TEST(ChartToolbar, QuietTickPresetTooltipNamesTheTickOnlyWhenElidedAndKeepsTheVeil) {
+    // W-0188: quiet, the preset tooltip repeats the tick only while the combo elides it,
+    // and always keeps the veil warning; the Auto/Manual explanation is learning-mode help.
+    auto &help = TooltipHelp::instance();
+    help.setExplanatory(false);
+    const auto restore = qScopeGuard([&] { help.setExplanatory(false); });
+    TopToolbar toolbar;
+    TopToolbar::TickSelectorState state;
+    state.enabled = true;
+    state.drawnUnits = 10;
+    state.offeredUnits = {10, 20};
+    toolbar.setTickSelectorState(state);
+    toolbar.resize(1920, 48);
+    toolbar.show(); // resize events reach only a visible combo
+    QCoreApplication::processEvents();
+    auto *combo = toolbar.tickPresetCombo();
+    ASSERT_TRUE(combo->isVisible());
+    combo->setFixedWidth(240); // wide: "$0.1" is drawn whole
+    EXPECT_TRUE(combo->toolTip().isEmpty()) << combo->toolTip().toStdString();
+    help.setExplanatory(true);
+    EXPECT_EQ(combo->toolTip(), "$0.1\nDrawn tick $0.1 (Auto). Pick a preset to lock it (Manual).");
+    help.setExplanatory(false);
+    state.indicator = "Drawn tick $0.1: columns are veiled";
+    toolbar.setTickSelectorState(state);
+    EXPECT_EQ(combo->toolTip(), "Drawn tick $0.1: columns are veiled");
+    combo->setFixedWidth(24); // narrow: the drawn text is elided, so the tooltip names it
+    EXPECT_EQ(combo->toolTip(), "$0.1\nDrawn tick $0.1: columns are veiled");
+    state.indicator.clear();
+    toolbar.setTickSelectorState(state);
+    EXPECT_EQ(combo->toolTip(), "$0.1");
+    combo->setFixedWidth(240); // widening again drops the repeat
+    EXPECT_TRUE(combo->toolTip().isEmpty()) << combo->toolTip().toStdString();
+    toolbar.setModeState({false, false, false, false, false}); // no heatmap or footprint
+    EXPECT_EQ(combo->toolTip(), "Enable the heatmap or footprint layer to change its tick");
+    help.setExplanatory(true);
+    EXPECT_EQ(combo->toolTip(), "Enable the heatmap or footprint layer to change its tick");
 }
 
 TEST(ChartToolbar, RealOverflowRestoresInlineControlsAcrossWidthModeAndFontChanges) {

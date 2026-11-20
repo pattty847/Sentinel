@@ -121,7 +121,8 @@ TEST_F(TooltipHelpTest, ExistingDockControlsAndModelRefreshWithoutMarketData) {
     QSignalSpy rows(model, &QAbstractItemModel::dataChanged);
     QSignalSpy headers(model, &QAbstractItemModel::headerDataChanged);
     const QList<QPair<QString, QString>> controls{{"domPulse", ""}, {"domLean", ""},
-        {"domCumulative", "Cumulative size"}, {"domRecenter", ""}, {"domGrouping", "Row grouping"}};
+        {"domCumulative", "Cumulative size"}, {"domRecenter", ""}, {"domGrouping", "Row grouping"},
+        {"domLadder", ""}, {"domLeanStrip", ""}};
     for (const auto& [name, shortForm] : controls) {
         auto* widget = dock.findChild<QWidget*>(name);
         ASSERT_NE(widget, nullptr);
