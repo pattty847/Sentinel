@@ -19,6 +19,7 @@ namespace {
 using nlohmann::json;
 constexpr int64_t Day = 86'400'000, Quarter = 900'000;
 constexpr std::string_view Magic = "SANCHR01";
+constexpr uint32_t KalshiEnvelopeVersion = 2;
 void require(bool ok, const char* reason) {
     if (!ok) throw std::runtime_error(std::string("anchor: ") + reason);
 }
@@ -84,7 +85,7 @@ std::vector<uint8_t> AnchorStore::encode(const ReplayAnchor& a) {
     const auto n = ZSTD_compress(compressed.data(), compressed.size(), raw.data(), raw.size(), 3);
     require(!ZSTD_isError(n) && n <= MaxBytes, "compression failed/oversize");
     std::vector<uint8_t> out(Magic.begin(), Magic.end());
-    put(out, i.venue == Venue::Kalshi ? 2 : Version); put(out, uint32_t(raw.size())); put(out, uint32_t(n));
+    put(out, i.venue == Venue::Kalshi ? KalshiEnvelopeVersion : Version); put(out, uint32_t(raw.size())); put(out, uint32_t(n));
     out.insert(out.end(), compressed.begin(), compressed.begin() + n);
     put(out, sentinel::crc32(out.data(), out.size()));
     return out;
@@ -92,7 +93,8 @@ std::vector<uint8_t> AnchorStore::encode(const ReplayAnchor& a) {
 ReplayAnchor AnchorStore::decode(const std::vector<uint8_t>& bytes) {
     require(bytes.size() >= 24 && bytes.size() <= MaxBytes + 24, "file size");
     const auto version = get(bytes,8);
-    require(std::equal(Magic.begin(), Magic.end(), bytes.begin()) && (version == Version || version == 2), "magic/version");
+    require(std::equal(Magic.begin(), Magic.end(), bytes.begin()) &&
+        (version == Version || version == KalshiEnvelopeVersion), "magic/version");
     const auto rawSize = get(bytes,12), packedSize = get(bytes,16);
     require(rawSize && rawSize <= MaxBytes && packedSize == bytes.size()-24, "payload length");
     require(get(bytes,bytes.size()-4) == sentinel::crc32(bytes.data(),bytes.size()-4), "CRC mismatch");
@@ -106,7 +108,7 @@ ReplayAnchor AnchorStore::decode(const std::vector<uint8_t>& bytes) {
     a.gridSnapshot = j.at("gridSnapshot").get<JournalPos>();
     if (!j.at("referenceMid").is_null()) a.referenceMid = j.at("referenceMid").get<double>();
     a.metadata = j.at("metadata");
-    if (version == 2) {
+    if (version == KalshiEnvelopeVersion) {
         require(j.at("venue") == "kalshi", "version 2 requires Kalshi venue");
         a.identity.venue = Venue::Kalshi; a.instrument = j.at("instrument");
     } else require(!j.contains("venue") && !j.contains("instrument"), "version 1 requires Coinbase schema");

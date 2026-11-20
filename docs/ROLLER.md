@@ -645,8 +645,9 @@ from this same validated policy; relative window factors are zero.
 Validation uses exact normalized decimal strings and integer divisibility, with
 at most 15 fractional places. Bounds must be exactly 0..1, bands must cover the
 whole range without gaps, band endpoints must align to their band's step, every
-step must be a multiple of the finest step, and 1 must be a multiple of both
-layer ticks. Unsupported policies fail with `Kalshi grid:` before recorder or
+step must be a multiple of the finest step, the deep tick must be an integer
+multiple of the near tick, and 1 must be a multiple of both layer ticks.
+Unsupported policies fail with `Kalshi grid:` before recorder or
 output creation. Coinbase grid overrides retain their existing behavior; Kalshi
 rejects overrides because its instrument block owns all four grid values.
 
@@ -655,15 +656,24 @@ scale, a layer tick, row bounds, price bounds or size floor.
 Different band schedules that derive the same recorder grid retain the same
 HMC2 identity and generation, with normal UTC day-file rollover.
 The roller's checkpoint/anchor hash still conditionally includes absolute rows,
-price bounds and the exact instrument JSON, so bands-only changes refuse
+price bounds and the normalized instrument JSON, so bands-only changes refuse
 mismatched checkpoints and anchors; Coinbase hashes append none of these fields
 and remain identical.
+
+Instrument decimal strings are normalized before identity and equality checks,
+so `0.01` and `0.0100` describe the same policy. Each Kalshi `roller.json` day
+entry also stores `venue: kalshi` and that normalized `instrument`, including
+the complete band schedule for readers; Coinbase checkpoint bytes are unchanged.
+A different instrument encountered within the UTC day stops the product roll
+with `Kalshi grid: instrument changed within the UTC day` before that record
+reaches the feed or recorder. Earlier committed columns remain valid; supporting
+mid-day tick changes requires a later slice.
 
 Journal anchor search recognizes `orderbook_snapshot` for the selected ticker
 and searches earlier hours and runs using the same ordering and damage handling
 as Coinbase. Snapshots need not repeat hourly. Midnight replay anchors retain
 Kalshi feed version-2 integer state, the native book, recorder integration state,
-and the exact instrument block. Their envelope is version 2 under the existing
+and the normalized instrument block. Their envelope is version 2 under the existing
 `SANCHR01` framing, with `venue: kalshi` and `referenceMid: null`. Old readers
 reject the envelope version. Coinbase envelopes and payload bytes stay version 1,
 with their required positive reference mid and Coinbase increment metadata.

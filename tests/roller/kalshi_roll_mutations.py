@@ -24,6 +24,20 @@ def check(pattern):
 
 
 MUTATIONS = [
+    ('midday instrument guard', 'Roller.cpp', 'if (normalizedInstrumentHeader != gridInstrument)',
+     'if (false && normalizedInstrumentHeader != gridInstrument)', 'KalshiRecovery.MiddayInstrumentChangeRefusesBeforeCallbacksAndPreservesPrefix'),
+    ('canonical instrument identity', 'Grid.cpp', 'return normalized;',
+     'return instrument;', 'KalshiRecovery.EquivalentDecimalHeadersShareIdentityAndPersistNormalizedInstrument'),
+    ('anchor journal header guard', 'Roller.cpp', 'throw std::runtime_error("anchor venue/instrument mismatch");',
+     '(void)0;', 'KalshiRecovery.NoCheckpointAnchorGuardRejectsInstrumentAndVenueBeforeFallback'),
+    ('checkpoint instrument metadata', 'Roller.cpp', 'cp["days"][key]["instrument"] = gridInstrument;',
+     '', 'KalshiRecovery.EquivalentDecimalHeadersShareIdentityAndPersistNormalizedInstrument'),
+    ('deep grid divisibility', 'Grid.cpp', 'if (deep % near)',
+     'if (false && deep % near)', 'KalshiRoll.GridTableAndMalformedPoliciesWriteNothing'),
+    ('Kalshi hourly rollup', 'Grid.cpp', 'layer.lowFrac = layer.highMult = 0;',
+     'layer.lowFrac = layer.highMult = 0; layer.hourlyRollup = false;', 'KalshiRecovery.ThreeHourDeltasOneSidedMidnightAndHourCrashHaveIdenticalBytes'),
+    ('restored delta integration', 'Roller.cpp', 'if (recorder) recorder->onUpdatesAt(o.product,t,local,std::move(levels));',
+     'if (recorder && !restoreLocal) recorder->onUpdatesAt(o.product,t,local,std::move(levels));', 'KalshiRecovery.ThreeHourDeltasOneSidedMidnightAndHourCrashHaveIdenticalBytes'),
     ('Coinbase bytes', 'Roller.cpp', '{"grace",5000}', '{"grace",5001}', 'CoinbaseRollBytes.*'),
     ('Kalshi snapshot wiring', 'Roller.cpp', 'if (input.venue == Venue::Kalshi) {',
      'if (false && input.venue == Venue::Kalshi) {', 'KalshiRoll.*'),

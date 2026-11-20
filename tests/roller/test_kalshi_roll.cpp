@@ -114,6 +114,8 @@ TEST(KalshiRoll, GridTableAndMalformedPoliciesWriteNothing) {
     std::vector<json> malformed;
     auto bad = mixed; bad["price_ranges"][1]["step"] = "0.007"; malformed.push_back(bad);
     bad = instrument("0.003"); malformed.push_back(bad);
+    bad = instrument("0.004"); malformed.push_back(bad);
+    bad = instrument("0.008"); malformed.push_back(bad);
     bad = mixed; bad["price_ranges"][1]["start"] = "0.51"; malformed.push_back(bad);
     bad = mixed; bad["price_ranges"][0]["end"] = "0.501"; bad["price_ranges"][1]["start"] = "0.501"; malformed.push_back(bad);
     bad = instrument(); bad["price_ranges"][0]["end"] = "0.99"; malformed.push_back(bad);

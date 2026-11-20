@@ -5,7 +5,7 @@
 namespace sentinel::roller {
 struct Grid {
     double priceScale = 0, nearTick = 0, deepTick = 0, sizeFloor = 0;
-    // Null preserves the Coinbase policy. Kalshi retains the exact instrument
+    // Null preserves the Coinbase policy. Kalshi retains the normalized instrument
     // block for checkpoint identity, including bands with the same finest tick.
     nlohmann::json instrument;
     recording::RecorderConfig config(const std::filesystem::path& root) const;
@@ -18,4 +18,6 @@ Grid deriveGrid(const nlohmann::json& metadata, double referencePrice,
 // Whole 0..1 grid, independent of the book. Exact decimal divisibility only;
 // no rounding, relative windows, reference mid or Coinbase overrides.
 Grid deriveKalshiGrid(const nlohmann::json& instrument);
+// Canonical decimal spelling shared by grids, replay identity and day guards.
+nlohmann::json normalizeKalshiInstrument(const nlohmann::json& instrument);
 } // namespace sentinel::roller

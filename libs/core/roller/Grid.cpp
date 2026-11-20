@@ -78,6 +78,18 @@ recording::RecorderConfig Grid::config(const std::filesystem::path& root) const 
     return c;
 }
 
+nlohmann::json normalizeKalshiInstrument(const nlohmann::json& instrument) {
+    (void)InstrumentSpec::fromHeader({{"venue","kalshi"},
+        {"product_metadata",{{"product_id","KALSHI"}}},{"instrument",instrument}});
+    auto normalized = instrument;
+    for (const auto* key : {"price_min", "price_max", "size_increment"})
+        normalized[key] = instrument_detail::decimal(normalized.at(key));
+    for (auto& band : normalized.at("price_ranges"))
+        for (const auto* key : {"start", "end", "step"})
+            band[key] = instrument_detail::decimal(band.at(key));
+    return normalized;
+}
+
 Grid deriveKalshiGrid(const nlohmann::json& instrument) {
     try {
         const auto spec = InstrumentSpec::fromHeader({{"venue","kalshi"},
@@ -112,6 +124,8 @@ Grid deriveKalshiGrid(const nlohmann::json& instrument) {
         const int64_t deep = std::max(near, scale / 100);
         if (near <= 0 || scale % near || scale % deep)
             throw std::runtime_error("1.0 must be an integer multiple of each layer tick");
+        if (deep % near)
+            throw std::runtime_error("deep tick must be an integer multiple of the near tick");
         int64_t previous = 0;
         for (const auto& band : spec.tickBands) {
             const auto start = units(band.bounds->min), end = units(band.bounds->max), step = units(band.step);
@@ -124,7 +138,7 @@ Grid deriveKalshiGrid(const nlohmann::json& instrument) {
         Grid grid{double(scale),double(near)/scale,double(deep)/scale,std::stod(spec.sizeIncrement)};
         if (!std::isfinite(grid.sizeFloor) || grid.sizeFloor <= 0)
             throw std::runtime_error("size increment is not representable");
-        grid.instrument = instrument;
+        grid.instrument = normalizeKalshiInstrument(instrument);
         return grid;
     } catch (const std::exception& e) {
         throw std::runtime_error(std::string("Kalshi grid: ") + e.what());

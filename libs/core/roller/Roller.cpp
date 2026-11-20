@@ -168,6 +168,7 @@ json roll(const RollOptions& o) {
         int64_t restoreLocal = 0;
         std::optional<double> referenceMid;
         json gridMetadata, gridInstrument;
+        json lastInstrumentHeader, normalizedInstrumentHeader;
         Venue gridVenue = Venue::Coinbase;
         JournalBook book;
         bool bookUp = true;
@@ -324,7 +325,7 @@ json roll(const RollOptions& o) {
                 if (!present || cursor.pos != cursorPos)
                     throw std::runtime_error("anchor durable position unavailable");
                 if (cursor.venue != a.identity.venue ||
-                    (cursor.venue == Venue::Kalshi && (cursor.instrument != a.instrument ||
+                    (cursor.venue == Venue::Kalshi && (normalizeKalshiInstrument(cursor.instrument) != grid.instrument ||
                         state.at("feed").at("version") != 2 || state.at("feed").at("venue") != "kalshi")))
                     throw std::runtime_error("anchor venue/instrument mismatch");
                 JournalFeed candidateFeed(o.product); candidateFeed.importState(state.at("feed"));
@@ -385,7 +386,7 @@ json roll(const RollOptions& o) {
                 recorder = std::move(candidate); reader = std::move(candidateReader);
                 gridReady = true; hash = expectedHash; recorderFloor = floor;
                 referenceMid = a.referenceMid; gridSnapshot = a.gridSnapshot; gridMetadata = a.metadata;
-                gridVenue = a.identity.venue; gridInstrument = a.instrument;
+                gridVenue = a.identity.venue; gridInstrument = grid.instrument;
                 applied = a.pos; restoreCursor = cursorPos; restoreCursorApplied = !before;
                 nextBoundary = a.boundaryMs + Quarter;
                 receiveThrough = candidateReceive; restoreLocal = lastLocal;
@@ -494,6 +495,10 @@ json roll(const RollOptions& o) {
             if (through < savedThrough ||
                 (through == savedThrough && stats.columnsWritten == checkpointColumns)) return;
             cp["days"][key] = {{"pos",applied},{"committedThroughMs",through},{"configHash",hash},{"fromMs",from},{"receiveThroughMs",receiveThrough}};
+            if (gridVenue == Venue::Kalshi) {
+                cp["days"][key]["venue"] = "kalshi";
+                cp["days"][key]["instrument"] = gridInstrument;
+            }
             // Also expose the newest checkpoint in the plan's flat schema.
             cp["pos"] = applied; cp["committedThroughMs"] = through; cp["configHash"] = hash;
             writeCheckpoint(cpPath,cp);
@@ -502,6 +507,18 @@ json roll(const RollOptions& o) {
         };
         while ((!recorder || o.nextRecord || savedThrough < end) && (!o.cancelled || !o.cancelled()) &&
                (o.nextRecord ? o.nextRecord(*reader, input) : reader->next(input))) {
+            // Reject before feed callbacks, cache export or recorder advancement.
+            // A following UTC day's records may close this day's lateness tail;
+            // its new policy belongs to that day's separate recorder instead.
+            if (gridReady && input.venue == Venue::Kalshi &&
+                input.record.time.systemNs / 1'000'000 < day + Day) {
+                if (lastInstrumentHeader != input.instrument) {
+                    normalizedInstrumentHeader = normalizeKalshiInstrument(input.instrument);
+                    lastInstrumentHeader = input.instrument;
+                }
+                if (normalizedInstrumentHeader != gridInstrument)
+                    throw std::runtime_error("Kalshi grid: instrument changed within the UTC day");
+            }
             // No synthetic EOF tick: only actual journal records prove elapsed time.
             // Warmup is read in journal order; receipt clock need not be monotonic.
             if (recorder && nextBoundary == day && input.record.time.systemNs / 1'000'000 >= day) {
