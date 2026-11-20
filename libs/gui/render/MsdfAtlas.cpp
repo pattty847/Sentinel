@@ -1,5 +1,14 @@
 /*
 Sentinel — MsdfAtlas
+Layout: every glyph gets one cell of the same size (the widest advance or outline and the
+line height, plus padding). The cell for charset index i is column i % kAtlasColumns, row
+i / kAtlasColumns, so appending to the charset never moves an existing cell. The atlas is
+always kAtlasColumns cells wide and a power-of-two number of rows high: a new row only
+halves the normalized V of the existing glyphs, which is exact in floating point, so their
+texels and the rendered pixels stay bit-identical (chart goldens). kAtlasColumns is the
+width of the original one-row atlas; changing it, or a new glyph wider or taller than the
+cell, moves every UV and changes the goldens. The layout is part of kCacheVersion: bump
+it with any layout change so an atlas cached with the old layout is rebuilt.
 */
 #include "MsdfAtlas.hpp"
 #include "SentinelLogging.hpp"
@@ -22,7 +31,17 @@ Sentinel — MsdfAtlas
 #include <msdfgen/ext/import-font.h>
 
 namespace {
-constexpr const char* kCacheVersion = "msdf_atlas_v11";
+constexpr const char* kCacheVersion = "msdf_atlas_v12";
+constexpr int kAtlasColumns = 76;
+
+int atlasRowsFor(int glyphCount) {
+    const int needed = std::max(1, (glyphCount + kAtlasColumns - 1) / kAtlasColumns);
+    int rows = 1;
+    while (rows < needed) {
+        rows *= 2;
+    }
+    return rows;
+}
 
 float clamp01(float value) {
     if (value < 0.0f) {
@@ -160,15 +179,16 @@ bool MsdfAtlas::build(const BuildParams& params) {
         return false;
     }
 
-    const int atlasW = cellW * params.charset.size();
-    const int atlasH = cellH;
+    const int atlasW = cellW * kAtlasColumns;
+    const int atlasH = cellH * atlasRowsFor(params.charset.size());
     QImage atlas(atlasW, atlasH, QImage::Format_RGB888);
     atlas.fill(Qt::white); // White generates standard MSDF "empty background" when distanceSign = -1.0
 
     msdfgen::MSDFGeneratorConfig config;
     for (int i = 0; i < prepared.size(); ++i) {
         const GlyphPrep& prep = prepared[i];
-        const int cellX = prep.index * cellW;
+        const int cellX = (prep.index % kAtlasColumns) * cellW;
+        const int cellY = (prep.index / kAtlasColumns) * cellH;
 
         const double exactW = (prep.bounds.r - prep.bounds.l) * scale + m_paddingPx * 2.0;
         const double exactH = (prep.bounds.t - prep.bounds.b) * scale + m_paddingPx * 2.0;
@@ -190,7 +210,7 @@ bool MsdfAtlas::build(const BuildParams& params) {
             // which evaluates to a distance field value of 0.0 (maximum solid white)
             // when the shading distance sign is inverted, causing bounding box artifacts.
             for (int y = 0; y < cellH; ++y) {
-                uchar* dst = atlas.scanLine(y) + cellX * 3;
+                uchar* dst = atlas.scanLine(cellY + y) + cellX * 3;
                 for (int x = 0; x < cellW; ++x) {
                     const float* src = glyphBitmap(x, cellH - 1 - y);
                     const int r = static_cast<int>(clamp01(src[0]) * 255.0f);
@@ -232,7 +252,7 @@ bool MsdfAtlas::build(const BuildParams& params) {
         const double texelV = 1.0 / static_cast<double>(atlasH);
 
         const double uvX = (cellX + 0.5) * texelU;
-        const double uvY = (cellH - exactH + 0.5) * texelV;
+        const double uvY = (cellY + cellH - exactH + 0.5) * texelV;
         const double uvW = std::max(0.0, (exactW - 1.0) * texelU);
         const double uvH = std::max(0.0, (exactH - 1.0) * texelV);
 
