@@ -1077,6 +1077,42 @@ TEST_F(ShadowTest, OracleRemovesPreviousDayAtRollover) {
   EXPECT_TRUE(fs::exists(productOracle / std::to_string(next) / Product /
                          "roller.json"));
 }
+// The hourly checker crosses a UTC day boundary by itself: it rolls the new day's oracle, which
+// removes the previous day's, and keeps comparing without a failure or a mismatch.
+TEST_F(ShadowTest, CheckerThreadCrossesTheUtcDayAndDropsThePreviousDayOracle) {
+  constexpr int64_t Day = 86400000, Hour = 3600000;
+  writer->append(record(0, snapshot()));
+  for (int64_t t = 30000; t <= Day + Hour + 90000; t += 30000)
+    writer->append(record(t));
+  writer->flush();
+  cfg.compareInterval = 50ms;
+  start();
+  const auto checkpointPath = root / "shadow" / Product / "comparison.json";
+  const auto comparedThrough = [&]() -> int64_t {
+    try {
+      return load(checkpointPath).at("comparedThroughMs").get<int64_t>();
+    } catch (const std::exception &) {
+      return 0; // not written yet
+    }
+  };
+  const auto until = std::chrono::steady_clock::now() + 90s;
+  while (comparedThrough() < Epoch + Day + Hour &&
+         std::chrono::steady_clock::now() < until)
+    std::this_thread::sleep_for(20ms);
+  shadow.reset();
+  ASSERT_GE(comparedThrough(), Epoch + Day + Hour)
+      << "the checker did not compare the first hour of the next day";
+  const auto productOracle = root / "shadow" / "shadow-oracle" / Product;
+  EXPECT_FALSE(fs::exists(productOracle / std::to_string(Epoch)))
+      << "the previous day's oracle outlived the rollover";
+  EXPECT_TRUE(fs::exists(productOracle / std::to_string(Epoch + Day) / Product /
+                         "roller.json"));
+  const auto saved = load(checkpointPath);
+  EXPECT_EQ(saved.at("nearMismatch").get<uint64_t>(), 0);
+  EXPECT_EQ(saved.at("deepMismatch").get<uint64_t>(), 0);
+  EXPECT_TRUE(has("sentinel_roller_shadow_comparison_failures_total{product="
+                  "\"BTC-USD\"} 0"));
+}
 TEST_F(ShadowTest, RefusesAliasedProtectedRoot) {
   initial();
   fs::create_directories(root / "primary");
