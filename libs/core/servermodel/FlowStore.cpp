@@ -1135,7 +1135,20 @@ FlowStore::Reply FlowStore::buildWindow(const std::string &symbol, int64_t from,
         for (auto first = from; first < to;) {
             const auto day = dayFloor(first), end = std::min(to, day + Day);
             const auto index = indexFor(symbol, day);
-            if (!index.file.present && !index.state.present && sourceState(symbol, first, end) == SourceState::Absent) {
+            const auto path = filePath(symbol, day);
+            const bool readable = index.valid && stamp(path) == index.file &&
+                                  stamp(path.string() + ".state") == index.state;
+            bool noStoredHours = !index.file.present && !index.state.present;
+            if (!noStoredHours && readable) {
+                noStoredHours = true;
+                for (auto hour = first / Hour * Hour; hour < end; hour += Hour) {
+                    if (index.hours & (1u << ((hour - day) / Hour))) {
+                        noStoredHours = false;
+                        break;
+                    }
+                }
+            }
+            if (noStoredHours && sourceState(symbol, first, end) == SourceState::Absent) {
                 reply.ranges.push_back({first, end, "unrecorded", {}});
                 first = end;
                 continue;

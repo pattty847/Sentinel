@@ -786,6 +786,11 @@ TEST_F(FlowStoreTest, FirstJournalAt0453LeavesLeadingClosedHoursUnrecorded) {
     const auto leading = store.window("BTC-USD", day, day + 4 * Hour);
     EXPECT_FALSE(leading.building);
     for (const auto& range : leading.ranges) EXPECT_EQ(range.status, "unrecorded");
+    for (int h = 0; h < 4; ++h) {
+        const auto from = day + h * Hour;
+        EXPECT_EQ(store.buildWindow("BTC-USD", from, from + Hour).ranges.front().status,
+                  "unrecorded");
+    }
     EXPECT_EQ(store.window("BTC-USD", day + 4 * Hour, day + 5 * Hour).ranges.front().status, "complete");
 }
 TEST_F(FlowStoreTest, LeadingHourProofRequiresAbsentPreviousDay) {

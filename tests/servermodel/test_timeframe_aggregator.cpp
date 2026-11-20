@@ -10,6 +10,7 @@
 #include <functional>
 #include <future>
 #include <optional>
+#include <stdexcept>
 #include <thread>
 #include <tuple>
 
@@ -112,6 +113,24 @@ TEST(TimeframeAggregatorSignals, CallbacksRunUnlockedAndKeepTradeEventOrder) {
         EXPECT_EQ(recorder.events[i].tf, expected[i]) << i;
         EXPECT_EQ(recorder.events[i].bar.count, i < 3 ? 1u : 2u) << i;
     }
+}
+
+TEST(TimeframeAggregatorSignals, ThrowingCallbackDoesNotStallLaterEvents) {
+    TimeframeAggregator aggregator({1'000, 60'000});
+    int secondUpdates = 0;
+    bool throwOnce = true;
+    QObject::connect(&aggregator, &TimeframeAggregator::barUpdated,
+                     [&](const QString&, int64_t tf, const OHLCVBar&) {
+        if (tf != 1'000) return;
+        ++secondUpdates;
+        if (throwOnce) {
+            throwOnce = false;
+            throw std::runtime_error("test callback failure");
+        }
+    });
+    EXPECT_THROW(aggregator.onTrade(tradeAt(10, 10, 1)), std::runtime_error);
+    aggregator.onTrade(tradeAt(20, 11, 1));
+    EXPECT_EQ(secondUpdates, 2);
 }
 
 TEST(TimeframeAggregatorRollup, UtcBoundariesAndOhlcv) {

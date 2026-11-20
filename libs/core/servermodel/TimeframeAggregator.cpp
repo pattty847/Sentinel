@@ -180,6 +180,14 @@ void TimeframeAggregator::drainEvents() {
     std::unique_lock lock(m_mutex);
     if (m_emitting) return;
     m_emitting = true;
+    struct EmittingScope {
+        std::unique_lock<std::shared_mutex>& lock;
+        bool& emitting;
+        ~EmittingScope() {
+            if (!lock.owns_lock()) lock.lock();
+            emitting = false;
+        }
+    } emittingScope{lock, m_emitting};
     // Keep the publication owner across callbacks: reentrant or concurrent
     // updates append behind this batch, preserving the order made under m_mutex.
     while (!m_pendingEvents.empty()) {
@@ -193,7 +201,6 @@ void TimeframeAggregator::drainEvents() {
         }
         lock.lock();
     }
-    m_emitting = false;
 }
 
 // Closes the symbol's bars that end at or before nowMs, carrying quiet buckets.

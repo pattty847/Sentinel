@@ -5,6 +5,7 @@
 #include "InstrumentSpec.hpp"
 #include <filesystem>
 #include <deque>
+#include <functional>
 #include <stop_token>
 #include <stdexcept>
 
@@ -46,8 +47,10 @@ struct JournalRecord {
 // a time. Reopen at a saved position to poll an open file; EOF is not a tick.
 class JournalReader {
 public:
+    // The test hook runs after each header read, before the next stop check.
     JournalReader(std::filesystem::path root, std::string product,
-                  std::optional<JournalPos> start = {}, std::stop_token stop = {});
+                  std::optional<JournalPos> start = {}, std::stop_token stop = {},
+                  std::function<void()> afterHeaderForTest = {});
     // A cursor over a previously validated file catalog; does not walk directories.
     JournalReader(const JournalReader& catalog, std::optional<JournalPos> start);
     bool next(JournalRecord& out);

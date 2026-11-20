@@ -70,7 +70,8 @@ void registerJournalMetrics(metrics::MetricsRegistry& registry, const std::strin
         [state] { return static_cast<double>(state->count.value()); });
 }
 JournalReader::JournalReader(std::filesystem::path root, std::string product,
-                             std::optional<JournalPos> start, std::stop_token stop)
+                             std::optional<JournalPos> start, std::stop_token stop,
+                             std::function<void()> afterHeaderForTest)
     : product_(std::move(product)), start_(std::move(start)) {
     // Validate the safe union before using a directory name; readHeader then
     // enforces the actual venue rules for every file.
@@ -80,6 +81,7 @@ JournalReader::JournalReader(std::filesystem::path root, std::string product,
         if (stop.stop_requested()) throw std::runtime_error("journal catalog cancelled");
         if (!e.is_regular_file() || e.path().extension() != ".rawl2") continue;
         auto h = capture::readHeader(QString::fromStdString(e.path().string()));
+        if (afterHeaderForTest) afterHeaderForTest();
         if (stop.stop_requested()) throw std::runtime_error("journal catalog cancelled");
         if (h.at("product_metadata").at("product_id") == product_) files_.push_back({e.path(), std::move(h)});
     }
