@@ -13,7 +13,10 @@
             "09.labels": "e1b56573ea69aed6e617259058805671dac396bd8f2f8ea589fcab8918cbf1de",
             "10.trade-bubbles": "4751a16993839094fa50da005405ceb8e400ac3d0a259f15261598efc41ccc61",
             "11.after-1m-to-15m": "584f07a139c7f69082b80ddb4f94538d5a3998be7ebeb515a9fffaf4d39f423b",
-            "12.rest-dpr2": "cb995052e331b8cb07613d1e71915bf94bfec0c3b422c5c39ecc95c957f4a7ee"
+            "12.rest-dpr2": "cb995052e331b8cb07613d1e71915bf94bfec0c3b422c5c39ecc95c957f4a7ee",
+            "13.footprint-strip": "c07e4e18efb6440e2e1f068f11612453f251282a3e3af1c49c43f0bca5a99b3a",
+            "14.footprint-cells-bands": "db3bc976f242d76ed9640015b2c36b0306f829e1b9a506c5115962ffa765cf5b",
+            "15.cvd-strip": "3a85846f899a6310d4ebc000e43074914f17af194400727b21f37be3fae50f6c"
         }
     },
     "version": 1

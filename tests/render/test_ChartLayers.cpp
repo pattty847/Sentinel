@@ -189,6 +189,7 @@ TEST(HeatmapLayer, AfterRenderingWithoutHostCallbacksConsumesFrameRequest) {
 #include "mainwindow/ChartAgentPort.hpp"
 #include "render/heatmap/HeatmapSettingsStore.hpp"
 #include "config/AgentHostMode.hpp"
+#include "HostSettingsGuard.hpp"
 #include <QSGOpacityNode>
 #include <QSGGeometryNode>
 #include <QTemporaryDir>
@@ -996,8 +997,8 @@ TEST(VolumeProfileEmptyState, LoadingEmptyAndVisibleDataHaveDistinctResults) {
 TEST(ChartEmptyStateText, EmptyLabelsUseMsdfAndAvoidVisibleCandles) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     chart::ChartLayers layers;
     auto& atlas = layers.text.atlas;
     ChartTextAtlas::BuildParams params;
@@ -1145,8 +1146,8 @@ TEST(FootprintCells, FootprintHasNoSourceSettingAndStaleSavedKeyIsIgnored) {
 TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
@@ -1309,8 +1310,8 @@ FootprintRun footprintRun(const std::array<int64_t, 4>& volumes, double colLogic
 TEST(FootprintCells, NumbersAreCentredInTheirHalfCell) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     for (const double dpr : {1.0, 2.0})
         for (const double col : {160.0, 161.0, 163.5}) {
             SCOPED_TRACE(std::to_string(dpr) + " x " + std::to_string(col));
@@ -1331,8 +1332,8 @@ TEST(FootprintCells, NumbersAreCentredInTheirHalfCell) {
 TEST(FootprintCells, MixedMagnitudesPrintTheFormatterText) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     const auto run = footprintRun({123'400, 1'234'500, 24'500, 3}, 200, 1); // 1234 | 12345, 245 | 0.03
     std::multiset<std::string> drawn, expected;
     for (const auto& n : run.numbers) drawn.insert(n.text);
@@ -1346,8 +1347,8 @@ TEST(FootprintCells, MixedMagnitudesPrintTheFormatterText) {
 TEST(FootprintCells, AScopeSwitchForgetsTheDecision) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
@@ -1381,8 +1382,8 @@ TEST(FootprintCells, AScopeSwitchForgetsTheDecision) {
 TEST(FootprintCells, CollectionOverflowAndGlyphBudgetDrawNone) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
@@ -1710,8 +1711,8 @@ TEST(CvdFeed, SumsAllLoadedBarsAndRespectsTpoOpenAndBaseScale) {
 TEST(CvdLayer, LabelsAreBoundedAndFreshDataFramesAllocateNothing) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
@@ -1916,8 +1917,8 @@ TEST(FlowFooter, DefaultNodesAreIdenticalAndEnabledNodesAreLazyBeforeText) {
 TEST(FlowFooter, FreshDataPanAndLabelsAllocateNothingAfterWarmup) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
@@ -2039,8 +2040,8 @@ TEST(FlowFooterPolicy, UnitShowsEightCharactersThenAnEllipsisAndResetLabelsAreSh
 TEST(FlowFooter, RowsShareOneColumnGridBesideAFixedLabelGutter) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
@@ -2098,8 +2099,8 @@ TEST(FlowFooter, RowsShareOneColumnGridBesideAFixedLabelGutter) {
 TEST(FlowFooter, FooterOnlyGutterNamesTheResetAndFitsLongUnits) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
@@ -2150,8 +2151,8 @@ TEST(FlowFooter, FooterOnlyGutterNamesTheResetAndFitsLongUnits) {
 TEST(FlowFooter, PanAndMagnitudeChangesKeepTheSameAbsoluteColumnPhase) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error));
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
@@ -2219,8 +2220,8 @@ TEST(FlowFooter, PanAndMagnitudeChangesKeepTheSameAbsoluteColumnPhase) {
 TEST(FlowFooter, DeltaPillsShareOneStyleInTheDirectionPair) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error));
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
@@ -2375,8 +2376,8 @@ TEST(CvdLayer, PriceLabelRectsStopAboveStripAndReturnToFullHeightWhenHidden) {
 TEST(CvdLayer, LastLabelTracksCurveEndpointAndClampsClearOfExtrema) {
     QTemporaryDir cache;
     QString error;
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error));
-    struct Reset { ~Reset() { AgentHostMode::resetForTests(); } } reset;
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
@@ -2424,4 +2425,42 @@ TEST(CvdLayer, LastLabelTracksCurveEndpointAndClampsClearOfExtrema) {
             text.endFrame();
         }
     }
+}
+
+// INV-186: resetForTests() alone leaves QSettings on the NATIVE format (the owner's plist); the guard
+// puts back the format and the INI paths a binary isolated at start-up.
+TEST(HostSettingsGuard, KeepsAnIsolatedSettingsFormatAndPathAcrossAHostScope) {
+    const auto outerFormat = QSettings::defaultFormat();
+    const QString outerUser = HostSettingsGuard::iniDir(QSettings::UserScope);
+    const QString outerSystem = HostSettingsGuard::iniDir(QSettings::SystemScope);
+    struct Restore {
+        QSettings::Format format; QString user, system;
+        ~Restore() {
+            QSettings::setDefaultFormat(format);
+            QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, user);
+            QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, system);
+        }
+    } restore{outerFormat, outerUser, outerSystem};
+    QTemporaryDir isolated, host;
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, isolated.path());
+    QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, isolated.path());
+    const QString isolatedUser = HostSettingsGuard::iniDir(QSettings::UserScope);
+    ASSERT_NE(isolatedUser, outerUser);
+
+    QString error;
+    {
+        HostSettingsGuard guard;
+        ASSERT_TRUE(AgentHostMode::activate(host.path(), {}, &error)) << error.toStdString();
+        EXPECT_NE(HostSettingsGuard::iniDir(QSettings::UserScope), isolatedUser) << "activate moves QSettings into the host";
+    }
+    EXPECT_EQ(QSettings::defaultFormat(), QSettings::IniFormat);
+    EXPECT_EQ(HostSettingsGuard::iniDir(QSettings::UserScope), isolatedUser);
+    EXPECT_EQ(HostSettingsGuard::iniDir(QSettings::SystemScope), isolatedUser);
+    EXPECT_FALSE(AgentHostMode::active());
+
+    // The bare reset is the hazard the guard exists for.
+    ASSERT_TRUE(AgentHostMode::activate(host.path(), {}, &error)) << error.toStdString();
+    AgentHostMode::resetForTests();
+    EXPECT_EQ(QSettings::defaultFormat(), QSettings::NativeFormat);
 }

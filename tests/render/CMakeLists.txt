@@ -364,6 +364,13 @@ target_link_libraries(test_dom PRIVATE sentinel_gui_lib GTest::gtest Qt6::Test Q
 add_test(NAME DomTests COMMAND test_dom)
 set_tests_properties(DomTests PROPERTIES LABELS "ui;dom" TIMEOUT 60)
 
+# The DOM mutation runner's own timeout test (the runner itself rebuilds the tree: run it by hand).
+find_program(SENTINEL_PYTHON3 python3)
+if(SENTINEL_PYTHON3)
+    add_test(NAME DomMutationRunnerTests COMMAND ${SENTINEL_PYTHON3} -I ${CMAKE_CURRENT_SOURCE_DIR}/test_check_dom_mutations.py)
+    set_tests_properties(DomMutationRunnerTests PROPERTIES LABELS "render;fast" TIMEOUT 60)
+endif()
+
 add_executable(test_WatchRailScreener test_WatchRailScreener.cpp)
 target_include_directories(test_WatchRailScreener PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_WatchRailScreener PRIVATE sentinel_gui_lib GTest::gtest Qt6::Widgets Qt6::Test)

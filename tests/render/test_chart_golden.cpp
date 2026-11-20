@@ -1,6 +1,6 @@
 // Slice S0b: Metal frame-hash golden of the main chart.
 //
-// Twelve scenes, each on a fresh 640x320 lab::OffscreenQuick scene (UGR, a C++-built
+// Fifteen scenes, each on a fresh 640x320 lab::OffscreenQuick scene (UGR, a C++-built
 // CandlestickOverlayItem and a TradeBubbleOverlayItem), hashed only once the frame has
 // settled: SHA-256 of the RGBA readback plus an explicit, named, hex-float serialization
 // of the published mapping (never raw struct bytes). The manifest
@@ -249,6 +249,13 @@ struct Harness {
     void view(int64_t lo, int64_t hi, double pmin, double pmax) { ugr->view()->setViewport(lo, hi, pmin, pmax); }
 };
 
+// The flow feeds publish on a 67 ms timer: let it run before the frame settles.
+void waitForFlow(Harness& h) {
+    Q_UNUSED(h);
+    QElapsedTimer wait; wait.start();
+    while (wait.elapsed() < 300) QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+}
+
 struct Scene {
     const char* name;
     std::function<void(Harness&)> run;
@@ -346,6 +353,45 @@ std::vector<Scene> scenes() {
         while (wait.elapsed() < 300) QCoreApplication::processEvents(QEventLoop::AllEvents, 10); // the 67 ms feed timer
         h.settle("footprint");
         if (pixels(h.image) == plain) throw Failure("the footprint cells drew nothing");
+    }});
+    s.push_back({"13.footprint-strip", [](Harness& h) { // 16 px columns: below the Cells width, rows merged into bands
+        useViewport(h);
+        h.ugr->layers()->setFootprintEnabled(true);
+        GoldenFlowSource source;
+        h.ugr->agentPort().bindFlowSource(source);
+        h.settle("strip plain");
+        const QByteArray plain = pixels(h.image);
+        source.deliver(viewLo - minute, 42, 99'950, 300);
+        waitForFlow(h);
+        h.settle("strip");
+        if (h.ugr->footprintPresentation()->previous != chart::FootprintStage::Strip) throw Failure("scene 13 is not the Strip stage");
+        if (pixels(h.image) == plain) throw Failure("the footprint strip drew nothing");
+    }});
+    s.push_back({"14.footprint-cells-bands", [](Harness& h) { // 64 px columns, sub-pixel rows: Cells with merged bands
+        h.view(viewLo, viewLo + 10 * minute, 99'900, 100'300);
+        h.settle("bands viewport");
+        h.ugr->layers()->setFootprintEnabled(true);
+        GoldenFlowSource source;
+        h.ugr->agentPort().bindFlowSource(source);
+        h.settle("bands plain");
+        const QByteArray plain = pixels(h.image);
+        source.deliver(viewLo - minute, 12, 99'950, 300);
+        waitForFlow(h);
+        h.settle("bands");
+        if (h.ugr->footprintPresentation()->previous != chart::FootprintStage::Cells) throw Failure("scene 14 is not the Cells stage");
+        if (pixels(h.image) == plain) throw Failure("the footprint bands drew nothing");
+    }});
+    s.push_back({"15.cvd-strip", [](Harness& h) { // the cumulative-delta strip under the chart, with its value gutter
+        useViewport(h);
+        h.ugr->layers()->setCvdStripPx(80);
+        GoldenFlowSource source;
+        h.ugr->agentPort().bindFlowSource(source);
+        h.settle("cvd plain");
+        const QByteArray plain = pixels(h.image);
+        source.deliver(viewLo - minute, 42, 99'950, 300);
+        waitForFlow(h);
+        h.settle("cvd");
+        if (pixels(h.image) == plain) throw Failure("the CVD strip drew nothing");
     }});
     s.push_back({"09.labels", [](Harness& h) {
         h.view(viewLo, viewLo + 10 * minute, 100'000, 100'016); // $1 cells of 64 x 20 px: room for labels

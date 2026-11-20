@@ -8,6 +8,7 @@
 #include <QScopeGuard>
 #include <QStringList>
 #include "config/AgentHostMode.hpp"
+#include "HostSettingsGuard.hpp"
 #include <algorithm>
 #include <chrono>
 #include <thread>
@@ -446,7 +447,7 @@ TEST_F(CandleDataSourceTest, FifteenMinuteViewportSendsNativeBarPageThroughRealC
 
 TEST_F(CandleDataSourceTest, DisconnectClearsReplicaBeforeGuardedStartupResubscribe) {
     QTemporaryDir host("/private/tmp/sentinel-reconnect-host-XXXXXX");
-    const auto resetHost = qScopeGuard([] { AgentHostMode::resetForTests(); });
+    HostSettingsGuard hostSettings; // before activate: it records the isolated QSettings state
     QString error;
     ASSERT_TRUE(AgentHostMode::activate(host.path(), {}, &error)) << error.toStdString();
     AgentHostMode::setSymbolAllowlist({"BTC-USD"});
