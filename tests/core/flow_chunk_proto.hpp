@@ -375,6 +375,7 @@ struct DayFile {
     uint8_t ruleVersion = 1;
     uint32_t sealWindowMs = 15'000;
     uint32_t lateTrades = 0, rejectedTrades = 0, regressions = 0;
+    uint64_t ruleIdentity = 0;      // section 7 rule identity the sections were built under
     std::array<DaySection, DaySections> sections;
     bool operator==(const DayFile&) const = default;
 };
@@ -397,6 +398,7 @@ inline std::vector<uint8_t> encodeDayFile(const DayFile& d) {
     for (auto v : {d.grid.rowTickUnits, d.grid.priceScale, d.grid.baseScale, d.grid.quoteScale}) h.fixed(uint64_t(v), 8);
     h.fixed(d.ruleVersion, 1); h.fixed(d.sealWindowMs, 4);
     h.fixed(d.lateTrades, 4); h.fixed(d.rejectedTrades, 4); h.fixed(d.regressions, 4);
+    h.fixed(d.ruleIdentity, 8);
     h.fixed(0, 4);           // table CRC, patched below
     const size_t headerLength = h.b.size();
     const uint64_t base = headerLength + DaySections * TableEntryBytes;
@@ -451,6 +453,7 @@ inline DayFile parseDayFile(std::span<const uint8_t> bytes) {
     d.grid = {int64_t(in.fixed(8)), int64_t(in.fixed(8)), int64_t(in.fixed(8)), int64_t(in.fixed(8))};
     d.ruleVersion = uint8_t(in.fixed(1)); d.sealWindowMs = uint32_t(in.fixed(4));
     d.lateTrades = uint32_t(in.fixed(4)); d.rejectedTrades = uint32_t(in.fixed(4)); d.regressions = uint32_t(in.fixed(4));
+    d.ruleIdentity = in.fixed(8);
     const auto tableCrc = uint32_t(in.fixed(4));
     if (in.p != headerLength || d.dayStartMs % 86'400'000) In::fail("day header");
     uint64_t next = headerLength + DaySections * TableEntryBytes;
@@ -477,6 +480,46 @@ inline DayFile parseDayFile(std::span<const uint8_t> bytes) {
     }
     if (next != bytes.size()) In::fail("day trailing bytes");
     return d;
+}
+
+// ---- Epoch state (section 7) -------------------------------------------------
+// The durable epoch file: counter, the rule identity it was advanced under, and
+// the days still pending a rebuild. A day is servable only when it is not
+// pending and its file was built under the current rule identity.
+struct EpochState {
+    uint64_t counter = 0, ruleIdentity = 0;
+    std::vector<int64_t> pending; // day starts, ascending
+    bool operator==(const EpochState&) const = default;
+};
+inline uint64_t fnv1a(std::span<const uint8_t> bytes, uint64_t h = 14695981039346656037ULL) {
+    for (auto b : bytes) { h ^= b; h *= 1099511628211ULL; }
+    return h;
+}
+inline uint64_t epochOf(const std::string& domain, const EpochState& e) {
+    detail::Out o;
+    o.b.assign(domain.begin(), domain.end());
+    o.fixed(e.ruleIdentity, 8); o.fixed(e.counter, 8);
+    return fnv1a(o.b);
+}
+// Startup: a changed rule identity, or days left pending by a crash, starts a
+// transition. Every day is pending after a rule change; a restart with pending
+// days advances the counter again.
+inline EpochState startupTransition(EpochState stored, uint64_t currentRule, const std::vector<int64_t>& days) {
+    if (stored.ruleIdentity != currentRule) {
+        stored.ruleIdentity = currentRule;
+        stored.pending = days;
+        ++stored.counter;
+    } else if (!stored.pending.empty()) {
+        ++stored.counter;
+    }
+    return stored;
+}
+inline bool servable(const EpochState& e, const DayFile& day) {
+    return day.ruleIdentity == e.ruleIdentity &&
+           !std::binary_search(e.pending.begin(), e.pending.end(), day.dayStartMs);
+}
+inline void finishDay(EpochState& e, int64_t dayStartMs) {
+    e.pending.erase(std::remove(e.pending.begin(), e.pending.end(), dayStartMs), e.pending.end());
 }
 
 // Section 5 assembly of a 16-day 1d chunk from day pieces (entry 25 of each

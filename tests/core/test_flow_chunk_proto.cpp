@@ -282,3 +282,31 @@ TEST(FlowChunkProto, MalformedPayloadsAreRefused) {
     EXPECT_ANY_THROW(decodeSpec(bytes, Minute, T0, 59));               // slot 59 outside a 59-slot span
     EXPECT_ANY_THROW(proto::fromBars(hourBars(), Minute, T0 + Minute, 60));
 }
+
+// A rule change makes every day pending; an old-rule file is never servable under
+// the new identity, even after the pending list is cleared; a restart with
+// pending days advances the epoch again.
+TEST(FlowChunkProto, RuleChangeFencesEveryOldRuleDay) {
+    const std::vector<int64_t> days{T0 - Day, T0};
+    proto::EpochState stored{7, 0xAAAA, {}};
+    auto oldFile = sampleDayFile();
+    oldFile.ruleIdentity = 0xAAAA;
+    ASSERT_TRUE(proto::servable(stored, oldFile));
+    const auto oldEpoch = proto::epochOf("flow", stored);
+    EXPECT_EQ(proto::startupTransition(stored, 0xAAAA, days), stored); // same rules, nothing pending: no change
+
+    auto next = proto::startupTransition(stored, 0xBBBB, days);
+    EXPECT_EQ(next.pending, days);
+    EXPECT_NE(proto::epochOf("flow", next), oldEpoch);
+    EXPECT_FALSE(proto::servable(next, oldFile));
+    proto::finishDay(next, T0);                       // T0 rebuilt...
+    EXPECT_FALSE(proto::servable(next, oldFile));     // ...but this file is still the old-rule one
+    auto rebuilt = oldFile;
+    rebuilt.ruleIdentity = 0xBBBB;
+    EXPECT_TRUE(proto::servable(next, rebuilt));
+    EXPECT_EQ(proto::parseDayFile(proto::encodeDayFile(rebuilt)).ruleIdentity, 0xBBBBu);
+
+    const auto crashed = proto::startupTransition(next, 0xBBBB, days); // restart with T0 - Day still pending
+    EXPECT_EQ(crashed.counter, next.counter + 1);
+    EXPECT_NE(proto::epochOf("flow", crashed), proto::epochOf("flow", next));
+}

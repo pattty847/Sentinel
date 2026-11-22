@@ -86,15 +86,17 @@ step 4) or `SCK1` (this spec).
 | 11 | `committed_through_ms` | i64 | equals `end_ms` when sealed |
 | 12 | `revision` | u64 | 0 when sealed |
 | 13 | `epoch` | u64 | the channel's epoch domain (section 7) |
-| 14 | `content_hash` | u64 | FNV-1a 64 over fields 5-11 then the raw payload (the SHC1 FNV rule, `heatmap/ChunkCodec.cpp:58-66`). Kind, state, revision and epoch are outside it, so equal content has equal hashes across kinds and epochs. |
+| 14 | `content_hash` | u64 | FNV-1a 64 over fields 5-11, then field 15 (`payload_version`, u16), then the raw payload (the SHC1 FNV rule, `heatmap/ChunkCodec.cpp:58-66`). Kind, state, revision and epoch are outside it, so equal content in the same payload version has equal hashes across kinds and epochs. |
 | 15 | `payload_version` | u16 | per channel; 1 here |
 | 16 | codec | u8 | 0 raw, 1 zstd |
 | 17 | raw length | u32 | at most 16 MiB |
 | 18 | stored length | u32 | equals the remaining frame bytes |
 | 19 | payload | bytes | defined by (channel, kind, payload version) |
 
-- `not_modified` (3): fields 1-14. Field 14 echoes the requester's `have_hash`, which equals the current chunk's
-  content hash; fields 11-13 are the current chunk's (so a client holding an older epoch takes the current one).
+- `not_modified` (3): fields 1-14. Sent only when the requester's `have_hash` equals the current chunk's content
+  hash, which covers its payload version; field 14 echoes that hash, fields 11-13 are the current chunk's (so a
+  client holding an older epoch takes the current one). A fenced key (section 7) answers `unavailable`, never
+  `not_modified`.
   `error` (4): fields 1-9, u16 code, str8 message; codes as SHC1 (`heatmap/ChunkCodec.hpp:48-53`).
 - `live` (2) frames and open chunks (state 0) exist only for channels whose availability levels carry
   `committed_through_ms` (the heatmap minute level). Each such channel defines its own kind 2 payload. Flow sends
@@ -226,7 +228,7 @@ Path `<flow_root>/<venue>/<symbol>/<YYYY-MM-DD>.flc` (UTC day). Prototype: `enco
 
 | Part | Layout |
 | --- | --- |
-| Header | `FLC1`; u16 version 1; u16 header length; u32 CRC-32 (IEEE) of the header with this field zeroed; str8 `instrument_id`; i64 day start; grid (32 bytes); u8 rule version; u32 seal window W (ms); u32 trades past their seal; u32 trades rejected by the builder; u32 receive-time regressions; u32 CRC-32 of the table |
+| Header | `FLC1`; u16 version 1; u16 header length; u32 CRC-32 (IEEE) of the header with this field zeroed; str8 `instrument_id`; i64 day start; grid (32 bytes); u8 rule version; u32 seal window W (ms); u32 trades past their seal; u32 trades rejected by the builder; u32 receive-time regressions; u64 rule identity (section 7); u32 CRC-32 of the table |
 | Table | 50 entries of 25 bytes: u32 offset, u32 summary length, u32 total length, u32 CRC-32 of the section, u8 state (0 absent, 1 sealed), u64 source fingerprint (hour entries: the RAWL2 prefix through the hour's seal point, from FlowStore's source identities, `servermodel/FlowStore.cpp:66-130`; 0 otherwise) |
 | Sections | back to back in table order, starting right after the table |
 
@@ -331,6 +333,11 @@ Fixtures (step 3 acceptance):
 - Live: on archives without regressions the live finals equal the sealed bars (trade in the record that first
   reaches the seal point; seal point in the next hourly file; reconnect snapshots resending trades after the seal
   point). On the reordered-run archive live may differ; the mismatch counter counts each differing bar.
+- Coarse live composition: a forming 1d bucket after several sealed hours inside the retention window have been
+  pruned from live equals the composition of those sealed hours and the retained live minutes; an hour neither
+  sealed nor retained makes the bucket's coverage `building`.
+- Rule change: a server started with a changed rule identity serves no old-rule day (nor `not_modified` for one)
+  under the new epoch, rebuilds every day, and resumes after a crash mid-way with a new epoch.
 
 Why W = 15 s: on 4 measured days (3 BTC, 1 ETH, 6.5 M trades) M passed the end of a trade's bar by at most 1.3 s,
 the only regression was 6 ms, and neither 15 s nor 60 s excludes a trade (section 12; a transit-distribution scan,
@@ -347,9 +354,11 @@ were grouped into runs.
 - `live_from_ms` = UTC hour of (receive watermark - 60 s) - 6 h, today's retention bound
   (`servermodel/ServerDataModel.cpp:1152-1159`). Live keeps every 1m bucket at or after it and drops a bucket only
   when its hour is sealed on disk or it falls before `live_from_ms`.
-- Live serves every bucket of a subscribed timeframe that intersects `[live_from_ms, now]`. A coarse bucket that
-  starts before `live_from_ms` (for example today's 1d bucket) is composed from the sealed 1m bars before
-  `live_from_ms` and the retained live minutes after it, as today's crossing bucket.
+- Live serves every bucket of a subscribed timeframe that intersects `[live_from_ms, now]`. `live_from_ms` decides
+  only retention and which buckets live serves, never where a bucket's content comes from. A coarse bucket is
+  composed per constituent 1m interval: the sealed bar where the hour is sealed; else the retained live bar; else
+  nothing, and the bucket's coverage says `building` for that interval. So a forming 1d bucket takes its sealed hours
+  from the store even when they are inside the retention window and live has already pruned them.
 - The client draws a bucket from a held sealed chunk when it has one; else from live; else it is `building` (inside
   the recorded range) or `unrecorded`. Ownership never moves back into live: an unsealed hour before `live_from_ms`
   (a failed build, a store more than 6 h behind, newest-first recovery) stays `building` until it is sealed.
@@ -361,26 +370,36 @@ were grouped into runs.
 An epoch names the rules and archive state behind sealed bytes, per domain: `flow` (the `.flc` files:
 `flow.summary`, `flow.rows`, `trades.big`), and from step 4 `book.near` and `book.deep`.
 
-- epoch = FNV-1a 64 of (domain name, builder rule version, W, scale rule version, big-trade floors, counter).
-- The counter lives in `<flow_root>/epoch`: u64 counter, u32 count of pending days, i64 day starts, u32 CRC-32;
-  always replaced atomically (temp file, fsync, rename, directory fsync).
-- Triggers: a rebuild finds a sealed section whose new source fingerprint differs from its table entry (RAWL2
-  changed under it), or the owner-approved RAWL2 repair procedure names days. A rule change changes the epoch by
-  itself (it is in the hash).
+- Rule identity = FNV-1a 64 of every rule and config value that can change sealed bytes: builder rule version,
+  W, scale rule version, big-trade floors, payload versions, and any later one. Each day file header records the
+  identity it was built under.
+- epoch = FNV-1a 64 of (domain name, rule identity, counter).
+- `<flow_root>/epoch` holds u64 counter, u64 rule identity, u32 count of pending days, i64 day starts, u32 CRC-32;
+  it is always replaced atomically (temp file, fsync, rename, directory fsync).
+- Triggers:
+  - at startup, the current rule identity differs from the file's: every day is affected, with every 1h, 1d and
+    `trades.big` chunk derived from it;
+  - a rebuild finds a sealed section whose new source fingerprint differs from its table entry (RAWL2 changed under
+    it): that day;
+  - the owner-approved RAWL2 repair procedure: the days it names.
+- A day is served only when it is not pending and its file header carries the current rule identity, so an
+  old-rule section is never served, or confirmed through `not_modified`, under the new identity, even if the
+  pending list were lost.
 
 Transition, in this order:
 
 | Step | Action | Crash after this step |
 | --- | --- | --- |
 | 1 | Fence the affected days in memory: their keys leave `sealed`, requests get `unavailable`, their byte-cache entries are dropped, and replies for them still in the history pool are discarded when they finish. Frames already queued on a socket carry the old bytes with the old epoch, a consistent pair. | nothing durable changed; the next rescan finds the same mismatch and starts again |
-| 2 | Write the epoch file: counter + 1, pending = the affected days | restart reads the pending list: step 6 |
+| 2 | Write the epoch file: counter + 1, the current rule identity, pending = the affected days | restart reads the pending list: step 6 |
 | 3 | Advertise the new epoch. The byte cache is keyed by epoch, so every other entry is dropped. | step 6 |
-| 4 | Rebuild the pending days and write their files | step 6 |
-| 5 | Write the epoch file with an empty pending list; unfence | done |
-| 6 (restart with pending days) | keep those days fenced, counter + 1 (a new epoch again), rebuild them, then step 5 | |
+| 4 | Rebuild the pending days newest first and write their files. After each day, rewrite the epoch file without it and unfence it; a 16-day chunk is unfenced when all its days are. | step 6 |
+| 5 | The pending list is empty | done |
+| 6 (restart with pending days) | keep those days fenced, counter + 1 (a new epoch again), continue at step 4 | |
 
 - New bytes are never served under the old epoch (the counter moves at step 2, before any new file exists), and old
-  bytes of affected days are never served under the new epoch (fenced from step 1 to step 5).
+  bytes of affected days are never served under the new epoch (fenced until rebuilt, and refused by the rule
+  identity check). Prototype: `EpochState`, `startupTransition`, `servable`; test `RuleChangeFencesEveryOldRuleDay`.
 - A missing or unreadable epoch file is recreated with counter = current Unix time in ms (far above any earlier
   counter) and every day pending: no day is served before its table fingerprints are checked against RAWL2.
 - A day file lost while RAWL2 is intact is rebuilt to the same bytes; no transition is needed.
@@ -492,14 +511,14 @@ Day file (section 5: header and 50-entry table, 24 hour sections, the 1h section
 
 | Day | FLD1 | `.flc` | of which header + table / 1h / 1d piece | Read: FLD1 decode / `.flc` parse + decode 24 hours |
 | --- | --- | --- | --- | --- |
-| BTC busy | 2,179,873 | 1,400,068 (1.6x smaller) | 1,340 / 206,439 / 62,494 | 4.9 / 4.0 ms |
-| BTC median | 1,429,626 | 587,912 (2.4x) | 1,340 / 99,067 / 38,449 | 1.5 / 1.8 ms |
-| ETH | 1,250,195 | 365,621 (3.4x) | 1,340 / 43,946 / 13,756 | 1.1 / 1.0 ms |
-| SOL | 1,196,587 | 304,765 (3.9x) | 1,340 / 37,357 / 10,151 | 1.0 / 0.9 ms |
-| PEPE | 477,695 | 46,942 (10.2x) | 1,341 / 2,895 / 723 | 0.34 / 0.17 ms |
+| BTC busy | 2,179,873 | 1,400,076 (1.6x smaller) | 1,348 / 206,439 / 62,494 | 4.9 / 4.0 ms |
+| BTC median | 1,429,626 | 587,920 (2.4x) | 1,348 / 99,067 / 38,449 | 1.5 / 1.8 ms |
+| ETH | 1,250,195 | 365,629 (3.4x) | 1,348 / 43,946 / 13,756 | 1.1 / 1.0 ms |
+| SOL | 1,196,587 | 304,773 (3.9x) | 1,348 / 37,357 / 10,151 | 1.0 / 0.9 ms |
+| PEPE | 477,695 | 46,950 (10.2x) | 1,349 / 2,895 / 723 | 0.34 / 0.17 ms |
 
 Serving a 1m or 1h chunk reads its section and needs no decode. The read column was measured before the table CRC
-was added (4 bytes, included above) and before loading decoded every section; with the full section 5 validation
+and the rule identity were added (12 bytes, included above) and before loading decoded every section; with the full section 5 validation
 the BTC busy day takes 6.5 ms, once per file load.
 
 1h and 1d levels, all FLD1 days (BTC 54, others 53):
