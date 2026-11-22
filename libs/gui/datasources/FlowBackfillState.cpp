@@ -1,5 +1,6 @@
 #include "FlowBackfillState.hpp"
 #include <algorithm>
+#include <limits>
 
 void FlowBackfillState::select(const QString& symbol, int64_t tf) {
     if (symbol == m_symbol && tf == m_tf) return;
@@ -12,7 +13,8 @@ void FlowBackfillState::select(const QString& symbol, int64_t tf) {
     m_pagingStopped = false;
     m_window = false;
     m_liveCurrentBucket = m_lastLiveBucket = m_probeBucket = -1;
-    m_probeDue = m_sentAt = m_nextEdgePageMs = 0;
+    m_probeDue = m_sentAt = m_liveSampleDue = 0;
+    m_sampledLive = -1;
     m_liveArmed = m_liveTracking = false;
     m_timedOut.reset();
     m_refusedBucket.reset();
@@ -26,27 +28,18 @@ void FlowBackfillState::setWindow(int64_t start, int64_t end) {
     // Keep work and storage bounded even at extreme zoom. Newest buckets first.
     m_start = std::max(start, end - int64_t(FlowSeriesBuffer::kMaxBuckets) * m_tf) / m_tf * m_tf;
     m_end = (end - 1) / m_tf * m_tf;
-    trimCoverage();
     if (m_liveCurrentBucket < m_start || m_liveCurrentBucket > m_end)
         m_liveTracking = false;
 }
-void FlowBackfillState::trimCoverage() {
-    if (!m_window) return;
-    auto old = std::move(m_covered);
-    m_covered.clear();
-    const int64_t hi = m_end + m_tf;
-    for (const auto& [from, to] : old) {
-        const auto clippedFrom = std::max(from, m_start), clippedTo = std::min(to, hi);
-        if (clippedFrom < clippedTo) cover(clippedFrom, clippedTo);
+void FlowBackfillState::uncover(int64_t below, int64_t from) {
+    for (auto it = m_covered.begin(); it != m_covered.end() && it->first < below;) {
+        const auto to = it->second;
+        it = m_covered.erase(it);
+        if (to > below) { m_covered.emplace(below, to); break; }
     }
-    // Mirror the series buffer's three-bucket tail beyond the window.
-    int tail = 3;
-    for (auto it = old.rbegin(); it != old.rend() && tail > 0; ++it) {
-        const auto lo = std::max(it->first, hi);
-        if (lo >= it->second) continue;
-        const int take = int(std::min<int64_t>(tail, (it->second - lo) / m_tf));
-        if (take > 0) { cover(it->second - take * m_tf, it->second); tail -= take; }
-    }
+    auto it = m_covered.lower_bound(from);
+    if (it != m_covered.begin() && std::prev(it)->second > from) std::prev(it)->second = from;
+    m_covered.erase(it, m_covered.end());
 }
 void FlowBackfillState::refresh(int64_t bucket, int64_t dueMs) {
     if (m_tf < 1000 || bucket < 0 || m_symbol.isEmpty()) return;
@@ -57,13 +50,13 @@ void FlowBackfillState::refresh(int64_t bucket, int64_t dueMs) {
 void FlowBackfillState::beginLive(int64_t bucket) {
     if (m_tf < 1000 || bucket < 0 || m_symbol.isEmpty()) return;
     m_liveArmed = true;
-    m_liveCurrentBucket = bucket;
+    m_liveCurrentBucket = std::max(m_liveCurrentBucket, bucket);
 }
 void FlowBackfillState::markLiveEdge(int64_t bucket) {
     if (m_tf < 1000 || bucket < 0 || m_symbol.isEmpty()) return;
-    // The clock's edge paces edge pages and sizes cold-replay timeouts from the start;
+    // The clock's edge is the live seam and sizes cold-replay timeouts from the start;
     // it is covered only once live delivery is armed (beginLive or observeLive).
-    m_liveCurrentBucket = bucket;
+    m_liveCurrentBucket = std::max(m_liveCurrentBucket, bucket);
     if (!m_liveArmed) return;
     if (!m_window || bucket < m_start || bucket > m_end) { m_liveTracking = false; return; }
     if (m_liveTracking && m_lastLiveBucket >= 0 && bucket >= m_lastLiveBucket)
@@ -75,10 +68,8 @@ void FlowBackfillState::markLiveEdge(int64_t bucket) {
 void FlowBackfillState::observeLive(int64_t bucket, int64_t nowMs) {
     if (m_tf < 1000 || bucket < 0 || m_symbol.isEmpty()) return;
     if (!m_liveArmed) beginLive(bucket);
-    if (m_window && bucket >= m_start) {
-        cover(bucket, bucket + m_tf);
-        if (bucket > m_end) trimCoverage();
-    }
+    m_liveCurrentBucket = std::max(m_liveCurrentBucket, bucket);
+    if (m_window && bucket >= m_start) cover(bucket, bucket + m_tf);
     if (m_window && bucket >= m_start && bucket <= m_end && !m_liveTracking) {
         m_lastLiveBucket = bucket;
         m_liveTracking = true;
@@ -92,61 +83,120 @@ std::optional<FlowBackfillState::Request> FlowBackfillState::next(int64_t nowMs)
     if (nowMs < m_retryAt) { m_hold = m_retryHold; return {}; }
     if (m_pending) {
         if (!m_pending->held) { m_hold = Hold::InFlight; return {}; }
-        m_pending->held = false;
-        m_pending->id = ++m_nextId;
-        m_sentAt = nowMs;
-        return m_pending;
+        // A held live sample never goes ahead of older history the window now needs (a pan
+        // during its backoff): drop it and sample again after those gaps.
+        if (m_pending->sample && !m_pagingStopped && m_window && gapEnd() >= m_start) {
+            m_pending.reset();
+            m_timedOut.reset();
+            m_liveSampleDue = 0;
+        } else if (fitHeldToSeam(nowMs)) {
+            m_pending->held = false;
+            m_pending->id = ++m_nextId;
+            m_sentAt = nowMs;
+            return m_pending;
+        }
     }
     Request request{0, m_generation, m_symbol, m_tf};
-    for (auto it = m_refresh.begin(); it != m_refresh.end(); ++it) {
+    const int64_t limit = historyLimit();
+    for (auto it = m_refresh.begin(); it != m_refresh.end() && it->first <= limit; ++it) {
         if (it->second > nowMs) continue;
         request.endMs = it->first;
         request.limit = 1;
         request.refresh = true;
         it = m_refresh.erase(it);
         // Adjacent due buckets share one page rather than one job each.
-        while (it != m_refresh.end() && it->second <= nowMs &&
-               it->first == request.endMs + m_tf && request.limit < m_pageLimit) {
+        while (it != m_refresh.end() && it->second <= nowMs && it->first == request.endMs + m_tf &&
+               it->first <= limit && request.limit < m_pageLimit) {
             request.endMs = it->first;
             ++request.limit;
             it = m_refresh.erase(it);
         }
-        request.id = ++m_nextId;
-        m_pending = request;
-        m_sentAt = nowMs;
-        return m_pending;
+        return send(request, nowMs);
     }
-    if (m_probeDue && nowMs >= m_probeDue && m_probeBucket >= 0) {
-        request.endMs = m_probeBucket;
+    // The probe samples the seal watermark; any bucket history owns answers it.
+    if (const int64_t probe = std::min(m_probeBucket, limit); m_probeDue && nowMs >= m_probeDue && probe >= 0) {
+        request.endMs = probe;
         request.limit = 1;
         request.refresh = request.probe = true;
         m_probeDue = nowMs + FlowSeriesBuffer::kRefetchIntervalMs;
-        request.id = ++m_nextId;
-        m_pending = request;
-        m_sentAt = nowMs;
-        return m_pending;
+        return send(request, nowMs);
     }
     if (m_pagingStopped) { m_hold = Hold::Stopped; return {}; }
     if (!m_window || m_end < m_start) { m_hold = Hold::Idle; return {}; }
-    const int64_t end = gapEnd();
-    if (end < m_start) { m_hold = Hold::Idle; return {}; }
-    const bool nearLiveEdge = m_liveCurrentBucket >= 0 &&
-        end >= m_liveCurrentBucket - std::max<int64_t>(5000, m_tf);
-    if (nearLiveEdge && nowMs < m_nextEdgePageMs) { m_hold = Hold::EdgeThrottle; return {}; }
-    int64_t gapStart = m_start;
-    if (auto above = m_covered.upper_bound(end); above != m_covered.begin())
-        gapStart = std::max(gapStart, std::prev(above)->second);
-    request.endMs = end;
-    request.limit = int(std::min<int64_t>(m_pageLimit, (end - gapStart) / m_tf + 1));
+    if (const int64_t end = gapEnd(); end >= m_start) {
+        int64_t gapStart = m_start;
+        if (auto above = m_covered.upper_bound(end); above != m_covered.begin())
+            gapStart = std::max(gapStart, std::prev(above)->second);
+        request.endMs = end;
+        request.limit = int(std::min<int64_t>(m_pageLimit, (end - gapStart) / m_tf + 1));
+        return send(request, nowMs);
+    }
+    // Only after every older gap: the live sample never delays history the view needs.
+    if (liveSampling()) {
+        const int64_t from = sampleFrom();
+        if (nowMs >= m_liveSampleDue) {
+            request.endMs = m_liveCurrentBucket;
+            request.limit = int((m_liveCurrentBucket - from) / m_tf + 1);
+            request.sample = true;
+            m_liveSampleDue = nowMs + FlowSeriesBuffer::kRefetchIntervalMs;
+            return send(request, nowMs);
+        }
+        if (!covers(from, m_liveCurrentBucket + m_tf)) { m_hold = Hold::LiveSample; return {}; }
+    }
+    m_hold = Hold::Idle;
+    return {};
+}
+std::optional<FlowBackfillState::Request> FlowBackfillState::send(Request request, int64_t nowMs) {
     request.id = ++m_nextId;
     m_pending = request;
     m_sentAt = nowMs;
-    if (nearLiveEdge) m_nextEdgePageMs = nowMs + 5000;
     return m_pending;
+}
+// A held request goes out again only within the current seam. Buckets it named that are
+// now live (or after) are dropped; a refresh keeps them queued for after the seam, and a
+// live sample keeps its closed buckets as a plain page. False when nothing is left.
+bool FlowBackfillState::fitHeldToSeam(int64_t nowMs) {
+    auto& request = *m_pending;
+    const int64_t allowed = request.sample && !m_liveArmed ? std::numeric_limits<int64_t>::max() : historyLimit();
+    if (request.endMs <= allowed) return true;
+    const int64_t past = std::min<int64_t>((request.endMs - allowed + m_tf - 1) / m_tf, request.limit);
+    if (request.refresh && !request.probe)
+        for (int64_t i = 0; i < past; ++i) refresh(request.endMs - i * m_tf, nowMs);
+    request.endMs -= past * m_tf;
+    request.limit -= int(past);
+    request.sample = false;
+    m_timedOut.reset();
+    if (request.limit > 0) return true;
+    m_pending.reset();
+    return false;
+}
+int64_t FlowBackfillState::seamWakeWallMs() const {
+    if (m_symbol.isEmpty() || m_liveCurrentBucket < 0 || liveSampling()) return 0;
+    // The earliest deferred bucket becomes history's when it closes; later ones wake then.
+    const auto deferred = m_refresh.upper_bound(historyLimit());
+    return deferred == m_refresh.end() ? 0 : deferred->first + m_tf;
+}
+// Newest bucket a request other than the live sample may name: before the live bucket,
+// and before the live sample's buckets while it runs. Unbounded before the clock is known.
+int64_t FlowBackfillState::historyLimit() const {
+    if (m_liveCurrentBucket < 0) return std::numeric_limits<int64_t>::max();
+    return (liveSampling() ? sampleFrom() : m_liveCurrentBucket) - m_tf;
+}
+// Live not armed and the live bucket in the window: history samples the live edge.
+bool FlowBackfillState::liveSampling() const {
+    return !m_liveArmed && m_window && m_liveCurrentBucket >= m_start && m_liveCurrentBucket <= m_end;
+}
+// Oldest bucket the live sample owns: from the bucket the last sample ended at (closed
+// since, or still live) through the live bucket, within one page and the window.
+int64_t FlowBackfillState::sampleFrom() const {
+    int64_t from = m_liveCurrentBucket;
+    if (m_sampledLive >= 0)
+        from = std::max(m_sampledLive, m_liveCurrentBucket - int64_t(m_pageLimit - 1) * m_tf);
+    return std::max(from, m_start);
 }
 // The newest uncovered bucket of the window; below m_start when the window is covered.
 int64_t FlowBackfillState::gapEnd() const {
-    int64_t end = m_end;
+    int64_t end = std::min(m_end, historyLimit());
     // Skip proven runs above the next gap, including an edge that has moved.
     while (end >= m_start) {
         auto above = m_covered.upper_bound(end);
@@ -159,9 +209,13 @@ int64_t FlowBackfillState::gapEnd() const {
 }
 bool FlowBackfillState::workDue(int64_t nowMs) const {
     if (m_symbol.isEmpty() || m_tf < 1000) return false;
-    for (const auto& [bucket, due] : m_refresh)
+    const int64_t limit = historyLimit();
+    for (const auto& [bucket, due] : m_refresh) {
+        if (bucket > limit) break;
         if (due <= nowMs) return true;
-    return !m_pagingStopped && m_window && m_end >= m_start && gapEnd() >= m_start;
+    }
+    if (m_pagingStopped || !m_window || m_end < m_start) return false;
+    return gapEnd() >= m_start || (liveSampling() && !covers(sampleFrom(), m_liveCurrentBucket + m_tf));
 }
 bool FlowBackfillState::covers(int64_t from, int64_t to) const {
     if (to <= from) return true;
@@ -178,7 +232,7 @@ const char* FlowBackfillState::holdName(Hold hold) {
     case Hold::Pacing: return "page_gap_100ms";
     case Hold::Backoff: return "retry_backoff";
     case Hold::Stopped: return "paging_stopped";
-    case Hold::EdgeThrottle: return "edge_throttle_5s";
+    case Hold::LiveSample: return "live_sample_interval";
     }
     return "unknown";
 }
@@ -211,6 +265,7 @@ bool FlowBackfillState::accept(const SentinelStreamClient::FlowBatch& b, int64_t
     m_retryAt = nowMs + 100;
     m_retryHold = Hold::Pacing;
     m_backoff = 1000;
+    if (request.sample) m_sampledLive = std::max(m_sampledLive, request.endMs);
     if (b.status == SentinelStreamClient::FlowStatus::Refused) { m_pagingStopped = true; return true; }
     if (b.oldestMs < 0 || b.oldestMs > request.endMs || b.oldestMs % m_tf != 0) {
         m_pagingStopped = true; // malformed/non-progressing page
@@ -232,7 +287,7 @@ bool FlowBackfillState::accept(const SentinelStreamClient::FlowBatch& b, int64_t
     if (newestProvisional >= 0) {
         m_probeBucket = std::max(m_probeBucket, newestProvisional);
         if (!m_probeDue) m_probeDue = nowMs + FlowSeriesBuffer::kRefetchIntervalMs;
-    } else if (request.probe && m_probeBucket == request.endMs) {
+    } else if (request.probe && std::min(m_probeBucket, historyLimit()) <= request.endMs) {
         m_probeBucket = -1;
         m_probeDue = 0;
     }
@@ -308,14 +363,14 @@ int64_t FlowBackfillState::wakeAtMs(int64_t nowMs) const {
     if (inFlight()) return m_sentAt + flightTimeoutMs();
     if (nowMs < m_retryAt) return m_retryAt;
     int64_t at = 0;
-    for (const auto& [bucket, due] : m_refresh) at = at == 0 ? due : std::min(at, due);
-    if (m_probeDue) at = at == 0 ? m_probeDue : std::min(at, m_probeDue);
-    if (m_liveArmed && m_window && m_liveTracking) {
-        const int64_t edgeAt = nowMs + 5000;
-        at = at == 0 ? edgeAt : std::min(at, edgeAt);
+    const auto earliest = [&at](int64_t t) { at = at == 0 ? t : std::min(at, t); };
+    const int64_t limit = historyLimit();
+    for (const auto& [bucket, due] : m_refresh) {
+        if (bucket > limit) break; // waits for the seam; the next live frame or view change sends it
+        earliest(due);
     }
-    // A paced edge page is due even before live is armed: wake for it, or a page held
-    // back by the pace waits for an unrelated event.
-    if (!m_symbol.isEmpty() && !m_pagingStopped && m_window && m_nextEdgePageMs > nowMs) at = at == 0 ? m_nextEdgePageMs : std::min(at, m_nextEdgePageMs);
+    if (m_probeDue) earliest(m_probeDue);
+    if (!m_symbol.isEmpty() && !m_pagingStopped && liveSampling() && m_liveSampleDue > nowMs)
+        earliest(m_liveSampleDue);
     return at;
 }

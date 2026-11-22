@@ -727,7 +727,8 @@ void RemoteGridDataSource::requestFlowHistory(const QString& symbol, int64_t tf,
     }
     const auto marginStart = std::max<int64_t>(0, start - (end - start));
     m_flowBackfill.setWindow(resetAnchor >= 0 ? std::min(marginStart, resetAnchor) : marginStart, end);
-    m_flowBuffer.retainWindow(tf, m_flowBackfill.windowStartMs(), m_flowBackfill.windowEndMs());
+    m_flowBuffer.setView(tf, start, end, m_flowBackfill.windowStartMs(), m_flowBackfill.windowEndMs());
+    forgetTrimmedFlow();
     // Before the request, so a new selection's first page keeps its send time.
     if (m_flowProbe.on())
         m_flowProbe.viewChanged(symbol, tf, start, end, m_flowBackfill, m_flowBuffer, m_flowClock.elapsed(),
@@ -755,9 +756,15 @@ void RemoteGridDataSource::requestNextFlowPage() {
             sent = true;
         }
     }
-    if (const auto at = m_flowBackfill.wakeAtMs(now); at > now) {
-        m_flowTimer.start(int(std::min<int64_t>(at - now, INT_MAX)));
+    int64_t delay = 0;
+    if (const auto at = m_flowBackfill.wakeAtMs(now); at > now) delay = at - now;
+    // A refresh held at the live seam needs the bucket to close; nothing else may call the
+    // pager before then (quiet stream, still view).
+    if (const auto seam = m_flowBackfill.seamWakeWallMs(); seam > 0) {
+        const auto toSeam = std::max<int64_t>(1, seam - QDateTime::currentMSecsSinceEpoch());
+        delay = delay ? std::min(delay, toSeam) : toSeam;
     }
+    if (delay > 0) m_flowTimer.start(int(std::min<int64_t>(delay, INT_MAX)));
     // Probe work last: it never delays a request or the wake timer.
     if (m_flowProbe.on()) {
         if (sent) m_flowProbe.sent(*request, now);
@@ -785,6 +792,7 @@ void RemoteGridDataSource::onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr
     if (m_flowProbe.on() && batch->history) timing.start();
     const auto probed = timing.isValid() ? batch : nullptr;
     for (const auto bucket : m_flowBuffer.apply(*batch, now)) m_flowBackfill.refresh(bucket, now);
+    forgetTrimmedFlow();
     const double applyMs = timing.isValid() ? double(timing.nsecsElapsed()) / 1e6 : 0;
     emit flowBarsReceived(std::move(batch));
     if (probed) {
@@ -797,7 +805,10 @@ void RemoteGridDataSource::onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr
 void RemoteGridDataSource::publishFlowCoverage(int64_t bucket, SentinelStreamClient::FlowStatus status) {
     if (m_flowSymbol.isEmpty() || m_flowTimeframeMs < 1000) return;
     SentinelStreamClient::FlowRange range{bucket, bucket + m_flowTimeframeMs, status};
-    m_flowBuffer.setCoverage(m_flowSymbol, m_flowTimeframeMs, range);
+    // Partial is published only for a live frame the server dropped (flowLiveDropped).
+    if (status == SentinelStreamClient::FlowStatus::Partial) m_flowBuffer.markDropped(m_flowSymbol, m_flowTimeframeMs, bucket);
+    else m_flowBuffer.setCoverage(m_flowSymbol, m_flowTimeframeMs, range);
+    forgetTrimmedFlow();
     SentinelStreamClient::FlowBatch batch;
     batch.id = m_flowSubscription;
     batch.symbol = m_flowSymbol;
@@ -805,4 +816,11 @@ void RemoteGridDataSource::publishFlowCoverage(int64_t bucket, SentinelStreamCli
     batch.status = status;
     batch.ranges.push_back(range);
     emit flowBarsReceived(std::make_shared<const SentinelStreamClient::FlowBatch>(std::move(batch)));
+}
+
+// Buckets the series buffer trimmed are no longer loaded: the pager pages them again when
+// a window reaches them.
+void RemoteGridDataSource::forgetTrimmedFlow() {
+    if (const auto trim = m_flowBuffer.takeTrimmed(m_flowTimeframeMs))
+        m_flowBackfill.uncover(trim->belowMs, trim->fromMs);
 }

@@ -51,7 +51,8 @@ void FlowTimingProbe::sent(const FlowBackfillState::Request& request, int64_t no
     m_loggedHold = FlowBackfillState::Hold::Sent;
     sLog_Probe("flow.timing", "send id=" << request.id << " symbol=" << request.symbol << " tfMs="
                << request.timeframeMs << " endMs=" << request.endMs << " limit=" << request.limit
-               << " refresh=" << request.refresh << " probe=" << request.probe << " atMs=" << nowMs);
+               << " refresh=" << request.refresh << " probe=" << request.probe << " sample=" << request.sample
+               << " atMs=" << nowMs);
 }
 
 void FlowTimingProbe::held(const FlowBackfillState& state, int64_t nowMs) {
@@ -64,7 +65,7 @@ void FlowTimingProbe::held(const FlowBackfillState& state, int64_t nowMs) {
     }
     if (hold == m_loggedHold || !state.workDue(nowMs)) return;
     m_loggedHold = hold;
-    const int64_t waitMs = hold == FlowBackfillState::Hold::EdgeThrottle ? state.nextEdgePageMs() - nowMs
+    const int64_t waitMs = hold == FlowBackfillState::Hold::LiveSample ? state.liveSampleDueMs() - nowMs
         : hold == FlowBackfillState::Hold::InFlight ? nowMs - m_sentAtMs
         : state.retryAtMs() - nowMs;
     sLog_Probe("flow.timing", "held reason=" << FlowBackfillState::holdName(hold) << " symbol=" << m_symbol

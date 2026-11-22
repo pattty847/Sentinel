@@ -217,6 +217,21 @@ struct FlowDataSourceTest : testing::Test {
         auto b = batch(bar(1, true, Source::Live, 60'000, tf)); b.id = id; b.symbol = symbol;
         client().flowBarsReceived(std::make_shared<const Client::FlowBatch>(b)); deliver();
     }
+    void settle(int ms = 250) {
+        QEventLoop loop;
+        QTimer::singleShot(ms, &loop, &QEventLoop::quit);
+        loop.exec();
+    }
+    // A history reply with one stored bar per requested bucket.
+    void emitStored(const Json& request) {
+        Client::FlowBatch b; b.history = true; b.symbol = QString::fromStdString(request["symbol"]);
+        b.timeframeMs = request["timeframe_ms"]; b.id = request["req"];
+        const int64_t end = request["end_time_ms"];
+        b.oldestMs = end - (request["limit"].get<int64_t>() - 1) * b.timeframeMs;
+        for (int64_t t = b.oldestMs; t <= end; t += b.timeframeMs)
+            b.bars.push_back(bar(1, true, Source::Store, t, b.timeframeMs));
+        client().flowBarsReceived(std::make_shared<const Client::FlowBatch>(b)); deliver();
+    }
     void emitPage(const Json& request) {
         Client::FlowBatch b; b.history = true; b.symbol = QString::fromStdString(request["symbol"]);
         b.timeframeMs = request["timeframe_ms"]; b.id = request["req"]; b.oldestMs = 0;
@@ -323,13 +338,18 @@ TEST(FlowSeriesBuffer, LossRefetchCannotOverwriteNewerLiveRevisionAndEmptyRefetc
     buffer.apply(empty, 30'002);
     EXPECT_TRUE(buffer.series(60'000)->bars.empty());
 }
-TEST(FlowBackfillState, PanningBackReRequestsEvictedCoverageAndCoalescesBuildingRefresh) {
+// A pan keeps coverage; only a trim reported by the series buffer forgets it.
+TEST(FlowBackfillState, PanningBackReRequestsTrimmedCoverageAndCoalescesBuildingRefresh) {
     FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 10'000);
     const auto first = state.next(0); ASSERT_TRUE(first);
     EXPECT_TRUE(state.accept(reply(*first, 0), 1));
     state.setWindow(20'000, 30'000);
     const auto second = state.next(101); ASSERT_TRUE(second);
     EXPECT_TRUE(state.accept(reply(*second, 20'000), 102));
+    EXPECT_TRUE(state.covers(0, 10'000)) << "panning away trims nothing";
+    state.uncover(10'000, INT64_MAX);
+    EXPECT_FALSE(state.covers(9000, 10'000));
+    EXPECT_TRUE(state.covers(20'000, 30'000));
     state.setWindow(0, 10'000);
     const auto again = state.next(202); ASSERT_TRUE(again);
     EXPECT_EQ(again->endMs, 9000);
@@ -339,19 +359,48 @@ TEST(FlowBackfillState, PanningBackReRequestsEvictedCoverageAndCoalescesBuilding
     const auto refresh = state.next(30'203); ASSERT_TRUE(refresh);
     EXPECT_EQ(refresh->endMs, 3000); EXPECT_EQ(refresh->limit, 2);
 }
-TEST(FlowSeriesBuffer, WindowEvictionAllowsOlderPagesInsteadOfKeepingOnlyNewestBars) {
+TEST(FlowSeriesBuffer, PanningAwayKeepsBarsUnderTheCapsAndAcceptsOlderPages) {
     FlowSeriesBuffer buffer;
-    buffer.retainWindow(60'000, 60'000, 120'000);
+    buffer.setView(60'000, 60'000, 120'000, 60'000, 120'000);
     buffer.apply(batch(bar(1, true)), 0);
     EXPECT_EQ(buffer.series(60'000)->bars.size(), 1u);
-    buffer.retainWindow(60'000, 0, 60'000);
-    EXPECT_TRUE(buffer.series(60'000)->bars.contains(60'000)); // bounded live tail
+    buffer.setView(60'000, 0, 60'000, 0, 60'000);
+    EXPECT_TRUE(buffer.series(60'000)->bars.contains(60'000));
+    EXPECT_FALSE(buffer.takeTrimmed(60'000));
     buffer.apply(batch(bar(1, true, Source::Live, 0)), 0);
     EXPECT_EQ(buffer.series(60'000)->bars.size(), 2u);
     buffer.apply(batch(bar(2, true)), 1);
     EXPECT_EQ(buffer.series(60'000)->bars.begin()->first, 0);
 }
 
+// A transport drop leaves the bucket Partial only until the stream delivers that bucket
+// again; Partial reported by the source itself stays until history resolves it.
+// History said Partial, then a transport drop and its recovery: the source's Partial stays.
+TEST(FlowSeriesBuffer, SourcePartialSurvivesADropAndItsRecovery) {
+    FlowSeriesBuffer buffer;
+    auto page = batch(bar(1, false), true);
+    page.ranges = {{60'000, 120'000, Status::Partial}};
+    buffer.apply(page, 0);
+    buffer.markDropped("BTC-USD", 60'000, 60'000);
+    buffer.markDropped("BTC-USD", 60'000, 60'000); // a second drop keeps the first underlying status
+    buffer.apply(batch(bar(2, false)), 1);
+    EXPECT_EQ(buffer.series(60'000)->coverage.at(60'000).status, Status::Partial);
+}
+TEST(FlowSeriesBuffer, TransportDropClearsOnALaterLiveFrameButSourcePartialStays) {
+    FlowSeriesBuffer buffer;
+    buffer.apply(batch(bar(1, false)), 0);
+    buffer.markDropped("BTC-USD", 60'000, 60'000);
+    const auto status = [&] { return buffer.series(60'000)->coverage.at(60'000).status; };
+    EXPECT_EQ(status(), Status::Partial);
+    buffer.apply(batch(bar(3, false)), 1);
+    EXPECT_EQ(status(), Status::Live) << "a later cumulative frame restores delivery";
+    buffer.markDropped("BTC-USD", 60'000, 60'000);
+    auto page = batch(bar(3, false), true);
+    page.ranges = {{60'000, 120'000, Status::Partial}};
+    buffer.apply(page, 2);
+    buffer.apply(batch(bar(4, false)), 3);
+    EXPECT_EQ(status(), Status::Partial) << "the source's own Partial is not a transport drop";
+}
 TEST(FlowSeriesBuffer, AdvancingSealRequestsStoreForLiveBucketsOutsideTheNewPage) {
     FlowSeriesBuffer buffer;
     buffer.apply(batch(bar(100, true)), 0);
@@ -408,21 +457,201 @@ TEST(FlowBackfillState, SlidingWindowRequestsOnlyOneUncoveredBucket) {
     EXPECT_EQ(edge->endMs, 600'000);
     EXPECT_EQ(edge->limit, 1);
 }
-// Before live delivery is armed the clock's edge covers nothing, but it still paces
-// edge pages (one per 5 s), as it did when the subscription armed it unconditionally.
-TEST(FlowBackfillState, UnarmedLiveEdgeCoversNothingButPacesEdgePages) {
-    FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
-    state.markLiveEdge(599'000);
+// Refused or quiet subscription (live not armed): history pages the older buckets first,
+// then samples the live bucket once per refresh interval, never as paced edge pages.
+TEST(FlowBackfillState, UnarmedLiveBucketIsSampledOnTheRefreshInterval) {
+    constexpr int64_t tf = 60'000, live = 1000 * tf, interval = FlowSeriesBuffer::kRefetchIntervalMs;
+    FlowBackfillState state; state.select("BTC-USD", tf);
+    state.setWindow(live - 10 * tf, live + 2 * tf);
+    state.markLiveEdge(live);
+    const auto history = state.next(0); ASSERT_TRUE(history);
+    EXPECT_EQ(history->endMs, live - tf) << "an unarmed edge is sampled, not paged";
+    EXPECT_EQ(history->limit, 10);
+    ASSERT_TRUE(state.accept(reply(*history, live - 10 * tf), 10));
+    const auto sample = state.next(110); ASSERT_TRUE(sample);
+    EXPECT_EQ(sample->endMs, live);
+    EXPECT_EQ(sample->limit, 1);
+    EXPECT_TRUE(sample->sample);
+    ASSERT_TRUE(state.accept(reply(*sample, live), 120));
+    EXPECT_TRUE(state.covers(live - 10 * tf, live + tf));
+    EXPECT_FALSE(state.next(220));
+    EXPECT_EQ(state.lastHold(), FlowBackfillState::Hold::Idle);
+    EXPECT_EQ(state.wakeAtMs(220), 110 + interval) << "the pager wakes for the next sample";
+    // The edge moves on: the new live bucket waits for the interval, and the bucket that
+    // closed is not paged on its own.
+    state.markLiveEdge(live + tf);
+    EXPECT_FALSE(state.next(5000));
+    EXPECT_EQ(state.lastHold(), FlowBackfillState::Hold::LiveSample);
+    EXPECT_EQ(state.liveSampleDueMs(), 110 + interval);
+    EXPECT_TRUE(state.workDue(5000));
+    const auto again = state.next(110 + interval); ASSERT_TRUE(again);
+    EXPECT_EQ(again->endMs, live + tf);
+    EXPECT_EQ(again->limit, 2) << "the closed bucket is sampled once more with the live one";
+}
+// The live seam: a view running past the live bucket never makes history name a later
+// bucket, armed or not, through pages, refreshes or seal probes.
+TEST(FlowBackfillState, NothingAfterTheLiveBucketIsRequested) {
+    constexpr int64_t tf = 60'000, live = 1000 * tf;
+    for (const bool armed : {false, true}) {
+        FlowBackfillState state; state.select("BTC-USD", tf);
+        state.setWindow(live - 100 * tf, live + 50 * tf);
+        state.markLiveEdge(live);
+        if (armed) state.observeLive(live, 0);
+        state.refresh(live + 2 * tf, 0);
+        int64_t newest = -1;
+        int sent = 0;
+        for (int64_t now = 0; now <= 70'000; now += 50) {
+            const auto request = state.next(now);
+            if (!request) continue;
+            ++sent;
+            newest = std::max(newest, request->endMs);
+            auto page = reply(*request, request->endMs - (request->limit - 1) * tf);
+            page.bars = {bar(1, false, Source::Live, request->endMs, tf)}; // provisional: arms the seal probe
+            ASSERT_TRUE(state.accept(page, now));
+        }
+        EXPECT_GT(sent, 2) << "armed=" << armed;
+        EXPECT_EQ(newest, armed ? live - tf : live) << "armed=" << armed;
+    }
+}
+// The logged stall (1h chart, live not armed): the view ran past the live bucket, the
+// newest gaps were empty buckets at and after the edge, and each empty edge reply held
+// the next page for 5 s while the older visible gap waited. It now goes out at once.
+TEST(FlowBackfillState, EmptyEdgeReplyDoesNotDelayTheOlderVisibleGap) {
+    constexpr int64_t tf = 3'600'000, live = 500'000 * tf;
+    FlowBackfillState state; state.select("BTC-USD", tf);
+    state.markLiveEdge(live);
+    state.setWindow(live - 5 * tf, live + tf);
     const auto first = state.next(0); ASSERT_TRUE(first);
-    EXPECT_EQ(first->endMs, 599'000) << "an unarmed edge is history's to page";
-    EXPECT_TRUE(state.accept(reply(*first, 88'000), 1));
-    state.setWindow(0, 601'000);
-    state.markLiveEdge(600'000);
-    EXPECT_FALSE(state.next(200)) << "the edge page waits for its 5 s pace";
-    EXPECT_EQ(state.wakeAtMs(200), 5000) << "the pager wakes for the held edge page";
-    const auto edge = state.next(5000); ASSERT_TRUE(edge);
-    EXPECT_EQ(edge->endMs, 600'000);
-    EXPECT_EQ(edge->limit, 1);
+    ASSERT_TRUE(state.accept(reply(*first, live - 5 * tf), 20));
+    for (int64_t now = 120; now < 1000; now += 100) {
+        if (const auto edge = state.next(now)) { // the empty edge reply
+            EXPECT_LE(edge->endMs, live);
+            ASSERT_TRUE(state.accept(reply(*edge, edge->endMs), now + 20));
+        }
+    }
+    // Pan to past the live bucket; older visible buckets are not loaded.
+    state.setWindow(live - 20 * tf, live + 4 * tf);
+    state.markLiveEdge(live);
+    std::optional<FlowBackfillState::Request> older;
+    for (int64_t now = 1000; now < 1300 && !older; now += 100) older = state.next(now);
+    ASSERT_TRUE(older) << "held: " << FlowBackfillState::holdName(state.lastHold());
+    EXPECT_EQ(older->endMs, live - 6 * tf);
+    EXPECT_EQ(older->limit, 15);
+}
+// Live armed: the stream owns the live bucket. Pages and seal probes stop before it; a
+// refresh of it (a reported loss) waits until the seam passes it.
+TEST(FlowBackfillState, ArmedLiveBucketIsNeverRequestedByHistory) {
+    constexpr int64_t tf = 60'000, live = 1000 * tf;
+    FlowBackfillState state; state.select("BTC-USD", tf);
+    state.setWindow(live - 10 * tf, live + 3 * tf);
+    state.markLiveEdge(live);
+    state.observeLive(live, 0);
+    state.refresh(live, 0);
+    std::vector<int64_t> ends;
+    for (int64_t now = 0; now <= 61'000; now += 100) {
+        if (const auto request = state.next(now)) {
+            ends.push_back(request->endMs);
+            auto page = reply(*request, request->endMs - (request->limit - 1) * tf);
+            page.bars = {bar(1, false, Source::Live, request->endMs, tf)};
+            ASSERT_TRUE(state.accept(page, now + 10));
+        }
+    }
+    ASSERT_GE(ends.size(), 3u) << "one page and two seal probes";
+    for (const auto end : ends) EXPECT_LT(end, live);
+    EXPECT_FALSE(state.workDue(61'000));
+    state.markLiveEdge(live + tf);
+    const auto closed = state.next(61'200); ASSERT_TRUE(closed);
+    EXPECT_EQ(closed->endMs, live) << "once closed, the bucket is history's";
+    EXPECT_TRUE(closed->refresh);
+}
+// A live sample that failed and waits for its retry: live arms meanwhile. The retry drops
+// the bucket that is now the stream's and keeps the closed bucket it also covered.
+TEST(FlowBackfillState, HeldSampleDropsItsNowLiveBucketWhenLiveArms) {
+    constexpr int64_t tf = 60'000, live = 1000 * tf, interval = FlowSeriesBuffer::kRefetchIntervalMs;
+    for (const bool withClosedBucket : {true, false}) {
+        FlowBackfillState state; state.select("BTC-USD", tf);
+        state.setWindow(live - 10 * tf, live + 2 * tf);
+        state.markLiveEdge(live);
+        const auto history = state.next(0); ASSERT_TRUE(history);
+        ASSERT_TRUE(state.accept(reply(*history, live - 10 * tf), 10));
+        int64_t now = 110, edge = live;
+        if (withClosedBucket) {
+            const auto first = state.next(now); ASSERT_TRUE(first); ASSERT_TRUE(first->sample);
+            ASSERT_TRUE(state.accept(reply(*first, live), now + 10));
+            edge = live + tf;
+            state.markLiveEdge(edge);
+            now += interval;
+        }
+        const auto sample = state.next(now); ASSERT_TRUE(sample);
+        ASSERT_TRUE(sample->sample);
+        ASSERT_EQ(sample->endMs, edge);
+        ASSERT_EQ(sample->limit, withClosedBucket ? 2 : 1);
+        ASSERT_TRUE(state.fail(sample->id, Client::FlowFailure::Retryable, now + 10));
+        state.observeLive(edge, now + 20);
+        const auto retry = state.next(now + 2000);
+        if (!withClosedBucket) {
+            EXPECT_FALSE(retry) << "only the now-live bucket was held: nothing to resend";
+            continue;
+        }
+        ASSERT_TRUE(retry);
+        EXPECT_EQ(retry->endMs, live) << "the closed bucket only";
+        EXPECT_EQ(retry->limit, 1);
+        EXPECT_FALSE(retry->sample);
+    }
+}
+// A refresh held at the armed seam names the bucket boundary to wake at, so it goes out
+// when the bucket closes even if no live frame or view change calls the pager.
+TEST(FlowBackfillState, RefreshHeldAtTheSeamWakesAtTheBucketBoundary) {
+    constexpr int64_t tf = 60'000, live = 1000 * tf;
+    FlowBackfillState state; state.select("BTC-USD", tf);
+    state.setWindow(live - 10 * tf, live + tf);
+    state.markLiveEdge(live);
+    state.observeLive(live, 0);
+    EXPECT_EQ(state.seamWakeWallMs(), 0) << "nothing waits on the seam";
+    const auto page = state.next(0); ASSERT_TRUE(page);
+    ASSERT_TRUE(state.accept(reply(*page, live - 10 * tf), 10));
+    state.refresh(live, 20);
+    EXPECT_FALSE(state.next(200));
+    EXPECT_EQ(state.wakeAtMs(200), FlowSeriesBuffer::kRefetchIntervalMs) << "only the seal probe's deadline";
+    EXPECT_EQ(state.seamWakeWallMs(), live + tf);
+    state.markLiveEdge(live + tf);
+    EXPECT_EQ(state.seamWakeWallMs(), 0);
+    const auto closed = state.next(300); ASSERT_TRUE(closed);
+    EXPECT_EQ(closed->endMs, live);
+    EXPECT_TRUE(closed->refresh);
+}
+// The wake is the close of the earliest deferred bucket, not every boundary before it.
+TEST(FlowBackfillState, SeamWakeIsTheCloseOfTheEarliestDeferredBucket) {
+    constexpr int64_t tf = 60'000, live = 1000 * tf;
+    FlowBackfillState state; state.select("BTC-USD", tf);
+    state.setWindow(live - 10 * tf, live + tf);
+    state.markLiveEdge(live);
+    state.observeLive(live, 0);
+    state.refresh(live + 3 * tf, 0);
+    EXPECT_EQ(state.seamWakeWallMs(), live + 4 * tf);
+    state.refresh(live, 0);
+    EXPECT_EQ(state.seamWakeWallMs(), live + tf);
+}
+// A live sample that failed waits for its retry; the view pans to older, unloaded history
+// meantime. The older gap goes first; the sample is taken again after it.
+TEST(FlowBackfillState, HeldSampleWaitsBehindOlderGapsAfterAPan) {
+    constexpr int64_t tf = 60'000, live = 1000 * tf;
+    FlowBackfillState state; state.select("BTC-USD", tf);
+    state.setWindow(live - 10 * tf, live + tf);
+    state.markLiveEdge(live);
+    const auto history = state.next(0); ASSERT_TRUE(history);
+    ASSERT_TRUE(state.accept(reply(*history, live - 10 * tf), 10));
+    const auto sample = state.next(110); ASSERT_TRUE(sample); ASSERT_TRUE(sample->sample);
+    ASSERT_TRUE(state.fail(sample->id, Client::FlowFailure::Retryable, 120));
+    state.setWindow(live - 30 * tf, live + tf);
+    const auto older = state.next(1200); ASSERT_TRUE(older);
+    EXPECT_FALSE(older->sample) << "the retry waited behind the older gap";
+    EXPECT_EQ(older->endMs, live - 11 * tf);
+    EXPECT_EQ(older->limit, 20);
+    ASSERT_TRUE(state.accept(reply(*older, live - 30 * tf), 1210));
+    const auto again = state.next(1400); ASSERT_TRUE(again);
+    EXPECT_TRUE(again->sample);
+    EXPECT_EQ(again->endMs, live);
 }
 TEST(FlowBackfillState, LiveCoveredEdgeDoesNotPageHistory) {
     FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
@@ -438,24 +667,33 @@ TEST(FlowBackfillState, LiveCoveredEdgeDoesNotPageHistory) {
     EXPECT_TRUE(probe->probe);
     EXPECT_EQ(probe->limit, 1);
 }
-TEST(FlowBackfillState, ReturningToTrimmedLiveIntervalPagesTheGap) {
-    FlowBackfillState state; state.select("BTC-USD", 60'000);
-    state.setWindow(9 * 3'600'000 + 40 * 60'000, 10 * 3'600'000 + 31 * 60'000);
-    state.beginLive(10 * 3'600'000);
-    for (int minute = 0; minute <= 30; ++minute)
-        state.markLiveEdge(10 * 3'600'000 + minute * 60'000);
-    state.setWindow(7 * 3'600'000, 9 * 3'600'000);
-    state.markLiveEdge(10 * 3'600'000 + 40 * 60'000);
-    state.setWindow(9 * 3'600'000 + 40 * 60'000, 10 * 3'600'000 + 41 * 60'000);
-    state.markLiveEdge(10 * 3'600'000 + 40 * 60'000);
-    auto first = state.next(0); ASSERT_TRUE(first);
-    EXPECT_EQ(first->endMs, 10 * 3'600'000 + 39 * 60'000);
-    EXPECT_EQ(first->limit, 9); // gap above the retained three-bucket tail
-    EXPECT_TRUE(state.accept(reply(*first, 10 * 3'600'000 + 31 * 60'000), 1));
-    auto older = state.next(101); ASSERT_TRUE(older);
-    EXPECT_EQ(older->endMs, 10 * 3'600'000 + 27 * 60'000);
-    EXPECT_LE(older->endMs - older->limit * 60'000, 10 * 3'600'000);
+// Coverage outside the window lasts until the series buffer trims those bars: returning
+// to a live interval pages only the minutes never loaded, and a reported trim again.
+TEST(FlowBackfillState, ReturningToALiveIntervalPagesOnlyWhatWasNotKept) {
+    constexpr int64_t hour = 3'600'000, minute = 60'000;
+    FlowBackfillState state; state.select("BTC-USD", minute);
+    state.setWindow(9 * hour + 40 * minute, 10 * hour + 31 * minute);
+    state.beginLive(10 * hour);
+    for (int m = 0; m <= 30; ++m) state.markLiveEdge(10 * hour + m * minute);
+    state.setWindow(7 * hour, 9 * hour);
+    state.markLiveEdge(10 * hour + 40 * minute);
+    state.setWindow(9 * hour + 40 * minute, 10 * hour + 41 * minute);
+    state.markLiveEdge(10 * hour + 40 * minute);
+    const auto first = state.next(0); ASSERT_TRUE(first);
+    EXPECT_EQ(first->endMs, 10 * hour + 39 * minute);
+    EXPECT_EQ(first->limit, 9) << "the minutes the edge passed while the view was away";
+    ASSERT_TRUE(state.accept(reply(*first, 10 * hour + 31 * minute), 1));
+    const auto older = state.next(101); ASSERT_TRUE(older);
+    EXPECT_EQ(older->endMs, 9 * hour + 59 * minute) << "the live interval stayed loaded";
+    ASSERT_TRUE(state.accept(reply(*older, 9 * hour + 40 * minute), 102));
+    EXPECT_FALSE(state.next(202));
+    state.uncover(10 * hour + 20 * minute, INT64_MAX);
+    const auto trimmed = state.next(302); ASSERT_TRUE(trimmed);
+    EXPECT_EQ(trimmed->endMs, 10 * hour + 19 * minute);
+    EXPECT_EQ(trimmed->limit, 40);
 }
+// A silent armed subscription: the clock alone advances the covered edge, and a view
+// running past it sends history nothing.
 TEST(FlowBackfillState, SilentSubscriptionCoversAdvancingEdge) {
     FlowBackfillState state; state.select("BTC-USD", 1000);
     state.setWindow(60'000, 61'000);
@@ -464,13 +702,13 @@ TEST(FlowBackfillState, SilentSubscriptionCoversAdvancingEdge) {
     for (int second = 0; second < 60; ++second) {
         state.setWindow(60'000, 61'000 + second * 1000);
         if (second % 5 == 0) state.markLiveEdge(60'000 + second * 1000);
-        if (second == 0) EXPECT_EQ(state.wakeAtMs(0), 5000);
         if (auto req = state.next(second * 1000)) {
             ++requests;
             EXPECT_TRUE(state.accept(reply(*req, req->endMs), second * 1000 + 1));
         }
     }
-    EXPECT_LE(requests, 13);
+    EXPECT_EQ(requests, 0);
+    EXPECT_TRUE(state.covers(60'000, 116'000));
 }
 TEST(FlowBackfillState, LongLiveSessionUsesOneSealProbePerInterval) {
     FlowBackfillState state; state.select("BTC-USD", 60'000); state.setWindow(0, 600'000);
@@ -486,7 +724,7 @@ TEST(FlowBackfillState, LongLiveSessionUsesOneSealProbePerInterval) {
         const auto probe = state.next(now); ASSERT_TRUE(probe);
         EXPECT_TRUE(probe->probe);
         EXPECT_EQ(probe->limit, 1);
-        EXPECT_EQ(probe->endMs, (10 + i) * 60'000);
+        EXPECT_EQ(probe->endMs, (9 + i) * 60'000) << "the live bucket is the stream's";
         auto b = reply(*probe, probe->endMs);
         b.bars = {bar(1, false, Source::Live, probe->endMs)};
         EXPECT_TRUE(state.accept(b, now + 1));
@@ -608,30 +846,44 @@ TEST(FlowBackfillState, OversizedCoalescedRefreshPreservesOlderBuckets) {
     EXPECT_EQ(older->endMs, 3000);
     EXPECT_EQ(older->limit, 4);
 }
-TEST(FlowSeriesBuffer, KeepsOnlyNewestThreeLiveBucketsBeyondViewport) {
-    FlowSeriesBuffer buffer;
-    buffer.retainWindow(60'000, 0, 120'000);
-    for (int i = 2; i <= 5; ++i) buffer.apply(batch(bar(1, false, Source::Live, i * 60'000)), i);
-    const auto* held = buffer.series(60'000); ASSERT_NE(held, nullptr);
-    ASSERT_EQ(held->bars.size(), 3u);
-    EXPECT_EQ(held->bars.begin()->first, 180'000);
-    buffer.retainWindow(60'000, 0, 360'000);
-    EXPECT_EQ(held->bars.size(), 3u);
-    EXPECT_TRUE(held->bars.contains(300'000));
-}
-
-TEST_F(FlowDataSourceTest, DroppedLiveFrameMarksPartialAndSchedulesOneBucketRefetch) {
-    ready(); select(); const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
-    const auto sub = sent[0]["sub"].get<quint64>();
-    client().flowLiveDropped(sub, "BTC-USD", 60'000, 60'000); deliver();
-    ASSERT_NE(source.flowBuffer().series(60'000), nullptr);
-    EXPECT_EQ(source.flowBuffer().series(60'000)->coverage.at(60'000).status, Status::Partial);
-    emitPage(sent[1]);
-    QEventLoop loop;
-    QTimer::singleShot(250, &loop, &QEventLoop::quit);
-    loop.exec(); // the pager's 100 ms send throttle must expire
-    const auto refetch = requests(); ASSERT_EQ(refetch.size(), 1u);
-    EXPECT_EQ(refetch[0]["end_time_ms"], 60'000);
+// A dropped frame on the forming bucket (1 s bars, live armed): no history request for it
+// while it is live, a later frame restores it, and once it closes its refresh goes out by
+// the pager's own boundary wake, with no further frame or view change.
+TEST_F(FlowDataSourceTest, DroppedLiveFrameRecoversAndRefreshesTheBucketAfterItCloses) {
+    constexpr int64_t tf = 1000;
+    QElapsedTimer align; align.start();
+    while (QDateTime::currentMSecsSinceEpoch() % tf > 100 && align.elapsed() < 2000) {}
+    const int64_t live = QDateTime::currentMSecsSinceEpoch() / tf * tf;
+    ready();
+    source.subscribeFlowLive("BTC-USD", tf);
+    const auto subscribe = requests(); ASSERT_EQ(subscribe.size(), 1u);
+    const auto sub = subscribe[0]["sub"].get<quint64>();
+    const auto frame = [&](uint32_t revision) {
+        auto b = batch(bar(revision, false, Source::Live, live, tf)); b.id = sub;
+        client().flowBarsReceived(std::make_shared<const Client::FlowBatch>(b)); deliver();
+    };
+    frame(1);
+    source.requestFlowHistory("BTC-USD", tf, live - 10 * tf, live + tf);
+    const auto page = requests(); ASSERT_EQ(page.size(), 1u);
+    EXPECT_EQ(page[0]["end_time_ms"], live - tf);
+    emitPage(page[0]);
+    client().flowLiveDropped(sub, "BTC-USD", tf, live); deliver();
+    const auto status = [&] { return source.flowBuffer().series(tf)->coverage.at(live).status; };
+    EXPECT_EQ(status(), Status::Partial);
+    settle(150);
+    if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a second boundary";
+    EXPECT_TRUE(requests().empty()) << "the live bucket is the stream's";
+    frame(2);
+    EXPECT_EQ(status(), Status::Live) << "a later frame restores delivery";
+    QElapsedTimer clock; clock.start();
+    std::vector<Json> refetch;
+    while (refetch.empty() && clock.elapsed() < 2500) {
+        settle(50);
+        refetch = requests();
+    }
+    ASSERT_EQ(refetch.size(), 1u) << "the pager wakes when the bucket closes";
+    EXPECT_GE(QDateTime::currentMSecsSinceEpoch(), live + tf);
+    EXPECT_EQ(refetch[0]["end_time_ms"], live);
     EXPECT_EQ(refetch[0]["limit"], 1);
 }
 
@@ -678,12 +930,21 @@ TEST_F(FlowDataSourceTest, RefusedSubscriptionLeavesTheLiveEdgeToHistory) {
     if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
     const auto page = requests(); ASSERT_EQ(page.size(), 1u);
     EXPECT_EQ(page[0]["type"], "flow_history_request");
-    EXPECT_EQ(page[0]["end_time_ms"], live) << "the undelivered live bucket must be paged";
+    EXPECT_EQ(page[0]["end_time_ms"], live - tf) << "older buckets first";
+    emitPage(page[0]);
+    settle();
+    if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
+    const auto sample = requests(); ASSERT_EQ(sample.size(), 1u);
+    EXPECT_EQ(sample[0]["end_time_ms"], live) << "the undelivered live bucket is sampled";
+    EXPECT_EQ(sample[0]["limit"], 1);
+    emitPage(sample[0]);
+    settle();
+    EXPECT_TRUE(requests().empty());
+    EXPECT_GT(flowDelay(), FlowSeriesBuffer::kRefetchIntervalMs - 1000) << "next sample after the refresh interval";
+    EXPECT_LE(flowDelay(), FlowSeriesBuffer::kRefetchIntervalMs);
 }
-// A symbol switch with the view running past the live edge (follow live): one page covers
-// the future buckets, the live bucket and the history below it. With the live bucket
-// covered at subscribe, the first page held only the empty buckets above it and the
-// history below waited for the 5 s edge pace (one footprint column for ~5 s, W-0178).
+// A symbol switch with the view running past the live edge (follow live): the first page
+// is the history below the live bucket, never the empty buckets after it.
 TEST_F(FlowDataSourceTest, SwitchPagesHistoryBelowTheLiveEdgeInTheFirstPage) {
     constexpr int64_t tf = 60'000;
     ready();
@@ -692,35 +953,34 @@ TEST_F(FlowDataSourceTest, SwitchPagesHistoryBelowTheLiveEdgeInTheFirstPage) {
     source.requestFlowHistory("ETH-USD", tf, live - 30 * tf, live + 3 * tf);
     if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
     const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
-    EXPECT_EQ(sent[1]["end_time_ms"], live + 2 * tf);
-    EXPECT_EQ(sent[1]["limit"], 66) << "one page reaches the window start (one-view margin included)";
+    EXPECT_EQ(sent[1]["end_time_ms"], live - tf);
+    EXPECT_EQ(sent[1]["limit"], 63) << "one page reaches the window start (one-view margin included)";
 }
-// A quiet (or refused) subscription: no live frame arms coverage. A bucket that enters
-// the view inside the edge pace must still be paged when the pace ends, by the pager's
-// own timer, with no further viewport change or live delivery.
-TEST_F(FlowDataSourceTest, PacedEdgePageFiresOnItsOwnBeforeLiveArrives) {
-    constexpr int64_t tf = 60'000;
+// Panning keeps what was loaded: a pan right then back left by one screen sends no page
+// for the buckets that stayed in the padding.
+TEST_F(FlowDataSourceTest, PanRightThenLeftKeepsPaddingWithoutRefetch) {
+    constexpr int64_t tf = 60'000, screen = 60 * tf, start = 1000 * tf;
     ready();
-    const int64_t live = QDateTime::currentMSecsSinceEpoch() / tf * tf;
-    source.subscribeFlowLive("ETH-USD", tf);
-    source.requestFlowHistory("ETH-USD", tf, live - 30 * tf, live + tf);
-    const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
-    emitPage(sent[1]); // covers the window; no provisional bars, no building ranges
-    source.requestFlowHistory("ETH-USD", tf, live - 29 * tf, live + 2 * tf);
-    if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
-    EXPECT_TRUE(requests().empty()) << "the new bucket waits for the 5 s edge pace";
-    QElapsedTimer clock; clock.start();
-    std::vector<Json> page;
-    while (page.empty() && clock.elapsed() < 8000) {
-        QEventLoop loop;
-        QTimer::singleShot(50, &loop, &QEventLoop::quit);
-        loop.exec();
-        page = requests();
-    }
-    ASSERT_EQ(page.size(), 1u) << "the pager must wake for the paced edge page";
-    EXPECT_EQ(page[0]["end_time_ms"], live + tf);
-    EXPECT_EQ(page[0]["limit"], 1);
-    EXPECT_GE(clock.elapsed(), 4000) << "and only once the pace has passed";
+    source.subscribeFlowLive("BTC-USD", tf);
+    source.requestFlowHistory("BTC-USD", tf, start, start + screen);
+    auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
+    ASSERT_EQ(sent[1]["end_time_ms"], start + screen - tf);
+    ASSERT_EQ(sent[1]["limit"], 120) << "the view and its one-screen margin";
+    emitStored(sent[1]);
+    settle();
+    source.requestFlowHistory("BTC-USD", tf, start + screen, start + 2 * screen);
+    settle();
+    sent = requests(); ASSERT_EQ(sent.size(), 1u);
+    EXPECT_EQ(sent[0]["end_time_ms"], start + 2 * screen - tf);
+    EXPECT_EQ(sent[0]["limit"], 60);
+    emitStored(sent[0]);
+    settle();
+    source.requestFlowHistory("BTC-USD", tf, start, start + screen);
+    settle();
+    EXPECT_TRUE(requests().empty()) << "the margin left of the first view stayed loaded";
+    const auto* series = source.flowBuffer().series(tf); ASSERT_NE(series, nullptr);
+    EXPECT_EQ(series->bars.size(), 180u);
+    EXPECT_EQ(series->bars.begin()->first, start - screen);
 }
 TEST_F(FlowDataSourceTest, DeliveredLiveFrameCoversTheLiveEdge) {
     constexpr int64_t tf = 60'000;
@@ -735,6 +995,9 @@ TEST_F(FlowDataSourceTest, DeliveredLiveFrameCoversTheLiveEdge) {
     if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
     const auto page = requests(); ASSERT_EQ(page.size(), 1u);
     EXPECT_EQ(page[0]["end_time_ms"], live - tf) << "live delivery covers its own bucket";
+    emitPage(page[0]);
+    settle();
+    EXPECT_TRUE(requests().empty()) << "and history never asks for it";
 }
 
 TEST(FlowSeriesBuffer, RefusedHistoryDoesNotRetreatSealWatermark) {
@@ -785,13 +1048,13 @@ TEST_F(FlowDataSourceTest, CvdResetAnchorRequestsAndRetainsMidnightAcrossPans) {
     EXPECT_EQ(source.flowBuffer().series(tf)->bars.begin()->first, 0);
     chart::CvdFeed::build(snapshot, *source.flowBuffer().series(tf), cvdFrame(tf, 13 * hour, 16 * hour), chart::CvdReset::UtcDay, 4);
     EXPECT_EQ(snapshot.series.points[0].value, 781); EXPECT_STREQ(snapshot.label.data(), "CVD since UTC day");
-    // Off has exactly the original one-span margin and retires the extra history.
+    // Off pages exactly the original one-span margin; the loaded history stays under the caps.
     source.requestFlowHistory("BTC-USD", tf, 12 * hour, 15 * hour,
         chart::cvdHistoryAnchor(12 * hour, tf, 0, chart::CvdReset::UtcDay, 4));
-    EXPECT_EQ(flowStart(), 9 * hour); EXPECT_EQ(source.flowBuffer().series(tf)->bars.begin()->first, 9 * hour);
+    EXPECT_EQ(flowStart(), 9 * hour); EXPECT_EQ(source.flowBuffer().series(tf)->bars.begin()->first, 0);
     source.requestFlowHistory("BTC-USD", tf, 12 * hour, 15 * hour,
         chart::cvdHistoryAnchor(12 * hour, tf, 96, chart::CvdReset::Visible, 4));
-    EXPECT_EQ(flowStart(), 9 * hour); EXPECT_EQ(source.flowBuffer().series(tf)->bars.begin()->first, 9 * hour);
+    EXPECT_EQ(flowStart(), 9 * hour); EXPECT_EQ(source.flowBuffer().series(tf)->bars.begin()->first, 0);
 }
 TEST_F(FlowDataSourceTest, CvdSecondBarsRespectCapAndLabelActualLoadedTime) {
     constexpr int64_t hour = 3600000, tf = 1000;
@@ -806,16 +1069,89 @@ TEST_F(FlowDataSourceTest, CvdSecondBarsRespectCapAndLabelActualLoadedTime) {
     chart::CvdFeed::build(snapshot, *series, cvdFrame(tf, 12 * hour, 15 * hour), chart::CvdReset::UtcDay, 4);
     EXPECT_STREQ(snapshot.label.data(), "CVD since 12:43 loaded");
 }
-TEST(FlowSeriesBuffer, RetentionKeepsCoverageCrossingAnAnchor) {
-    FlowSeriesBuffer buffer;
+// A trim that cuts through a coverage range keeps the proof of the part it keeps.
+TEST(FlowSeriesBuffer, RetentionKeepsCoverageCrossingTheCut) {
+    FlowSeriesBuffer buffer(0);
+    buffer.setView(60000, 3600000, 7200000, 1800000, 7200000);
     buffer.setCoverage("BTC-USD", 60000, {0, 3600000, Status::Complete});
-    buffer.retainWindow(60000, 1800000, 7200000);
+    buffer.apply(batch(bar(1, true, Source::Store, 1740000)), 0);
     const auto* series = buffer.series(60000);
     ASSERT_NE(series, nullptr); ASSERT_EQ(series->coverage.size(), 1u);
+    EXPECT_TRUE(series->bars.empty());
     EXPECT_EQ(series->coverage.begin()->second.fromMs, 1800000);
     EXPECT_EQ(series->coverage.begin()->second.toMs, 3600000);
+    const auto trim = buffer.takeTrimmed(60000); ASSERT_TRUE(trim);
+    EXPECT_EQ(trim->belowMs, 1800000);
+    EXPECT_EQ(trim->fromMs, INT64_MAX);
 }
-
+namespace {
+Client::FlowRecord sizedBar(int64_t start, int64_t tf, size_t rows = 100) {
+    auto record = bar(1, true, Source::Store, start, tf);
+    record.bar.rows.resize(rows);
+    record.bar.rows.shrink_to_fit();
+    return record;
+}
+Client::FlowBatch storedPage(int64_t tf, int64_t fromBucket, int64_t toBucket) {
+    Client::FlowBatch b; b.symbol = "BTC-USD"; b.timeframeMs = tf; b.history = true;
+    for (int64_t i = fromBucket; i < toBucket; ++i) b.bars.push_back(sizedBar(i * tf, tf));
+    return b;
+}
+size_t bytesOutside(const FlowSeriesBuffer::Series& series, int64_t keepFrom, int64_t keepTo) {
+    size_t bytes = 0;
+    for (const auto& [start, record] : series.bars)
+        if (start < keepFrom || start >= keepTo) bytes += FlowSeriesBuffer::approxBarBytes(record);
+    return bytes;
+}
+}
+// Bytes outside the kept span are capped; the trim takes the side farther from the view.
+TEST(FlowSeriesBuffer, ByteCapTrimsTheFarSideFirst) {
+    constexpr int64_t tf = 60'000;
+    const size_t each = FlowSeriesBuffer::approxBarBytes(sizedBar(0, tf));
+    FlowSeriesBuffer buffer(40 * each);
+    buffer.setView(tf, 100 * tf, 110 * tf, 90 * tf, 110 * tf); // padding [80, 130)
+    buffer.apply(storedPage(tf, 0, 130), 0); // 90 bars before the kept span, 20 after it
+    const auto* series = buffer.series(tf); ASSERT_NE(series, nullptr);
+    EXPECT_LE(bytesOutside(*series, 90 * tf, 110 * tf), 40 * each);
+    EXPECT_EQ(series->bars.size(), 60u);
+    EXPECT_EQ(series->bars.begin()->first, 70 * tf) << "the 70 farthest bars were all older";
+    EXPECT_EQ(series->bars.rbegin()->first, 129 * tf) << "the nearer side kept everything";
+    const auto trim = buffer.takeTrimmed(tf); ASSERT_TRUE(trim);
+    EXPECT_EQ(trim->belowMs, 70 * tf);
+    EXPECT_EQ(trim->fromMs, INT64_MAX);
+    EXPECT_FALSE(buffer.takeTrimmed(tf)) << "a trim is reported once";
+    buffer.setView(tf, 101 * tf, 111 * tf, 91 * tf, 111 * tf);
+    EXPECT_FALSE(buffer.takeTrimmed(tf)) << "a pan under the cap trims nothing";
+}
+TEST(FlowSeriesBuffer, PaddingIsTwoScreensEachSideAndFourTowardThePan) {
+    constexpr int64_t tf = 60'000;
+    FlowSeriesBuffer buffer;
+    buffer.setView(tf, 100 * tf + 30'000, 110 * tf + 30'000, 90 * tf, 111 * tf);
+    auto pad = buffer.padding(tf); ASSERT_TRUE(pad);
+    EXPECT_EQ(pad->fromMs, 80 * tf) << "rounded out to whole buckets";
+    EXPECT_EQ(pad->toMs, 131 * tf);
+    EXPECT_EQ(pad->panDirection, 0);
+    buffer.setView(tf, 110 * tf, 120 * tf, 100 * tf, 120 * tf); // pan right
+    pad = buffer.padding(tf);
+    EXPECT_EQ(pad->panDirection, 1); EXPECT_EQ(pad->fromMs, 90 * tf); EXPECT_EQ(pad->toMs, 160 * tf);
+    buffer.setView(tf, 105 * tf, 125 * tf, 85 * tf, 125 * tf); // zoom out about the same centre
+    pad = buffer.padding(tf);
+    EXPECT_EQ(pad->panDirection, 1); EXPECT_EQ(pad->fromMs, 65 * tf); EXPECT_EQ(pad->toMs, 205 * tf);
+    buffer.setView(tf, 95 * tf, 115 * tf, 75 * tf, 115 * tf); // pan left
+    pad = buffer.padding(tf);
+    EXPECT_EQ(pad->panDirection, -1); EXPECT_EQ(pad->fromMs, 15 * tf); EXPECT_EQ(pad->toMs, 155 * tf);
+    // After a pan right the newer side has twice the padding, so it keeps more under the cap.
+    const size_t each = FlowSeriesBuffer::approxBarBytes(sizedBar(0, tf));
+    FlowSeriesBuffer capped(40 * each);
+    capped.setView(tf, 100 * tf, 110 * tf, 90 * tf, 110 * tf);
+    capped.setView(tf, 110 * tf, 120 * tf, 100 * tf, 120 * tf);
+    capped.apply(storedPage(tf, 60, 160), 0); // 40 bars outside on each side
+    const auto* series = capped.series(tf); ASSERT_NE(series, nullptr);
+    EXPECT_LE(bytesOutside(*series, 100 * tf, 120 * tf), 40 * each);
+    const auto older = std::distance(series->bars.begin(), series->bars.lower_bound(100 * tf));
+    const auto newer = std::distance(series->bars.lower_bound(120 * tf), series->bars.end());
+    EXPECT_EQ(older + newer, 40);
+    EXPECT_GT(newer, 3 * older) << "older=" << older << " newer=" << newer;
+}
 // The retention warning counts the buckets a window touches with the backfill's own
 // endpoints, so it fires exactly when the backfill window drops the oldest bucket.
 TEST(FlowSeriesBufferCapacity, TouchedBucketsMatchWhatBackfillRetains) {
@@ -838,7 +1174,7 @@ TEST(FlowSeriesBufferCapacity, TouchedBucketsMatchWhatBackfillRetains) {
         backfill.select("BTC-USD", tf);
         backfill.setWindow(w.start, w.end);
         FlowSeriesBuffer buffer;
-        buffer.retainWindow(tf, backfill.windowStartMs(), backfill.windowEndMs());
+        buffer.setView(tf, w.start, w.end, backfill.windowStartMs(), backfill.windowEndMs());
         FlowSeriesBuffer::Batch batch;
         batch.symbol = "BTC-USD"; batch.timeframeMs = tf; batch.history = true;
         for (int64_t t = w.start / tf * tf; t < w.end; t += tf) {
@@ -930,19 +1266,7 @@ TEST(FlowBackfillState, HoldNamesWhyADuePageWasNotSent) {
     EXPECT_EQ(state.lastHold(), Hold::Idle);
     EXPECT_FALSE(state.workDue(1300));
     EXPECT_TRUE(state.covers(0, 600'000));
-    EXPECT_STREQ(FlowBackfillState::holdName(Hold::EdgeThrottle), "edge_throttle_5s");
-}
-TEST(FlowBackfillState, HoldNamesTheFiveSecondEdgeThrottle) {
-    FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
-    state.markLiveEdge(599'000);
-    const auto first = state.next(0); ASSERT_TRUE(first);
-    EXPECT_TRUE(state.accept(reply(*first, 0), 1));
-    state.setWindow(0, 601'000);
-    state.markLiveEdge(600'000);
-    EXPECT_FALSE(state.next(200));
-    EXPECT_EQ(state.lastHold(), FlowBackfillState::Hold::EdgeThrottle);
-    EXPECT_TRUE(state.workDue(200));
-    EXPECT_EQ(state.nextEdgePageMs(), 5000);
+    EXPECT_STREQ(FlowBackfillState::holdName(Hold::LiveSample), "live_sample_interval");
 }
 TEST(FlowFillTracker, ReportsOneFillPerUncoveredWaitWithPagesAndBothDelays) {
     FlowFillTracker tracker;
