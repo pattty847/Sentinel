@@ -80,6 +80,8 @@ public:
                     int64_t previousBand = 0);
     static bool bin(FlowSnapshot&, const FlowSeriesBuffer::Series&, const MappingFrameContext&);
     static FlowSnapshot::WindowState windowState(const FlowSeriesBuffer::Series&, const MappingFrameContext&);
+    // flow.timing: a hash of every published column and cell field (probe only).
+    static uint64_t contentSignature(const FlowSnapshot&);
 private:
     void selectSymbol();
     void withdraw();

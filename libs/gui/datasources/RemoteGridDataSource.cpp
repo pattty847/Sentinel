@@ -743,6 +743,7 @@ void RemoteGridDataSource::requestNextFlowPage() {
         sLog_Warning("Flow history page timed out: symbol=" << m_flowSymbol << " tfMs=" << m_flowTimeframeMs);
     const auto request = m_flowBackfill.next(now);
     m_flowTimer.stop();
+    bool sent = false;
     if (request) {
         if (!symbolPermitted(request->symbol.toStdString(), "flow history"))
             m_flowBackfill.refuseSelection();
@@ -751,14 +752,17 @@ void RemoteGridDataSource::requestNextFlowPage() {
                        << " tfMs=" << request->timeframeMs << " end=" << request->endMs << " limit=" << request->limit);
             m_client.requestFlowHistory(request->id, request->symbol.toStdString(), request->timeframeMs,
                                         request->endMs, request->limit);
-            m_flowProbe.sent(*request, now);
+            sent = true;
         }
-    } else {
-        m_flowProbe.held(m_flowBackfill, now);
     }
-    if (m_flowProbe.on()) m_flowProbe.recheck(m_flowBackfill, m_flowBuffer, now, QDateTime::currentMSecsSinceEpoch());
     if (const auto at = m_flowBackfill.wakeAtMs(now); at > now) {
         m_flowTimer.start(int(std::min<int64_t>(at - now, INT_MAX)));
+    }
+    // Probe work last: it never delays a request or the wake timer.
+    if (m_flowProbe.on()) {
+        if (sent) m_flowProbe.sent(*request, now);
+        else if (!request) m_flowProbe.held(m_flowBackfill, now);
+        m_flowProbe.recheck(m_flowBackfill, m_flowBuffer, now, QDateTime::currentMSecsSinceEpoch());
     }
 }
 

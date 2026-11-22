@@ -33,6 +33,7 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -102,7 +103,7 @@ std::vector<uint8_t> readAll(const fs::path& path) {
 
 struct PageStats {
     int64_t fromMs = 0, toMs = 0;
-    int days = 0, missingDays = 0, buckets = 0;
+    int days = 0, missingDays = 0, buckets = 0, firstTouchDays = 0;
     size_t bytesRead = 0, barsIn = 0, barsOut = 0, rowsOut = 0, encodedBytes = 0, envelopeBytes = 0;
     size_t summaryBytes = 0;
     double readMs = 0, decodeMs = 0, validateMs = 0, composeMs = 0, encodeMs = 0, jsonMs = 0, envelopeMs = 0;
@@ -144,8 +145,10 @@ std::string rangeStatus(const Json& ranges) {
 // flow_history::buildPage: one hourly store range per hour (complete for a day
 // file on disk, unrecorded for a missing day), then per requested bucket its
 // range status, range and bar metadata, and composition of the bucket's bars.
+// indexed: days whose index this run already loaded. The server caches
+// indexFor(symbol, day) for the life of the process, so only a first touch pays.
 void pageDay(PageStats& s, Json& header, std::vector<flow::FlowBar>& out, const fs::path& path,
-             int64_t from, int64_t to, int64_t tf) {
+             int64_t from, int64_t to, int64_t tf, std::set<fs::path>& indexed) {
     std::map<int64_t, std::vector<std::pair<flow::FlowBar, uint32_t>>> buckets;
     const bool present = fs::exists(path);
     if (present) {
@@ -160,7 +163,10 @@ void pageDay(PageStats& s, Json& header, std::vector<flow::FlowBar>& out, const 
         start = Clock::now();
         if (flow::encodeFlowDay(day) != bytes) throw std::runtime_error("day re-encode differs " + path.string());
         s.validateMs += msSince(start);
-        indexLoad(s, path, bytes);
+        if (indexed.insert(path).second) {
+            indexLoad(s, path, bytes);
+            ++s.firstTouchDays;
+        }
         for (size_t i = 0; i < day.bars.size(); ++i) {
             auto& bar = day.bars[i];
             if (bar.startMs >= from && bar.startMs < to)
@@ -221,7 +227,8 @@ void pageDay(PageStats& s, Json& header, std::vector<flow::FlowBar>& out, const 
     s.jsonMs += msSince(start) - composeMs;
 }
 
-PageStats page(const fs::path& root, const std::string& symbol, int64_t endMs, int64_t tf, int64_t firstDayMs) {
+PageStats page(const fs::path& root, const std::string& symbol, int64_t endMs, int64_t tf, int64_t firstDayMs,
+               std::set<fs::path>& indexed) {
     PageStats s;
     s.toMs = endMs / tf * tf;
     s.fromMs = std::max(s.toMs - PageBars * tf, firstDayMs / tf * tf);
@@ -231,7 +238,8 @@ PageStats page(const fs::path& root, const std::string& symbol, int64_t endMs, i
     std::vector<flow::FlowBar> composed;
     // The server bounds source memory to one UTC day per buildPage call.
     for (int64_t day = s.fromMs / Day * Day; day < s.toMs; day += Day)
-        pageDay(s, header, composed, dayPath(root, symbol, day), std::max(s.fromMs, day), std::min(s.toMs, day + Day), tf);
+        pageDay(s, header, composed, dayPath(root, symbol, day), std::max(s.fromMs, day), std::min(s.toMs, day + Day), tf,
+                indexed);
     auto start = Clock::now();
     std::vector<std::vector<uint8_t>> frames;
     frames.reserve(composed.size());
@@ -269,7 +277,7 @@ void printPage(const std::string& symbol, int64_t tf, int pass, const PageStats&
               << " envelope_ms=" << s.envelopeMs << " measured_subset_ms=" << s.subsetMs()
               << " bars_in=" << s.barsIn << " bars_out=" << s.barsOut << " rows_out=" << s.rowsOut
               << " encoded_bytes=" << s.encodedBytes << " envelope_bytes=" << s.envelopeBytes
-              << " first_touch_index_ms=" << s.indexLoadMs
+              << " first_touch_days=" << s.firstTouchDays << " first_touch_index_ms=" << s.indexLoadMs
               << " summary_bytes=" << s.summaryBytes << " summary_ms=" << s.summaryMs
               << " summary_share=" << (s.envelopeBytes ? double(s.summaryBytes) / double(s.envelopeBytes) : 0.0) << '\n';
 }
@@ -371,12 +379,15 @@ int main(int argc, char** argv) {
                      "with one hourly store range per hour. Not included: FlowStore::window index stamp checks, "
                      "sourceState journal inventory, sealedThroughMs gating, the live RAM merge, history pool "
                      "queueing and the wire send. first_touch_index_ms (FlowStore::loadIndex: .state read, SHA-256, "
-                     "validated decode) is paid once per day per server process and is reported separately; "
+                     "validated decode) is paid once per day per server process: it is charged to the first page in this run that touches the day "
+                     "(later pages and passes report 0) and is reported separately; "
                      "summary_ms is the footer-only pass, also outside the subset.\n";
         std::cout << "fld1_root=" << root.string() << " symbol=" << symbol << " end_ms=" << endMs
                   << " first_day=" << dayName(*first) << " page_bars=" << PageBars << '\n';
+        std::set<fs::path> indexed; // one server process: each day's index loads once for the whole run
         for (const int64_t tf : {Minute, Hour, Day})
-            for (int pass = 1; pass <= passes; ++pass) printPage(symbol, tf, pass, page(root, symbol, endMs, tf, *first));
+            for (int pass = 1; pass <= passes; ++pass)
+                printPage(symbol, tf, pass, page(root, symbol, endMs, tf, *first, indexed));
         if (journal && journalDayMs) journalDay(*journal, root, symbol, *journalDayMs);
         return 0;
     } catch (const std::exception& e) {

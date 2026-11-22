@@ -1032,3 +1032,32 @@ TEST_F(FlowDataSourceTest, TimingProbeKeepsTheFirstPageOfANewSelection) {
     ASSERT_NE(id, 0u);
     EXPECT_GE(flowRtt(id), 0);
 }
+// flow.timing reports a build when its published content changes, even when
+// every count stays the same.
+TEST(FeedTiming, CvdSignatureFollowsFooterDeltaAtTheSameVolume) {
+    auto first = std::make_unique<chart::CvdSnapshot>();
+    first->series.count = 1;
+    first->series.points[0] = {60'000, 60'000, 0.0, 60'000}; // visible reset: the first point stays zero
+    first->totals[0] = {2.0, 10.0, true};
+    auto same = std::make_unique<chart::CvdSnapshot>(*first);
+    EXPECT_EQ(chart::CvdFeed::contentSignature(*first), chart::CvdFeed::contentSignature(*same));
+    auto flipped = std::make_unique<chart::CvdSnapshot>(*first);
+    flipped->totals[0].delta = -2.0; // buy/sell mix changed, volume did not
+    EXPECT_NE(chart::CvdFeed::contentSignature(*first), chart::CvdFeed::contentSignature(*flipped));
+}
+TEST(FeedTiming, FootprintSignatureFollowsACellThatMovesAtTheSameVolume) {
+    auto first = std::make_unique<chart::FlowSnapshot>();
+    first->barCount = 1;
+    first->cellCount = 1;
+    first->bars[0].startMs = 60'000;
+    first->bars[0].cellCount = 1;
+    first->cells[0] = {100, 1, 5, 7};
+    auto same = std::make_unique<chart::FlowSnapshot>(*first);
+    EXPECT_EQ(chart::FlowFeed::contentSignature(*first), chart::FlowFeed::contentSignature(*same));
+    auto moved = std::make_unique<chart::FlowSnapshot>(*first);
+    moved->cells[0].row = 101;
+    EXPECT_NE(chart::FlowFeed::contentSignature(*first), chart::FlowFeed::contentSignature(*moved));
+    auto widened = std::make_unique<chart::FlowSnapshot>(*first);
+    widened->cells[0].span = 2;
+    EXPECT_NE(chart::FlowFeed::contentSignature(*first), chart::FlowFeed::contentSignature(*widened));
+}

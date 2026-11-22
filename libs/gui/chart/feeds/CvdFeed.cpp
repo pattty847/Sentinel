@@ -133,6 +133,18 @@ void CvdFeed::receive(SentinelStreamClient::FlowBatchPtr batch) {
     buffer_.receive(*batch);
     onFrameChanged();
 }
+uint64_t CvdFeed::contentSignature(const CvdSnapshot& out) {
+    uint64_t signature = FeedTiming::mix(0, out.series.count);
+    for (int i = 0; i < out.series.count; ++i) {
+        const auto& point = out.series.points[size_t(i)];
+        const auto& totals = out.totals[size_t(i)];
+        signature = FeedTiming::mix(FeedTiming::mix(signature, point.timeMs), point.resetMs);
+        signature = FeedTiming::mix(FeedTiming::mixValue(signature, point.value), point.loadedFromMs);
+        signature = FeedTiming::mixValue(FeedTiming::mixValue(signature, totals.delta), totals.volume);
+        signature = FeedTiming::mix(signature, totals.valid);
+    }
+    return signature;
+}
 // flow.timing: one line per change of the bars the strip and footer use.
 void CvdFeed::reportTiming(const FlowSeriesBuffer::Series* series, const MappingFrameContext& frame) {
     if (!timing_.on()) return;
@@ -144,13 +156,7 @@ void CvdFeed::reportTiming(const FlowSeriesBuffer::Series* series, const Mapping
     signature = FeedTiming::mix(signature, int64_t(out.reset));
     signature = FeedTiming::mix(signature, FeedTiming::bucket(frame.raster.drawnStartMs, tf));
     signature = FeedTiming::mix(signature, FeedTiming::bucket(frame.raster.drawnEndMs, tf));
-    signature = FeedTiming::mix(signature, out.series.count);
-    signature = FeedTiming::mix(signature, totals);
-    // Content, so a live bar whose delta or volume changes is a new build.
-    for (int i = 0; i < out.series.count; ++i) {
-        signature = FeedTiming::mixValue(signature, out.series.points[size_t(i)].value);
-        signature = FeedTiming::mixValue(signature, out.totals[size_t(i)].volume);
-    }
+    signature = FeedTiming::mix(signature, contentSignature(out));
     signature = FeedTiming::mix(signature, series ? int64_t(series->bars.size()) : -1);
     const double ms = timing_.finish(signature);
     if (ms < 0) return;

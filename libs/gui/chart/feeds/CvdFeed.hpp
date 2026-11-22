@@ -75,6 +75,8 @@ public:
     void publish();
     int64_t historyAnchor(int64_t start, int64_t timeframe) const;
     static void build(CvdSnapshot&, const FlowSeriesBuffer::Series&, const MappingFrameContext&, CvdReset, int sessionType);
+    // flow.timing: a hash of every published point and footer field (probe only).
+    static uint64_t contentSignature(const CvdSnapshot&);
 private:
     void selectSymbol();
     void reportTiming(const FlowSeriesBuffer::Series*, const MappingFrameContext&);
