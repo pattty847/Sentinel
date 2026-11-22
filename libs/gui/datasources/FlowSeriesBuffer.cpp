@@ -102,9 +102,14 @@ std::vector<int64_t> FlowSeriesBuffer::apply(const Batch& batch, int64_t nowMs) 
             !(in.complete && !held->second.complete)) continue;
         if (merge(held == s.bars.end() ? nullptr : &held->second, in, m_sealedThroughMs) == Merge::Replace) {
             s.bars[start] = in;
-            if (!batch.history && in.source == Source::Live && s.dropped.erase(start) && !s.losses.contains(start)) {
-                s.coverage[start] = {start, start + batch.timeframeMs, Status::Live}; // delivery recovered
-            } else if (!batch.history && in.source == Source::Live) {
+            // Delivery recovered: the coverage the drop mark replaced comes back first.
+            if (const auto drop = s.dropped.find(start); !batch.history && in.source == Source::Live &&
+                drop != s.dropped.end() && !s.losses.contains(start)) {
+                if (drop->second) s.coverage[start] = *drop->second;
+                else s.coverage.erase(start);
+                s.dropped.erase(drop);
+            }
+            if (!batch.history && in.source == Source::Live) {
                 const auto above = s.coverage.upper_bound(start);
                 const bool alreadyCovered = above != s.coverage.begin() && std::prev(above)->second.toMs > start;
                 if (!alreadyCovered) s.coverage[start] = {start, start + batch.timeframeMs, Status::Live};
@@ -148,8 +153,12 @@ void FlowSeriesBuffer::markDropped(const QString& symbol, int64_t tf, int64_t bu
     if (!m_symbol.isEmpty() && symbol != m_symbol) clear();
     m_symbol = symbol;
     auto& series = m_series[tf];
-    series.coverage[bucket] = {bucket, bucket + tf, Status::Partial};
-    series.dropped.insert(bucket);
+    auto& coverage = series.coverage;
+    if (!series.dropped.contains(bucket)) {
+        const auto held = coverage.find(bucket);
+        series.dropped.emplace(bucket, held == coverage.end() ? std::nullopt : std::optional<Range>(held->second));
+    }
+    coverage[bucket] = {bucket, bucket + tf, Status::Partial};
     enforceRetention(tf, series);
 }
 void FlowSeriesBuffer::clear() {

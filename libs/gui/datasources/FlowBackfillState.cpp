@@ -83,7 +83,13 @@ std::optional<FlowBackfillState::Request> FlowBackfillState::next(int64_t nowMs)
     if (nowMs < m_retryAt) { m_hold = m_retryHold; return {}; }
     if (m_pending) {
         if (!m_pending->held) { m_hold = Hold::InFlight; return {}; }
-        if (fitHeldToSeam(nowMs)) {
+        // A held live sample never goes ahead of older history the window now needs (a pan
+        // during its backoff): drop it and sample again after those gaps.
+        if (m_pending->sample && !m_pagingStopped && m_window && gapEnd() >= m_start) {
+            m_pending.reset();
+            m_timedOut.reset();
+            m_liveSampleDue = 0;
+        } else if (fitHeldToSeam(nowMs)) {
             m_pending->held = false;
             m_pending->id = ++m_nextId;
             m_sentAt = nowMs;
@@ -165,8 +171,10 @@ bool FlowBackfillState::fitHeldToSeam(int64_t nowMs) {
     return false;
 }
 int64_t FlowBackfillState::seamWakeWallMs() const {
-    if (m_symbol.isEmpty() || m_liveCurrentBucket < 0 || liveSampling() || m_refresh.empty()) return 0;
-    return m_refresh.rbegin()->first > historyLimit() ? m_liveCurrentBucket + m_tf : 0;
+    if (m_symbol.isEmpty() || m_liveCurrentBucket < 0 || liveSampling()) return 0;
+    // The earliest deferred bucket becomes history's when it closes; later ones wake then.
+    const auto deferred = m_refresh.upper_bound(historyLimit());
+    return deferred == m_refresh.end() ? 0 : deferred->first + m_tf;
 }
 // Newest bucket a request other than the live sample may name: before the live bucket,
 // and before the live sample's buckets while it runs. Unbounded before the clock is known.

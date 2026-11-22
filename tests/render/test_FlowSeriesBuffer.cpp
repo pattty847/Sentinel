@@ -375,6 +375,17 @@ TEST(FlowSeriesBuffer, PanningAwayKeepsBarsUnderTheCapsAndAcceptsOlderPages) {
 
 // A transport drop leaves the bucket Partial only until the stream delivers that bucket
 // again; Partial reported by the source itself stays until history resolves it.
+// History said Partial, then a transport drop and its recovery: the source's Partial stays.
+TEST(FlowSeriesBuffer, SourcePartialSurvivesADropAndItsRecovery) {
+    FlowSeriesBuffer buffer;
+    auto page = batch(bar(1, false), true);
+    page.ranges = {{60'000, 120'000, Status::Partial}};
+    buffer.apply(page, 0);
+    buffer.markDropped("BTC-USD", 60'000, 60'000);
+    buffer.markDropped("BTC-USD", 60'000, 60'000); // a second drop keeps the first underlying status
+    buffer.apply(batch(bar(2, false)), 1);
+    EXPECT_EQ(buffer.series(60'000)->coverage.at(60'000).status, Status::Partial);
+}
 TEST(FlowSeriesBuffer, TransportDropClearsOnALaterLiveFrameButSourcePartialStays) {
     FlowSeriesBuffer buffer;
     buffer.apply(batch(bar(1, false)), 0);
@@ -608,6 +619,39 @@ TEST(FlowBackfillState, RefreshHeldAtTheSeamWakesAtTheBucketBoundary) {
     const auto closed = state.next(300); ASSERT_TRUE(closed);
     EXPECT_EQ(closed->endMs, live);
     EXPECT_TRUE(closed->refresh);
+}
+// The wake is the close of the earliest deferred bucket, not every boundary before it.
+TEST(FlowBackfillState, SeamWakeIsTheCloseOfTheEarliestDeferredBucket) {
+    constexpr int64_t tf = 60'000, live = 1000 * tf;
+    FlowBackfillState state; state.select("BTC-USD", tf);
+    state.setWindow(live - 10 * tf, live + tf);
+    state.markLiveEdge(live);
+    state.observeLive(live, 0);
+    state.refresh(live + 3 * tf, 0);
+    EXPECT_EQ(state.seamWakeWallMs(), live + 4 * tf);
+    state.refresh(live, 0);
+    EXPECT_EQ(state.seamWakeWallMs(), live + tf);
+}
+// A live sample that failed waits for its retry; the view pans to older, unloaded history
+// meantime. The older gap goes first; the sample is taken again after it.
+TEST(FlowBackfillState, HeldSampleWaitsBehindOlderGapsAfterAPan) {
+    constexpr int64_t tf = 60'000, live = 1000 * tf;
+    FlowBackfillState state; state.select("BTC-USD", tf);
+    state.setWindow(live - 10 * tf, live + tf);
+    state.markLiveEdge(live);
+    const auto history = state.next(0); ASSERT_TRUE(history);
+    ASSERT_TRUE(state.accept(reply(*history, live - 10 * tf), 10));
+    const auto sample = state.next(110); ASSERT_TRUE(sample); ASSERT_TRUE(sample->sample);
+    ASSERT_TRUE(state.fail(sample->id, Client::FlowFailure::Retryable, 120));
+    state.setWindow(live - 30 * tf, live + tf);
+    const auto older = state.next(1200); ASSERT_TRUE(older);
+    EXPECT_FALSE(older->sample) << "the retry waited behind the older gap";
+    EXPECT_EQ(older->endMs, live - 11 * tf);
+    EXPECT_EQ(older->limit, 20);
+    ASSERT_TRUE(state.accept(reply(*older, live - 30 * tf), 1210));
+    const auto again = state.next(1400); ASSERT_TRUE(again);
+    EXPECT_TRUE(again->sample);
+    EXPECT_EQ(again->endMs, live);
 }
 TEST(FlowBackfillState, LiveCoveredEdgeDoesNotPageHistory) {
     FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);

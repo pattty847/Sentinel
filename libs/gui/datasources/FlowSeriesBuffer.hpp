@@ -3,7 +3,6 @@
 #include "../../core/protocol/SentinelStreamClient.hpp"
 #include <map>
 #include <optional>
-#include <set>
 
 // GUI-thread series storage. The merge decision itself has no mutable state,
 // clock, Qt signals or rendering dependency.
@@ -42,15 +41,17 @@ public:
         std::map<int64_t, Range> coverage;
         std::map<int64_t, int64_t> lossRefetchAt;
         std::map<int64_t, uint32_t> losses;
-        // Buckets marked Partial because the server dropped a live frame for this client.
-        std::set<int64_t> dropped;
+        // Buckets marked Partial because the server dropped a live frame for this client,
+        // with the coverage entry the mark replaced (none when the bucket had none).
+        std::map<int64_t, std::optional<Range>> dropped;
     };
     // Returns buckets requiring an authoritative re-fetch after live coverage loss.
     std::vector<int64_t> apply(const Batch& batch, int64_t nowMs);
     void setCoverage(const QString& symbol, int64_t tf, const Range& range);
     // The server dropped a live frame for bucket: Partial until a later live frame for it
-    // (frames carry the whole bucket) or a history page replaces that coverage. Partial
-    // coverage from any other source stays until authoritative evidence resolves it.
+    // (frames carry the whole bucket) restores the coverage the mark replaced, or a history
+    // page replaces it. Partial from any other source stays until authoritative evidence
+    // resolves it, including across a drop and its recovery.
     void markDropped(const QString& symbol, int64_t tf, int64_t bucket);
     const Series* series(int64_t tf) const;
     const QString& symbol() const { return m_symbol; }
