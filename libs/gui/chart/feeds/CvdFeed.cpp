@@ -9,6 +9,8 @@
 #include "SentinelLogging.hpp"
 #include "models/DisplayTime.hpp"
 #include <QDateTime>
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 namespace chart {
 namespace {
@@ -131,6 +133,28 @@ void CvdFeed::receive(SentinelStreamClient::FlowBatchPtr batch) {
     buffer_.receive(*batch);
     onFrameChanged();
 }
+// flow.timing: one line per change of the bars the strip and footer use.
+void CvdFeed::reportTiming(const FlowSeriesBuffer::Series* series, const MappingFrameContext& frame) {
+    if (!timing_.on()) return;
+    const auto& out = mailbox_.back();
+    const int64_t tf = std::max<int64_t>(1, out.timeframeMs);
+    int totals = 0;
+    for (int i = 0; i < out.series.count; ++i) totals += out.totals[size_t(i)].valid;
+    uint64_t signature = FeedTiming::mix(uint64_t(qHash(symbol_)), tf);
+    signature = FeedTiming::mix(signature, int64_t(out.reset));
+    signature = FeedTiming::mix(signature, FeedTiming::bucket(frame.raster.drawnStartMs, tf));
+    signature = FeedTiming::mix(signature, FeedTiming::bucket(frame.raster.drawnEndMs, tf));
+    signature = FeedTiming::mix(signature, out.series.count);
+    signature = FeedTiming::mix(signature, totals);
+    signature = FeedTiming::mix(signature, series ? int64_t(series->bars.size()) : -1);
+    const double ms = timing_.finish(signature);
+    if (ms < 0) return;
+    sLog_Probe("flow.timing", "cvd build symbol=" << symbol_ << " tfMs=" << out.timeframeMs << " buildMs=" << ms
+               << " points=" << out.series.count << " footerBars=" << totals
+               << " sourceBars=" << (series ? series->bars.size() : 0)
+               << " drawn=[" << FeedTiming::bucket(frame.raster.drawnStartMs, 1) << ".."
+               << FeedTiming::bucket(frame.raster.drawnEndMs, 1) << ")");
+}
 int64_t CvdFeed::historyAnchor(int64_t start, int64_t timeframe) const {
     return cvdHistoryAnchor(start, timeframe, presentation_.stripPx || presentation_.flowFooter, presentation_.reset,
                             ports_.sessionType ? ports_.sessionType() : 4);
@@ -159,15 +183,18 @@ void CvdFeed::build(CvdSnapshot& out, const FlowSeriesBuffer::Series& source,
     baselineLabel(out);
 }
 void CvdFeed::publish() {
+    timing_.start();
     selectSymbol();
     auto& out = mailbox_.back();
     out.series.clear(); out.reset = presentation_.reset; out.unit = unit_;
     const auto frame = ports_.frame ? ports_.frame() : MappingFrameContext{};
     out.timeframeMs = frame.activeTimeframeMs > 0 ? std::max<int64_t>(1000, frame.activeTimeframeMs) : 0;
+    const FlowSeriesBuffer::Series* series = nullptr;
     if (presentation_.stripPx || presentation_.flowFooter) {
-        const auto* series = buffer_.series(symbol_, out.timeframeMs);
+        series = buffer_.series(symbol_, out.timeframeMs);
         if (series) build(out, *series, frame, presentation_.reset, ports_.sessionType ? ports_.sessionType() : 4);
     }
+    reportTiming(series, frame);
     if (out.series.overflow) {
         static sentinel::log_throttle::Site warning;
         uint32_t suppressed = 0;

@@ -76,6 +76,13 @@ public:
                          std::vector<CandleBar>& out, bool& hasMore,
                          qint64& nextStartMs) const;
 
+    // Approximate heap held (client.mem probe): ring storage only, from capacities.
+    // Each series allocates its full ring on first use and keeps it.
+    struct MemoryApprox {
+        size_t series = 0, bars = 0, ringSlots = 0, ringBytes = 0;
+    };
+    MemoryApprox approxMemory() const;
+
 signals:
     void candlesDirty(const QString& symbol,
                       int64_t timeframeMs,

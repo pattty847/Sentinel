@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 #include "datasources/FlowSeriesBuffer.hpp"
 #include "datasources/FlowBackfillState.hpp"
+#include "datasources/FlowFillTracker.hpp"
+#include "datasources/FlowTimingProbe.hpp"
+#include "marketdata/model/TradeData.h"
 #include "chart/feeds/CvdFeed.hpp"
 #include "chart/feeds/FlowFeed.hpp"
 #include "flow/FlowBarBuilder.hpp"
@@ -897,4 +900,110 @@ TEST(FlowSeriesBuffer, UnrecordedWithdrawsOldGenerationAndAllowsNewRecordingRevi
     buffer.apply(discovered, 2);
     EXPECT_EQ(buffer.series(60'000)->bars.at(60'000).revision, 1u);
     EXPECT_EQ(buffer.series(60'000)->coverage.at(60'000).status, Status::Complete);
+}
+
+// flow.timing: each hold of a due page is named; covers() answers for the fill probe.
+TEST(FlowBackfillState, HoldNamesWhyADuePageWasNotSent) {
+    using Hold = FlowBackfillState::Hold;
+    FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
+    const auto first = state.next(0); ASSERT_TRUE(first);
+    EXPECT_EQ(state.lastHold(), Hold::Sent);
+    EXPECT_FALSE(state.next(1));
+    EXPECT_EQ(state.lastHold(), Hold::InFlight);
+    EXPECT_TRUE(state.workDue(1));
+    EXPECT_FALSE(state.covers(88'000, 600'000));
+    EXPECT_TRUE(state.accept(reply(*first, 88'000), 2));
+    EXPECT_TRUE(state.covers(88'000, 600'000));
+    EXPECT_FALSE(state.covers(87'000, 600'000));
+    EXPECT_FALSE(state.next(50));
+    EXPECT_EQ(state.lastHold(), Hold::Pacing);
+    EXPECT_TRUE(state.workDue(50));
+    const auto second = state.next(102); ASSERT_TRUE(second);
+    EXPECT_TRUE(state.fail(second->id, Client::FlowFailure::Retryable, 103));
+    EXPECT_FALSE(state.next(500));
+    EXPECT_EQ(state.lastHold(), Hold::Backoff);
+    const auto retry = state.next(1103); ASSERT_TRUE(retry);
+    EXPECT_TRUE(state.accept(reply(*retry, 0), 1104));
+    EXPECT_FALSE(state.next(1300));
+    EXPECT_EQ(state.lastHold(), Hold::Idle);
+    EXPECT_FALSE(state.workDue(1300));
+    EXPECT_TRUE(state.covers(0, 600'000));
+    EXPECT_STREQ(FlowBackfillState::holdName(Hold::EdgeThrottle), "edge_throttle_5s");
+}
+TEST(FlowBackfillState, HoldNamesTheFiveSecondEdgeThrottle) {
+    FlowBackfillState state; state.select("BTC-USD", 1000); state.setWindow(0, 600'000);
+    state.markLiveEdge(599'000);
+    const auto first = state.next(0); ASSERT_TRUE(first);
+    EXPECT_TRUE(state.accept(reply(*first, 0), 1));
+    state.setWindow(0, 601'000);
+    state.markLiveEdge(600'000);
+    EXPECT_FALSE(state.next(200));
+    EXPECT_EQ(state.lastHold(), FlowBackfillState::Hold::EdgeThrottle);
+    EXPECT_TRUE(state.workDue(200));
+    EXPECT_EQ(state.nextEdgePageMs(), 5000);
+}
+TEST(FlowFillTracker, ReportsOneFillPerUncoveredWaitWithPagesAndBothDelays) {
+    FlowFillTracker tracker;
+    EXPECT_FALSE(tracker.viewChanged(0, 100, true, 10));
+    EXPECT_FALSE(tracker.waiting()) << "a covered view starts no wait";
+    EXPECT_FALSE(tracker.viewChanged(0, 100, false, 20));
+    EXPECT_FALSE(tracker.waiting()) << "an unchanged range is ignored";
+    EXPECT_FALSE(tracker.viewChanged(-50, 50, false, 30));
+    EXPECT_TRUE(tracker.waiting());
+    EXPECT_FALSE(tracker.viewChanged(-60, 40, false, 40));
+    EXPECT_FALSE(tracker.pageApplied(false, 100));
+    const auto filled = tracker.pageApplied(true, 250); ASSERT_TRUE(filled);
+    EXPECT_EQ(filled->sinceFirstChangeMs, 220);
+    EXPECT_EQ(filled->sinceLastChangeMs, 210);
+    EXPECT_EQ(filled->pages, 2);
+    EXPECT_EQ(filled->changes, 2);
+    EXPECT_FALSE(tracker.pageApplied(true, 300)) << "a fill reports once";
+    EXPECT_FALSE(tracker.viewChanged(-70, 30, false, 400));
+    const auto back = tracker.viewChanged(0, 100, true, 450); ASSERT_TRUE(back);
+    EXPECT_EQ(back->sinceLastChangeMs, 0);
+    EXPECT_EQ(back->sinceFirstChangeMs, 50);
+    EXPECT_EQ(back->pages, 0);
+    EXPECT_EQ(back->changes, 2);
+}
+TEST(FlowTimingProbe, FillRangeIsVisibleBucketsClippedToWindowAndLiveBucket) {
+    using Range = FlowTimingProbe::Range;
+    const auto same = [](Range a, Range b) { return a.from == b.from && a.to == b.to; };
+    EXPECT_TRUE(same(FlowTimingProbe::fillRange(90'500, 150'000, 60'000, 0, 1'000'000, 1'000'000), {60'000, 180'000}));
+    EXPECT_TRUE(same(FlowTimingProbe::fillRange(90'500, 150'000, 60'000, 0, 1'000'000, 100'000), {60'000, 120'000}));
+    EXPECT_TRUE(same(FlowTimingProbe::fillRange(90'500, 150'000, 60'000, 120'000, 1'000'000, 1'000'000), {120'000, 180'000}));
+    EXPECT_TRUE(same(FlowTimingProbe::fillRange(90'500, 150'000, 60'000, 0, 60'000, 1'000'000), {}));
+    EXPECT_TRUE(same(FlowTimingProbe::fillRange(150'000, 90'500, 60'000, 0, 1'000'000, 1'000'000), {}));
+}
+TEST(FlowTimingProbe, BookBytesFollowReplicaSlots) {
+    LiveOrderBook empty("BTC-USD");
+    EXPECT_EQ(approxBookBytes(empty), 0u);
+    LiveOrderBook book("BTC-USD");
+    book.initialize(0, 127, 1); // 128 slots per side
+    const size_t dense = 2 * 128 * sizeof(double);
+    EXPECT_GE(approxBookBytes(book), dense + 2 * 2 * (sizeof(uint64_t) + sizeof(double) + 1));
+    EXPECT_LT(approxBookBytes(book), dense + 512);
+}
+TEST(FlowSeriesBuffer, ApproxMemoryCountsBarsRowsNotablesAndCoverage) {
+    FlowSeriesBuffer buffer;
+    const auto none = buffer.approxMemory();
+    EXPECT_EQ(none.bars, 0u);
+    EXPECT_EQ(none.totalBytes(), 0u);
+    auto record = bar();
+    record.bar.rows.resize(3);
+    record.bar.rows.shrink_to_fit();
+    record.bar.notable.resize(1);
+    buffer.apply(batch(record), 0);
+    const auto memory = buffer.approxMemory();
+    EXPECT_EQ(memory.series, 1u);
+    EXPECT_EQ(memory.bars, 1u);
+    EXPECT_EQ(memory.rows, 3u);
+    EXPECT_GE(memory.rowBytes, 3 * sizeof(sentinel::flow::Row));
+    EXPECT_GE(memory.notableBytes, sizeof(sentinel::flow::Notable));
+    EXPECT_GE(memory.nodeBytes, sizeof(FlowSeriesBuffer::Record) + FlowSeriesBuffer::kMapNodeOverheadBytes);
+    EXPECT_EQ(memory.coverageRanges, 1u);
+    EXPECT_EQ(memory.coveredFromMs, 60'000);
+    EXPECT_EQ(memory.coveredToMs, 120'000);
+    EXPECT_EQ(memory.totalBytes(), memory.rowBytes + memory.notableBytes + memory.nodeBytes);
+    buffer.clear();
+    EXPECT_EQ(buffer.approxMemory().totalBytes(), 0u);
 }

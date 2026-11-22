@@ -1,4 +1,5 @@
 #pragma once
+#include "chart/feeds/FeedTiming.hpp"
 #include "chart/feeds/FlowBufferAccess.hpp"
 #include "chart/core/FootprintLod.hpp"
 #include "render/ITimeAxisMappingProvider.hpp"
@@ -85,6 +86,7 @@ private:
     void post();
     bool visible(const MappingFrameContext&);
     void report(const FlowSnapshot&);
+    void reportTiming(const FlowSnapshot&, const FlowSeriesBuffer::Series*);
     FlowMailbox& mailbox_;
     FlowFeedPorts ports_;
     std::function<void()> coverageChanged_;
@@ -98,5 +100,6 @@ private:
     int64_t band_ = 0; // band factor history, cleared on a symbol or timeframe change
     int64_t bandTimeframeMs_ = 0;
     bool numbers_ = true;
+    FeedTiming timing_;
 };
 } // namespace chart

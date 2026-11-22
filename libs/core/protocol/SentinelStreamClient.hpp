@@ -86,6 +86,9 @@ public:
         QString error;
         std::vector<FlowRange> ranges;
         std::vector<FlowRecord> bars;
+        // Measurement only (flow.timing probe): wire frame size and decode time.
+        size_t wireBytes = 0;
+        double decodeMs = 0;
     };
     using FlowBatchPtr = std::shared_ptr<const FlowBatch>;
     using TradeHistoryPtr = std::shared_ptr<const protocol::tradewire::Page>;

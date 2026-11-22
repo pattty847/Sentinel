@@ -341,3 +341,14 @@ bool CandleSeriesBuffer::getBoundedSlice(const QString& symbol, int64_t timefram
     if (hasMore) nextStartMs = getAt(series, first + count).timeStartMs;
     return true;
 }
+
+CandleSeriesBuffer::MemoryApprox CandleSeriesBuffer::approxMemory() const {
+    MemoryApprox out;
+    for (const auto& [key, series] : m_series) {
+        ++out.series;
+        out.bars += series.count;
+        out.ringSlots += series.ring.capacity();
+        out.ringBytes += series.ring.capacity() * sizeof(CandleBar);
+    }
+    return out;
+}

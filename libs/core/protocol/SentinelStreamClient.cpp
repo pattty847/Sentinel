@@ -547,8 +547,11 @@ void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame
     }
     if (flowLive || (frame.size() >= 4 && std::equal(frame.begin(), frame.begin() + 4, "FHE1"))) {
         try {
+            const auto started = std::chrono::steady_clock::now();
             auto batch = flowLive ? protocol::clientparse::parseFlowLive(nlohmann::json::parse(frame))
                                   : protocol::clientparse::parseFlowHistory(frame);
+            batch.wireBytes = frame.size();
+            batch.decodeMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
             std::lock_guard lock(m_chunkOrderMutex);
             if (epoch == m_connectionEpoch.load())
                 emit flowBarsReceived(std::make_shared<const FlowBatch>(std::move(batch)));

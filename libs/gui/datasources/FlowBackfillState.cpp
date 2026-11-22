@@ -87,9 +87,11 @@ void FlowBackfillState::observeLive(int64_t bucket, int64_t nowMs) {
     if (!m_probeDue) m_probeDue = nowMs + FlowSeriesBuffer::kRefetchIntervalMs;
 }
 std::optional<FlowBackfillState::Request> FlowBackfillState::next(int64_t nowMs) {
-    if (m_symbol.isEmpty() || m_tf < 1000 || nowMs < m_retryAt) return {};
+    m_hold = Hold::Sent;
+    if (m_symbol.isEmpty() || m_tf < 1000) { m_hold = Hold::NoSelection; return {}; }
+    if (nowMs < m_retryAt) { m_hold = m_retryHold; return {}; }
     if (m_pending) {
-        if (!m_pending->held) return {};
+        if (!m_pending->held) { m_hold = Hold::InFlight; return {}; }
         m_pending->held = false;
         m_pending->id = ++m_nextId;
         m_sentAt = nowMs;
@@ -124,20 +126,13 @@ std::optional<FlowBackfillState::Request> FlowBackfillState::next(int64_t nowMs)
         m_sentAt = nowMs;
         return m_pending;
     }
-    if (m_pagingStopped || !m_window || m_end < m_start) return {};
-    int64_t end = m_end;
-    // Skip proven runs above the next gap, including an edge that has moved.
-    while (end >= m_start) {
-        auto above = m_covered.upper_bound(end);
-        if (above == m_covered.begin()) break;
-        const auto covered = std::prev(above);
-        if (covered->second <= end) break;
-        end = covered->first - m_tf;
-    }
-    if (end < m_start) return {};
+    if (m_pagingStopped) { m_hold = Hold::Stopped; return {}; }
+    if (!m_window || m_end < m_start) { m_hold = Hold::Idle; return {}; }
+    const int64_t end = gapEnd();
+    if (end < m_start) { m_hold = Hold::Idle; return {}; }
     const bool nearLiveEdge = m_liveCurrentBucket >= 0 &&
         end >= m_liveCurrentBucket - std::max<int64_t>(5000, m_tf);
-    if (nearLiveEdge && nowMs < m_nextEdgePageMs) return {};
+    if (nearLiveEdge && nowMs < m_nextEdgePageMs) { m_hold = Hold::EdgeThrottle; return {}; }
     int64_t gapStart = m_start;
     if (auto above = m_covered.upper_bound(end); above != m_covered.begin())
         gapStart = std::max(gapStart, std::prev(above)->second);
@@ -148,6 +143,44 @@ std::optional<FlowBackfillState::Request> FlowBackfillState::next(int64_t nowMs)
     m_sentAt = nowMs;
     if (nearLiveEdge) m_nextEdgePageMs = nowMs + 5000;
     return m_pending;
+}
+// The newest uncovered bucket of the window; below m_start when the window is covered.
+int64_t FlowBackfillState::gapEnd() const {
+    int64_t end = m_end;
+    // Skip proven runs above the next gap, including an edge that has moved.
+    while (end >= m_start) {
+        auto above = m_covered.upper_bound(end);
+        if (above == m_covered.begin()) break;
+        const auto covered = std::prev(above);
+        if (covered->second <= end) break;
+        end = covered->first - m_tf;
+    }
+    return end;
+}
+bool FlowBackfillState::workDue(int64_t nowMs) const {
+    if (m_symbol.isEmpty() || m_tf < 1000) return false;
+    for (const auto& [bucket, due] : m_refresh)
+        if (due <= nowMs) return true;
+    return !m_pagingStopped && m_window && m_end >= m_start && gapEnd() >= m_start;
+}
+bool FlowBackfillState::covers(int64_t from, int64_t to) const {
+    if (to <= from) return true;
+    const auto above = m_covered.upper_bound(from);
+    if (above == m_covered.begin()) return false;
+    return std::prev(above)->second >= to;
+}
+const char* FlowBackfillState::holdName(Hold hold) {
+    switch (hold) {
+    case Hold::Sent: return "sent";
+    case Hold::Idle: return "idle";
+    case Hold::NoSelection: return "no_selection";
+    case Hold::InFlight: return "in_flight";
+    case Hold::Pacing: return "page_gap_100ms";
+    case Hold::Backoff: return "retry_backoff";
+    case Hold::Stopped: return "paging_stopped";
+    case Hold::EdgeThrottle: return "edge_throttle_5s";
+    }
+    return "unknown";
 }
 void FlowBackfillState::cover(int64_t from, int64_t to) {
     auto it = m_covered.lower_bound(from);
@@ -176,6 +209,7 @@ bool FlowBackfillState::accept(const SentinelStreamClient::FlowBatch& b, int64_t
     m_timedOut.reset();
     if (request.generation != m_generation) return false;
     m_retryAt = nowMs + 100;
+    m_retryHold = Hold::Pacing;
     m_backoff = 1000;
     if (b.status == SentinelStreamClient::FlowStatus::Refused) { m_pagingStopped = true; return true; }
     if (b.oldestMs < 0 || b.oldestMs > request.endMs || b.oldestMs % m_tf != 0) {
@@ -223,6 +257,7 @@ bool FlowBackfillState::fail(quint64 id, SentinelStreamClient::FlowFailure failu
             m_pending->held = true;
         }
         m_retryAt = nowMs + 100;
+        m_retryHold = Hold::Pacing;
         return true;
     }
     if (failure == SentinelStreamClient::FlowFailure::Fatal) {
@@ -233,6 +268,7 @@ bool FlowBackfillState::fail(quint64 id, SentinelStreamClient::FlowFailure failu
     }
     m_pending->held = true;
     m_retryAt = nowMs + m_backoff;
+    m_retryHold = Hold::Backoff;
     m_backoff = std::min<int64_t>(30'000, m_backoff * 2);
     return true;
 }
