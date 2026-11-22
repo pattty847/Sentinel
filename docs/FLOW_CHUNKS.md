@@ -90,7 +90,8 @@ then bytes.
 - Limits and decoder checks as SHC1: frame and raw payload at most 16 MiB; zstd frame content size checked
   before allocation; every count bounded by the remaining bytes before allocation.
 - Codec: zstd level 1 when it saves at least 10%, otherwise raw. On the measured data zstd 1 saves 10-34% on
-  `flow.rows` chunks and level 3 at most 1% more; `flow.summary` saves about 5%, so it goes raw (section 12).
+  `flow.rows` chunks and level 3 at most 1% more; `flow.summary` saves 5-8% for BTC, ETH and SOL (sent raw) and
+  21% for PEPE (section 12).
   The server caches the finished frame.
 
 Request (JSON text frame):
@@ -436,7 +437,8 @@ Lean = the section 4 payload (`flow_chunk_proto.hpp`, `Delta`); "no deltas" = th
 - Lean against today's FLD1 file: BTC 1.9x (busy) to 3.1x (median) smaller, ETH 4.0x, SOL 4.6x, PEPE 11.4x.
   Dropping notables gives most of it; varints give the rest; deltas add 3-10%.
 - zstd on the lean form: 15-26% saving at 1m (PEPE 34%), 10-16% at 1h and 1d; level 3 within 1% of level 1.
-  The summary barely compresses (5%). The fixed-width in-memory image is larger than today's FLB1.
+  The summary alone compresses 5-8% (BTC, ETH, SOL) and 21% (PEPE). The fixed-width in-memory image is larger
+  than today's FLB1.
 - Day file (header once, offsets, 24 sections): BTC busy 1,144,866 bytes, median 458,237. The prototype's
   header and offsets are 127 bytes; section 5's header and 26-entry table are about 560 bytes.
 - Decode of a whole day: BTC busy 1.6 ms lean (2.0 ms to `FlowBar`s) against 5.0 ms for FLD1 without its
