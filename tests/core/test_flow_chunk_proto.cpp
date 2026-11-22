@@ -188,26 +188,63 @@ TEST(FlowChunkProto, SixteenDayAssemblyFromDayPieces) {
     EXPECT_EQ(proto::encode(assembled, proto::Encoding::Spec), proto::encode(expected, proto::Encoding::Spec));
 }
 
-TEST(FlowChunkProto, DayFileRoundTripAndValidation) {
+proto::DayFile sampleDayFile() {
     proto::DayFile d;
     d.instrument = "coinbase:BTC-USD"; d.dayStartMs = T0; d.grid = {100, 100, Base, Quote};
     d.lateTrades = 2; d.regressions = 1;
     const auto chunk = proto::fromBars(hourBars(), Minute, T0, 60);
     d.sections[0] = {true, uint32_t(proto::encode(chunk, proto::Encoding::Spec, true).size()), 0x1234,
                      proto::encode(chunk, proto::Encoding::Spec)};
-    d.sections[3] = {true, 0, 0x99, proto::encode(proto::fromBars({}, Minute, T0 + 3 * Hour, 60), proto::Encoding::Spec)};
+    const auto empty = proto::fromBars({}, Minute, T0 + 3 * Hour, 60);
+    d.sections[3] = {true, uint32_t(proto::encode(empty, proto::Encoding::Spec, true).size()), 0x99,
+                     proto::encode(empty, proto::Encoding::Spec)};
+    return d;
+}
+size_t tableStart(const std::vector<uint8_t>& file) { return size_t(file[6]) | size_t(file[7]) << 8; }
+
+TEST(FlowChunkProto, DayFileRoundTripAndValidation) {
+    const auto d = sampleDayFile();
+    EXPECT_EQ(d.sections[3].summaryLength, d.sections[3].payload.size()); // no bars: the rows section is empty
     const auto bytes = proto::encodeDayFile(d);
     EXPECT_EQ(proto::parseDayFile(bytes), d);
     auto corrupt = bytes;
-    corrupt.back() ^= 1; // last section byte
+    corrupt.back() ^= 1;                                   // a section byte
     EXPECT_ANY_THROW(proto::parseDayFile(corrupt));
     corrupt = bytes;
-    corrupt[20] ^= 1;    // header byte
+    corrupt[20] ^= 1;                                      // a header byte
     EXPECT_ANY_THROW(proto::parseDayFile(corrupt));
     EXPECT_ANY_THROW(proto::parseDayFile(std::span(bytes).first(bytes.size() - 1)));
     auto trailing = bytes;
     trailing.push_back(0);
     EXPECT_ANY_THROW(proto::parseDayFile(trailing));
+}
+
+// The table is covered by its own CRC: a length or a fingerprint changed while
+// every payload byte stays intact is refused.
+TEST(FlowChunkProto, DayFileTableCorruptionIsRefused) {
+    const auto bytes = proto::encodeDayFile(sampleDayFile());
+    const size_t entry0 = tableStart(bytes);
+    for (size_t field : {size_t(4), size_t(8), size_t(17)}) { // summary length, total length, fingerprint
+        auto corrupt = bytes;
+        corrupt[entry0 + field] ^= 1;
+        EXPECT_ANY_THROW(proto::parseDayFile(corrupt)) << field;
+    }
+}
+
+// Table contents checked even when every CRC is right.
+TEST(FlowChunkProto, DayFileTableRules) {
+    auto wrongSummary = sampleDayFile();
+    --wrongSummary.sections[0].summaryLength;              // not a summary boundary
+    EXPECT_ANY_THROW(proto::parseDayFile(proto::encodeDayFile(wrongSummary)));
+    auto zeroSummary = sampleDayFile();
+    zeroSummary.sections[3].summaryLength = 0;             // a sealed flow section needs its summary
+    EXPECT_ANY_THROW(proto::parseDayFile(proto::encodeDayFile(zeroSummary)));
+    auto noPayload = sampleDayFile();
+    noPayload.sections[5] = {true, 0, 0, {}};              // sealed without a payload
+    EXPECT_ANY_THROW(proto::parseDayFile(proto::encodeDayFile(noPayload)));
+    auto bigSummary = sampleDayFile();
+    bigSummary.sections[30] = {true, 4, 0, {1, 2, 3, 4}};  // trades.big carries no summary length
+    EXPECT_ANY_THROW(proto::parseDayFile(proto::encodeDayFile(bigSummary)));
 }
 
 TEST(FlowChunkProto, MalformedPayloadsAreRefused) {
@@ -233,6 +270,11 @@ TEST(FlowChunkProto, MalformedPayloadsAreRefused) {
     auto badRun = bytes;
     badRun[33 + 1 + 2] = 59;                                          // run ends at slot 59, not 60
     EXPECT_ANY_THROW(decodeSpec(badRun, Minute, T0, 60));
+    auto building = bytes;
+    building[33 + 5] = 4;                                             // status 4 (building) is never served
+    EXPECT_ANY_THROW(decodeSpec(building, Minute, T0, 60));
+    building[33 + 5] = 1;
+    EXPECT_NO_THROW(decodeSpec(building, Minute, T0, 60));
     auto inconsistent = hourBars().front();                           // sell volume above its rows' bid sum
     inconsistent.sellVol += 1; inconsistent.baseVolume += 1; inconsistent.delta -= 1;
     EXPECT_ANY_THROW(decodeSpec(proto::encode(proto::fromBars(std::span(&inconsistent, 1), Minute, T0, 60),

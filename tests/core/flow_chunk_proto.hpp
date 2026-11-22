@@ -36,6 +36,8 @@ struct Grid {
 };
 static_assert(sizeof(Grid) == 32);
 
+// Served statuses are 1-3. Building exists only inside assembly: a chunk with a
+// building slot is not sealed, and encode refuses it.
 enum class Status : uint8_t { Complete = 1, Partial = 2, Unrecorded = 3, Building = 4 };
 struct CoverageRun {
     uint16_t fromSlot = 0, toSlot = 0; // [from, to)
@@ -186,7 +188,10 @@ inline std::vector<uint8_t> encode(const FlowChunk& c, Encoding e, bool summaryO
     for (const auto& g : c.grids)
         for (auto v : {g.rowTickUnits, g.priceScale, g.baseScale, g.quoteScale}) o.fixed(uint64_t(v), 8);
     o.fixed(c.coverage.size(), 1);
-    for (const auto& r : c.coverage) { o.fixed(r.fromSlot, 2); o.fixed(r.toSlot, 2); o.fixed(uint8_t(r.status), 1); }
+    for (const auto& r : c.coverage) {
+        if (r.status == Status::Building) throw std::invalid_argument("flow proto unsealed coverage");
+        o.fixed(r.fromSlot, 2); o.fixed(r.toSlot, 2); o.fixed(uint8_t(r.status), 1);
+    }
     const size_t n = c.bars();
     u(n, 2);
     int64_t prev = -1;
@@ -241,7 +246,7 @@ inline FlowChunk decode(std::span<const uint8_t> bytes, Encoding e, int64_t leve
     for (size_t i = 0; i < runCount; ++i) {
         CoverageRun r{uint16_t(in.fixed(2)), uint16_t(in.fixed(2)), Status(in.fixed(1))};
         if (r.fromSlot != covered || r.toSlot <= r.fromSlot || r.toSlot > slotCount ||
-            uint8_t(r.status) < 1 || uint8_t(r.status) > 4) In::fail("coverage");
+            uint8_t(r.status) < 1 || uint8_t(r.status) > 3) In::fail("coverage");
         covered = r.toSlot;
         c.coverage.push_back(r);
     }
@@ -358,7 +363,7 @@ constexpr size_t DaySections = 50;
 constexpr size_t TableEntryBytes = 25;
 struct DaySection {
     bool sealed = false;
-    uint32_t summaryLength = 0;     // flow sections; 0 for trades.big
+    uint32_t summaryLength = 0;     // flow sections: the summary prefix; 0 for trades.big
     uint64_t sourcePrefix = 0;      // hours: fingerprint of the RAWL2 prefix through the seal point
     std::vector<uint8_t> payload;
     bool operator==(const DaySection&) const = default;
@@ -374,7 +379,12 @@ struct DayFile {
     bool operator==(const DayFile&) const = default;
 };
 
+// Writes what it is given (tests feed it bad tables); parseDayFile validates.
 inline std::vector<uint8_t> encodeDayFile(const DayFile& d) {
+    detail::Out table;
+    uint64_t offset = 0; // relative to the end of the table, patched below
+    std::vector<uint64_t> starts;
+    for (const auto& s : d.sections) { starts.push_back(offset); offset += s.payload.size(); }
     detail::Out h;
     for (char ch : {'F', 'L', 'C', '1'}) h.b.push_back(uint8_t(ch));
     h.fixed(1, 2);           // file version
@@ -387,26 +397,40 @@ inline std::vector<uint8_t> encodeDayFile(const DayFile& d) {
     for (auto v : {d.grid.rowTickUnits, d.grid.priceScale, d.grid.baseScale, d.grid.quoteScale}) h.fixed(uint64_t(v), 8);
     h.fixed(d.ruleVersion, 1); h.fixed(d.sealWindowMs, 4);
     h.fixed(d.lateTrades, 4); h.fixed(d.rejectedTrades, 4); h.fixed(d.regressions, 4);
+    h.fixed(0, 4);           // table CRC, patched below
     const size_t headerLength = h.b.size();
+    const uint64_t base = headerLength + DaySections * TableEntryBytes;
+    for (size_t i = 0; i < DaySections; ++i) {
+        const auto& s = d.sections[i];
+        table.fixed(s.payload.empty() ? 0 : base + starts[i], 4);
+        table.fixed(s.summaryLength, 4); table.fixed(s.payload.size(), 4);
+        table.fixed(s.payload.empty() ? 0 : crc32(s.payload), 4);
+        table.fixed(s.sealed, 1); table.fixed(s.sourcePrefix, 8);
+    }
+    if (base + offset > UINT32_MAX) throw std::invalid_argument("flow proto day file too large");
+    const auto tableCrc = crc32(table.b);
+    for (int i = 0; i < 4; ++i) h.b[headerLength - 4 + size_t(i)] = uint8_t(tableCrc >> (8 * i));
     h.b[6] = uint8_t(headerLength); h.b[7] = uint8_t(headerLength >> 8);
     const auto crc = crc32(h.b);
     for (int i = 0; i < 4; ++i) h.b[8 + i] = uint8_t(crc >> (8 * i));
-    uint64_t offset = headerLength + DaySections * TableEntryBytes;
-    for (const auto& s : d.sections) {
-        if (!s.sealed && !s.payload.empty()) throw std::invalid_argument("flow proto absent section with bytes");
-        h.fixed(s.payload.empty() ? 0 : offset, 4);
-        h.fixed(s.summaryLength, 4); h.fixed(s.payload.size(), 4);
-        h.fixed(s.payload.empty() ? 0 : crc32(s.payload), 4);
-        h.fixed(s.sealed, 1); h.fixed(s.sourcePrefix, 8);
-        offset += s.payload.size();
-    }
-    if (offset > UINT32_MAX) throw std::invalid_argument("flow proto day file too large");
+    h.b.insert(h.b.end(), table.b.begin(), table.b.end());
     for (const auto& s : d.sections) h.b.insert(h.b.end(), s.payload.begin(), s.payload.end());
     return std::move(h.b);
 }
 
-// Validates the header CRC, the table (sections back to back in table order,
-// inside the file, summary length within the section) and every section CRC.
+// The payload key of a flow entry (0-25) of a day file.
+struct EntryKey { int64_t levelMs, startMs; uint32_t slots; };
+inline EntryKey flowEntryKey(size_t entry, int64_t dayStartMs) {
+    constexpr int64_t Minute = 60'000, Hour = 60 * Minute, Day = 24 * Hour;
+    if (entry < 24) return {Minute, dayStartMs + int64_t(entry) * Hour, 60};
+    if (entry == 24) return {Hour, dayStartMs, 24};
+    return {Day, dayStartMs, 1};
+}
+
+// Validates the header CRC, the table CRC, the table (sections back to back in
+// table order; a sealed entry has a payload, an absent one none; a flow entry's
+// summary length is a decodable summary prefix of a decodable payload; a
+// trades.big entry has summary length 0) and every section CRC.
 inline DayFile parseDayFile(std::span<const uint8_t> bytes) {
     using detail::In;
     In in{bytes};
@@ -414,7 +438,7 @@ inline DayFile parseDayFile(std::span<const uint8_t> bytes) {
     if (in.fixed(2) != 1) In::fail("day version");
     const auto headerLength = in.fixed(2);
     const auto storedCrc = uint32_t(in.fixed(4));
-    if (headerLength < 12 || headerLength > bytes.size()) In::fail("day header length");
+    if (headerLength < 16 || headerLength > bytes.size()) In::fail("day header length");
     std::vector<uint8_t> header(bytes.begin(), bytes.begin() + ptrdiff_t(headerLength));
     std::fill(header.begin() + 8, header.begin() + 12, 0);
     if (crc32(header) != storedCrc) In::fail("day header crc");
@@ -427,18 +451,28 @@ inline DayFile parseDayFile(std::span<const uint8_t> bytes) {
     d.grid = {int64_t(in.fixed(8)), int64_t(in.fixed(8)), int64_t(in.fixed(8)), int64_t(in.fixed(8))};
     d.ruleVersion = uint8_t(in.fixed(1)); d.sealWindowMs = uint32_t(in.fixed(4));
     d.lateTrades = uint32_t(in.fixed(4)); d.rejectedTrades = uint32_t(in.fixed(4)); d.regressions = uint32_t(in.fixed(4));
+    const auto tableCrc = uint32_t(in.fixed(4));
     if (in.p != headerLength || d.dayStartMs % 86'400'000) In::fail("day header");
     uint64_t next = headerLength + DaySections * TableEntryBytes;
     if (next > bytes.size()) In::fail("day table truncated");
-    for (auto& s : d.sections) {
+    if (crc32(bytes.subspan(headerLength, DaySections * TableEntryBytes)) != tableCrc) In::fail("day table crc");
+    for (size_t i = 0; i < DaySections; ++i) {
+        auto& s = d.sections[i];
         const auto offset = in.fixed(4), summary = in.fixed(4), length = in.fixed(4), crc = in.fixed(4);
         const auto sealed = in.fixed(1);
         s.sourcePrefix = in.fixed(8);
-        if (sealed > 1 || summary > length || (length && offset != next) || (!length && offset) ||
-            (!sealed && length) || length > bytes.size() - next) In::fail("day table");
+        const bool flow = i < 26;
+        if (sealed > 1 || bool(sealed) != (length > 0) || (length ? offset != next : offset != 0) ||
+            length > bytes.size() - next || (flow ? (sealed && (summary == 0 || summary > length)) || (!sealed && summary)
+                                                  : summary != 0)) In::fail("day table");
         s.sealed = sealed; s.summaryLength = uint32_t(summary);
         s.payload.assign(bytes.begin() + ptrdiff_t(next), bytes.begin() + ptrdiff_t(next + length));
         if (length && crc32(s.payload) != crc) In::fail("day section crc");
+        if (flow && sealed) {
+            const auto k = flowEntryKey(i, d.dayStartMs);
+            decode(std::span(s.payload).first(summary), Encoding::Spec, k.levelMs, k.startMs, k.slots, true);
+            decode(s.payload, Encoding::Spec, k.levelMs, k.startMs, k.slots);
+        }
         next += length;
     }
     if (next != bytes.size()) In::fail("day trailing bytes");

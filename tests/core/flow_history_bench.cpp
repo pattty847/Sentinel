@@ -21,13 +21,17 @@
 //
 //   flow_history_bench --lateness <rawl2-root> <symbol> <YYYY-MM-DD>...
 //
-// Lateness mode (docs/FLOW_CHUNKS.md section 7): every trade whose exchange
-// time is in the day, deduplicated and ordered by JournalFeed as FlowStore does,
-// with the receive time FlowStore uses (the RAWL2 record's systemNs). One hour of
-// lead-in, and reading until the running maximum receive time is an hour past
-// the day. Prints receive - exchange and receive - end of the trade's 1m bucket
-// as histograms and quantiles, what a 15 s and a 60 s seal window exclude under
-// the running-maximum rule, receive-time regressions, damage and completeness.
+// Lateness mode: a transit-distribution scan that informs the seal window W of
+// docs/FLOW_CHUNKS.md section 7. It is not the canonical hour scan of that
+// section (one continuous feed for the day, not a fresh feed per hour) and is
+// not seal-conformance evidence. Every trade whose exchange time is in the day,
+// deduplicated and ordered by JournalFeed as FlowStore does, with the receive
+// time FlowStore uses (the RAWL2 record's systemNs). It starts at the last
+// journal file opened at least one hour before the day (in practice one to two
+// hours of lead-in) and reads until the running maximum receive time is an hour
+// past the day. Prints receive - exchange and receive - end of the trade's 1m
+// bucket, what a 15 s and a 60 s window exclude by the running maximum, receive
+// regressions, file-order regressions, damage and completeness.
 //
 //   flow_history_bench --columnar <fld1-root> <symbol> <YYYY-MM-DD>...
 //
@@ -385,12 +389,13 @@ int64_t quantile(const std::vector<int64_t>& sorted, double q) {
 
 struct LateTrade { int64_t afterEndMs, exchangeMs, receiveMs; bool snapshotFrame; std::string id; };
 
-// The seal rule of docs/FLOW_CHUNKS.md section 7: a trade misses its bar when the
-// running maximum receive time over all records, advanced by its own record
-// before the record's trades apply, is at or past bar end + W.
+// Transit-distribution scan (see the file comment): a trade counts as past a
+// window when the running maximum receive time over all records, advanced by its
+// own record before the record's trades apply, is at or past bar end + window.
 void latenessDay(const fs::path& journalRoot, const std::string& symbol, int64_t dayMs) {
-    // An hour of lead-in warms JournalFeed's trade-id window and the running
-    // maximum; reading stops once the running maximum is an hour past the day.
+    // Start at the last file opened at least LeadIn before the day (hourly files:
+    // one to two hours of lead-in), which warms JournalFeed's trade-id window and
+    // the running maximum; stop once the running maximum is an hour past the day.
     constexpr int64_t LeadIn = Hour, ReadTail = Hour;
     const int64_t end = dayMs + Day;
     roller::JournalReader catalog(journalRoot, symbol);
@@ -458,8 +463,10 @@ void latenessDay(const fs::path& journalRoot, const std::string& symbol, int64_t
         feed.apply(record);
     }
     const double scanMs = msSince(start);
-    // Complete: no damage, the lead-in reached, and the running maximum reached the read tail.
-    const bool complete = !reader.damaged() && firstReceive <= dayMs - Minute && seenMs >= end + ReadTail;
+    // Complete: no damage, no file-order regression, the lead-in reached, and the
+    // running maximum reached the read tail.
+    const bool complete = !reader.damaged() && fileOrderRegressions == 0 && firstReceive <= dayMs - Minute &&
+                          seenMs >= end + ReadTail;
     std::sort(transit.begin(), transit.end());
     std::sort(afterEnd.begin(), afterEnd.end());
     const auto bins = [](const std::vector<int64_t>& v) {

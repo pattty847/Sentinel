@@ -10,8 +10,10 @@ payload, the section 5 day file and the 16-day assembly, with golden bytes in `t
 
 Decided rules this spec makes exact:
 - RAWL2 is the only truth. Every flow file is a rebuildable index of it.
-- A sealed bar is a deterministic function of RAWL2. 1h and 1d bars are composed from sealed 1m bars only.
-- History serves only sealed chunks. Live owns what is not sealed yet.
+- A sealed bar is a deterministic function of the RAWL2 archive (the canonical hour scan, section 7). 1h and 1d
+  bars are composed from sealed 1m bars only.
+- History serves only sealed chunks. Live bars are a provisional preview that the sealed chunk replaces; they need
+  not equal it.
 - Sub-minute flow is never written to disk.
 
 ## 1. Units and primitives
@@ -84,15 +86,16 @@ step 4) or `SCK1` (this spec).
 | 11 | `committed_through_ms` | i64 | equals `end_ms` when sealed |
 | 12 | `revision` | u64 | 0 when sealed |
 | 13 | `epoch` | u64 | the channel's epoch domain (section 7) |
-| 14 | `content_hash` | u64 | FNV-1a 64 over fields 1-13 then the raw payload (the SHC1 rule, `heatmap/ChunkCodec.cpp:58-66`) |
+| 14 | `content_hash` | u64 | FNV-1a 64 over fields 5-11 then the raw payload (the SHC1 FNV rule, `heatmap/ChunkCodec.cpp:58-66`). Kind, state, revision and epoch are outside it, so equal content has equal hashes across kinds and epochs. |
 | 15 | `payload_version` | u16 | per channel; 1 here |
 | 16 | codec | u8 | 0 raw, 1 zstd |
 | 17 | raw length | u32 | at most 16 MiB |
 | 18 | stored length | u32 | equals the remaining frame bytes |
 | 19 | payload | bytes | defined by (channel, kind, payload version) |
 
-- `not_modified` (3): fields 1-14. `error` (4): fields 1-9, u16 code, str8 message; codes as SHC1
-  (`heatmap/ChunkCodec.hpp:48-53`).
+- `not_modified` (3): fields 1-14. Field 14 echoes the requester's `have_hash`, which equals the current chunk's
+  content hash; fields 11-13 are the current chunk's (so a client holding an older epoch takes the current one).
+  `error` (4): fields 1-9, u16 code, str8 message; codes as SHC1 (`heatmap/ChunkCodec.hpp:48-53`).
 - `live` (2) frames and open chunks (state 0) exist only for channels whose availability levels carry
   `committed_through_ms` (the heatmap minute level). Each such channel defines its own kind 2 payload. Flow sends
   neither: flow history is sealed chunks only and flow live stays `flow_bar` (section 8).
@@ -150,7 +153,7 @@ of the `flow.rows` payload, cut by the server without re-encoding. A held `flow.
 | `grid_count` | u8 | 0 only when the chunk has no bars; 1 in 1m and 1h chunks (one UTC day has one grid, `flow/FlowCodec.cpp:165-167`); up to 16 in 1d chunks |
 | grids | `grid_count` x 32 | i64 `row_tick_units`, i64 `price_scale`, i64 `base_scale`, i64 `quote_scale` |
 | `run_count` | u8 | coverage runs |
-| runs | `run_count` x 5 | u16 from slot, u16 to slot (exclusive), u8 status: 1 complete, 2 partial, 3 unrecorded. Ascending, contiguous, covering `[0, slots)` exactly. |
+| runs | `run_count` x 5 | u16 from slot, u16 to slot (exclusive), u8 status: 1 complete, 2 partial, 3 unrecorded. Ascending, contiguous, covering `[0, slots)` exactly. A building slot never appears: a chunk with one is not sealed and not encoded. |
 
 Summary section, field-major (every value of one field, then the next). `n` = bars with trades.
 
@@ -223,7 +226,7 @@ Path `<flow_root>/<venue>/<symbol>/<YYYY-MM-DD>.flc` (UTC day). Prototype: `enco
 
 | Part | Layout |
 | --- | --- |
-| Header | `FLC1`; u16 version 1; u16 header length; u32 CRC-32 (IEEE) of the header with this field zeroed; str8 `instrument_id`; i64 day start; grid (32 bytes); u8 rule version; u32 seal window W (ms); u32 trades past their seal; u32 trades rejected by the builder; u32 receive-time regressions |
+| Header | `FLC1`; u16 version 1; u16 header length; u32 CRC-32 (IEEE) of the header with this field zeroed; str8 `instrument_id`; i64 day start; grid (32 bytes); u8 rule version; u32 seal window W (ms); u32 trades past their seal; u32 trades rejected by the builder; u32 receive-time regressions; u32 CRC-32 of the table |
 | Table | 50 entries of 25 bytes: u32 offset, u32 summary length, u32 total length, u32 CRC-32 of the section, u8 state (0 absent, 1 sealed), u64 source fingerprint (hour entries: the RAWL2 prefix through the hour's seal point, from FlowStore's source identities, `servermodel/FlowStore.cpp:66-130`; 0 otherwise) |
 | Sections | back to back in table order, starting right after the table |
 
@@ -237,9 +240,12 @@ Path `<flow_root>/<venue>/<symbol>/<YYYY-MM-DD>.flc` (UTC day). Prototype: `enco
 Coverage of a composed slot (a 1h slot from its 60 minutes, a 1d piece from its 24 hours): `complete` if all parts
 are complete, `unrecorded` if all are unrecorded, otherwise `partial` (the FHE1 rule, MARKETDATA.md "Flow history").
 
-- Validation on load: the header CRC; a zero-length entry has offset 0; non-empty entries lie back to back from the
-  end of the table; summary length <= total length; absent entries are empty; section CRCs; the file ends at the
-  last section. Any failure makes the whole file unreadable: its keys leave `sealed` and the day is rebuilt.
+- Validation on load: the header CRC; the table CRC; per entry, `state` 1 iff total length > 0, offset 0 iff empty,
+  non-empty entries back to back from the end of the table, the section CRC; for a sealed flow entry (0-25) a summary
+  length in `1..total`, the first summary-length bytes decode as a `flow.summary` payload and the whole section as
+  a `flow.rows` payload of its key; for `trades.big` entries summary length 0; the file ends at the last section.
+  Any failure makes the whole file unreadable: its keys leave `sealed` and the day is rebuilt. Tests:
+  `DayFileTableCorruptionIsRefused`, `DayFileTableRules`.
 - Serving 1m and 1h: the section bytes are the payload (cut at the summary length for `flow.summary`), without
   decode or re-encode.
 - Serving the 16-day 1d chunk and the day and 16-day `trades.big` chunks: assembled once from pieces, encoded and
@@ -290,41 +296,46 @@ BTC 1m and save at most 8% elsewhere.
 
 ### Seal rule
 
+A sealed bar is a deterministic function of the RAWL2 archive, computed by the canonical hour scan below. History
+serves only sealed bars. Live bars, closing and live-final ones included, are a provisional preview: they follow the
+same rule on what live saw, but nothing requires them to equal the sealed bar.
+
 | Term | Definition |
 | --- | --- |
 | RAWL2 order | `JournalReader` order: files by (`run_started_system_ns`, run id, segment) (`roller/JournalReader.cpp:49,89`), records in file order |
-| Read start for hour h | the first durable record with receive time >= h - 60 s; a fresh `JournalFeed` starts there (its trade-id window fills during the lead-in) |
-| Watermark M(R) | the maximum receive time (`systemNs / 10^6`) over every record from the read start through record R, all record kinds, R included |
+| Canonical hour scan of hour h | read RAWL2 in that order from the first durable record with receive time >= h - 60 s, with a fresh `JournalFeed` (its trade-id window fills during the lead-in), until the first record with M >= h + 1 h + W |
+| Watermark M(R) | the maximum receive time (`systemNs / 10^6`) over every record from the scan start through record R, all record kinds, R included |
 | Membership | a trade of record R belongs to 1m bar `[s, s + 60 s)` iff its exchange time is in the bar and `M(R) < s + 60 s + W`; equality excludes |
 | W | **15 s** (`flow.seal_window_ms`, written in the day file header) |
-| Regression | a record whose receive time is below M of its predecessor |
 
-- Each hour is defined from its own read start, so its content does not depend on which hours one build pass
-  covers. A pass may share one read across hours with no regression in their ranges; the result is the same.
-- An hour whose range `[h - 60 s, h + 1 h + W]` holds a regression is sealed with coverage `partial` and counted
-  (header, `sentinel_flow_seal_regressions_total`); its content still follows the rule. This is the case where
-  RAWL2 order can differ from the order live saw (a clock step back followed by a capture restart whose run sorts
-  earlier).
+- An hour's bytes depend only on the archive, the rules and its own scan start, so any pass grouping and any rebuild
+  give the same bytes. A pass may share one read across hours when the result is the same.
 - Trades that miss their bar are counted (header, `sentinel_flow_late_trades_total`) and stay in RAWL2.
+- Receive-time regressions (a record below M of its predecessor) are a diagnostic only: counted in the header and
+  `sentinel_flow_receive_regressions_total`. They change neither coverage nor content.
 - 1h and 1d bars are `flow::composeFlowBars` (`flow/FlowCompose.cpp:9-70`) of sealed 1m bars only.
 
-Live applies the same rule. Today the roller delivers a record's trades and then, at most once per journal
-second, its receive time (`roller/ShadowRoller.cpp:329-338,521-526`); flow cannot seal on that. Step 3 delivers
-every applied record's receive time to the flow model **before** the record's trades, unthrottled. The model keeps
-M per product, drops and counts a trade whose bar's seal point is at or below M, and marks a bar final when M
-reaches its seal point. M never decreases, also when the roller retracts a provisional suffix; live bars are
-provisional and sealed chunks replace them.
+**Live.** Step 3 delivers every applied record's receive time to the flow model before the record's trades,
+unthrottled (today the roller sends it after the trades, at most once per journal second,
+`roller/ShadowRoller.cpp:329-338,521-526`). The model keeps M per product, counts and drops a trade whose bar's seal
+point is at or below M, and marks a bar final when M reaches the seal point. With one run and a monotone clock this
+gives the sealed bar; after a clock step back, a capture restart or a retracted suffix it may not. When the store
+seals an hour, the server compares each live-final 1m bar it still holds with the sealed bar (both are in the same
+process) and counts every difference in `sentinel_flow_live_seal_mismatch_total{instrument}`. The client replaces
+live bars with the sealed chunk in any case (section 8).
 
-Parity fixtures (step 3 acceptance; each feeds the same RAWL2 through the live roller path and the store builder
-and compares the sealed bars): a trade in the record that first reaches the seal point; a seal point in the next
-hourly file; reconnect snapshot frames resending trades after the seal point; a clock step back inside a run; a
-clock step back with a capture restart whose run sorts earlier (must come out `partial`); hours h and h + 1 built
-in one pass and separately (identical bytes).
+Fixtures (step 3 acceptance):
+- Determinism: the same RAWL2 built in one pass, hour by hour and in reverse order gives identical bytes, including
+  an archive with a backward clock step inside a run and a reordered, non-overlapping run (a restart after a clock
+  step back whose run sorts earlier).
+- Live: on archives without regressions the live finals equal the sealed bars (trade in the record that first
+  reaches the seal point; seal point in the next hourly file; reconnect snapshots resending trades after the seal
+  point). On the reordered-run archive live may differ; the mismatch counter counts each differing bar.
 
 Why W = 15 s: on 4 measured days (3 BTC, 1 ETH, 6.5 M trades) M passed the end of a trade's bar by at most 1.3 s,
-the only regression was 6 ms, and neither 15 s nor 60 s excludes a trade (section 12). 15 s is the smaller
-window, with ten times the observed maximum as margin, and absorbs the observed clock offset (-0.14 s). A larger W
-only delays sealing. Open item 1 re-measures every day before the cutover.
+the only regression was 6 ms, and neither 15 s nor 60 s excludes a trade (section 12; a transit-distribution scan,
+not a conformance run). 15 s is the smaller window with ten times the observed maximum as margin and absorbs the
+observed clock offset (-0.14 s). A larger W only delays sealing. Open item 1 re-measures every day before the cutover.
 
 Today's store differs: it reads until receive time passes the end of its whole build run plus 60 s
 (`servermodel/FlowStore.cpp:455`, runs grouped at `:996-1032`), so a late trade's membership depends on how hours
@@ -333,50 +344,73 @@ were grouped into runs.
 ### Ownership
 
 - History serves every sealed chunk, whether or not earlier hours are sealed. Availability lists the sealed runs.
-- Live keeps the 1m buckets from `live_from_ms` = UTC hour of (receive watermark - 60 s) - 6 h, today's retention
-  bound (`servermodel/ServerDataModel.cpp:1152-1159`). It drops a bucket only when its hour is sealed on disk or the
-  bucket falls before `live_from_ms`.
-- A bucket is drawn from a held sealed chunk if there is one; else from live if it is at or after `live_from_ms`;
-  else it is `building` (inside the recorded range) or `unrecorded`. Ownership never moves back into live: an
-  unsealed hour before `live_from_ms` (a failed build, a store more than 6 h behind, newest-first recovery) stays
-  `building` until the store seals it.
-- A sealed file that fails validation leaves `sealed` (its keys answer `unavailable`) and is rebuilt. Clients keep
-  their copies: a rebuild from the same RAWL2 gives the same bytes.
+- `live_from_ms` = UTC hour of (receive watermark - 60 s) - 6 h, today's retention bound
+  (`servermodel/ServerDataModel.cpp:1152-1159`). Live keeps every 1m bucket at or after it and drops a bucket only
+  when its hour is sealed on disk or it falls before `live_from_ms`.
+- Live serves every bucket of a subscribed timeframe that intersects `[live_from_ms, now]`. A coarse bucket that
+  starts before `live_from_ms` (for example today's 1d bucket) is composed from the sealed 1m bars before
+  `live_from_ms` and the retained live minutes after it, as today's crossing bucket.
+- The client draws a bucket from a held sealed chunk when it has one; else from live; else it is `building` (inside
+  the recorded range) or `unrecorded`. Ownership never moves back into live: an unsealed hour before `live_from_ms`
+  (a failed build, a store more than 6 h behind, newest-first recovery) stays `building` until it is sealed.
+- A file that fails validation leaves `sealed` (its keys answer `unavailable`) and is rebuilt. A rebuild from the
+  same RAWL2 gives the same bytes, so held copies stay valid.
 
 ### Epoch
 
-An epoch identifies the rules behind sealed bytes, per domain: `flow` (the `.flc` files: `flow.summary`,
-`flow.rows`, `trades.big`), and from step 4 `book.near` and `book.deep`.
+An epoch names the rules and archive state behind sealed bytes, per domain: `flow` (the `.flc` files:
+`flow.summary`, `flow.rows`, `trades.big`), and from step 4 `book.near` and `book.deep`.
 
-- epoch = FNV-1a 64 of (domain name, builder rule version, W, scale rule version, big-trade floors, the domain's
-  counter). The counter is a u64 in `<flow_root>/epoch`.
-- The server increments the counter when it rebuilds a sealed section whose new source fingerprint differs from the
-  one in the table (RAWL2 changed under it), and when the owner-approved RAWL2 repair procedure asks for it. A
-  missing or unreadable counter file is recreated with the current Unix time in ms, far above any earlier counter
-  value, so the epoch changes.
-- A day file lost while RAWL2 is intact is rebuilt to the same bytes; the epoch stays.
-- Every frame carries its epoch; availability carries the current one per channel. A client revalidates
-  (`have_hash`) a held sealed chunk whose epoch differs before using it; `not_modified` re-stamps it.
+- epoch = FNV-1a 64 of (domain name, builder rule version, W, scale rule version, big-trade floors, counter).
+- The counter lives in `<flow_root>/epoch`: u64 counter, u32 count of pending days, i64 day starts, u32 CRC-32;
+  always replaced atomically (temp file, fsync, rename, directory fsync).
+- Triggers: a rebuild finds a sealed section whose new source fingerprint differs from its table entry (RAWL2
+  changed under it), or the owner-approved RAWL2 repair procedure names days. A rule change changes the epoch by
+  itself (it is in the hash).
+
+Transition, in this order:
+
+| Step | Action | Crash after this step |
+| --- | --- | --- |
+| 1 | Fence the affected days in memory: their keys leave `sealed`, requests get `unavailable`, their byte-cache entries are dropped, and replies for them still in the history pool are discarded when they finish. Frames already queued on a socket carry the old bytes with the old epoch, a consistent pair. | nothing durable changed; the next rescan finds the same mismatch and starts again |
+| 2 | Write the epoch file: counter + 1, pending = the affected days | restart reads the pending list: step 6 |
+| 3 | Advertise the new epoch. The byte cache is keyed by epoch, so every other entry is dropped. | step 6 |
+| 4 | Rebuild the pending days and write their files | step 6 |
+| 5 | Write the epoch file with an empty pending list; unfence | done |
+| 6 (restart with pending days) | keep those days fenced, counter + 1 (a new epoch again), rebuild them, then step 5 | |
+
+- New bytes are never served under the old epoch (the counter moves at step 2, before any new file exists), and old
+  bytes of affected days are never served under the new epoch (fenced from step 1 to step 5).
+- A missing or unreadable epoch file is recreated with counter = current Unix time in ms (far above any earlier
+  counter) and every day pending: no day is served before its table fingerprints are checked against RAWL2.
+- A day file lost while RAWL2 is intact is rebuilt to the same bytes; no transition is needed.
+- Clients: every frame carries its epoch, availability the current one per channel. A held sealed chunk whose epoch
+  differs is not drawn until revalidated: `have_hash` with its content hash; `not_modified` gives it the current
+  epoch, `unavailable` keeps it hidden and retries, a chunk replaces it.
 - A lost day file together with changed RAWL2 is not detected (open item 8).
 
 ## 8. Live tail
 
-`flow_live_subscribe`, `flow_bar` and `flow_live_unsubscribe` keep today's fields and semantics (MARKETDATA.md
-"Live flow bars"): revision as envelope metadata, higher revision wins, at equal revision `complete` wins. Changes:
+`flow_live_subscribe`, `flow_bar` and `flow_live_unsubscribe` keep today's fields and semantics (MARKETDATA.md "Live
+flow bars"): revision as envelope metadata, higher revision wins, at equal revision `complete` wins. Changes:
 
-1. On subscribe the server sends `flow_bar` for **every** retained bucket of the subscribed timeframe at or after
-   `live_from_ms` (today: only the newest), oldest first, then one barrier:
-   `{"type":"flow_live_ready","sub":<u64>,"live_from_ms":<i64>,"buckets":<count>}`. Later `flow_bar` messages are
-   updates. Each FLB1 carries its own grid, so a tail across midnight needs nothing new. The burst is at most 7 h
-   of buckets (420 at 1m; estimated 0.9 MB of JSON on a busy BTC day), inside the 16 MiB session write budget.
-2. Correlation is the JSON `sub`. Re-subscribe replaces; unsubscribe or disconnect cancels and discards queued
-   frames (today's rules). A refused subscribe (`error`, context `flow_live_subscribe`) is retried with exponential
+1. Replay: on subscribe the server sends `flow_bar` for every bucket of the subscribed timeframe that intersects
+   `[live_from_ms, now]` (section 7 Ownership; today: only the newest), oldest first, then one barrier:
+   `{"type":"flow_live_ready","sub":<u64>,"live_from_ms":<i64>,"buckets":<count>}`. Each FLB1 carries its own grid,
+   so a replay across midnight needs nothing new.
+2. Admission: replay frames go through the session's normal write queue, at most 1 MiB of replay bytes queued at a
+   time per subscription; the next frame is admitted when queued replay bytes drop below that. One frame is at most
+   one FLB1 bar (at most 65,535 rows, about 1.6 MB of base64), so a frame always fits the 16 MiB queue. Updates to
+   the series during the replay are coalesced per bucket (newest revision) and sent after the barrier. The
+   slow-client disconnect policy is today's.
+3. Correlation is the JSON `sub`. Re-subscribe replaces; unsubscribe or disconnect cancels the replay and discards
+   queued frames. A refused subscribe (`error`, context `flow_live_subscribe`) is retried with exponential
    100 ms..5 s backoff.
-3. A new subscription or connection resets revisions: at subscribe the client drops its live buckets of that
-   series and rebuilds them from the burst.
-4. The client drops a live bucket once it holds a sealed chunk covering it. A coarse bucket that crosses the
-   sealed boundary stays live; the server composes it from sealed hours and live minutes, as today.
-5. 1 s subscriptions are unchanged (RAM only, no chunks).
+4. A new subscription or connection resets revisions: at subscribe the client drops its live buckets of the series
+   and rebuilds them from the replay.
+5. The client replaces a live bucket with the sealed chunk once it holds one covering it, whatever the live
+   bucket's revision or finality.
+6. 1 s subscriptions are unchanged (RAM only, no chunks).
 
 ## 9. Client fetch
 
@@ -400,7 +434,7 @@ Retry, busy backoff, deadlines and reconnect follow the heatmap fetcher (MARKETD
 1. The server builds `.flc` files from RAWL2 in a background thread, newest day first, into a new root. FLD1 keeps
    serving FHE1 meanwhile.
 2. Each day is diffed against FLD1 per 1m bar (summary and rows; notables excluded). Expected differences: bars
-   whose membership changes under section 7, and hours marked `partial`; each is listed with the trades that moved.
+   whose membership changes under section 7; each is listed with the trades that moved.
 3. Cutover (owner approval at the Mac): `chunk_request` serves from `.flc`, the client moves to chunks (step 5), and
    FHE1, FLB1 history, FLD1 files, `.state` sidecars, `encodeFlowDay` / `decodeFlowDay` and their tests are deleted
    in the same change. Clients start with an empty flow cache, so no epoch carries over.
@@ -418,10 +452,11 @@ Run 2026-11-22 on `/Volumes/T7/sentinel-data` (read-only): `flow_history_bench -
 
 ### Lateness
 
-Every trade with its exchange time in the day, deduplicated and ordered by `JournalFeed` as the store builder does.
-Reading starts two hours before the day (lead-in) and stops when the running maximum receive time is an hour past
-it. All four scans are complete: no damage, no file-order regression. "After bar end" = receive time - end of the
-trade's 1m bar; exclusions use the section 7 running maximum M.
+A transit-distribution scan, not the canonical hour scan and not seal-conformance evidence: one continuous
+`JournalFeed` for the day, deduplicating and ordering as the store builder does. It starts at the last journal file
+opened at least an hour before the day (one to two hours of lead-in; two on these days) and stops when the running
+maximum receive time is an hour past the day. All four scans are complete: no damage, no file-order regression.
+"After bar end" = receive time - end of the trade's 1m bar; exclusions use the running maximum M.
 
 | Day | Trades | Receive - exchange p50 / p99 / p99.9 / max, min | After bar end: 0-100 ms / 0.1-1 s / 1-5 s / >= 5 s | After bar end p99.9 / max (by M) | Excluded at 15 s / 60 s | Regressions | Reconnects |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -432,7 +467,7 @@ trade's 1m bar; exclusions use the section 7 running maximum M.
 
 - 99.8% of trades arrived before their bar ended. The one trade more than 1 s late (1,278 ms) came in a reconnect
   snapshot frame.
-- The 6 ms regression on BTC 2026-11-21 would mark its hour `partial` under section 7; it moves no trade.
+- The 6 ms regression on BTC 2026-11-21 moves no trade.
 - Negative receive - exchange is clock offset between Coinbase and the capture host.
 - Scan cost: 54-69 s per day.
 
@@ -457,13 +492,15 @@ Day file (section 5: header and 50-entry table, 24 hour sections, the 1h section
 
 | Day | FLD1 | `.flc` | of which header + table / 1h / 1d piece | Read: FLD1 decode / `.flc` parse + decode 24 hours |
 | --- | --- | --- | --- | --- |
-| BTC busy | 2,179,873 | 1,400,064 (1.6x smaller) | 1,336 / 206,439 / 62,494 | 4.9 / 4.0 ms |
-| BTC median | 1,429,626 | 587,908 (2.4x) | 1,336 / 99,067 / 38,449 | 1.5 / 1.8 ms |
-| ETH | 1,250,195 | 365,617 (3.4x) | 1,336 / 43,946 / 13,756 | 1.1 / 1.0 ms |
-| SOL | 1,196,587 | 304,761 (3.9x) | 1,336 / 37,357 / 10,151 | 1.0 / 0.9 ms |
-| PEPE | 477,695 | 46,938 (10.2x) | 1,337 / 2,895 / 723 | 0.34 / 0.17 ms |
+| BTC busy | 2,179,873 | 1,400,068 (1.6x smaller) | 1,340 / 206,439 / 62,494 | 4.9 / 4.0 ms |
+| BTC median | 1,429,626 | 587,912 (2.4x) | 1,340 / 99,067 / 38,449 | 1.5 / 1.8 ms |
+| ETH | 1,250,195 | 365,621 (3.4x) | 1,340 / 43,946 / 13,756 | 1.1 / 1.0 ms |
+| SOL | 1,196,587 | 304,765 (3.9x) | 1,340 / 37,357 / 10,151 | 1.0 / 0.9 ms |
+| PEPE | 477,695 | 46,942 (10.2x) | 1,341 / 2,895 / 723 | 0.34 / 0.17 ms |
 
-Serving a 1m or 1h chunk reads its section and needs no decode; the parse figure includes every section CRC.
+Serving a 1m or 1h chunk reads its section and needs no decode. The read column was measured before the table CRC
+was added (4 bytes, included above) and before loading decoded every section; with the full section 5 validation
+the BTC busy day takes 6.5 ms, once per file load.
 
 1h and 1d levels, all FLD1 days (BTC 54, others 53):
 
@@ -517,7 +554,8 @@ Not measured: an event should take 15-20 bytes, so 500 a day is about 9 KB.
 ## 13. Open items
 
 1. **Lateness on every day.** Four days were measured. Before the cutover, run `--lateness` over every recorded day
-   and product (about a minute per day) and check that no day excludes a trade at 15 s or shows a regression.
+   and product (about a minute per day) and check that no day excludes a trade at 15 s. A conformance run of the
+   canonical hour scan itself is the step 3 builder's job.
 2. **Big-trade floors** (owner decision: what bubbles show far back). Section 12 proposes floors.
 3. **Days without a recorder grid** (plan question 4). Live drops their trades
    (`sentinel_flow_missing_grid_trades_total`); the store has a journal grid fallback (`dayScales`,
@@ -528,8 +566,8 @@ Not measured: an event should take 15-20 bytes, so 500 a day is about 9 KB.
 6. **Live message format.** `flow_bar` stays JSON with FLB1 (rows always included). A summary-only live level of
    detail, binary live frames and dropping FLB1 notables when `trades.big` ships belong to the live rework.
 7. **Heatmap on SCK1 (step 4).** The mapping in section 3 is fixed. Not settled, because it needs the step 4 code:
-   how HMC2 repair tools bump the `book.*` epoch (today they delete rollup files, MARKETDATA.md "Changed content"),
-   and the exact `book.*` kind 2 payload layout.
+   which HMC2 repair tools run the section 7 epoch transition for `book.*` (today they delete rollup files,
+   MARKETDATA.md "Changed content"), and the exact `book.*` kind 2 payload layout.
 8. **Lost day file and changed RAWL2 together.** The epoch cannot see it (the old fingerprint is gone). RAWL2 is
    append-only and rewritten only by owner-approved repairs, which bump the epoch; an unannounced change of RAWL2
    bytes is outside the model.
