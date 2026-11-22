@@ -83,10 +83,12 @@ std::optional<FlowBackfillState::Request> FlowBackfillState::next(int64_t nowMs)
     if (nowMs < m_retryAt) { m_hold = m_retryHold; return {}; }
     if (m_pending) {
         if (!m_pending->held) { m_hold = Hold::InFlight; return {}; }
-        m_pending->held = false;
-        m_pending->id = ++m_nextId;
-        m_sentAt = nowMs;
-        return m_pending;
+        if (fitHeldToSeam(nowMs)) {
+            m_pending->held = false;
+            m_pending->id = ++m_nextId;
+            m_sentAt = nowMs;
+            return m_pending;
+        }
     }
     Request request{0, m_generation, m_symbol, m_tf};
     const int64_t limit = historyLimit();
@@ -143,6 +145,28 @@ std::optional<FlowBackfillState::Request> FlowBackfillState::send(Request reques
     m_pending = request;
     m_sentAt = nowMs;
     return m_pending;
+}
+// A held request goes out again only within the current seam. Buckets it named that are
+// now live (or after) are dropped; a refresh keeps them queued for after the seam, and a
+// live sample keeps its closed buckets as a plain page. False when nothing is left.
+bool FlowBackfillState::fitHeldToSeam(int64_t nowMs) {
+    auto& request = *m_pending;
+    const int64_t allowed = request.sample && !m_liveArmed ? std::numeric_limits<int64_t>::max() : historyLimit();
+    if (request.endMs <= allowed) return true;
+    const int64_t past = std::min<int64_t>((request.endMs - allowed + m_tf - 1) / m_tf, request.limit);
+    if (request.refresh && !request.probe)
+        for (int64_t i = 0; i < past; ++i) refresh(request.endMs - i * m_tf, nowMs);
+    request.endMs -= past * m_tf;
+    request.limit -= int(past);
+    request.sample = false;
+    m_timedOut.reset();
+    if (request.limit > 0) return true;
+    m_pending.reset();
+    return false;
+}
+int64_t FlowBackfillState::seamWakeWallMs() const {
+    if (m_symbol.isEmpty() || m_liveCurrentBucket < 0 || liveSampling() || m_refresh.empty()) return 0;
+    return m_refresh.rbegin()->first > historyLimit() ? m_liveCurrentBucket + m_tf : 0;
 }
 // Newest bucket a request other than the live sample may name: before the live bucket,
 // and before the live sample's buckets while it runs. Unbounded before the clock is known.

@@ -373,6 +373,23 @@ TEST(FlowSeriesBuffer, PanningAwayKeepsBarsUnderTheCapsAndAcceptsOlderPages) {
     EXPECT_EQ(buffer.series(60'000)->bars.begin()->first, 0);
 }
 
+// A transport drop leaves the bucket Partial only until the stream delivers that bucket
+// again; Partial reported by the source itself stays until history resolves it.
+TEST(FlowSeriesBuffer, TransportDropClearsOnALaterLiveFrameButSourcePartialStays) {
+    FlowSeriesBuffer buffer;
+    buffer.apply(batch(bar(1, false)), 0);
+    buffer.markDropped("BTC-USD", 60'000, 60'000);
+    const auto status = [&] { return buffer.series(60'000)->coverage.at(60'000).status; };
+    EXPECT_EQ(status(), Status::Partial);
+    buffer.apply(batch(bar(3, false)), 1);
+    EXPECT_EQ(status(), Status::Live) << "a later cumulative frame restores delivery";
+    buffer.markDropped("BTC-USD", 60'000, 60'000);
+    auto page = batch(bar(3, false), true);
+    page.ranges = {{60'000, 120'000, Status::Partial}};
+    buffer.apply(page, 2);
+    buffer.apply(batch(bar(4, false)), 3);
+    EXPECT_EQ(status(), Status::Partial) << "the source's own Partial is not a transport drop";
+}
 TEST(FlowSeriesBuffer, AdvancingSealRequestsStoreForLiveBucketsOutsideTheNewPage) {
     FlowSeriesBuffer buffer;
     buffer.apply(batch(bar(100, true)), 0);
@@ -534,6 +551,62 @@ TEST(FlowBackfillState, ArmedLiveBucketIsNeverRequestedByHistory) {
     state.markLiveEdge(live + tf);
     const auto closed = state.next(61'200); ASSERT_TRUE(closed);
     EXPECT_EQ(closed->endMs, live) << "once closed, the bucket is history's";
+    EXPECT_TRUE(closed->refresh);
+}
+// A live sample that failed and waits for its retry: live arms meanwhile. The retry drops
+// the bucket that is now the stream's and keeps the closed bucket it also covered.
+TEST(FlowBackfillState, HeldSampleDropsItsNowLiveBucketWhenLiveArms) {
+    constexpr int64_t tf = 60'000, live = 1000 * tf, interval = FlowSeriesBuffer::kRefetchIntervalMs;
+    for (const bool withClosedBucket : {true, false}) {
+        FlowBackfillState state; state.select("BTC-USD", tf);
+        state.setWindow(live - 10 * tf, live + 2 * tf);
+        state.markLiveEdge(live);
+        const auto history = state.next(0); ASSERT_TRUE(history);
+        ASSERT_TRUE(state.accept(reply(*history, live - 10 * tf), 10));
+        int64_t now = 110, edge = live;
+        if (withClosedBucket) {
+            const auto first = state.next(now); ASSERT_TRUE(first); ASSERT_TRUE(first->sample);
+            ASSERT_TRUE(state.accept(reply(*first, live), now + 10));
+            edge = live + tf;
+            state.markLiveEdge(edge);
+            now += interval;
+        }
+        const auto sample = state.next(now); ASSERT_TRUE(sample);
+        ASSERT_TRUE(sample->sample);
+        ASSERT_EQ(sample->endMs, edge);
+        ASSERT_EQ(sample->limit, withClosedBucket ? 2 : 1);
+        ASSERT_TRUE(state.fail(sample->id, Client::FlowFailure::Retryable, now + 10));
+        state.observeLive(edge, now + 20);
+        const auto retry = state.next(now + 2000);
+        if (!withClosedBucket) {
+            EXPECT_FALSE(retry) << "only the now-live bucket was held: nothing to resend";
+            continue;
+        }
+        ASSERT_TRUE(retry);
+        EXPECT_EQ(retry->endMs, live) << "the closed bucket only";
+        EXPECT_EQ(retry->limit, 1);
+        EXPECT_FALSE(retry->sample);
+    }
+}
+// A refresh held at the armed seam names the bucket boundary to wake at, so it goes out
+// when the bucket closes even if no live frame or view change calls the pager.
+TEST(FlowBackfillState, RefreshHeldAtTheSeamWakesAtTheBucketBoundary) {
+    constexpr int64_t tf = 60'000, live = 1000 * tf;
+    FlowBackfillState state; state.select("BTC-USD", tf);
+    state.setWindow(live - 10 * tf, live + tf);
+    state.markLiveEdge(live);
+    state.observeLive(live, 0);
+    EXPECT_EQ(state.seamWakeWallMs(), 0) << "nothing waits on the seam";
+    const auto page = state.next(0); ASSERT_TRUE(page);
+    ASSERT_TRUE(state.accept(reply(*page, live - 10 * tf), 10));
+    state.refresh(live, 20);
+    EXPECT_FALSE(state.next(200));
+    EXPECT_EQ(state.wakeAtMs(200), FlowSeriesBuffer::kRefetchIntervalMs) << "only the seal probe's deadline";
+    EXPECT_EQ(state.seamWakeWallMs(), live + tf);
+    state.markLiveEdge(live + tf);
+    EXPECT_EQ(state.seamWakeWallMs(), 0);
+    const auto closed = state.next(300); ASSERT_TRUE(closed);
+    EXPECT_EQ(closed->endMs, live);
     EXPECT_TRUE(closed->refresh);
 }
 TEST(FlowBackfillState, LiveCoveredEdgeDoesNotPageHistory) {
@@ -729,18 +802,44 @@ TEST(FlowBackfillState, OversizedCoalescedRefreshPreservesOlderBuckets) {
     EXPECT_EQ(older->endMs, 3000);
     EXPECT_EQ(older->limit, 4);
 }
-TEST_F(FlowDataSourceTest, DroppedLiveFrameMarksPartialAndSchedulesOneBucketRefetch) {
-    ready(); select(); const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
-    const auto sub = sent[0]["sub"].get<quint64>();
-    client().flowLiveDropped(sub, "BTC-USD", 60'000, 60'000); deliver();
-    ASSERT_NE(source.flowBuffer().series(60'000), nullptr);
-    EXPECT_EQ(source.flowBuffer().series(60'000)->coverage.at(60'000).status, Status::Partial);
-    emitPage(sent[1]);
-    QEventLoop loop;
-    QTimer::singleShot(250, &loop, &QEventLoop::quit);
-    loop.exec(); // the pager's 100 ms send throttle must expire
-    const auto refetch = requests(); ASSERT_EQ(refetch.size(), 1u);
-    EXPECT_EQ(refetch[0]["end_time_ms"], 60'000);
+// A dropped frame on the forming bucket (1 s bars, live armed): no history request for it
+// while it is live, a later frame restores it, and once it closes its refresh goes out by
+// the pager's own boundary wake, with no further frame or view change.
+TEST_F(FlowDataSourceTest, DroppedLiveFrameRecoversAndRefreshesTheBucketAfterItCloses) {
+    constexpr int64_t tf = 1000;
+    QElapsedTimer align; align.start();
+    while (QDateTime::currentMSecsSinceEpoch() % tf > 100 && align.elapsed() < 2000) {}
+    const int64_t live = QDateTime::currentMSecsSinceEpoch() / tf * tf;
+    ready();
+    source.subscribeFlowLive("BTC-USD", tf);
+    const auto subscribe = requests(); ASSERT_EQ(subscribe.size(), 1u);
+    const auto sub = subscribe[0]["sub"].get<quint64>();
+    const auto frame = [&](uint32_t revision) {
+        auto b = batch(bar(revision, false, Source::Live, live, tf)); b.id = sub;
+        client().flowBarsReceived(std::make_shared<const Client::FlowBatch>(b)); deliver();
+    };
+    frame(1);
+    source.requestFlowHistory("BTC-USD", tf, live - 10 * tf, live + tf);
+    const auto page = requests(); ASSERT_EQ(page.size(), 1u);
+    EXPECT_EQ(page[0]["end_time_ms"], live - tf);
+    emitPage(page[0]);
+    client().flowLiveDropped(sub, "BTC-USD", tf, live); deliver();
+    const auto status = [&] { return source.flowBuffer().series(tf)->coverage.at(live).status; };
+    EXPECT_EQ(status(), Status::Partial);
+    settle(150);
+    if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a second boundary";
+    EXPECT_TRUE(requests().empty()) << "the live bucket is the stream's";
+    frame(2);
+    EXPECT_EQ(status(), Status::Live) << "a later frame restores delivery";
+    QElapsedTimer clock; clock.start();
+    std::vector<Json> refetch;
+    while (refetch.empty() && clock.elapsed() < 2500) {
+        settle(50);
+        refetch = requests();
+    }
+    ASSERT_EQ(refetch.size(), 1u) << "the pager wakes when the bucket closes";
+    EXPECT_GE(QDateTime::currentMSecsSinceEpoch(), live + tf);
+    EXPECT_EQ(refetch[0]["end_time_ms"], live);
     EXPECT_EQ(refetch[0]["limit"], 1);
 }
 

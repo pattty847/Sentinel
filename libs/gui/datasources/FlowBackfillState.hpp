@@ -12,12 +12,14 @@
 // - Live armed (the subscription delivered a frame): the stream owns the live bucket and
 //   keeps it covered as the edge advances. History requests only older buckets: gap pages,
 //   seal probes and refreshes alike. A refresh at or after the live bucket waits until the
-//   seam passes it.
+//   seam passes it; seamWakeWallMs() names that boundary so the pager wakes for it.
 // - Live not armed (quiet or refused subscription): history pages buckets before the seam;
 //   the live bucket, and the buckets that closed since it was last sampled, belong to the
 //   live sample: one page per FlowSeriesBuffer::kRefetchIntervalMs, sent only after every
 //   older gap of the window is paged. A closing bucket is never paged on its own as the
 //   edge moves.
+// A held request (retry, oversize halving) is re-shaped to the seam before it is resent:
+// live may have armed, or the edge moved, while it waited.
 // There is no edge pace. Pages are spaced by the 100 ms page gap only (server fairness:
 // the server runs one flow job per connection and few overall).
 // Coverage outside the window is kept until the series buffer trims those bars (uncover).
@@ -49,6 +51,9 @@ public:
     bool inFlight() const { return m_pending && !m_pending->held; }
     int64_t retryAtMs() const { return m_retryAt; }
     int64_t wakeAtMs(int64_t nowMs) const;
+    // Wall-clock bucket boundary to wake at when a refresh waits only for the live bucket to
+    // close (a wake, not a request pace); 0 when nothing waits on the seam.
+    int64_t seamWakeWallMs() const;
     int64_t windowStartMs() const { return m_start; }
     int64_t windowEndMs() const { return m_window ? m_end + m_tf : 0; }
     // Why the last next() sent nothing (Sent when it sent a request). Measurement only.
@@ -69,6 +74,7 @@ private:
     int64_t sampleFrom() const;
     int64_t flightTimeoutMs() const;
     std::optional<Request> send(Request request, int64_t nowMs);
+    bool fitHeldToSeam(int64_t nowMs);
     QString m_symbol;
     int64_t m_tf = 0, m_start = 0, m_end = 0, m_retryAt = 0;
     int64_t m_backoff = 1000;

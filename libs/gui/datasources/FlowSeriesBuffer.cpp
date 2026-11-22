@@ -60,6 +60,7 @@ std::vector<int64_t> FlowSeriesBuffer::apply(const Batch& batch, int64_t nowMs) 
         }
         for (const auto& range : batch.ranges) {
             s.coverage[range.fromMs] = range;
+            s.dropped.erase(s.dropped.lower_bound(range.fromMs), s.dropped.lower_bound(range.toMs));
             if (range.status != Status::Unrecorded) continue;
             // A terminal empty answer withdraws cached values, including a prior
             // source generation. A later discovered recording can start at revision 1.
@@ -101,7 +102,9 @@ std::vector<int64_t> FlowSeriesBuffer::apply(const Batch& batch, int64_t nowMs) 
             !(in.complete && !held->second.complete)) continue;
         if (merge(held == s.bars.end() ? nullptr : &held->second, in, m_sealedThroughMs) == Merge::Replace) {
             s.bars[start] = in;
-            if (!batch.history && in.source == Source::Live) {
+            if (!batch.history && in.source == Source::Live && s.dropped.erase(start) && !s.losses.contains(start)) {
+                s.coverage[start] = {start, start + batch.timeframeMs, Status::Live}; // delivery recovered
+            } else if (!batch.history && in.source == Source::Live) {
                 const auto above = s.coverage.upper_bound(start);
                 const bool alreadyCovered = above != s.coverage.begin() && std::prev(above)->second.toMs > start;
                 if (!alreadyCovered) s.coverage[start] = {start, start + batch.timeframeMs, Status::Live};
@@ -139,6 +142,14 @@ void FlowSeriesBuffer::setCoverage(const QString& symbol, int64_t tf, const Rang
     m_symbol = symbol;
     auto& series = m_series[tf];
     series.coverage[range.fromMs] = range;
+    enforceRetention(tf, series);
+}
+void FlowSeriesBuffer::markDropped(const QString& symbol, int64_t tf, int64_t bucket) {
+    if (!m_symbol.isEmpty() && symbol != m_symbol) clear();
+    m_symbol = symbol;
+    auto& series = m_series[tf];
+    series.coverage[bucket] = {bucket, bucket + tf, Status::Partial};
+    series.dropped.insert(bucket);
     enforceRetention(tf, series);
 }
 void FlowSeriesBuffer::clear() {
@@ -234,12 +245,14 @@ void FlowSeriesBuffer::enforceRetention(int64_t tf, Series& s) {
         cutBelow(s.coverage, below);
         s.losses.erase(s.losses.begin(), s.losses.lower_bound(below));
         s.lossRefetchAt.erase(s.lossRefetchAt.begin(), s.lossRefetchAt.lower_bound(below));
+        s.dropped.erase(s.dropped.begin(), s.dropped.lower_bound(below));
     }
     if (from != kNoBound) {
         s.bars.erase(s.bars.lower_bound(from), s.bars.end());
         cutFrom(s.coverage, from);
         s.losses.erase(s.losses.lower_bound(from), s.losses.end());
         s.lossRefetchAt.erase(s.lossRefetchAt.lower_bound(from), s.lossRefetchAt.end());
+        s.dropped.erase(s.dropped.lower_bound(from), s.dropped.end());
     }
     while (s.coverage.size() > kMaxBuckets) {
         below = std::max(below, floorTo(s.coverage.begin()->first, tf) + tf);
