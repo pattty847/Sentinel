@@ -21,18 +21,20 @@
 //
 //   flow_history_bench --lateness <rawl2-root> <symbol> <YYYY-MM-DD>...
 //
-// Lateness mode (docs/FLOW_CHUNKS.md, seal window): every trade whose exchange
+// Lateness mode (docs/FLOW_CHUNKS.md section 7): every trade whose exchange
 // time is in the day, deduplicated and ordered by JournalFeed as FlowStore does,
-// with the receive time FlowStore uses (the RAWL2 record's systemNs). It reads
-// one hour past the day end so trades up to an hour late are seen. Prints
-// receive - exchange and receive - end of the trade's 1m bucket as histograms
-// and quantiles, and what a 15 s and a 60 s seal window would exclude.
+// with the receive time FlowStore uses (the RAWL2 record's systemNs). One hour of
+// lead-in, and reading until the running maximum receive time is an hour past
+// the day. Prints receive - exchange and receive - end of the trade's 1m bucket
+// as histograms and quantiles, what a 15 s and a 60 s seal window exclude under
+// the running-maximum rule, receive-time regressions, damage and completeness.
 //
 //   flow_history_bench --columnar <fld1-root> <symbol> <YYYY-MM-DD>...
 //
-// Columnar mode: re-lays FLD1 days as the lean chunk of docs/FLOW_CHUNKS.md
-// (flow_chunk_proto.hpp) and prints sizes raw and with zstd, decode cost, row
-// density per level and int16 offset headroom over every FLD1 day of the symbol.
+// Columnar mode: re-lays FLD1 days in the section 4 payload and the section 5
+// day file of docs/FLOW_CHUNKS.md (flow_chunk_proto.hpp) and prints sizes raw
+// and with zstd against FLB1, read cost, 1h and assembled 16-day 1d chunks, row
+// density, int16 offset headroom and big-trade floor counts over every FLD1 day.
 #include "flow/FlowCodec.hpp"
 #include "flow/FlowCompose.hpp"
 #include "flow_chunk_proto.hpp"
@@ -383,44 +385,54 @@ int64_t quantile(const std::vector<int64_t>& sorted, double q) {
 
 struct LateTrade { int64_t afterEndMs, exchangeMs, receiveMs; bool snapshotFrame; std::string id; };
 
+// The seal rule of docs/FLOW_CHUNKS.md section 7: a trade misses its bar when the
+// running maximum receive time over all records, advanced by its own record
+// before the record's trades apply, is at or past bar end + W.
 void latenessDay(const fs::path& journalRoot, const std::string& symbol, int64_t dayMs) {
-    // Reads one hour past the day so trades up to an hour late are seen.
-    constexpr int64_t ReadTail = Hour;
+    // An hour of lead-in warms JournalFeed's trade-id window and the running
+    // maximum; reading stops once the running maximum is an hour past the day.
+    constexpr int64_t LeadIn = Hour, ReadTail = Hour;
     const int64_t end = dayMs + Day;
     roller::JournalReader catalog(journalRoot, symbol);
     if (catalog.files().empty()) throw std::runtime_error("no journal files for " + symbol);
-    // Start in the file open a minute before the day: a fast clock can receive
-    // a trade before its exchange time.
+    // Reader order is header order; count files whose open time goes backwards in it.
     size_t chosen = 0;
+    uint64_t fileOrderRegressions = 0;
+    int64_t previousOpen = INT64_MIN;
     for (size_t i = 0; i < catalog.files().size(); ++i) {
-        if (catalog.files()[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= dayMs - Minute) chosen = i;
-        else break;
+        const auto opened = catalog.files()[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000;
+        fileOrderRegressions += opened < previousOpen;
+        previousOpen = std::max(previousOpen, opened);
+        if (opened <= dayMs - LeadIn) chosen = i;
     }
     const auto& h = catalog.files()[chosen].header;
     const roller::JournalPos pos{symbol, h.at("run_id").get<std::string>(), h.at("first_block_ordinal").get<uint64_t>(), 0};
     const auto start = Clock::now();
     roller::JournalReader reader(catalog, pos);
     roller::JournalFeed feed(symbol);
-    int64_t receiveMs = 0;
+    int64_t receiveMs = 0, seenMs = INT64_MIN; // this record's receive time; running maximum
     bool snapshotFrame = false;
-    uint64_t records = 0, transportUps = 0;
-    int64_t firstReceive = INT64_MAX, lastReceive = 0;
-    std::vector<int64_t> transit, afterEnd; // receive - exchange; receive - bucket end
-    std::map<int64_t, std::pair<int64_t, int64_t>> barLate; // bucket -> trades excluded at 15 s, 60 s
+    uint64_t records = 0, transportUps = 0, regressions = 0, runRegressions = 0;
+    int64_t maxRegressionMs = 0, firstReceive = INT64_MAX;
+    std::string run;
+    std::vector<int64_t> transit, afterEnd; // receive - exchange; receive - bucket end (own record time)
+    struct Late { uint64_t own15 = 0, own60 = 0, max15 = 0, max60 = 0; };
+    std::map<int64_t, Late> barLate;
     std::vector<LateTrade> worst;
     uint64_t lateSnapshot = 0, lateUpdate = 0; // trades more than 1 s after their bar ended
     feed.onTrade = [&](const ::Trade& t) {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t.timestamp.time_since_epoch()).count();
         if (ms < dayMs || ms >= end) return;
         const int64_t bucketEnd = ms / Minute * Minute + Minute;
-        const int64_t after = receiveMs - bucketEnd;
+        const int64_t after = receiveMs - bucketEnd, afterMax = seenMs - bucketEnd;
         transit.push_back(receiveMs - ms);
         afterEnd.push_back(after);
         if (after > 1000) (snapshotFrame ? lateSnapshot : lateUpdate) += 1;
-        if (after >= 15'000) ++barLate[bucketEnd - Minute].first;
-        if (after >= 60'000) ++barLate[bucketEnd - Minute].second;
-        if (worst.size() < 8 || after > worst.back().afterEndMs) {
-            worst.push_back({after, ms, receiveMs, snapshotFrame, t.trade_id});
+        auto& late = barLate[bucketEnd - Minute];
+        late.own15 += after >= 15'000; late.own60 += after >= 60'000;
+        late.max15 += afterMax >= 15'000; late.max60 += afterMax >= 60'000;
+        if (worst.size() < 8 || afterMax > worst.back().afterEndMs) {
+            worst.push_back({afterMax, ms, receiveMs, snapshotFrame, t.trade_id});
             std::sort(worst.begin(), worst.end(), [](const auto& a, const auto& b) { return a.afterEndMs > b.afterEndMs; });
             if (worst.size() > 8) worst.pop_back();
         }
@@ -428,10 +440,16 @@ void latenessDay(const fs::path& journalRoot, const std::string& symbol, int64_t
     roller::JournalRecord record;
     while (reader.next(record)) {
         receiveMs = record.record.time.systemNs / 1'000'000;
-        if (receiveMs >= end + ReadTail) break;
+        if (seenMs != INT64_MIN && receiveMs < seenMs) {
+            ++regressions;
+            maxRegressionMs = std::max(maxRegressionMs, seenMs - receiveMs);
+            runRegressions += record.pos.run != run;
+        }
+        run = record.pos.run;
+        seenMs = std::max(seenMs, receiveMs); // advanced before this record's trades
+        if (seenMs >= end + ReadTail) break;
         ++records;
         firstReceive = std::min(firstReceive, receiveMs);
-        lastReceive = std::max(lastReceive, receiveMs);
         transportUps += record.record.kind == capture::Kind::TransportUp;
         const auto& payload = record.record.payload;
         snapshotFrame = record.record.kind == capture::Kind::Frame &&
@@ -440,6 +458,8 @@ void latenessDay(const fs::path& journalRoot, const std::string& symbol, int64_t
         feed.apply(record);
     }
     const double scanMs = msSince(start);
+    // Complete: no damage, the lead-in reached, and the running maximum reached the read tail.
+    const bool complete = !reader.damaged() && firstReceive <= dayMs - Minute && seenMs >= end + ReadTail;
     std::sort(transit.begin(), transit.end());
     std::sort(afterEnd.begin(), afterEnd.end());
     const auto bins = [](const std::vector<int64_t>& v) {
@@ -453,25 +473,33 @@ void latenessDay(const fs::path& journalRoot, const std::string& symbol, int64_t
         const auto n = bins(v);
         std::cout << "mode=lateness symbol=" << symbol << " day=" << dayName(dayMs) << " measure=" << name
                   << " trades=" << v.size() << " lt0=" << n[0] << " 0_100ms=" << n[1] << " 100ms_1s=" << n[2]
-                  << " 1_5s=" << n[3] << " 5_15s=" << n[4] << " 15_60s=" << n[5] << " gt60s=" << n[6]
+                  << " 1_5s=" << n[3] << " 5_15s=" << n[4] << " 15_60s=" << n[5] << " ge60s=" << n[6]
                   << " min_ms=" << (v.empty() ? 0 : v.front()) << " p50_ms=" << quantile(v, 0.5)
                   << " p99_ms=" << quantile(v, 0.99) << " p999_ms=" << quantile(v, 0.999)
                   << " max_ms=" << (v.empty() ? 0 : v.back()) << '\n';
     };
     print("receive_minus_exchange", transit);
     print("receive_minus_1m_bar_end", afterEnd);
-    uint64_t ex15 = 0, ex60 = 0, bars15 = 0, bars60 = 0;
-    for (const auto& [_, n] : barLate) { ex15 += n.first; ex60 += n.second; bars15 += n.first > 0; bars60 += n.second > 0; }
-    std::cout << "mode=lateness symbol=" << symbol << " day=" << dayName(dayMs) << " excluded_15s_trades=" << ex15
-              << " excluded_15s_bars=" << bars15 << " excluded_60s_trades=" << ex60 << " excluded_60s_bars=" << bars60
+    Late total;
+    uint64_t bars15 = 0, bars60 = 0;
+    for (const auto& [_, n] : barLate) {
+        total.own15 += n.own15; total.own60 += n.own60; total.max15 += n.max15; total.max60 += n.max60;
+        bars15 += n.max15 > 0; bars60 += n.max60 > 0;
+    }
+    std::cout << "mode=lateness symbol=" << symbol << " day=" << dayName(dayMs) << " scan_complete=" << complete
+              << " damaged=" << reader.damaged() << " lead_in_ms=" << (dayMs - firstReceive)
+              << " file_order_regressions=" << fileOrderRegressions << " receive_regressions=" << regressions
+              << " cross_run_regressions=" << runRegressions << " max_regression_ms=" << maxRegressionMs
+              << " excluded_15s_trades=" << total.max15 << " excluded_15s_bars=" << bars15
+              << " excluded_60s_trades=" << total.max60 << " excluded_60s_bars=" << bars60
+              << " own_time_excluded_15s=" << total.own15 << " own_time_excluded_60s=" << total.own60
               << " late_gt1s_in_snapshot_frames=" << lateSnapshot << " late_gt1s_in_update_frames=" << lateUpdate
               << " records=" << records << " transport_ups=" << transportUps
-              << " first_receive_ms=" << firstReceive << " last_receive_ms=" << lastReceive
-              << " scan_ms=" << scanMs << '\n';
+              << " first_receive_ms=" << firstReceive << " last_seen_ms=" << seenMs << " scan_ms=" << scanMs << '\n';
     for (const auto& w : worst)
-        std::cout << "mode=lateness symbol=" << symbol << " day=" << dayName(dayMs) << " worst_after_end_ms=" << w.afterEndMs
-                  << " exchange_ms=" << w.exchangeMs << " receive_ms=" << w.receiveMs
-                  << " snapshot_frame=" << w.snapshotFrame << " trade_id=" << w.id << '\n';
+        std::cout << "mode=lateness symbol=" << symbol << " day=" << dayName(dayMs)
+                  << " worst_running_max_after_end_ms=" << w.afterEndMs << " exchange_ms=" << w.exchangeMs
+                  << " receive_ms=" << w.receiveMs << " snapshot_frame=" << w.snapshotFrame << " trade_id=" << w.id << '\n';
 }
 
 // ---- Columnar mode -------------------------------------------------------
@@ -484,17 +512,21 @@ size_t zstdSize(const std::vector<uint8_t>& raw, int level) {
     if (ZSTD_isError(n)) throw std::runtime_error("zstd failed");
     return n;
 }
-// Raw, zstd 1, zstd 3 sums over independently compressed pieces.
+// Raw, zstd 1, zstd 3 sums over independently compressed pieces, and how many
+// pieces zstd 1 shrinks by at least 10% (the section 3 codec rule).
 struct Size3 {
-    size_t raw = 0, z1 = 0, z3 = 0;
-    void add(const std::vector<uint8_t>& bytes) { raw += bytes.size(); z1 += zstdSize(bytes, 1); z3 += zstdSize(bytes, 3); }
-    void add(const Size3& o) { raw += o.raw; z1 += o.z1; z3 += o.z3; }
+    size_t raw = 0, z1 = 0, z3 = 0, pieces = 0, pays = 0;
+    void add(const std::vector<uint8_t>& bytes) {
+        const auto a = zstdSize(bytes, 1);
+        raw += bytes.size(); z1 += a; z3 += zstdSize(bytes, 3);
+        ++pieces; pays += !bytes.empty() && double(a) <= 0.9 * double(bytes.size());
+    }
 };
 std::string fmt(const char* name, const Size3& s, size_t bars) {
     std::ostringstream o;
-    o << ' ' << name << "_raw=" << s.raw << ' ' << name << "_z1=" << s.z1 << ' ' << name << "_z3=" << s.z3;
-    if (bars) o << ' ' << name << "_raw_per_bar=" << double(s.raw) / double(bars)
-                << ' ' << name << "_z3_per_bar=" << double(s.z3) / double(bars);
+    o << ' ' << name << "_raw=" << s.raw << ' ' << name << "_z1=" << s.z1 << ' ' << name << "_z3=" << s.z3
+      << ' ' << name << "_z1_pays=" << s.pays << '/' << s.pieces;
+    if (bars) o << ' ' << name << "_raw_per_bar=" << double(s.raw) / double(bars);
     return o.str();
 }
 flow::FlowBar stripNotables(flow::FlowBar b) { b.notable.clear(); return b; }
@@ -509,32 +541,33 @@ std::vector<uint8_t> flb1Form(std::span<const flow::FlowBar> bars, bool notables
     }
     return out;
 }
-struct LeanSizes { Size3 flb1, flb1NoNotables, fixed, varint, delta, summaryDelta, rowsDelta; size_t bars = 0; };
+struct LeanSizes { Size3 flb1, flb1NoNotables, fixed, varint, spec, summary; size_t bars = 0; };
 
-// One chunk of bars at one level: all three lean forms with header, summary and rows split.
-void chunkSizes(LeanSizes& s, std::span<const flow::FlowBar> bars, int64_t level, int64_t start, uint32_t slotCount,
-                proto::Stats& stats, uint64_t& roundTripMismatch) {
+struct Checks { proto::Stats stats; uint64_t roundTrip = 0, assembly = 0, dayFile = 0; };
+
+// One chunk at one level: the spec payload (flow.rows), its summary prefix
+// (flow.summary) and the two measurement variants; checks the spec round trip.
+std::vector<uint8_t> chunkSizes(LeanSizes& s, std::span<const flow::FlowBar> bars, int64_t level, int64_t start,
+                                uint32_t slotCount, Checks& checks) {
     s.bars += bars.size();
     s.flb1.add(flb1Form(bars, true));
     s.flb1NoNotables.add(flb1Form(bars, false));
-    const auto chunk = proto::fromBars(bars, level, start, slotCount, &stats);
+    const auto chunk = proto::fromBars(bars, level, start, slotCount, &checks.stats);
     s.fixed.add(proto::encode(chunk, proto::Encoding::Fixed));
     s.varint.add(proto::encode(chunk, proto::Encoding::Varint));
-    const auto delta = proto::encode(chunk, proto::Encoding::Delta);
-    s.delta.add(delta);
-    const auto summary = proto::encode(chunk, proto::Encoding::Delta, true);
-    s.summaryDelta.add(summary);
-    s.rowsDelta.raw += delta.size() - summary.size();
-    const auto back = proto::toBars(proto::decode(delta));
-    if (back.size() != bars.size()) roundTripMismatch += bars.size();
-    else for (size_t i = 0; i < bars.size(); ++i) roundTripMismatch += !(back[i] == stripNotables(bars[i]));
+    auto spec = proto::encode(chunk, proto::Encoding::Spec);
+    s.spec.add(spec);
+    s.summary.add(proto::encode(chunk, proto::Encoding::Spec, true));
+    const auto back = proto::toBars(proto::decode(spec, proto::Encoding::Spec, level, start, slotCount));
+    if (back.size() != bars.size()) checks.roundTrip += bars.size();
+    else for (size_t i = 0; i < bars.size(); ++i) checks.roundTrip += !(back[i] == stripNotables(bars[i]));
+    return spec;
 }
 void printLean(const std::string& symbol, const std::string& label, const LeanSizes& s) {
     std::cout << "mode=columnar symbol=" << symbol << ' ' << label << " bars=" << s.bars
               << fmt("flb1", s.flb1, s.bars) << fmt("flb1_no_notables", s.flb1NoNotables, s.bars)
-              << fmt("lean_fixed", s.fixed, s.bars) << fmt("lean_varint", s.varint, s.bars)
-              << fmt("lean_delta", s.delta, s.bars) << fmt("lean_delta_summary", s.summaryDelta, s.bars)
-              << " lean_delta_rows_raw=" << s.rowsDelta.raw << '\n';
+              << fmt("variant_fixed", s.fixed, s.bars) << fmt("variant_varint", s.varint, s.bars)
+              << fmt("spec_rows", s.spec, s.bars) << fmt("spec_summary", s.summary, s.bars) << '\n';
 }
 
 struct Density {
@@ -563,70 +596,86 @@ void printDensity(const std::string& symbol, const char* level, Density& d) {
               << " int16_headroom=" << double(INT16_MAX + 1) / double(std::max<int64_t>(1, d.widest)) << '\n';
 }
 
+// One FLD1 day re-laid as the section 5 day file: 24 hour sections, the 1h day
+// chunk and the 1d piece (trades.big sections stay absent: not prototyped).
+// Every hour present in FLD1 is taken as sealed and complete; an hour without
+// bars is a sealed empty section.
+struct LeanDay {
+    proto::DayFile file;
+    std::vector<flow::FlowBar> hourBars;
+    std::optional<flow::FlowBar> dayBar;
+    std::vector<std::vector<uint8_t>> hourPayloads;
+};
+LeanDay leanDay(const std::string& symbol, const flow::DayFile& day, LeanSizes* minute, LeanSizes* hour, Checks& checks) {
+    LeanDay out;
+    out.file.instrument = "coinbase:" + symbol;
+    out.file.dayStartMs = day.dayStartMs;
+    out.file.grid = {std::llround(day.nativeTick * double(day.priceScale)), day.priceScale, day.baseScale, day.quoteScale};
+    LeanSizes scratch;
+    for (int h = 0; h < 24; ++h) {
+        const int64_t from = day.dayStartMs + h * Hour;
+        std::vector<flow::FlowBar> bars;
+        for (const auto& b : day.bars) if (b.startMs >= from && b.startMs < from + Hour) bars.push_back(b);
+        auto payload = chunkSizes(minute ? *minute : scratch, bars, Minute, from, 60, checks);
+        const auto summary = proto::encode(proto::fromBars(bars, Minute, from, 60), proto::Encoding::Spec, true);
+        out.file.sections[size_t(h)] = {true, uint32_t(summary.size()), 0, payload};
+        out.hourPayloads.push_back(std::move(payload));
+        if (!bars.empty()) out.hourBars.push_back(flow::composeFlowBars(bars, Hour));
+    }
+    auto hourPayload = chunkSizes(hour ? *hour : scratch, out.hourBars, Hour, day.dayStartMs, 24, checks);
+    out.file.sections[24] = {true, uint32_t(proto::encode(proto::fromBars(out.hourBars, Hour, day.dayStartMs, 24),
+                                                          proto::Encoding::Spec, true).size()), 0, hourPayload};
+    std::vector<flow::FlowBar> dayBars;
+    if (!day.bars.empty()) {
+        try { out.dayBar = flow::composeFlowBars(day.bars, Day); dayBars.push_back(*out.dayBar); }
+        catch (const std::out_of_range&) {}
+    }
+    const auto piece = proto::fromBars(dayBars, Day, day.dayStartMs, 1);
+    out.file.sections[25] = {true, uint32_t(proto::encode(piece, proto::Encoding::Spec, true).size()), 0,
+                             proto::encode(piece, proto::Encoding::Spec)};
+    return out;
+}
+
 void columnar(const fs::path& root, const std::string& symbol, const std::vector<int64_t>& days) {
-    proto::Stats stats;
-    uint64_t mismatch = 0;
-    // Per listed day: today's FLD1 file, the per-hour 1m chunks, the lean day file and the 1h day chunk.
+    Checks checks;
+    // Per listed day: the 24 hour chunks, the 1h day chunk and the whole day file against FLD1.
     for (const auto dayMs : days) {
-        const auto path = dayPath(root, symbol, dayMs);
-        const auto bytes = readAll(path);
+        const auto bytes = readAll(dayPath(root, symbol, dayMs));
         auto start = Clock::now();
         const auto day = flow::decodeFlowDay(bytes, flow::DayCheck::BarsOnly);
         const double fldDecodeMs = msSince(start);
         LeanSizes minute, hour;
-        Size3 fldFile, leanDayPerHour, fldPerHour;
+        const auto lean = leanDay(symbol, day, &minute, &hour, checks);
+        const auto file = proto::encodeDayFile(lean.file);
+        Size3 fldFile, leanFile;
         fldFile.add(bytes);
-        std::vector<uint8_t> leanDay; // header once, u32 hour section offsets, sections (no header)
-        std::vector<std::vector<uint8_t>> sections;
-        std::vector<flow::FlowBar> hourBars;
-        for (int h = 0; h < 24; ++h) {
-            const int64_t from = dayMs + h * Hour;
-            std::vector<flow::FlowBar> bars;
-            for (const auto& b : day.bars) if (b.startMs >= from && b.startMs < from + Hour) bars.push_back(b);
-            if (bars.empty()) { sections.emplace_back(); continue; }
-            chunkSizes(minute, bars, Minute, from, 60, stats, mismatch);
-            fldPerHour.add(flb1Form(bars, true));
-            sections.push_back(proto::encode(proto::fromBars(bars, Minute, from, 60), proto::Encoding::Delta, false, false));
-            leanDayPerHour.add(sections.back());
-            hourBars.push_back(flow::composeFlowBars(bars, Hour));
-        }
-        // Lean day file: header (as one chunk header) + 25 u32 section offsets + sections.
-        const auto header = proto::encode(proto::fromBars({}, Minute, dayMs, 1440), proto::Encoding::Delta, true, true);
-        leanDay = header;
-        leanDay.resize(leanDay.size() + 25 * 4);
-        for (const auto& sec : sections) leanDay.insert(leanDay.end(), sec.begin(), sec.end());
-        Size3 leanDayWhole;
-        leanDayWhole.add(leanDay);
-        chunkSizes(hour, hourBars, Hour, dayMs, 24, stats, mismatch);
-        // Decode cost of the lean day: every hour section through the delta decoder.
-        std::vector<std::vector<uint8_t>> withHeader;
-        for (int h = 0; h < 24; ++h) {
-            std::vector<flow::FlowBar> bars;
-            for (const auto& b : day.bars) if (b.startMs >= dayMs + h * Hour && b.startMs < dayMs + (h + 1) * Hour) bars.push_back(b);
-            withHeader.push_back(proto::encode(proto::fromBars(bars, Minute, dayMs + h * Hour, 60), proto::Encoding::Delta));
-        }
+        leanFile.add(file);
+        // Read cost: parse the day file (header, table, CRCs) and decode its 24 hour sections.
         start = Clock::now();
+        const auto parsed = proto::parseDayFile(file);
         size_t decodedBars = 0;
-        for (const auto& w : withHeader) decodedBars += proto::decode(w).bars();
+        for (int h = 0; h < 24; ++h)
+            decodedBars += proto::decode(parsed.sections[size_t(h)].payload, proto::Encoding::Spec, Minute,
+                                         dayMs + h * Hour, 60).bars();
         const double leanDecodeMs = msSince(start);
-        start = Clock::now();
-        size_t viewBars = 0;
-        for (const auto& w : withHeader) viewBars += proto::toBars(proto::decode(w)).size();
-        const double leanToBarsMs = msSince(start);
+        checks.dayFile += !(parsed == lean.file);
         printLean(symbol, "day=" + dayName(dayMs) + " level=1m unit=hour_chunks", minute);
         printLean(symbol, "day=" + dayName(dayMs) + " level=1h unit=day_chunk", hour);
+        size_t sectionBytes = 0;
+        for (const auto& s : lean.file.sections) sectionBytes += s.payload.size();
         std::cout << "mode=columnar symbol=" << symbol << " day=" << dayName(dayMs) << " unit=day_file"
-                  << fmt("fld1_file", fldFile, day.bars.size()) << fmt("fld1_hours_sum", fldPerHour, day.bars.size())
-                  << fmt("lean_day_whole", leanDayWhole, day.bars.size())
-                  << fmt("lean_day_hour_sections", leanDayPerHour, day.bars.size())
-                  << " lean_day_header_and_offsets=" << header.size() + 100
-                  << " fld1_decode_bars_only_ms=" << fldDecodeMs << " lean_decode_ms=" << leanDecodeMs
-                  << " lean_decode_to_flowbar_ms=" << leanToBarsMs << " decoded_bars=" << decodedBars
-                  << " view_bars=" << viewBars << '\n';
+                  << fmt("fld1_file", fldFile, day.bars.size()) << fmt("flc_file", leanFile, day.bars.size())
+                  << " flc_header_and_table=" << file.size() - sectionBytes
+                  << " flc_1h_section=" << lean.file.sections[24].payload.size()
+                  << " flc_1d_piece=" << lean.file.sections[25].payload.size()
+                  << " fld1_decode_bars_only_ms=" << fldDecodeMs << " flc_parse_and_decode_hours_ms=" << leanDecodeMs
+                  << " decoded_bars=" << decodedBars << '\n';
     }
-    // Every FLD1 day of the symbol: 1h and 1d composition, 16-day 1d chunks, density and headroom.
+    // Every FLD1 day of the symbol: 1h day chunks, 16-day 1d chunks assembled
+    // from day pieces, density, headroom and big-trade floors.
     Density d1m, d1h, d1d;
-    std::map<int64_t, std::vector<flow::FlowBar>> dayChunks; // 1d chunk start -> day bars
+    std::map<int64_t, std::map<int64_t, std::vector<uint8_t>>> pieces; // 1d chunk start -> day -> piece
+    std::map<int64_t, std::vector<flow::FlowBar>> dayBars;
     uint64_t composeFailures = 0;
     LeanSizes hourAll;
     // trades.big floors from FLD1 notables (top 8 sweep-collapsed events per minute):
@@ -650,29 +699,30 @@ void columnar(const fs::path& root, const std::string& symbol, const std::vector
                 for (const auto& n : b.notable) bigEvents[f] += n.notional >= floor;
                 bigTruncated[f] += b.notable.size() == flow::NotableCapacity && b.notable.back().notional >= floor;
             }
-        std::vector<flow::FlowBar> hours;
-        for (int h = 0; h < 24; ++h) {
-            std::vector<flow::FlowBar> bars;
-            for (const auto& b : day.bars) if (b.startMs >= dayMs + h * Hour && b.startMs < dayMs + (h + 1) * Hour) bars.push_back(b);
-            if (bars.empty()) continue;
-            hours.push_back(flow::composeFlowBars(bars, Hour));
-            d1h.add(hours.back(), name);
-        }
-        chunkSizes(hourAll, hours, Hour, dayMs, 24, stats, mismatch);
-        try {
-            auto dayBar = flow::composeFlowBars(day.bars, Day);
-            d1d.add(dayBar, name);
-            dayChunks[heatmap::chunkStartOf(Day, dayMs)].push_back(std::move(dayBar));
-        } catch (const std::out_of_range&) {
+        const auto lean = leanDay(symbol, day, nullptr, &hourAll, checks);
+        for (const auto& b : lean.hourBars) d1h.add(b, name);
+        if (!lean.dayBar) {
             ++composeFailures;
             std::cout << "mode=density symbol=" << symbol << " day=" << name << " compose_1d=int16_overflow\n";
+            continue;
         }
+        d1d.add(*lean.dayBar, name);
+        const auto chunkStart = heatmap::chunkStartOf(Day, dayMs);
+        pieces[chunkStart][dayMs] = lean.file.sections[25].payload;
+        dayBars[chunkStart].push_back(*lean.dayBar);
     }
     printLean(symbol, "level=1h unit=day_chunks all_days", hourAll);
-    for (auto& [start, bars] : dayChunks) {
-        LeanSizes s;
+    for (auto& [start, bars] : dayBars) {
         std::sort(bars.begin(), bars.end(), [](const auto& a, const auto& b) { return a.startMs < b.startMs; });
-        chunkSizes(s, bars, Day, start, uint32_t(heatmap::kDayChunkDays), stats, mismatch);
+        LeanSizes s;
+        auto direct = proto::fromBars(bars, Day, start, uint32_t(heatmap::kDayChunkDays));
+        // Assembly from the day pieces must give the direct encoding (absent days: unrecorded).
+        std::vector<std::vector<uint8_t>> span(static_cast<size_t>(heatmap::kDayChunkDays));
+        for (const auto& [day, piece] : pieces[start]) span[size_t((day - start) / Day)] = piece;
+        const auto assembled = proto::assembleDayChunk(start, span, proto::Status::Unrecorded);
+        direct.coverage = assembled.coverage;
+        checks.assembly += !(assembled == direct);
+        chunkSizes(s, bars, Day, start, uint32_t(heatmap::kDayChunkDays), checks);
         printLean(symbol, "level=1d unit=16_day_chunk start=" + dayName(start) + " days=" + std::to_string(bars.size()), s);
     }
     for (size_t f = 0; f < floorsUsd.size(); ++f)
@@ -683,9 +733,10 @@ void columnar(const fs::path& root, const std::string& symbol, const std::vector
     printDensity(symbol, "1m", d1m);
     printDensity(symbol, "1h", d1h);
     printDensity(symbol, "1d", d1d);
-    std::cout << "mode=columnar symbol=" << symbol << " check roundtrip_mismatch_bars=" << mismatch
-              << " lowrow_not_floor_of_low=" << stats.lowRowMismatch
-              << " native_tick_not_row_tick_over_scale=" << stats.nativeTickMismatch
+    std::cout << "mode=columnar symbol=" << symbol << " check roundtrip_mismatch_bars=" << checks.roundTrip
+              << " assembly_mismatch_chunks=" << checks.assembly << " day_file_mismatch=" << checks.dayFile
+              << " lowrow_not_floor_of_low=" << checks.stats.lowRowMismatch
+              << " native_tick_not_row_tick_over_scale=" << checks.stats.nativeTickMismatch
               << " compose_1d_int16_overflow_days=" << composeFailures << '\n';
 }
 } // namespace

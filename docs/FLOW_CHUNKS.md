@@ -4,16 +4,17 @@
 files, FHE1 pages, `flow_bar` live messages) is in [MARKETDATA.md](MARKETDATA.md) "Live flow bars" and
 "Flow history". This spec replaces FLD1 and FHE1 and puts flow on heatmap-style chunks. The server
 (plan step 3) and the client (step 5) implement it; step 4 moves the heatmap onto the same envelope.
-Measurements are in section 12; they come from `flow_history_bench --lateness` and `--columnar`
-(`tests/core/flow_history_bench.cpp`, prototype codec `tests/core/flow_chunk_proto.hpp`).
+Measurements are in section 12. They come from `flow_history_bench --lateness` and `--columnar`
+(`tests/core/flow_history_bench.cpp`). `tests/core/flow_chunk_proto.hpp` is a prototype of the section 4
+payload, the section 5 day file and the 16-day assembly, with golden bytes in `test_flow_chunk_proto.cpp`.
 
 Decided rules this spec makes exact:
 - RAWL2 is the only truth. Every flow file is a rebuildable index of it.
 - A sealed bar is a deterministic function of RAWL2. 1h and 1d bars are composed from sealed 1m bars only.
-- History serves only sealed chunks. The live stream owns the live bar and every closing bar.
+- History serves only sealed chunks. Live owns what is not sealed yet.
 - Sub-minute flow is never written to disk.
 
-## 1. Units
+## 1. Units and primitives
 
 One unit per quantity. Every price is in **price units**; rows are used only for row offsets.
 
@@ -23,13 +24,18 @@ One unit per quantity. Every price is in **price units**; rows are used only for
 | Row | `floorDiv(price units, row_tick_units)` on the day's recorder grid | not stored | `flow/FlowBarBuilder.cpp:142` |
 | Row offset | row - low row of its bar | i16, 0..32767 | `flow/FlowBar.hpp:21` |
 | Low row | `floorDiv(low, row_tick_units)` | derived | holds for every FLD1 bar (section 12) |
-| Base volume | size x `base_scale` (10^decimals of `base_increment`) | i64 | `flow/FlowScales.cpp:8-27` |
-| Quote volume | price x size x `quote_scale` (10^8), rounded once per trade | i64 | `flow/FlowBarBuilder.cpp:95-116` |
+| Base volume | size x `base_scale` (10^decimals of `base_increment`) | i64, >= 0 | `flow/FlowScales.cpp:8-27` |
+| Quote volume | price x size x `quote_scale` (10^8), rounded once per trade | i64, >= 0 | `flow/FlowBarBuilder.cpp:95-116` |
 | Trade count | trades, unknown side included | u32 | |
 | Time | ms since the Unix epoch, UTC | i64 | |
 
-OHLC on the wire are price-unit deltas (section 4), never row offsets. Rows map to price only through the
-bar's own grid: price of row `r` = `r x row_tick_units / price_scale`.
+- VWAP (derived): `(quote_volume / quote_scale) / (base_volume / base_scale)` in quote currency per base unit;
+  x `price_scale` for price units. Every bar has a trade, so `base_volume` > 0; a composed bucket with no bars
+  has no VWAP.
+- varint: unsigned LEB128, 7 bits per byte, low group first, at most 10 bytes, the tenth byte at most 1, no
+  trailing 0x00 byte except for the value 0 itself (the FLB1 rule, `flow/FlowCodec.cpp:33-45`). zigzag varint:
+  varint of `(v << 1) ^ (v >> 63)`. Decoders reject everything else.
+- Fixed-width integers are little-endian. `str8` = u8 length, then bytes.
 
 ## 2. Chunk key
 
@@ -38,26 +44,28 @@ bar's own grid: price of row `r` = `r x row_tick_units / price_scale`.
 | Field | Form | Rule |
 | --- | --- | --- |
 | `instrument_id` | `<venue>:<symbol>`, ASCII, at most 72 bytes | venue `coinbase` or `kalshi` (`InstrumentSpec.hpp:15-21`); symbol as the venue spells it, checked by `validateInstrumentId` (`InstrumentSpec.hpp:23-32`). Example `coinbase:BTC-USD`. Required in every new file, key and cache. |
-| `channel` | string, at most 32 bytes | `flow.summary`, `flow.rows`, `trades.big`. Step 4 adds `book.near`, `book.deep` for the heatmap. |
+| `channel` | string, at most 32 bytes | `flow.summary`, `flow.rows`, `trades.big`. Step 4 adds `book.near`, `book.deep`. |
 | `level_ms` | i64 | 60000, 3600000 or 86400000 |
-| `price_step` | u32 | native rows per stored row. 1 = native grid. 0 for channels without rows (`flow.summary`, `trades.big`). v1 accepts only these two values; coarser rows (2, 5, ...) can be added later without changing any other key. |
-| `start_ms` | i64 | chunk start, `heatmap::chunkStartOf(level, t)` (`heatmap/ChunkCodec.cpp:238-242`) |
+| `price_step` | u32 | native rows per stored row: 1 = native grid; 0 for channels without rows (`flow.summary`, `trades.big`). v1 accepts only these two values. |
+| `start_ms` | i64 | `heatmap::chunkStartOf(level, t)` (`heatmap/ChunkCodec.cpp:238-242`) |
 
-| Level | Bars per chunk | Span | Alignment |
+| Level | Slots | Span | Alignment |
 | --- | --- | --- | --- |
 | 1m | 60 | 1 UTC hour | Unix-epoch hour |
 | 1h | 24 | 1 UTC day | UTC midnight |
 | 1d | 16 | 16 UTC days | whole 16-day spans after 2000-01-01 (`kDayChunkDays`, `heatmap/ChunkCodec.hpp:30`) |
 
-Spans and alignment are the heatmap's, so one key arithmetic serves both. `trades.big` uses the same three
-levels and spans; its level only selects the span (events are not bars, section 4).
+`trades.big` uses the same levels; for it the level only selects the span (events are not bars).
 
-## 3. Envelope
+Flow timeframes are the ones flow serves today: 1m multiples that divide a UTC day (MARKETDATA.md "Flow
+history"). A composed bucket therefore never crosses midnight and never mixes grids; `composeFlowBars`
+refuses mixed grids (`flow/FlowCompose.cpp:31-37`, test `ComposeRefusesMixedGrids`). 1w is open item 9.
 
-The binary envelope stays SHE1 exactly as today: `SHE1`, u16 envelope version 1, u64 request id, then
-the inner frame (`heatmap/ChunkCodec.cpp:458-464`). The decoder dispatches on the inner magic: `SHC1`
-(heatmap, wire v3, until step 4) or `SCK1` (this spec). All integers little-endian; `str8` is a u8 length
-then bytes.
+## 3. Envelope and availability
+
+The binary envelope stays SHE1 exactly as today: `SHE1`, u16 version 1, u64 request id, then the inner frame
+(`heatmap/ChunkCodec.cpp:458-464`). The decoder dispatches on the inner magic: `SHC1` (heatmap wire v3, until
+step 4) or `SCK1` (this spec).
 
 `SCK1` frame:
 
@@ -75,186 +83,181 @@ then bytes.
 | 10 | `end_ms` | i64 | exclusive extent; `start + span` for kind 1 |
 | 11 | `committed_through_ms` | i64 | equals `end_ms` when sealed |
 | 12 | `revision` | u64 | 0 when sealed |
-| 13 | `generation` | u32 | section 7 |
+| 13 | `epoch` | u64 | the channel's epoch domain (section 7) |
 | 14 | `content_hash` | u64 | FNV-1a 64 over fields 1-13 then the raw payload (the SHC1 rule, `heatmap/ChunkCodec.cpp:58-66`) |
-| 15 | `payload_version` | u16 | per channel; 1 for every channel here |
+| 15 | `payload_version` | u16 | per channel; 1 here |
 | 16 | codec | u8 | 0 raw, 1 zstd |
 | 17 | raw length | u32 | at most 16 MiB |
 | 18 | stored length | u32 | equals the remaining frame bytes |
-| 19 | payload | bytes | section 4 |
+| 19 | payload | bytes | defined by (channel, kind, payload version) |
 
-- `not_modified` (3): fields 1-14, no payload.
-- `error` (4): fields 1-9, u16 code, str8 message (at most 255 bytes). Codes as SHC1
-  (`heatmap/ChunkCodec.hpp:48-53`): 1 invalid_request, 2 unavailable, 3 busy, 4 build_failed.
-- `live` (2): open, never cached; payload as kind 1 plus the live trailer (section 8).
-- Limits and decoder checks as SHC1: frame and raw payload at most 16 MiB; zstd frame content size checked
-  before allocation; every count bounded by the remaining bytes before allocation.
-- Codec: zstd level 1 when it saves at least 10%, otherwise raw. On the measured data zstd 1 saves 10-34% on
-  `flow.rows` chunks and level 3 at most 1% more; `flow.summary` saves 5-8% for BTC, ETH and SOL (sent raw) and
-  21% for PEPE (section 12).
-  The server caches the finished frame.
+- `not_modified` (3): fields 1-14. `error` (4): fields 1-9, u16 code, str8 message; codes as SHC1
+  (`heatmap/ChunkCodec.hpp:48-53`).
+- `live` (2) frames and open chunks (state 0) exist only for channels whose availability levels carry
+  `committed_through_ms` (the heatmap minute level). Each such channel defines its own kind 2 payload. Flow sends
+  neither: flow history is sealed chunks only and flow live stays `flow_bar` (section 8).
+- Limits and decoder checks as SHC1: frame and raw payload at most 16 MiB; the zstd content size is checked
+  before allocation; every count is bounded by the remaining bytes before allocation.
+- Codec: zstd level 1 when it shrinks the payload by at least 10%, otherwise raw (section 12). The server caches
+  the finished frame.
 
-Request (JSON text frame):
-`{"type":"chunk_request","req":<u64>,"instrument":"coinbase:BTC-USD","channel":"flow.rows","level_ms":60000,"price_step":1,"starts":[<i64>...],"have_hash":["<16 hex>"|""...]}`.
-1..64 starts; one binary reply per start (chunk, not_modified or error), as `heatmap_chunk_request`
-(MARKETDATA.md "Heatmap chunk wire"). Budgets, busy errors and the history pool are the heatmap's.
+Request (JSON): `{"type":"chunk_request","req":<u64>,"instrument":"coinbase:BTC-USD","channel":"flow.rows","level_ms":60000,"price_step":1,"starts":[<i64>...],"have_hash":["<16 hex>"|""...]}`.
+1..64 starts, one binary reply each (chunk, not_modified or error); budgets, busy and the history pool as
+`heatmap_chunk_request` (MARKETDATA.md "Heatmap chunk wire"). A flow key that is not sealed gets `unavailable`.
 
-Availability (JSON, pushed on subscribe and on change):
-`{"type":"chunk_availability","instrument":..,"wire_version":1,"channels":{"flow.rows":{"levels":[{"level_ms":60000,"chunk_span_ms":3600000,"oldest_ms":..,"sealed_through_ms":..}]}},"generations":[[<day_ms>,<gen>]...]}`.
-`generations` lists only days whose generation is not 1 (rebuilds are rare). `sealed_through_ms` is
-section 7's T.
+Availability (JSON) is a full snapshot per instrument that replaces the previous one, sent on subscribe and on
+every change:
 
-What changes, and when:
+```
+{"type":"chunk_availability","instrument":"coinbase:BTC-USD","wire_version":1,
+ "live_from_ms":<i64>,                                    // flow, section 7
+ "channels":{"flow.rows":{"epoch":"<16 hex>","meta":{},
+   "levels":[{"level_ms":60000,"chunk_span_ms":3600000,"oldest_ms":..,"latest_ms":..,
+              "sealed":[[<from>,<to>],...]}]}}}            // book levels add "committed_through_ms"
+```
 
-| SHC1 v3 field (`heatmap/ChunkCodec.cpp:326-336`) | SCK1 | Flow (step 3) | Heatmap (step 4) |
-| --- | --- | --- | --- |
-| `SHC1`, u16 version 3 | `SCK1`, u16 version 1 | uses SCK1 | moves to SCK1; SHC1 and its decoder are deleted |
-| u8 kind, u8 sealed | same | same | same |
-| str8 symbol | str8 `instrument_id` | `coinbase:BTC-USD` | the same id replaces the bare symbol |
-| str8 source (`hmc2.near`) | str8 channel | `flow.*` | `book.near`, `book.deep`; the `hmc2.*` ids are retired |
-| - | u32 `price_step` | 0 or 1 | 1 |
-| i64 level, start, end | same | same | same |
-| i64 `tailStartMs` (live kind only) | in the live payload | - | moves into the heatmap live payload |
-| grid identity and `SizeScale` (40 bytes) | in the payload | flow grid table | heatmap payload header |
-| i64 committed through, u64 revision | same | same | same |
-| - | u32 generation | per-day generation | per-day generation (RollupStore fingerprints feed it) |
-| u64 FNV-1a content hash | same rule | same | same |
-| u32 column and entry counts | in the payload | `n` and row counts | heatmap payload header |
-| zstd level 3 always | u16 payload version, u8 codec | zstd 1 or raw | zstd 3, unchanged payload bytes |
-| `heatmap_chunk_request`, `heatmap_availability` | `chunk_request`, `chunk_availability` | new messages | the heatmap messages are deleted |
+`sealed` lists every coalesced run of sealed chunk starts as half-open ranges, ascending. `meta` is
+channel-specific; empty for flow.
 
-Step 4 changes no heatmap payload byte; heatmap byte-parity tests compare the decoded `SparseColumns`
-before and after the move.
+Heatmap mapping (step 4 moves the heatmap; flow uses SCK1 from step 3):
 
-## 4. Channels and payloads
+| Today (`heatmap/ChunkCodec.cpp:326-336`, `protocol/ChunkWire.hpp:137-164`) | SCK1 |
+| --- | --- |
+| `SHC1` version 3; `heatmap_chunk_request`, `heatmap_availability` | `SCK1` version 1; `chunk_request`, `chunk_availability`; the old ones are deleted |
+| str8 symbol, str8 source `hmc2.near` | `instrument_id`; channel `book.near` (`book.deep`) |
+| - | `price_step` 1; `epoch` (domains `book.near`, `book.deep`) |
+| grid identity, `SizeScale`, column and entry counts | heatmap payload header |
+| live `tailStartMs` after `end` | head of the `book.*` kind 2 payload |
+| zstd level 3 always | codec 1 at level 3; payload bytes unchanged |
+| availability `grids` (config hash, row tick, price scale, size floor, codes per octave) | `channels.book.*.meta.grids`, unchanged |
+| per-level `oldest_ms`, `latest_ms`, `committed_through_ms` (1m: recorder minute cutoff; 1h, 1d: RollupStore built interval) | the same per level; `sealed` = `[oldest, committed_through)` in whole chunks |
+| open 1m chunks with revision and committed-through | unchanged (state 0) |
+| a running GUI never revalidates sealed chunks | revalidation when the domain epoch changes (open item 7) |
+
+Step 4 parity tests compare decoded `SparseColumns`, the availability fields above and the live frames before
+and after the move.
+
+## 4. Payloads
 
 ### flow.summary and flow.rows
 
-`flow.rows` = summary section + rows section. `flow.summary` = the summary section alone; it is a byte
-prefix of the `flow.rows` payload, so the server cuts it without re-encoding, and a client holding a
-`flow.rows` chunk also holds its summary. Both channels share one key except `price_step` (0 and 1).
+`flow.rows` = header + summary section + rows section. `flow.summary` = header + summary section: a byte prefix
+of the `flow.rows` payload, cut by the server without re-encoding. A held `flow.rows` chunk answers a
+`flow.summary` want. The slot count comes from the key (section 2), not the payload.
 
-Payload header:
-
-| Field | Type | Meaning |
+| Header field | Type | Meaning |
 | --- | --- | --- |
-| `grid_count` | u8 | 0 only when the chunk has no bars; 1 for 1m and 1h chunks (one UTC day has one grid, `flow/FlowCodec.cpp:165-167`); 1..16 for 1d chunks |
-| grids | `grid_count` x 32 bytes | i64 `row_tick_units`, i64 `price_scale`, i64 `base_scale`, i64 `quote_scale` |
+| `grid_count` | u8 | 0 only when the chunk has no bars; 1 in 1m and 1h chunks (one UTC day has one grid, `flow/FlowCodec.cpp:165-167`); up to 16 in 1d chunks |
+| grids | `grid_count` x 32 | i64 `row_tick_units`, i64 `price_scale`, i64 `base_scale`, i64 `quote_scale` |
 | `run_count` | u8 | coverage runs |
-| runs | `run_count` x 5 bytes | u16 from slot, u16 to slot (exclusive), u8 status: 1 complete, 2 partial, 3 unrecorded, 4 building. Runs are ascending and cover `[0, slots)` exactly. Only live frames (kind 2) may hold `building`. |
+| runs | `run_count` x 5 | u16 from slot, u16 to slot (exclusive), u8 status: 1 complete, 2 partial, 3 unrecorded. Ascending, contiguous, covering `[0, slots)` exactly. |
 
-Summary section, field-major (every value of one field, then the next field). `n` = bars with trades.
+Summary section, field-major (every value of one field, then the next). `n` = bars with trades.
 
 | Field | Count | Encoding | Meaning |
 | --- | --- | --- | --- |
-| `n` | 1 | varint | present bars, at most the span's slots |
+| `n` | 1 | varint | at most the slot count |
 | slot gap | n | varint | slot - previous slot - 1 (previous starts at -1); bar start = chunk start + slot x level |
-| grid index | n, only if `grid_count` > 1 | u8 | index into grids |
+| grid index | n, only if `grid_count` > 1 | u8 | |
 | open | n | zigzag varint | open - previous bar's close (the first bar: open - 0) |
 | up | n | varint | high - open |
 | down | n | varint | open - low |
 | close | n | varint | close - low |
-| base volume | n | varint | all trades |
-| quote volume | n | varint | all trades |
-| buy volume | n | varint | aggressor buys |
-| sell volume | n | varint | aggressor sells |
-| count | n | varint | all trades, unknown side included |
+| base, quote, buy, sell volume | n each | varint | buy = aggressor buys, sell = aggressor sells |
+| count | n | varint | all trades |
 
-Rows section (`flow.rows` only):
+Rows section:
 
 | Field | Count | Encoding | Meaning |
 | --- | --- | --- | --- |
-| row count | n | varint | rows of each bar, at most 32768 |
-| offset gap | rows | varint | offset - previous offset - 1 within the bar (the first row: its offset, always 0) |
-| bid volume | rows | varint | sell-aggressor base volume at the row |
-| ask volume | rows | varint | buy-aggressor base volume |
-| bid count | rows | varint | |
-| ask count | rows | varint | |
+| row count | n | varint | 1..32768 per bar |
+| offset gap | rows | varint | offset - previous offset - 1 within the bar (the first row: its offset, 0) |
+| bid volume, ask volume | rows each | varint | sell-aggressor and buy-aggressor base volume at the row |
+| bid count, ask count | rows each | varint | |
 
-Derived on read, never stored: low row = `floorDiv(low, row_tick_units)`; delta = buy - sell; unknown-side
-volume = base - buy - sell; maximum row volume; VWAP = quote / base. A row with zero volumes exists when only
-unknown-side trades printed there (`flow/FlowBarBuilder.cpp:189-195`); it is kept.
+Derived on read, never stored: low row, delta = buy - sell, unknown-side volume = base - buy - sell, maximum row
+volume, VWAP (section 1). A row with zero volumes exists where only unknown-side trades printed
+(`flow/FlowBarBuilder.cpp:189-195`).
 
-The decoder rejects: slots outside the span or not ascending; `high < close`; `buy + sell > base`; per-bar
-row volume sums not equal to sell (bid) and buy (ask); known row counts above `count`; offsets not ascending
-or above 32767; first offset not 0; last offset not `floorDiv(high, row_tick_units) - low row`; a grid
-index out of range; trailing bytes. These are the FLB1 checks (`flow/FlowCodec.cpp:56-97`) plus the
-derivation rules.
+The decoder rejects: anything section 1 rejects; runs that do not tile `[0, slots)` or carry an unknown status;
+`n` above the slot count; slots not ascending or outside the span; a grid index out of range; a price outside
+i64; `low <= 0`; `high < close`; `buy + sell > base`; a bar without rows; a bid sum other than sell or an ask
+sum other than buy; known row counts above `count`; offsets not ascending or above 32767; a first offset other
+than 0; a last offset other than `floorDiv(high, row_tick_units) - low row` on the bar's own grid; trailing
+bytes. A `complete` slot without a bar is an observed empty minute; `unrecorded` means no recording.
 
-Bars with trades only. A slot with coverage `complete` and no bar is an observed empty minute; `unrecorded`
-has no bar and means no recording.
-
-**Grid table in 1d chunks.** Each 1d bar is one UTC day and uses that day's grid through its grid index.
-Readers map rows to price with the bar's grid, never one chunk-wide grid. A 1h bar composed across a grid
-change cannot exist: the grid changes only at UTC midnight.
+Golden bytes for one bar: `test_flow_chunk_proto.cpp`, `GoldenSpecBytes`.
 
 ### trades.big
 
-One chunk = the big-trade events of its span: one UTC hour (level 60000), one UTC day (3600000) or 16 days
-(86400000); `price_step` 0. A coarser chunk is the concatenation of its finer chunks (same floor, same events),
-so a far zoom fetches one chunk per day or per 16 days instead of one per hour. Measured size at the proposed
-floors: about 9 KB per BTC day (estimate, section 12). An event is one trade, or
-a sweep: consecutive trades in feed order with consecutive numeric trade ids, the same exchange millisecond
-and the same side, collapsed as notables are today (`flow/FlowBarBuilder.cpp:202-225`). An event is kept when
-its notional is at or above the instrument's floor (`big_floor_quote`, quote units, server config). The floor
-is written in each chunk; a floor change is a rebuild with a new generation. Proposed floors, about 50-500
-events a day each (section 12; the owner decides, open item 2):
+Events of the chunk's span: one UTC hour (level 60000), one UTC day (3600000) or 16 days (86400000);
+`price_step` 0. A coarser chunk holds exactly the events of its finer chunks.
 
-| Instrument | Floor | Events per day (lower bound, 53-54 days) |
-| --- | --- | --- |
-| BTC-USD | $100,000 | 500 |
-| ETH-USD | $50,000 | 344 |
-| SOL-USD | $25,000 | 287 |
-| PEPE-USD | $10,000 | 51 |
-
-The client may draw a higher floor than the chunk's; it never needs a lower one from history.
+- Order of steps per trade: the section 7 seal rule, trade-id deduplication, grouping, then the floor.
+- Grouping (canonical, as notables today): within each 1m bucket, sort the accepted trades by exchange ms, then
+  numeric trade id, then id text (`tradeLess`, `flow/FlowBarBuilder.cpp:20-26`). A sweep is a maximal run of
+  neighbours in that order with consecutive numeric ids, equal exchange ms and equal side
+  (`flow/FlowBarBuilder.cpp:202-225`). A trade with a non-numeric id is its own event.
+- Floor: an event is kept when its notional is at least the instrument's `big_floor_quote` (quote units, server
+  config). Section 12 proposes floors (owner decision, open item 2). The floors are part of the epoch.
 
 | Field | Count | Encoding | Meaning |
 | --- | --- | --- | --- |
-| grid | 1 | 32 bytes | as above |
-| floor | 1 | varint | `big_floor_quote` used |
-| `n` | 1 | varint | events, ascending by (exchange ms, first trade id) |
-| time | n | varint | exchange ms - previous event's ms (the first: - chunk start) |
+| `grid_count`, grids | | as flow | one grid per UTC day in the span |
+| floor | 1 | varint | `big_floor_quote` |
+| `n` | 1 | varint | events, ascending by (exchange ms, first trade's sort key) |
+| grid index | n, only if `grid_count` > 1 | u8 | |
+| time | n | varint | exchange ms - previous event's (the first: - chunk start) |
 | side | n | u8 | 0 unknown, 1 buy, 2 sell |
-| price | n | zigzag varint | first trade's price units - previous event's (the first: - 0) |
-| low | n | varint | price - lowest price of the sweep |
-| high | n | varint | highest price of the sweep - price |
-| size | n | varint | base units |
-| notional | n | varint | quote units |
-| trades | n | varint | trades collapsed into the event |
-| levels | n | varint | distinct prices |
+| price | n | zigzag varint | first trade's price units - previous event's (the first: - 0), on the event's grid |
+| low, high | n each | varint | price - lowest sweep price; highest sweep price - price |
+| size, notional | n each | varint | base units, quote units |
+| trades, levels | n each | varint | trades collapsed; distinct prices |
 
-Trade ids are not stored: the live tail and sealed chunks meet at "sealed through T" by exchange time, not
-by id (section 8). Sealing uses the same seal rule as bars (section 7), per event's minute.
+Trade ids are not stored: sealed chunks and the live tape meet at the sealed boundary by exchange time.
+`trades.big` is not prototyped.
 
 ## 5. Per-day file (replaces FLD1)
 
-Path: `<flow_root>/<venue>/<symbol>/<YYYY-MM-DD>.flc` (UTC day). One file per instrument and day holds the
-day's 24 1m chunks, its 1h chunk and its 1d bar. The 16-day 1d chunk is assembled at serve time from 16
-day files (the heatmap RollupStore serves 1d the same way, MARKETDATA.md "Rollup levels").
+Path `<flow_root>/<venue>/<symbol>/<YYYY-MM-DD>.flc` (UTC day). Prototype: `encodeDayFile`, `parseDayFile`.
 
 | Part | Layout |
 | --- | --- |
-| Header | `FLC1`; u16 file version 1; u16 header length; u32 CRC-32 of the header with this field zeroed; str8 `instrument_id`; i64 day start; u32 generation; grid (32 bytes); u8 seal rule version; u32 seal window ms; 32-byte source fingerprint (SHA-256 of the RAWL2 source identities, as FLD1 `sourceFingerprint` and `.state` today, `servermodel/FlowStore.cpp:66-130`); u32 trades past the seal window; u32 trades rejected by the builder |
-| Section table | 26 entries, fixed: 24 hour chunks (1m), then the 1h chunk, then the 1d bar. Each entry: u32 offset, u32 summary length, u32 rows length, u32 CRC-32 of both, u8 status (0 absent, 1 sealed). |
-| Sections | each = summary section then rows section, exactly the `flow.rows` payload bytes of section 4 for that key, raw (no zstd) |
+| Header | `FLC1`; u16 version 1; u16 header length; u32 CRC-32 (IEEE) of the header with this field zeroed; str8 `instrument_id`; i64 day start; grid (32 bytes); u8 rule version; u32 seal window W (ms); u32 trades past their seal; u32 trades rejected by the builder; u32 receive-time regressions |
+| Table | 50 entries of 25 bytes: u32 offset, u32 summary length, u32 total length, u32 CRC-32 of the section, u8 state (0 absent, 1 sealed), u64 source fingerprint (hour entries: the RAWL2 prefix through the hour's seal point, from FlowStore's source identities, `servermodel/FlowStore.cpp:66-130`; 0 otherwise) |
+| Sections | back to back in table order, starting right after the table |
 
-- The file stores what the wire sends, so a sealed chunk is served by copying bytes into an `SCK1` frame
-  (plus zstd when it pays). No decode and no re-encode on read; the server checks the section CRC once
-  when it loads the file and caches the frame (the heatmap's 256 MiB sealed LRU).
-- The 1m section of an hour is written once the hour is sealed (section 7). The file is rewritten
-  atomically (temp file, fsync, rename, directory fsync, as `atomicFile`, `servermodel/FlowStore.cpp:471-488`),
-  adding sections. The 1h and 1d sections are written once all 24 hour sections are sealed (an unrecorded hour
-  is a sealed section with no bars).
-- Appending a sealed hour does not change sealed content, so it does not bump the generation.
-- The `.state` sidecar goes away: the header carries the generation, fingerprint and counts.
-- Uncompressed on disk: the busiest measured BTC day is 1.14 MB against 2.18 MB of FLD1, a median BTC day
-  0.46 MB against 1.43 MB (section 12). zstd would save 15-35% and cost a decompression on every cold read.
+| Entry | Content | Payload key |
+| --- | --- | --- |
+| 0-23 | `flow.rows` payload of hour h | (1m, hour start), 60 slots |
+| 24 | `flow.rows` payload of the 1h chunk | (1h, day start), 24 slots |
+| 25 | the day's 1d piece: a `flow.rows` payload with 1 slot | (1d, day start), 1 slot |
+| 26-49 | `trades.big` payload of hour h | (60000, hour start) |
+
+Coverage of a composed slot (a 1h slot from its 60 minutes, a 1d piece from its 24 hours): `complete` if all parts
+are complete, `unrecorded` if all are unrecorded, otherwise `partial` (the FHE1 rule, MARKETDATA.md "Flow history").
+
+- Validation on load: the header CRC; a zero-length entry has offset 0; non-empty entries lie back to back from the
+  end of the table; summary length <= total length; absent entries are empty; section CRCs; the file ends at the
+  last section. Any failure makes the whole file unreadable: its keys leave `sealed` and the day is rebuilt.
+- Serving 1m and 1h: the section bytes are the payload (cut at the summary length for `flow.summary`), without
+  decode or re-encode.
+- Serving the 16-day 1d chunk and the day and 16-day `trades.big` chunks: assembled once from pieces, encoded and
+  cached (prototype `assembleDayChunk`):
+  1. slot = (day - chunk start) / 1 day. A day with a sealed piece takes the piece's coverage status and bar. A day
+     without a RAWL2 source is `unrecorded`. Any other day leaves the chunk unsealed (not served).
+  2. Grids in slot order of first use; a grid index per bar when there is more than one.
+  3. Coverage runs from the slot statuses, equal neighbours merged.
+  4. Encode with section 4 from scratch (the open deltas restart at the first bar).
+- An hour section is written when the hour is sealed; entries 24 and 25 when all 24 hours are; a `trades.big` hour
+  with its flow hour. The file is rewritten atomically (temp file, fsync, rename, directory fsync, as `atomicFile`,
+  `servermodel/FlowStore.cpp:471-488`). There is no `.state` sidecar.
+- Raw on disk: zstd 1 would shrink a file by 16-38% (section 12) but cost a decompression on every cold read.
 
 ## 6. In-memory FlowChunk
 
-Client and server hold one decoded chunk as one allocation with per-field arrays. `FlowBar` stays the server
-builder's working type (`flow/FlowBar.hpp:38-51`); FlowChunk is what is stored, served and drawn.
+One decoded chunk is one allocation with per-field arrays, on the server and the client. `FlowBar` stays the
+builder's working type (`flow/FlowBar.hpp:38-51`).
 
 ```cpp
 struct FlowChunkKey { std::string instrument, channel; int64_t levelMs; uint32_t priceStep; int64_t startMs; };
@@ -264,200 +267,222 @@ static_assert(sizeof(FlowGrid) == 32);
 struct FlowRow { int64_t bidVol, askVol; uint32_t bidCount, askCount; };  // no offset, no padding
 static_assert(sizeof(FlowRow) == 24 && alignof(FlowRow) == 8);
 
-struct FlowChunk {                        // one allocation; arrays are spans into it
-    FlowChunkKey key; uint32_t generation; uint16_t slots; uint16_t bars; uint32_t rows;
+struct FlowChunk {                        // arrays are spans into one allocation, widest type first
+    FlowChunkKey key; uint64_t epoch; uint16_t slots, bars; uint32_t rows;
     std::span<const FlowGrid> grids;
     std::span<const CoverageRun> coverage;
-    // Summary, bars entries each, ascending slot:
-    std::span<const int64_t> open, high, low, close;          // price units
+    std::span<const int64_t> open, high, low, close;          // price units, one per bar
     std::span<const int64_t> baseVol, quoteVol, buyVol, sellVol;
     std::span<const uint32_t> count;
     std::span<const uint32_t> rowBegin;                       // bars + 1; empty for flow.summary
     std::span<const uint16_t> slot;
     std::span<const uint8_t> grid;                            // empty when grids.size() == 1
-    // Rows, rows entries each:
-    std::span<const FlowRow> row;
+    std::span<const FlowRow> row;                             // one per row
     std::span<const int16_t> offset;
 };
 ```
 
-| Part | Bytes |
+75 bytes per bar and 26 per row: a BTC 1m hour chunk (37.8 rows per bar on average) is about 63 KB. Rows stay
+sparse: density is 0.75 for BTC 1m and 0.95-1.0 elsewhere (section 12); a dense layout would cost 22% more for
+BTC 1m and save at most 8% elsewhere.
+
+## 7. Seal, ownership, epoch
+
+### Seal rule
+
+| Term | Definition |
 | --- | --- |
-| per bar (summary) | 8 x 8 + 4 + 4 + 2 + 1 = 75 |
-| per row | 24 + 2 = 26 |
-| BTC 1m hour chunk (60 bars, 37.8 rows each on average) | about 63 KB |
+| RAWL2 order | `JournalReader` order: files by (`run_started_system_ns`, run id, segment) (`roller/JournalReader.cpp:49,89`), records in file order |
+| Read start for hour h | the first durable record with receive time >= h - 60 s; a fresh `JournalFeed` starts there (its trade-id window fills during the lead-in) |
+| Watermark M(R) | the maximum receive time (`systemNs / 10^6`) over every record from the read start through record R, all record kinds, R included |
+| Membership | a trade of record R belongs to 1m bar `[s, s + 60 s)` iff its exchange time is in the bar and `M(R) < s + 60 s + W`; equality excludes |
+| W | **15 s** (`flow.seal_window_ms`, written in the day file header) |
+| Regression | a record whose receive time is below M of its predecessor |
 
-Arrays are laid out widest first (i64, u32, u16, u8) inside the allocation, each 8-byte aligned.
-Rows stay sparse (an offset per present row). Row density is 0.75 for BTC 1m and 0.95-1.0 everywhere else
-(section 12); a dense layout without offsets would cost 22% more for BTC 1m and save at most 8% elsewhere, so
-one sparse layout serves every level.
-`tests/core/flow_chunk_proto.hpp` holds the same arrays as vectors with the same `static_assert`s.
+- Each hour is defined from its own read start, so its content does not depend on which hours one build pass
+  covers. A pass may share one read across hours with no regression in their ranges; the result is the same.
+- An hour whose range `[h - 60 s, h + 1 h + W]` holds a regression is sealed with coverage `partial` and counted
+  (header, `sentinel_flow_seal_regressions_total`); its content still follows the rule. This is the case where
+  RAWL2 order can differ from the order live saw (a clock step back followed by a capture restart whose run sorts
+  earlier).
+- Trades that miss their bar are counted (header, `sentinel_flow_late_trades_total`) and stay in RAWL2.
+- 1h and 1d bars are `flow::composeFlowBars` (`flow/FlowCompose.cpp:9-70`) of sealed 1m bars only.
 
-## 7. Seal and ownership
+Live applies the same rule. Today the roller delivers a record's trades and then, at most once per journal
+second, its receive time (`roller/ShadowRoller.cpp:329-338,521-526`); flow cannot seal on that. Step 3 delivers
+every applied record's receive time to the flow model **before** the record's trades, unthrottled. The model keeps
+M per product, drops and counts a trade whose bar's seal point is at or below M, and marks a bar final when M
+reaches its seal point. M never decreases, also when the roller retracts a provisional suffix; live bars are
+provisional and sealed chunks replace them.
 
-A 1m bar `[s, s + 60 s)` moves one way: **live** (now < s + 60 s), **closing** (until the seal), **sealed**.
+Parity fixtures (step 3 acceptance; each feeds the same RAWL2 through the live roller path and the store builder
+and compares the sealed bars): a trade in the record that first reaches the seal point; a seal point in the next
+hourly file; reconnect snapshot frames resending trades after the seal point; a clock step back inside a run; a
+clock step back with a capture restart whose run sorts earlier (must come out `partial`); hours h and h + 1 built
+in one pass and separately (identical bytes).
 
-| Rule | Definition |
-| --- | --- |
-| Membership | A trade belongs to bar b iff its exchange time is in `[s, s + 60 s)` and its record comes, in RAWL2 order, before the product's first record whose receive time is `>= s + 60 s + W` (the bar's seal point). With a monotone receive clock this is "receive time `< s + 60 s + W`". |
-| Receive time | The RAWL2 record's `systemNs / 10^6`, the time the store builder uses today (`servermodel/FlowStore.cpp:452`). RAWL2 order is `JournalReader` order (run start, run id, segment). Membership is a pure function of RAWL2, and it is what live sees: live seals a bar when its receive watermark passes the seal point, so a record after a backward clock step is late in both. |
-| Seal window W | **15 s** (`flow.seal_window_ms`, server config, recorded in each day file header). |
-| Sealed through T | per instrument, the largest hour boundary such that every hour from the first recorded hour up to it has a sealed section on disk. An hour `[h, h + 1 h)` can be built when the receive watermark passes `h + 1 h + W`. |
-| Rollups | 1h and 1d bars are `flow::composeFlowBars` (`flow/FlowCompose.cpp:9-70`) of sealed 1m bars only. sum(1m) == 1h holds by construction. |
-| Late trades | A trade that misses its bar's seal is not in any sealed bar. The builder counts it per day (file header) and in `sentinel_flow_late_trades_total{instrument}`. It stays in RAWL2. Live drops it from the bar too (it would revise a bar whose sealed bytes will not contain it). |
+Why W = 15 s: on 4 measured days (3 BTC, 1 ETH, 6.5 M trades) M passed the end of a trade's bar by at most 1.3 s,
+the only regression was 6 ms, and neither 15 s nor 60 s excludes a trade (section 12). 15 s is the smaller
+window, with ten times the observed maximum as margin, and absorbs the observed clock offset (-0.14 s). A larger W
+only delays sealing. Open item 1 re-measures every day before the cutover.
 
-Why W = 15 s: on the 4 measured days (3 BTC, 1 ETH, 6.5 M trades) the latest trade arrived 1.3 s after
-its bar ended, the 99.9th percentile within 0.02 s, and neither a 15 s nor a 60 s window excludes a single trade
-(section 12). Both windows give the same bars on this data; 15 s is the smaller one with ten times the observed
-maximum as margin. It also bounds the live clock offset: receive minus exchange went as low as -0.14 s. W only
-delays when an hour can be built (by W) and how long live keeps closing bars; a larger W buys nothing that was
-measured. Re-measure over all recorded days before the cutover (open item 1).
+Today's store differs: it reads until receive time passes the end of its whole build run plus 60 s
+(`servermodel/FlowStore.cpp:455`, runs grouped at `:996-1032`), so a late trade's membership depends on how hours
+were grouped into runs.
 
-Today's store rule is different and not deterministic per bar: it reads RAWL2 until receive time passes the end of
-its whole build run plus 60 s (`servermodel/FlowStore.cpp:455`, runs grouped at `:996-1032`), so a trade an hour late
-is in the bar when its hour was built in a later run, and out when not. The new builder applies the membership rule
-per bar.
+### Ownership
 
-**Ownership.**
-- History serves only chunks whose whole span is before T. It never serves an open chunk, and the client never
-  requests a key whose span reaches T.
-- The live stream owns everything at or after T: closing and sealed-but-not-yet-built minutes, and the live bar.
-  Its retention therefore covers at least `[T, now]` (today it keeps the forming hour plus grace and up to six
-  hours the store has not built, `servermodel/ServerDataModel.cpp:1152-1159`).
-- First connect: the reply to `flow_live_subscribe` starts with one closing-tail snapshot (section 8) over
-  `[T, live bar]`, then live updates.
+- History serves every sealed chunk, whether or not earlier hours are sealed. Availability lists the sealed runs.
+- Live keeps the 1m buckets from `live_from_ms` = UTC hour of (receive watermark - 60 s) - 6 h, today's retention
+  bound (`servermodel/ServerDataModel.cpp:1152-1159`). It drops a bucket only when its hour is sealed on disk or the
+  bucket falls before `live_from_ms`.
+- A bucket is drawn from a held sealed chunk if there is one; else from live if it is at or after `live_from_ms`;
+  else it is `building` (inside the recorded range) or `unrecorded`. Ownership never moves back into live: an
+  unsealed hour before `live_from_ms` (a failed build, a store more than 6 h behind, newest-first recovery) stays
+  `building` until the store seals it.
+- A sealed file that fails validation leaves `sealed` (its keys answer `unavailable`) and is rebuilt. Clients keep
+  their copies: a rebuild from the same RAWL2 gives the same bytes.
 
-**Generation and revalidation.**
-- Each day file has a u32 generation, starting at 1. A rebuild whose sealed content differs (a changed source
-  fingerprint, a new grid, a seal-rule or scale-rule change) writes generation + 1. Adding a sealed hour does not.
-- A chunk's generation = the sum of the generations of the days its span covers (1 day for 1m and 1h chunks, up to
-  16 for 1d). Any day's bump raises it.
-- `chunk_availability.generations` lists days with generation above 1. A client holding a sealed chunk whose
-  computed generation differs revalidates it with `have_hash`; an unchanged content hash returns `not_modified`.
+### Epoch
+
+An epoch identifies the rules behind sealed bytes, per domain: `flow` (the `.flc` files: `flow.summary`,
+`flow.rows`, `trades.big`), and from step 4 `book.near` and `book.deep`.
+
+- epoch = FNV-1a 64 of (domain name, builder rule version, W, scale rule version, big-trade floors, the domain's
+  counter). The counter is a u64 in `<flow_root>/epoch`.
+- The server increments the counter when it rebuilds a sealed section whose new source fingerprint differs from the
+  one in the table (RAWL2 changed under it), and when the owner-approved RAWL2 repair procedure asks for it. A
+  missing or unreadable counter file is recreated with the current Unix time in ms, far above any earlier counter
+  value, so the epoch changes.
+- A day file lost while RAWL2 is intact is rebuilt to the same bytes; the epoch stays.
+- Every frame carries its epoch; availability carries the current one per channel. A client revalidates
+  (`have_hash`) a held sealed chunk whose epoch differs before using it; `not_modified` re-stamps it.
+- A lost day file together with changed RAWL2 is not detected (open item 8).
 
 ## 8. Live tail
 
-- `flow_live_subscribe` and `flow_bar` keep today's semantics (MARKETDATA.md "Live flow bars"): one message per
-  changed bucket, `revision` as envelope metadata, higher revision wins, at equal revision `complete` wins.
-- New: the subscribe reply begins with a closing-tail snapshot, one binary `SCK1` frame of kind 2 (`live`, state
-  open, never cached) on `channel` `flow.rows` or `flow.summary` (as subscribed). Only in this frame `level_ms` is
-  the subscribed timeframe (any served minute multiple); `start_ms` = T floored to that timeframe, `end_ms` = end
-  of the live bar, slots = (end - start) / timeframe. Its payload is the section 4 payload over those slots, the
-  bucket crossing T included as the provisional composite, followed by a live trailer: varint revision per
-  present bar, u8 flags per present bar (bit 0 closed, bit 1 complete). Coverage may say `building` (for example
-  after a server restart, open item 5).
-- 1 s subscriptions are unchanged: sub-minute flow has no chunks.
-- `flow_bar` messages then follow for buckets at or after T only.
-- `chunk_availability` carries the new T whenever it advances. Client merge at T:
+`flow_live_subscribe`, `flow_bar` and `flow_live_unsubscribe` keep today's fields and semantics (MARKETDATA.md
+"Live flow bars"): revision as envelope metadata, higher revision wins, at equal revision `complete` wins. Changes:
 
-| Bucket | Source |
-| --- | --- |
-| end <= T | sealed chunks only. Live data for it is dropped (today's rule, MARKETDATA.md "Client merge of flow bars"). |
-| start >= T | live only (snapshot, then `flow_bar`). |
-| start < T < end (coarse bucket crossing T) | live: the server composes it from sealed hours and live minutes, as today's provisional crossing bucket. |
-
-When T advances, the client drops live buckets that now end at or before T only after the covering chunk is in its
-store, so the picture never shows a hole.
+1. On subscribe the server sends `flow_bar` for **every** retained bucket of the subscribed timeframe at or after
+   `live_from_ms` (today: only the newest), oldest first, then one barrier:
+   `{"type":"flow_live_ready","sub":<u64>,"live_from_ms":<i64>,"buckets":<count>}`. Later `flow_bar` messages are
+   updates. Each FLB1 carries its own grid, so a tail across midnight needs nothing new. The burst is at most 7 h
+   of buckets (420 at 1m; estimated 0.9 MB of JSON on a busy BTC day), inside the 16 MiB session write budget.
+2. Correlation is the JSON `sub`. Re-subscribe replaces; unsubscribe or disconnect cancels and discards queued
+   frames (today's rules). A refused subscribe (`error`, context `flow_live_subscribe`) is retried with exponential
+   100 ms..5 s backoff.
+3. A new subscription or connection resets revisions: at subscribe the client drops its live buckets of that
+   series and rebuilds them from the burst.
+4. The client drops a live bucket once it holds a sealed chunk covering it. A coarse bucket that crosses the
+   sealed boundary stays live; the server composes it from sealed hours and live minutes, as today.
+5. 1 s subscriptions are unchanged (RAM only, no chunks).
 
 ## 9. Client fetch
 
 | Rule | Value |
 | --- | --- |
-| Wanted range | the viewport plus padding: 2 screens on each side, 4 toward the pan direction (the sign of the last pan), ending at T |
+| Wanted range | the viewport plus padding: 2 screens on each side, 4 toward the pan direction (sign of the last pan) |
+| Requests | only keys inside `sealed` runs; never the live edge or the future; no edge throttles |
 | Rounding | out to whole chunks of the level in use |
-| Padding cap | 32 MiB of estimated chunk bytes per chart (estimate: section 12 sizes per level; known decoded size once fetched). Visible chunks are never capped. |
-| Level | the coarsest stored level dividing the timeframe; finer levels at the edges where a coarse chunk would cross T (the heatmap's `tiles::chunksFor`, `heatmap/HeatmapTiles.hpp:72`). 5m/15m from 1m, 4h from 1h, 1w from 1d. |
-| Channel | `flow.summary` for candles, volume, CVD and the footer; `flow.rows` for footprint, TPO and VP. A held `flow.rows` chunk answers a summary want. |
-| Order | visible chunks (newest first), then the pan side, then the other side |
+| Padding cap | 32 MiB of estimated bytes per chart (section 12 sizes; the decoded size once fetched); visible chunks are never capped |
+| Level | the coarsest stored level dividing the timeframe; finer levels where a coarser chunk is not sealed (as `tiles::chunksFor`, `heatmap/HeatmapTiles.hpp:72`) |
+| Channel | `flow.summary` for candles, volume, CVD and the footer; `flow.rows` for footprint, TPO and VP |
+| Order | visible chunks newest first, then the pan side, then the other side |
 | In flight | at most 8 chunks and 8 MiB of estimated bytes across all charts |
-| Cache | one byte-budgeted LRU of decoded FlowChunks shared by every chart, 256 MiB to start; wanted keys are never evicted; survives timeframe and symbol switches (keys carry the instrument) |
-| Draw | only the viewport; padding is fetched and held, not drawn |
-| Never | requests at or after T, or for future time; no edge throttles |
+| Cache | one byte-budgeted LRU of decoded FlowChunks for all charts, 256 MiB to start; wanted keys are never evicted; survives timeframe and symbol switches |
+| Draw | the viewport only |
 
 Retry, busy backoff, deadlines and reconnect follow the heatmap fetcher (MARKETDATA.md "Process-wide chunk fetching").
 
 ## 10. Rebuild and migration
 
-1. The server builds `.flc` files from RAWL2 in a background thread (the FlowStore builder's priority and
-   rescan), newest day first, into a new root beside the FLD1 root. FLD1 keeps serving FHE1 meanwhile.
-2. Every day's `.flc` is checked against its FLD1 day: per 1m bar, the summary fields and rows equal FLD1's
-   (notables excluded), except bars that differ because of the per-bar membership rule; each such bar is listed
-   with the trades that moved.
-3. Cutover (owner approval at the Mac required): the server serves `chunk_request` from `.flc`; the client moves
-   to chunks (step 5); FHE1, FLB1 history, FLD1 files, their `.state` sidecars, `flow::encodeFlowDay` /
-   `decodeFlowDay` and the FLD1 tests are deleted in the same change. No backward compatibility.
-4. The FLD1 root is deleted after the cutover, by the conductor with the owner present.
-5. `flow_bar` FLB1 live messages stay until the live path is reworked; notables leave FLB1 when `trades.big` ships.
+1. The server builds `.flc` files from RAWL2 in a background thread, newest day first, into a new root. FLD1 keeps
+   serving FHE1 meanwhile.
+2. Each day is diffed against FLD1 per 1m bar (summary and rows; notables excluded). Expected differences: bars
+   whose membership changes under section 7, and hours marked `partial`; each is listed with the trades that moved.
+3. Cutover (owner approval at the Mac): `chunk_request` serves from `.flc`, the client moves to chunks (step 5), and
+   FHE1, FLB1 history, FLD1 files, `.state` sidecars, `encodeFlowDay` / `decodeFlowDay` and their tests are deleted
+   in the same change. Clients start with an empty flow cache, so no epoch carries over.
+4. The conductor deletes the FLD1 root after the cutover, with the owner present.
 
 ## 11. What stays as is
 
-`flow_bar` revision semantics; the 1 s live series and its journal replay (RAM only); `FlowBarBuilder` and
-`composeFlowBars`; the recorder grid as the row grid; quote scale 10^8.
+`flow_bar` revision semantics and FLB1 live bodies (open item 6); the 1 s live series and its journal replay;
+`FlowBarBuilder` and `composeFlowBars`; the recorder grid as the row grid; quote scale 10^8.
 
 ## 12. Measurements
 
-Run 2026-11-22 on the recorded data under `/Volumes/T7/sentinel-data` (read-only). Commands:
-`flow_history_bench --lateness <raw-l2> <symbol> <days...>` and
-`flow_history_bench --columnar <hmc2-flow> <symbol> <days...>`.
+Run 2026-11-22 on `/Volumes/T7/sentinel-data` (read-only): `flow_history_bench --lateness <raw-l2> <symbol>
+<days...>` and `flow_history_bench --columnar <hmc2-flow> <symbol> <days...>`.
 
 ### Lateness
 
-Every trade with its exchange time in the day, deduplicated and ordered by `JournalFeed` as the store builder
-does, receive time = RAWL2 record time, read until one hour past the day. "After bar end" = receive time - end
-of the trade's 1m bar.
+Every trade with its exchange time in the day, deduplicated and ordered by `JournalFeed` as the store builder does.
+Reading starts two hours before the day (lead-in) and stops when the running maximum receive time is an hour past
+it. All four scans are complete: no damage, no file-order regression. "After bar end" = receive time - end of the
+trade's 1m bar; exclusions use the section 7 running maximum M.
 
-| Day | Trades | Receive - exchange p50 / p99 / p99.9 / max | min | After bar end: 0-100 ms / 100 ms-1 s / 1-5 s / >= 5 s | After bar end p99.9 / max | Excluded at 15 s / 60 s | Reconnects |
+| Day | Trades | Receive - exchange p50 / p99 / p99.9 / max, min | After bar end: 0-100 ms / 0.1-1 s / 1-5 s / >= 5 s | After bar end p99.9 / max (by M) | Excluded at 15 s / 60 s | Regressions | Reconnects |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| BTC 2026-11-19 | 1,894,339 | 67 / 393 / 868 / 12,942 ms | -139 ms | 2,021 / 399 / 0 / 0 | 20 / 456 ms | 0 / 0 | 3 |
-| BTC 2026-11-20 | 2,478,362 | 66 / 889 / 2,404 / 4,215 ms | -58 ms | 2,159 / 698 / 1 / 0 | 7 / 1,278 ms | 0 / 0 | 8 |
-| BTC 2026-11-21 | 1,695,851 | 50 / 258 / 742 / 3,345 ms | -116 ms | 1,539 / 136 / 0 / 0 | -1 / 142 ms | 0 / 0 | 4 |
-| ETH 2026-11-20 | 434,248 | 57 / 952 / 1,579 / 3,066 ms | -58 ms | 320 / 180 / 0 / 0 | 17 / 880 ms | 0 / 0 | 8 |
+| BTC 2026-11-19 | 1,894,339 | 67 / 393 / 868 / 12,942, -139 ms | 2,021 / 399 / 0 / 0 | 20 / 456 ms | 0 / 0 | 0 | 3 |
+| BTC 2026-11-20 | 2,478,362 | 66 / 889 / 2,404 / 4,215, -58 ms | 2,159 / 698 / 1 / 0 | 7 / 1,278 ms | 0 / 0 | 0 | 8 |
+| BTC 2026-11-21 | 1,695,851 | 50 / 258 / 742 / 3,345, -116 ms | 1,539 / 136 / 0 / 0 | -1 / 142 ms | 0 / 0 | 1 (6 ms) | 4 |
+| ETH 2026-11-20 | 434,248 | 57 / 952 / 1,579 / 3,066, -58 ms | 320 / 180 / 0 / 0 | 17 / 880 ms | 0 / 0 | 0 | 8 |
 
-- 99.8% of trades arrived before their bar ended and all but one less than 1 s after it. The one (1,278 ms)
-  came in a reconnect snapshot frame; reconnect snapshots recovered nothing else late.
-- Negative receive - exchange (down to -139 ms) is clock offset between Coinbase and the capture host.
-- Scan cost: 53-67 s per day.
+- 99.8% of trades arrived before their bar ended. The one trade more than 1 s late (1,278 ms) came in a reconnect
+  snapshot frame.
+- The 6 ms regression on BTC 2026-11-21 would mark its hour `partial` under section 7; it moves no trade.
+- Negative receive - exchange is clock offset between Coinbase and the capture host.
+- Scan cost: 54-69 s per day.
 
 ### Sizes
 
-Lean = the section 4 payload (`flow_chunk_proto.hpp`, `Delta`); "no deltas" = the same arrays as plain varints
-(`Varint`); "fixed" = fixed-width arrays, the in-memory image (`Fixed`). FLB1 = today's FLB1 frames plus their
-24-byte FLD1 index entries. All per-hour pieces compressed independently. Bytes per 1m bar in brackets.
+"Spec" = the section 4 `flow.rows` payload, "summary" = its `flow.summary` prefix, both exactly as specified.
+"Varint" (no deltas) and "fixed" (fixed width, the in-memory image) are measurement variants of the same fields.
+FLB1 = today's FLB1 frames plus their 24-byte FLD1 index entries. Every chunk is compressed on its own. Every hour
+present in FLD1 is taken as sealed and complete; `trades.big` is not measured. Bytes per 1m bar in brackets.
 
-1m level, one day of hour chunks:
+1m level, the 24 hour chunks of one day:
 
-| Day | FLB1 | FLB1 no notables | Lean fixed | Lean no deltas | Lean | Lean zstd 1 | Lean zstd 3 | Summary only |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| BTC 2026-11-20 (busy) | 2,179,776 (1514) | 1,454,016 | 3,201,928 | 1,198,853 | 1,146,131 (796) | 850,299 | 838,635 | 46,526 (32.3) |
-| BTC 2026-10-22 (median) | 1,429,529 (993) | 703,769 | 1,351,612 | 479,416 | 459,502 (319) | 363,060 | 362,395 | 45,264 (31.4) |
-| ETH 2026-11-20 | 1,250,098 (868) | 535,858 | 712,584 | 323,156 | 313,565 (218) | 266,660 | 266,662 | 45,903 (31.9) |
-| SOL 2026-11-20 | 1,196,490 (831) | 482,250 | 599,874 | 267,274 | 261,538 (182) | 220,058 | 219,831 | 44,658 (31.0) |
-| PEPE 2026-10-13 (1,150 bars) | 477,597 (415) | 216,578 | 123,656 | 47,878 | 43,302 (38) | 28,538 | 28,216 | 28,032 (24.4) |
+| Day | FLB1 | FLB1 no notables | Fixed | Varint | Spec | Spec zstd 1 / 3 | Summary |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| BTC 2026-11-20 (busy) | 2,179,776 (1,514) | 1,454,016 | 3,201,472 | 1,153,517 | 1,129,795 (785) | 830,431 / 819,264 | 45,217 (31.4) |
+| BTC 2026-10-22 (median) | 1,429,529 (993) | 703,769 | 1,351,156 | 463,280 | 449,056 (312) | 353,036 / 352,379 | 43,781 (30.4) |
+| ETH 2026-11-20 | 1,250,098 (868) | 535,858 | 712,128 | 316,098 | 306,579 (213) | 261,096 / 261,130 | 44,645 (31.0) |
+| SOL 2026-11-20 | 1,196,490 (831) | 482,250 | 599,418 | 261,653 | 255,917 (178) | 215,181 / 215,205 | 43,256 (30.0) |
+| PEPE 2026-10-13 (1,150 bars) | 477,597 (415) | 216,578 | 123,200 | 46,559 | 41,983 (37) | 27,692 / 27,305 | 27,021 (23.5) |
 
-- Lean against today's FLD1 file: BTC 1.9x (busy) to 3.1x (median) smaller, ETH 4.0x, SOL 4.6x, PEPE 11.4x.
-  Dropping notables gives most of it; varints give the rest; deltas add 3-10%.
-- zstd on the lean form: 15-26% saving at 1m (PEPE 34%), 10-16% at 1h and 1d; level 3 within 1% of level 1.
-  The summary alone compresses 5-8% (BTC, ETH, SOL) and 21% (PEPE). The fixed-width in-memory image is larger
-  than today's FLB1.
-- Day file (header once, offsets, 24 sections): BTC busy 1,144,866 bytes, median 458,237. The prototype's
-  header and offsets are 127 bytes; section 5's header and 26-entry table are about 560 bytes.
-- Decode of a whole day: BTC busy 1.6 ms lean (2.0 ms to `FlowBar`s) against 5.0 ms for FLD1 without its
-  validation re-encode; ETH 0.4 against 1.1 ms; PEPE 0.08 against 0.31 ms.
+Day file (section 5: header and 50-entry table, 24 hour sections, the 1h section, the 1d piece):
 
-1h and 1d levels, composed from 1m with `flow::composeFlowBars`:
+| Day | FLD1 | `.flc` | of which header + table / 1h / 1d piece | Read: FLD1 decode / `.flc` parse + decode 24 hours |
+| --- | --- | --- | --- | --- |
+| BTC busy | 2,179,873 | 1,400,064 (1.6x smaller) | 1,336 / 206,439 / 62,494 | 4.9 / 4.0 ms |
+| BTC median | 1,429,626 | 587,908 (2.4x) | 1,336 / 99,067 / 38,449 | 1.5 / 1.8 ms |
+| ETH | 1,250,195 | 365,617 (3.4x) | 1,336 / 43,946 / 13,756 | 1.1 / 1.0 ms |
+| SOL | 1,196,587 | 304,761 (3.9x) | 1,336 / 37,357 / 10,151 | 1.0 / 0.9 ms |
+| PEPE | 477,695 | 46,938 (10.2x) | 1,337 / 2,895 / 723 | 0.34 / 0.17 ms |
+
+Serving a 1m or 1h chunk reads its section and needs no decode; the parse figure includes every section CRC.
+
+1h and 1d levels, all FLD1 days (BTC 54, others 53):
 
 | Chunk | BTC | ETH | SOL | PEPE |
 | --- | --- | --- | --- | --- |
-| 1h day chunk, average over all days, lean | 110 KB (4,602 B/bar) | 28 KB | 29 KB | 3.2 KB |
-| 1h day chunk, zstd 1 | 94 KB | 25 KB | 25 KB | 2.9 KB |
-| 1h day chunk, BTC busy day 2026-11-20 | 212 KB (182 KB zstd 1) | | | |
-| 1d 16-day chunk, lean (16 days) | 418-426 KB (26 KB/bar) | 102-120 KB | 103-122 KB | 7.8-12.6 KB |
-| 1d 16-day chunk, zstd 1 | 353-358 KB | 89-106 KB | 90-106 KB | 6.9-11.0 KB |
-| Summary per bar, 1h / 1d | 39 / 44 B | 38 / 44 B | 36 / 43 B | 33 / 37 B |
+| 1h day chunk, average spec / zstd 1 | 107 / 91 KB | 27 / 24 KB | 28 / 24 KB | 3.1 / 2.8 KB |
+| 1d 16-day chunk (16 days), spec / zstd 1 | 403-410 / 348-353 KB | 99-118 / 88-104 KB | 101-119 / 89-104 KB | 7.6-12.2 / 6.8-10.9 KB |
+| Summary per bar, 1h / 1d | 37 / 43 B | 37 / 42 B | 34 / 42 B | 31 / 35 B |
 
-All 54 BTC days: 1h chunks 5.9 MB lean (5.0 MB zstd 1); the four 1d chunks 1.63 MB.
+All 54 BTC days: 1h chunks 5.8 MB spec (4.9 MB zstd 1); the four 1d chunks 1.57 MB. Every 16-day chunk assembled
+from day pieces equals the direct encoding.
 
-### Rows and offsets (all FLD1 days: BTC 54, others 53)
+Codec threshold (zstd 1 shrinks by at least 10%): `flow.rows` 1m chunks 24/24 on every measured day (15-34% saved);
+1h chunks 54/54 BTC, 53/53 ETH, 52/53 SOL, 50/53 PEPE (11-15% in total); 1d chunks 11-14%, except two PEPE chunks
+at 9.0% and 9.8% (sent raw).
+`flow.summary` almost never pays (BTC, ETH 0/24, SOL 1/24 per day; 1h and 1d 0 of all), except PEPE 1m (24/24,
+21%). zstd 3 saves at most 1.3% more than level 1.
+
+### Rows and offsets (all FLD1 days)
 
 | Instrument, level | Row density (rows / (max offset + 1)): total, p10, p50 | Widest offset range (day) | int16 headroom |
 | --- | --- | --- | --- |
@@ -468,45 +493,47 @@ All 54 BTC days: 1h chunks 5.9 MB lean (5.0 MB zstd 1); the four 1d chunks 1.63 
 | SOL 1d | 0.999 | 1,116 (2026-10-08) | 29x |
 | PEPE 1d | 1.000 | 131 (2026-10-29) | 250x |
 
-BTC 1m averages 37.8 rows per bar. Checks over every bar: lean round trip equal to FLD1 without notables (0
-mismatches), low row = `floorDiv(low, row_tick_units)` (0 mismatches), native tick = row tick units / price scale
-(0 mismatches), no 1d composition overflowed int16.
+BTC 1m averages 37.8 rows per bar. Checks over every bar: spec round trip equals FLD1 without notables, low row =
+`floorDiv(low, row_tick_units)`, native tick = row tick units / price scale, day files parse back equal; 0
+mismatches. No 1d composition overflowed int16.
 
 ### Big trades (from FLD1 notables)
 
 Sweep-collapsed events at or above a floor, per day. Notables keep the top 8 per minute, so these are lower
-bounds; "truncated" counts minutes whose eighth notable was at or above the floor.
+bounds; "truncated" counts minutes whose eighth notable was at or above the floor. Proposed floors in bold
+(about 50-500 events a day each; the owner decides, open item 2).
 
 | Floor | BTC | ETH | SOL | PEPE |
 | --- | --- | --- | --- | --- |
-| $10,000 | 5,908 (22,255 truncated) | 3,334 | 1,020 | 51 (11) |
-| $25,000 | 3,030 | 1,322 | 287 (170) | 15 |
-| $50,000 | 1,567 | 344 (170) | 110 | 5.3 |
-| $100,000 | 500 (324) | 98 | 40 | 1.4 |
+| $10,000 | 5,908 (22,255 truncated) | 3,334 | 1,020 | **51** (11) |
+| $25,000 | 3,030 | 1,322 | **287** (170) | 15 |
+| $50,000 | 1,567 | **344** (170) | 110 | 5.3 |
+| $100,000 | **500** (324) | 98 | 40 | 1.4 |
 | $250,000 | 98 | 23 | 8.6 | 0.08 |
 | $1,000,000 | 7.3 | 1.2 | 0.4 | 0 |
 
-Not measured: an event in the section 4 layout should take about 15-20 bytes, so 500 a day is about 9 KB.
+Not measured: an event should take 15-20 bytes, so 500 a day is about 9 KB.
 
 ## 13. Open items
 
-1. **Lateness on every day.** Four days were measured. Before the cutover, run `--lateness` over every recorded
-   day and product (about a minute per day, in the background) and check that no day excludes a trade at 15 s.
-   The metric `sentinel_flow_late_trades_total` then watches production.
-2. **Big-trade floors** (owner decision: what bubbles show far back). The table in section 4 is a proposal.
-   Sweep grouping beyond same millisecond, same side and consecutive ids (plan question 2) stays as today.
-3. **Days without a recorder grid** (plan question 4). The live model drops their trades
-   (`sentinel_flow_missing_grid_trades_total`); the store already has a journal grid fallback
-   (`dayScales`, `servermodel/FlowStore.cpp:342-412`). The live path needs the same before chunks replace FHE1.
+1. **Lateness on every day.** Four days were measured. Before the cutover, run `--lateness` over every recorded day
+   and product (about a minute per day) and check that no day excludes a trade at 15 s or shows a regression.
+2. **Big-trade floors** (owner decision: what bubbles show far back). Section 12 proposes floors.
+3. **Days without a recorder grid** (plan question 4). Live drops their trades
+   (`sentinel_flow_missing_grid_trades_total`); the store has a journal grid fallback (`dayScales`,
+   `servermodel/FlowStore.cpp:342-412`). Live needs the same before chunks replace FHE1.
 4. **Server memory** (plan question 5): profile the ~877 MB before step 3 adds the sealed-frame cache.
-5. **Startup gap.** After a server restart, live holds only bars since its first live trade, so `[T, first
-   trade)` is `building` in the closing-tail snapshot until the store seals it. Startup replay of the open hour
-   (plan step 6) closes it.
-6. **Live message format.** Live updates stay `flow_bar` with FLB1 bodies. Moving them onto `SCK1` kind 2
-   frames (and dropping FLB1 notables when `trades.big` ships) is left to the live rework.
-7. **Heatmap generations** (step 4): how RollupStore fingerprints and HMC2 rewrites map to the per-day
-   generation, replacing "a GUI does not revalidate sealed chunks" (MARKETDATA.md "Changed content").
-8. **Kalshi.** Its instruments have tick bands, not one tick; the flow row grid is defined only for a single
-   recorder tick. Flow for Kalshi needs its own grid rule before it gets chunks.
-9. **Coarser rows** (`price_step` > 1): the key has the slot; the composition rule (sum of native rows per
-   coarse row) and when the server prebuilds them are not specified.
+5. **Startup gap.** After a restart live holds only buckets since its first live trade; earlier unsealed hours are
+   `building` until sealed. Startup replay of the open hour (plan step 6) closes it.
+6. **Live message format.** `flow_bar` stays JSON with FLB1 (rows always included). A summary-only live level of
+   detail, binary live frames and dropping FLB1 notables when `trades.big` ships belong to the live rework.
+7. **Heatmap on SCK1 (step 4).** The mapping in section 3 is fixed. Not settled, because it needs the step 4 code:
+   how HMC2 repair tools bump the `book.*` epoch (today they delete rollup files, MARKETDATA.md "Changed content"),
+   and the exact `book.*` kind 2 payload layout.
+8. **Lost day file and changed RAWL2 together.** The epoch cannot see it (the old fingerprint is gone). RAWL2 is
+   append-only and rewritten only by owner-approved repairs, which bump the epoch; an unannounced change of RAWL2
+   bytes is outside the model.
+9. **1w and other multi-day timeframes.** They mix grids, and `composeFlowBars` refuses that. They need a
+   mixed-grid rule (common price scale, output row tick, base-scale conversion), not specified here.
+10. **Kalshi.** Tick bands, not one tick; the flow row grid is defined only for one recorder tick.
+11. **Coarser rows** (`price_step` > 1): composition rule and prebuilding not specified.
