@@ -9,14 +9,23 @@
 //
 // Page mode: for 1m, 1h and 1d, the 512-bar page whose exclusive end is the end
 // time floored to the timeframe, clamped to the first FLD1 day on disk. Every
-// day file the page touches is read whole, as the server does. Pass 1 may hit a
-// cold OS cache; later passes are warm.
+// day file the page touches is read whole, as the server does, and every
+// requested bucket gets the server's range/bar JSON and FHE1 envelope work,
+// missing days included. FlowStore itself is not used: without a build pass its
+// sealed watermark is zero and window() returns no bars. measured_subset_ms is
+// therefore a named subset; the program prints which server stages it leaves out.
+// Pass 1 may hit a cold OS cache; later passes are warm.
 // Journal mode (--journal, --day): one UTC day of RAWL2 replayed through
 // JournalFeed (every frame, FM-278) for its trades, against reading and decoding
 // that day's FLD1 file.
 #include "flow/FlowCodec.hpp"
 #include "flow/FlowCompose.hpp"
 #include "roller/JournalFeed.hpp"
+#include <QByteArrayView>
+#include <QCryptographicHash>
+#include <nlohmann/json.hpp>
+#include <algorithm>
+#include <string_view>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -93,84 +102,176 @@ std::vector<uint8_t> readAll(const fs::path& path) {
 
 struct PageStats {
     int64_t fromMs = 0, toMs = 0;
-    int days = 0, missingDays = 0;
-    size_t bytesRead = 0, barsIn = 0, barsOut = 0, rowsOut = 0, encodedBytes = 0, summaryBytes = 0;
-    double readMs = 0, decodeMs = 0, validateMs = 0, composeMs = 0, encodeMs = 0, summaryMs = 0, totalMs = 0;
+    int days = 0, missingDays = 0, buckets = 0;
+    size_t bytesRead = 0, barsIn = 0, barsOut = 0, rowsOut = 0, encodedBytes = 0, envelopeBytes = 0;
+    size_t summaryBytes = 0;
+    double readMs = 0, decodeMs = 0, validateMs = 0, composeMs = 0, encodeMs = 0, jsonMs = 0, envelopeMs = 0;
+    double summaryMs = 0, indexLoadMs = 0;
+    double subsetMs() const { return readMs + decodeMs + validateMs + composeMs + encodeMs + jsonMs + envelopeMs; }
 };
 struct Summary { int64_t buy = 0, sell = 0, delta = 0, base = 0; };
+using Json = nlohmann::json;
+struct SliceRange { int64_t fromMs, toMs; const char* status; };
 
-// One UTC day of the page, the way SentinelStreamServer::flow_history::build
-// slices a page by day and buildPage composes each bucket.
-void pageDay(PageStats& s, const fs::path& path, int64_t from, int64_t to, int64_t tf) {
-    auto start = Clock::now();
-    const auto bytes = readAll(path);
-    s.readMs += msSince(start);
-    s.bytesRead += bytes.size();
-    start = Clock::now();
-    auto day = flow::decodeFlowDay(bytes, flow::DayCheck::BarsOnly);
-    s.decodeMs += msSince(start);
-    start = Clock::now();
-    if (flow::encodeFlowDay(day) != bytes) throw std::runtime_error("day re-encode differs " + path.string());
-    s.validateMs += msSince(start);
+// FlowStore::loadIndex on the first touch of a day in a process (cached after):
+// read the .state sidecar, SHA-256 over state and day bytes, a validated decode.
+void indexLoad(PageStats& s, const fs::path& path, const std::vector<uint8_t>& bytes) {
+    const auto start = Clock::now();
+    const auto state = readAll(path.string() + ".state");
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData(QByteArrayView(reinterpret_cast<const char*>(state.data()), qsizetype(state.size())));
+    hash.addData(QByteArrayView(reinterpret_cast<const char*>(bytes.data()), qsizetype(bytes.size())));
+    (void)hash.result();
+    (void)flow::decodeFlowDay(bytes);
+    s.indexLoadMs += msSince(start);
+}
 
-    std::map<int64_t, std::vector<flow::FlowBar>> buckets;
-    for (auto& bar : day.bars)
-        if (bar.startMs >= from && bar.startMs < to) buckets[bar.startMs / tf * tf].push_back(std::move(bar));
-    for (const auto& [_, parts] : buckets) s.barsIn += parts.size();
+// A copy of SentinelStreamServer flow_history::rangeStatus.
+std::string rangeStatus(const Json& ranges) {
+    bool building = false, partial = false, unrecorded = false, complete = false;
+    for (const auto& range : ranges) {
+        const auto status = range.at("status").get<std::string>();
+        building |= status == "building";
+        partial |= status == "partial";
+        unrecorded |= status == "unrecorded";
+        complete |= status == "complete";
+    }
+    return building ? "building" : partial || (unrecorded && complete) ? "partial" :
+        unrecorded ? "unrecorded" : "complete";
+}
 
-    start = Clock::now();
-    std::map<int64_t, Summary> summaries;
-    for (const auto& [bucket, parts] : buckets) {
-        auto& sum = summaries[bucket];
-        for (const auto& bar : parts) {
-            sum.buy += bar.buyVol; sum.sell += bar.sellVol; sum.delta += bar.delta; sum.base += bar.baseVolume;
+// One UTC day slice [from, to) of the page, modelled on SentinelStreamServer
+// flow_history::buildPage: one hourly store range per hour (complete for a day
+// file on disk, unrecorded for a missing day), then per requested bucket its
+// range status, range and bar metadata, and composition of the bucket's bars.
+void pageDay(PageStats& s, Json& header, std::vector<flow::FlowBar>& out, const fs::path& path,
+             int64_t from, int64_t to, int64_t tf) {
+    std::map<int64_t, std::vector<std::pair<flow::FlowBar, uint32_t>>> buckets;
+    const bool present = fs::exists(path);
+    if (present) {
+        ++s.days;
+        auto start = Clock::now();
+        const auto bytes = readAll(path);
+        s.readMs += msSince(start);
+        s.bytesRead += bytes.size();
+        start = Clock::now();
+        auto day = flow::decodeFlowDay(bytes, flow::DayCheck::BarsOnly);
+        s.decodeMs += msSince(start);
+        start = Clock::now();
+        if (flow::encodeFlowDay(day) != bytes) throw std::runtime_error("day re-encode differs " + path.string());
+        s.validateMs += msSince(start);
+        indexLoad(s, path, bytes);
+        for (size_t i = 0; i < day.bars.size(); ++i) {
+            auto& bar = day.bars[i];
+            if (bar.startMs >= from && bar.startMs < to)
+                buckets[bar.startMs / tf * tf].emplace_back(std::move(bar), day.revisions[i]);
         }
+        for (const auto& [_, parts] : buckets) s.barsIn += parts.size();
+        // Footer-only pass: kept out of the subset total.
+        start = Clock::now();
+        std::map<int64_t, Summary> summaries;
+        for (const auto& [bucket, parts] : buckets) {
+            auto& sum = summaries[bucket];
+            for (const auto& [bar, _] : parts) {
+                sum.buy += bar.buyVol; sum.sell += bar.sellVol; sum.delta += bar.delta; sum.base += bar.baseVolume;
+            }
+        }
+        s.summaryMs += msSince(start);
+        s.summaryBytes += summaries.size() * SummaryBytesPerBar;
+    } else {
+        ++s.missingDays;
     }
-    s.summaryMs += msSince(start);
-    s.summaryBytes += summaries.size() * SummaryBytesPerBar;
-
-    start = Clock::now();
-    std::vector<flow::FlowBar> composed;
-    composed.reserve(buckets.size());
-    for (auto& [_, parts] : buckets)
-        composed.push_back(tf == parts.front().timeframeMs ? std::move(parts.front()) : flow::composeFlowBars(parts, tf));
-    s.composeMs += msSince(start);
-
-    start = Clock::now();
-    for (const auto& bar : composed) {
-        s.encodedBytes += 4 + flow::encodeFlowBar(bar).size(); // u32 length prefix per frame
-        s.rowsOut += bar.rows.size();
+    std::vector<SliceRange> ranges;
+    for (int64_t hour = from / Hour * Hour; hour < to; hour += Hour)
+        ranges.push_back({std::max(hour, from), std::min(hour + Hour, to), present ? "complete" : "unrecorded"});
+    double composeMs = 0;
+    const auto start = Clock::now();
+    for (int64_t bucket = from / tf * tf; bucket < to; bucket += tf) {
+        ++s.buckets;
+        const int64_t end = bucket + tf;
+        int64_t covered = bucket;
+        bool building = false, unrecorded = false, recorded = false;
+        for (const auto& r : ranges) {
+            if (r.toMs <= bucket || r.fromMs >= end) continue;
+            if (r.fromMs > covered) building = true;
+            covered = std::max(covered, r.toMs);
+            unrecorded |= std::string_view(r.status) == "unrecorded";
+            recorded |= std::string_view(r.status) != "unrecorded";
+        }
+        building |= covered < end;
+        const bool partial = unrecorded && recorded;
+        const std::string status = building ? "building" : partial ? "partial" : unrecorded ? "unrecorded" : "complete";
+        header["ranges"].push_back({{"from_ms", bucket}, {"to_ms", end}, {"status", status},
+                                    {"price_scale", 100}, {"row_tick_units", 100}});
+        auto it = buckets.find(bucket);
+        if (it == buckets.end()) continue;
+        auto& entries = it->second;
+        const auto composeStart = Clock::now();
+        std::sort(entries.begin(), entries.end(),
+                  [](const auto& a, const auto& b) { return a.first.startMs < b.first.startMs; });
+        std::vector<flow::FlowBar> parts;
+        uint32_t revision = 0;
+        for (auto& [bar, rev] : entries) { parts.push_back(std::move(bar)); revision = std::max(revision, rev); }
+        out.push_back(tf == parts.front().timeframeMs ? std::move(parts.front()) : flow::composeFlowBars(parts, tf));
+        composeMs += msSince(composeStart);
+        header["bars"].push_back({{"bucket_start_ms", bucket}, {"revision", revision},
+                                  {"complete", !building && !partial}, {"source", "store"}});
     }
-    s.encodeMs += msSince(start);
-    s.barsOut += composed.size();
+    s.composeMs += composeMs;
+    s.jsonMs += msSince(start) - composeMs;
 }
 
 PageStats page(const fs::path& root, const std::string& symbol, int64_t endMs, int64_t tf, int64_t firstDayMs) {
     PageStats s;
     s.toMs = endMs / tf * tf;
     s.fromMs = std::max(s.toMs - PageBars * tf, firstDayMs / tf * tf);
-    const auto start = Clock::now();
-    for (int64_t day = s.fromMs / Day * Day; day < s.toMs; day += Day) {
-        const auto path = dayPath(root, symbol, day);
-        if (!fs::exists(path)) { ++s.missingDays; continue; }
-        ++s.days;
-        pageDay(s, path, std::max(s.fromMs, day), std::min(s.toMs, day + Day), tf);
+    Json header = {{"type", "flow_history_chunk"}, {"schema_version", 1}, {"req", 1}, {"symbol", symbol},
+                   {"timeframe_ms", tf}, {"oldest_ms", s.fromMs}, {"price_scale", 0}, {"row_tick_units", 0},
+                   {"sealed_through_ms", s.toMs}, {"ranges", Json::array()}, {"bars", Json::array()}};
+    std::vector<flow::FlowBar> composed;
+    // The server bounds source memory to one UTC day per buildPage call.
+    for (int64_t day = s.fromMs / Day * Day; day < s.toMs; day += Day)
+        pageDay(s, header, composed, dayPath(root, symbol, day), std::max(s.fromMs, day), std::min(s.toMs, day + Day), tf);
+    auto start = Clock::now();
+    std::vector<std::vector<uint8_t>> frames;
+    frames.reserve(composed.size());
+    for (const auto& bar : composed) {
+        frames.push_back(flow::encodeFlowBar(bar));
+        s.encodedBytes += 4 + frames.back().size(); // u32 length prefix per frame
+        s.rowsOut += bar.rows.size();
     }
-    s.totalMs = msSince(start);
+    s.encodeMs = msSince(start);
+    s.barsOut = composed.size();
+    // FHE1: magic, u32 JSON length, JSON header, length-prefixed FLB1 frames.
+    start = Clock::now();
+    header["status"] = rangeStatus(header["ranges"]);
+    std::string body;
+    for (const auto& bytes : frames) {
+        for (unsigned i = 0; i < 4; ++i) body.push_back(char(uint32_t(bytes.size()) >> (8 * i)));
+        body.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    }
+    const auto json = header.dump();
+    std::string envelope = "FHE1";
+    for (unsigned i = 0; i < 4; ++i) envelope.push_back(char(uint32_t(json.size()) >> (8 * i)));
+    envelope += json + body;
+    s.envelopeMs = msSince(start);
+    s.envelopeBytes = envelope.size();
     return s;
 }
 
 void printPage(const std::string& symbol, int64_t tf, int pass, const PageStats& s) {
     std::cout << "mode=page symbol=" << symbol << " tf_ms=" << tf << " pass=" << pass
-              << " from_ms=" << s.fromMs << " to_ms=" << s.toMs
+              << " from_ms=" << s.fromMs << " to_ms=" << s.toMs << " buckets=" << s.buckets
               << " day_files=" << s.days << " missing_days=" << s.missingDays
               << " bytes_read=" << s.bytesRead << " read_ms=" << s.readMs
               << " decode_ms=" << s.decodeMs << " validate_reencode_ms=" << s.validateMs
-              << " compose_ms=" << s.composeMs << " encode_ms=" << s.encodeMs << " total_ms=" << s.totalMs
+              << " compose_ms=" << s.composeMs << " encode_ms=" << s.encodeMs << " json_ms=" << s.jsonMs
+              << " envelope_ms=" << s.envelopeMs << " measured_subset_ms=" << s.subsetMs()
               << " bars_in=" << s.barsIn << " bars_out=" << s.barsOut << " rows_out=" << s.rowsOut
-              << " encoded_bytes=" << s.encodedBytes
+              << " encoded_bytes=" << s.encodedBytes << " envelope_bytes=" << s.envelopeBytes
+              << " first_touch_index_ms=" << s.indexLoadMs
               << " summary_bytes=" << s.summaryBytes << " summary_ms=" << s.summaryMs
-              << " summary_share=" << (s.encodedBytes ? double(s.summaryBytes) / double(s.encodedBytes) : 0.0) << '\n';
+              << " summary_share=" << (s.envelopeBytes ? double(s.summaryBytes) / double(s.envelopeBytes) : 0.0) << '\n';
 }
 
 void journalDay(const fs::path& journalRoot, const fs::path& flowRoot, const std::string& symbol, int64_t dayMs) {
@@ -265,6 +366,13 @@ int main(int argc, char** argv) {
         }
         const auto first = firstDay(root, symbol);
         if (!first) throw std::runtime_error("no FLD1 day files for " + symbol);
+        std::cout << "note=measured_subset_ms is read+decode+validate_reencode+compose+encode+json+envelope. "
+                     "json and envelope are a bench copy of SentinelStreamServer flow_history::buildPage/envelope "
+                     "with one hourly store range per hour. Not included: FlowStore::window index stamp checks, "
+                     "sourceState journal inventory, sealedThroughMs gating, the live RAM merge, history pool "
+                     "queueing and the wire send. first_touch_index_ms (FlowStore::loadIndex: .state read, SHA-256, "
+                     "validated decode) is paid once per day per server process and is reported separately; "
+                     "summary_ms is the footer-only pass, also outside the subset.\n";
         std::cout << "fld1_root=" << root.string() << " symbol=" << symbol << " end_ms=" << endMs
                   << " first_day=" << dayName(*first) << " page_bars=" << PageBars << '\n';
         for (const int64_t tf : {Minute, Hour, Day})

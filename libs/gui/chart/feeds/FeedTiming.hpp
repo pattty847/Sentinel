@@ -2,6 +2,7 @@
 #include "SentinelLogging.hpp"
 #include <QElapsedTimer>
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 
@@ -27,6 +28,7 @@ public:
     static uint64_t mix(uint64_t seed, int64_t value) {
         return (seed ^ uint64_t(value)) * 0x100000001b3ULL; // FNV-1a step
     }
+    static uint64_t mixValue(uint64_t seed, double value) { return mix(seed, std::bit_cast<int64_t>(value)); }
     // The bucket index of a time, so a pan inside one bucket keeps the signature.
     static int64_t bucket(double ms, int64_t tf) {
         if (!std::isfinite(ms) || tf <= 0) return 0;

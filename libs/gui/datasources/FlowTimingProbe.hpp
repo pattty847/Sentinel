@@ -16,7 +16,10 @@ class LiveOrderBook;
 class FlowTimingProbe {
 public:
     FlowTimingProbe();
+    explicit FlowTimingProbe(bool on) : m_on(on) {} // tests
     bool on() const { return m_on; }
+    // Round trip of the request in flight, -1 when id is not the last request sent.
+    int64_t rttMs(quint64 id, int64_t nowMs) const { return m_sentId && id == m_sentId ? nowMs - m_sentAtMs : -1; }
     void reset();
     void sent(const FlowBackfillState::Request&, int64_t nowMs);
     // After next() sent nothing: logs the hold reason once per change while work is due.
@@ -28,6 +31,8 @@ public:
     void viewChanged(const QString& symbol, int64_t tf, int64_t startMs, int64_t endMs,
                      const FlowBackfillState&, const FlowSeriesBuffer&, int64_t nowMs, int64_t wallNowMs);
     void pageApplied(const FlowBackfillState&, const FlowSeriesBuffer&, int64_t nowMs, int64_t wallNowMs);
+    // After the pager ran: coverage can change without a page (live edge marks).
+    void recheck(const FlowBackfillState&, const FlowSeriesBuffer&, int64_t nowMs, int64_t wallNowMs);
 
     // The buckets a fill must cover: the visible buckets, clipped to the backfill
     // window and to the forming live bucket (later buckets never fill). Empty when to <= from.

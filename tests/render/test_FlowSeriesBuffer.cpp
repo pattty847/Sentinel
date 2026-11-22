@@ -195,6 +195,8 @@ struct FlowDataSourceTest : testing::Test {
     int64_t flowStart() const { return source.m_flowBackfill.windowStartMs(); }
     void load(const Client::FlowBatch& batch) { source.m_flowBuffer.apply(batch, 0); }
     int flowDelay() const { return source.m_flowTimer.remainingTime(); }
+    void flowTimingOn() { source.m_flowProbe = FlowTimingProbe(true); }
+    int64_t flowRtt(quint64 id) const { return source.m_flowProbe.rttMs(id, source.m_flowClock.elapsed()); }
     void ready() {
         client().connected(); deliver();
         client().serverConfigReceived(ServerConfig{}); deliver();
@@ -1006,4 +1008,27 @@ TEST(FlowSeriesBuffer, ApproxMemoryCountsBarsRowsNotablesAndCoverage) {
     EXPECT_EQ(memory.totalBytes(), memory.rowBytes + memory.notableBytes + memory.nodeBytes);
     buffer.clear();
     EXPECT_EQ(buffer.approxMemory().totalBytes(), 0u);
+}
+
+TEST(FlowFillTracker, RecheckSettlesAWaitWithoutCountingAPage) {
+    FlowFillTracker tracker;
+    EXPECT_FALSE(tracker.recheck(true, 5)) << "nothing waits";
+    EXPECT_FALSE(tracker.viewChanged(0, 100, false, 10));
+    EXPECT_FALSE(tracker.recheck(false, 20));
+    const auto filled = tracker.recheck(true, 30); ASSERT_TRUE(filled);
+    EXPECT_EQ(filled->pages, 0);
+    EXPECT_EQ(filled->sinceFirstChangeMs, 20);
+    EXPECT_FALSE(tracker.waiting());
+}
+// The probe learns a new selection before its first page is sent, so that page's
+// round trip is not lost to the selection reset.
+TEST_F(FlowDataSourceTest, TimingProbeKeepsTheFirstPageOfANewSelection) {
+    flowTimingOn();
+    ready();
+    select();
+    quint64 id = 0;
+    for (const auto& request : requests())
+        if (request["type"] == "flow_history_request") id = request["req"];
+    ASSERT_NE(id, 0u);
+    EXPECT_GE(flowRtt(id), 0);
 }

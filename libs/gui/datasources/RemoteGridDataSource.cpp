@@ -81,8 +81,9 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             &RemoteGridDataSource::onFlowBarsReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::flowHistoryFailed, this,
             [this](quint64 id, const QString& message, SentinelStreamClient::FlowFailure failure) {
-                m_flowProbe.failed(id, m_flowClock.elapsed());
-                if (m_flowBackfill.fail(id, failure, m_flowClock.elapsed())) {
+                const auto now = m_flowClock.elapsed();
+                m_flowProbe.failed(id, now);
+                if (m_flowBackfill.fail(id, failure, now)) {
                     emit errorOccurred(QStringLiteral("Flow history: ") + message);
                     if (const auto bucket = m_flowBackfill.takeRefusedBucket())
                         publishFlowCoverage(*bucket, SentinelStreamClient::FlowStatus::Refused);
@@ -727,9 +728,11 @@ void RemoteGridDataSource::requestFlowHistory(const QString& symbol, int64_t tf,
     const auto marginStart = std::max<int64_t>(0, start - (end - start));
     m_flowBackfill.setWindow(resetAnchor >= 0 ? std::min(marginStart, resetAnchor) : marginStart, end);
     m_flowBuffer.retainWindow(tf, m_flowBackfill.windowStartMs(), m_flowBackfill.windowEndMs());
+    // Before the request, so a new selection's first page keeps its send time.
+    if (m_flowProbe.on())
+        m_flowProbe.viewChanged(symbol, tf, start, end, m_flowBackfill, m_flowBuffer, m_flowClock.elapsed(),
+                                QDateTime::currentMSecsSinceEpoch());
     requestNextFlowPage();
-    m_flowProbe.viewChanged(symbol, tf, start, end, m_flowBackfill, m_flowBuffer, m_flowClock.elapsed(),
-                            QDateTime::currentMSecsSinceEpoch());
 }
 
 void RemoteGridDataSource::requestNextFlowPage() {
@@ -753,6 +756,7 @@ void RemoteGridDataSource::requestNextFlowPage() {
     } else {
         m_flowProbe.held(m_flowBackfill, now);
     }
+    if (m_flowProbe.on()) m_flowProbe.recheck(m_flowBackfill, m_flowBuffer, now, QDateTime::currentMSecsSinceEpoch());
     if (const auto at = m_flowBackfill.wakeAtMs(now); at > now) {
         m_flowTimer.start(int(std::min<int64_t>(at - now, INT_MAX)));
     }

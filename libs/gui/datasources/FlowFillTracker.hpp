@@ -35,6 +35,11 @@ public:
         ++m_pages;
         return settle(covered, nowMs);
     }
+    // Coverage may have changed without a page (the live edge was marked).
+    std::optional<Filled> recheck(bool covered, int64_t nowMs) {
+        if (!m_waiting) return {};
+        return settle(covered, nowMs);
+    }
     bool waiting() const { return m_waiting; }
     int64_t from() const { return m_from; }
     int64_t to() const { return m_to; }

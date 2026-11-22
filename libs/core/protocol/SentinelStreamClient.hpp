@@ -86,7 +86,7 @@ public:
         QString error;
         std::vector<FlowRange> ranges;
         std::vector<FlowRecord> bars;
-        // Measurement only (flow.timing probe): wire frame size and decode time.
+        // Measurement only: wire frame size and decode time, set only while the flow.timing probe is on.
         size_t wireBytes = 0;
         double decodeMs = 0;
     };

@@ -74,7 +74,7 @@ void FlowTimingProbe::held(const FlowBackfillState& state, int64_t nowMs) {
 
 void FlowTimingProbe::failed(quint64 id, int64_t nowMs) {
     if (!m_on) return;
-    sLog_Probe("flow.timing", "failed id=" << id << " rttMs=" << (id == m_sentId ? nowMs - m_sentAtMs : -1));
+    sLog_Probe("flow.timing", "failed id=" << id << " rttMs=" << rttMs(id, nowMs));
 }
 
 void FlowTimingProbe::replied(const SentinelStreamClient::FlowBatch& batch, bool accepted, int64_t nowMs,
@@ -83,13 +83,14 @@ void FlowTimingProbe::replied(const SentinelStreamClient::FlowBatch& batch, bool
     size_t rows = 0;
     for (const auto& record : batch.bars) rows += record.bar.rows.size();
     sLog_Probe("flow.timing", "reply id=" << batch.id << " symbol=" << batch.symbol << " tfMs=" << batch.timeframeMs
-               << " accepted=" << accepted << " rttMs=" << (batch.id == m_sentId ? nowMs - m_sentAtMs : -1)
+               << " accepted=" << accepted << " rttMs=" << rttMs(batch.id, nowMs)
                << " wireBytes=" << batch.wireBytes << " decodeMs=" << batch.decodeMs << " bars=" << batch.bars.size()
                << " rows=" << rows << " ranges=" << batch.ranges.size() << " applyMs=" << applyMs
                << " consumersMs=" << consumersMs);
 }
 
 void FlowTimingProbe::logFilled(const FlowFillTracker::Filled& filled, const FlowSeriesBuffer& buffer) const {
+    if (filled.pages == 0 && filled.sinceFirstChangeMs == 0) return; // covered within the same call
     const auto inView = viewBars(buffer, m_tf, m_startMs / m_tf * m_tf, m_endMs);
     sLog_Probe("flow.timing", "view filled symbol=" << m_symbol << " tfMs=" << m_tf << " view=[" << m_startMs << ".."
                << m_endMs << ") sinceLastChangeMs=" << filled.sinceLastChangeMs << " sinceFirstChangeMs="
@@ -116,6 +117,12 @@ void FlowTimingProbe::pageApplied(const FlowBackfillState& state, const FlowSeri
                                   int64_t wallNowMs) {
     if (!m_on || m_tf <= 0) return;
     if (const auto filled = m_fill.pageApplied(covered(state, wallNowMs), nowMs)) logFilled(*filled, buffer);
+}
+
+void FlowTimingProbe::recheck(const FlowBackfillState& state, const FlowSeriesBuffer& buffer, int64_t nowMs,
+                              int64_t wallNowMs) {
+    if (!m_on || m_tf <= 0) return;
+    if (const auto filled = m_fill.recheck(covered(state, wallNowMs), nowMs)) logFilled(*filled, buffer);
 }
 
 size_t approxBookBytes(const LiveOrderBook& book) {

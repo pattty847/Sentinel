@@ -335,6 +335,13 @@ void FlowFeed::reportTiming(const FlowSnapshot& out, const FlowSeriesBuffer::Ser
     signature = FeedTiming::mix(signature, FeedTiming::bucket(out.windowToMs, tf));
     signature = FeedTiming::mix(signature, out.barCount);
     signature = FeedTiming::mix(signature, out.cellCount);
+    // Content, so a live bar whose rows or totals change is a new build.
+    for (int i = 0; i < out.barCount; ++i) {
+        const auto& bar = out.bars[size_t(i)];
+        signature = FeedTiming::mix(FeedTiming::mix(FeedTiming::mix(signature, bar.bidVol), bar.askVol), bar.maxRowVol);
+    }
+    for (int i = 0; i < out.cellCount; ++i)
+        signature = FeedTiming::mix(FeedTiming::mix(signature, out.cells[size_t(i)].bidVol), out.cells[size_t(i)].askVol);
     signature = FeedTiming::mix(signature, int64_t(out.windowState));
     signature = FeedTiming::mix(signature, series ? int64_t(series->bars.size()) : -1);
     const double ms = timing_.finish(signature);

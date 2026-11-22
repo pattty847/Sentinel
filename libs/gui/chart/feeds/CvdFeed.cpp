@@ -146,6 +146,11 @@ void CvdFeed::reportTiming(const FlowSeriesBuffer::Series* series, const Mapping
     signature = FeedTiming::mix(signature, FeedTiming::bucket(frame.raster.drawnEndMs, tf));
     signature = FeedTiming::mix(signature, out.series.count);
     signature = FeedTiming::mix(signature, totals);
+    // Content, so a live bar whose delta or volume changes is a new build.
+    for (int i = 0; i < out.series.count; ++i) {
+        signature = FeedTiming::mixValue(signature, out.series.points[size_t(i)].value);
+        signature = FeedTiming::mixValue(signature, out.totals[size_t(i)].volume);
+    }
     signature = FeedTiming::mix(signature, series ? int64_t(series->bars.size()) : -1);
     const double ms = timing_.finish(signature);
     if (ms < 0) return;
