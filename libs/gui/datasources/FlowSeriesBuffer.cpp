@@ -163,3 +163,28 @@ void FlowSeriesBuffer::retainWindow(int64_t tf, int64_t fromMs, int64_t toMs) {
     trim(series->second.losses);
     trim(series->second.lossRefetchAt);
 }
+
+FlowSeriesBuffer::MemoryApprox FlowSeriesBuffer::approxMemory() const {
+    MemoryApprox out;
+    constexpr size_t node = kMapNodeOverheadBytes;
+    for (const auto& [tf, s] : m_series) {
+        ++out.series;
+        out.bars += s.bars.size();
+        out.coverageRanges += s.coverage.size();
+        out.nodeBytes += s.bars.size() * (sizeof(decltype(s.bars)::value_type) + node) +
+            s.coverage.size() * (sizeof(decltype(s.coverage)::value_type) + node) +
+            s.lossRefetchAt.size() * (sizeof(decltype(s.lossRefetchAt)::value_type) + node) +
+            s.losses.size() * (sizeof(decltype(s.losses)::value_type) + node);
+        for (const auto& [start, record] : s.bars) {
+            out.rows += record.bar.rows.size();
+            out.rowBytes += record.bar.rows.capacity() * sizeof(sentinel::flow::Row);
+            out.notableBytes += record.bar.notable.capacity() * sizeof(sentinel::flow::Notable);
+        }
+        if (!s.coverage.empty()) {
+            const auto from = s.coverage.begin()->second.fromMs, to = s.coverage.rbegin()->second.toMs;
+            out.coveredFromMs = out.coveredFromMs ? std::min(out.coveredFromMs, from) : from;
+            out.coveredToMs = std::max(out.coveredToMs, to);
+        }
+    }
+    return out;
+}

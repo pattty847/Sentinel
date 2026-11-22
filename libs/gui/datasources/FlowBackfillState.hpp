@@ -31,8 +31,19 @@ public:
     int64_t wakeAtMs(int64_t nowMs) const;
     int64_t windowStartMs() const { return m_start; }
     int64_t windowEndMs() const { return m_window ? m_end + m_tf : 0; }
+    // Why the last next() sent nothing (Sent when it sent a request). Measurement only.
+    enum class Hold { Sent, Idle, NoSelection, InFlight, Pacing, Backoff, Stopped, EdgeThrottle };
+    Hold lastHold() const { return m_hold; }
+    static const char* holdName(Hold);
+    // True when a page or refresh is due but held: an uncovered bucket in the
+    // window, or a refresh whose time has come.
+    bool workDue(int64_t nowMs) const;
+    int64_t nextEdgePageMs() const { return m_nextEdgePageMs; }
+    // True when one proven run covers every bucket of [from, to). Bucket-aligned input.
+    bool covers(int64_t from, int64_t to) const;
 private:
     void cover(int64_t from, int64_t to);
+    int64_t gapEnd() const;
     void trimCoverage();
     int64_t flightTimeoutMs() const;
     QString m_symbol;
@@ -45,6 +56,7 @@ private:
     std::optional<int64_t> m_refusedBucket;
     quint64 m_generation = 0, m_nextId = 0;
     bool m_pagingStopped = false, m_window = false;
+    Hold m_hold = Hold::Idle, m_retryHold = Hold::Pacing;
     std::optional<Request> m_pending;
     std::optional<Request> m_timedOut;
     std::map<int64_t, int64_t> m_covered;

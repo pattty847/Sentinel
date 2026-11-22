@@ -19,5 +19,9 @@ struct DayFile {
 Bytes encodeFlowBar(const FlowBar& bar); // FLB1
 FlowBar decodeFlowBar(std::span<const uint8_t> bytes);
 Bytes encodeFlowDay(const DayFile& day); // FLD1, indexed by bucket start.
-DayFile decodeFlowDay(std::span<const uint8_t> bytes);
+// ReEncode also applies the writer's day and ordering checks by re-encoding the
+// whole day and comparing bytes. BarsOnly skips that pass (each bar and the index
+// are still checked); only measurement uses it today.
+enum class DayCheck { ReEncode, BarsOnly };
+DayFile decodeFlowDay(std::span<const uint8_t> bytes, DayCheck check = DayCheck::ReEncode);
 } // namespace sentinel::flow

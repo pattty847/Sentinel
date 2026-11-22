@@ -326,8 +326,47 @@ void FlowFeed::report(const FlowSnapshot& out) {
         sLog_Warning("Footprint snapshot incomplete: symbol=" << symbol_ << " skipped=" << out.skippedBars
                      << " truncated=" << out.truncatedBars << sentinel::log_throttle::Suppressed{suppressed});
 }
+uint64_t FlowFeed::contentSignature(const FlowSnapshot& out) {
+    uint64_t signature = FeedTiming::mix(FeedTiming::mix(0, out.barCount), out.cellCount);
+    signature = FeedTiming::mix(FeedTiming::mix(signature, int64_t(out.windowState)), out.bandRows);
+    signature = FeedTiming::mixValue(FeedTiming::mixValue(signature, out.tick), out.maxRowVolume);
+    signature = FeedTiming::mixValue(FeedTiming::mixValue(signature, out.low), out.high);
+    signature = FeedTiming::mix(FeedTiming::mix(signature, out.valid), out.visibleBarCount);
+    for (int i = 0; i < out.barCount; ++i) {
+        const auto& bar = out.bars[size_t(i)];
+        for (const int64_t value : {bar.startMs, bar.baseScale, bar.bidVol, bar.askVol, bar.delta, bar.maxRowVol,
+                                    int64_t(bar.firstCell), int64_t(bar.cellCount), bar.maxSideVol, bar.lowRow,
+                                    bar.highRow})
+            signature = FeedTiming::mix(signature, value);
+    }
+    for (int i = 0; i < out.cellCount; ++i) {
+        const auto& cell = out.cells[size_t(i)];
+        for (const int64_t value : {cell.row, cell.span, cell.bidVol, cell.askVol})
+            signature = FeedTiming::mix(signature, value);
+    }
+    return signature;
+}
+// flow.timing: one line per change of the binned bars, cells or window state.
+void FlowFeed::reportTiming(const FlowSnapshot& out, const FlowSeriesBuffer::Series* series) {
+    if (!timing_.on()) return;
+    const int64_t tf = std::max<int64_t>(1, out.timeframeMs);
+    uint64_t signature = FeedTiming::mix(uint64_t(qHash(symbol_)), tf);
+    signature = FeedTiming::mix(signature, FeedTiming::bucket(out.windowFromMs, tf));
+    signature = FeedTiming::mix(signature, FeedTiming::bucket(out.windowToMs, tf));
+    signature = FeedTiming::mix(signature, contentSignature(out));
+    signature = FeedTiming::mix(signature, series ? int64_t(series->bars.size()) : -1);
+    const double ms = timing_.finish(signature);
+    if (ms < 0) return;
+    const char* state = out.windowState == FlowSnapshot::WindowState::Ready ? "ready" :
+        out.windowState == FlowSnapshot::WindowState::Unavailable ? "unavailable" : "loading";
+    sLog_Probe("flow.timing", "footprint bin symbol=" << symbol_ << " tfMs=" << out.timeframeMs << " binMs=" << ms
+               << " bars=" << out.barCount << " visibleBars=" << out.visibleBarCount << " cells=" << out.cellCount
+               << " band=" << out.bandRows << " window=" << state
+               << " sourceBars=" << (series ? series->bars.size() : 0));
+}
 void FlowFeed::publishRows() {
     if (!enabled_) return;
+    timing_.start();
     selectSymbol();
     const auto frame = ports_.frame ? ports_.frame() : MappingFrameContext{};
     if (!visible(frame)) return;
@@ -343,6 +382,7 @@ void FlowFeed::publishRows() {
         band_ = out.bandRows;
         out.windowState = windowState(*series, frame);
     }
+    reportTiming(out, series);
     report(out);
     post();
     if (ports_.update) ports_.update();

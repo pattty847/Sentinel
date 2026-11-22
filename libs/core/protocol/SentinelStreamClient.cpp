@@ -547,8 +547,15 @@ void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame
     }
     if (flowLive || (frame.size() >= 4 && std::equal(frame.begin(), frame.begin() + 4, "FHE1"))) {
         try {
+            // flow.timing only: no clock read while the probe is off.
+            static const bool timed = sentinel::logging::probeEnabled("flow.timing");
+            const auto started = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             auto batch = flowLive ? protocol::clientparse::parseFlowLive(nlohmann::json::parse(frame))
                                   : protocol::clientparse::parseFlowHistory(frame);
+            if (timed) {
+                batch.wireBytes = frame.size();
+                batch.decodeMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+            }
             std::lock_guard lock(m_chunkOrderMutex);
             if (epoch == m_connectionEpoch.load())
                 emit flowBarsReceived(std::make_shared<const FlowBatch>(std::move(batch)));

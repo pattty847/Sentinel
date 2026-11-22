@@ -7,6 +7,8 @@ set_tests_properties(FlowBarTests PROPERTIES LABELS "core")
 
 add_executable(flow_store_size_bench EXCLUDE_FROM_ALL flow_store_size_bench.cpp)
 target_link_libraries(flow_store_size_bench PRIVATE sentinel_core)
+add_executable(flow_history_bench EXCLUDE_FROM_ALL flow_history_bench.cpp)
+target_link_libraries(flow_history_bench PRIVATE sentinel_core)
 
 # Test Target: test_log_throttle
 add_executable(test_log_throttle test_log_throttle.cpp)

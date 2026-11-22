@@ -1,6 +1,7 @@
 #pragma once
 #include "chart/core/CvdSeries.hpp"
 #include "chart/core/FlowFooter.hpp"
+#include "chart/feeds/FeedTiming.hpp"
 #include "chart/feeds/FlowBufferAccess.hpp"
 #include "render/ITimeAxisMappingProvider.hpp"
 #include <QTimer>
@@ -74,8 +75,11 @@ public:
     void publish();
     int64_t historyAnchor(int64_t start, int64_t timeframe) const;
     static void build(CvdSnapshot&, const FlowSeriesBuffer::Series&, const MappingFrameContext&, CvdReset, int sessionType);
+    // flow.timing: a hash of every published point and footer field (probe only).
+    static uint64_t contentSignature(const CvdSnapshot&);
 private:
     void selectSymbol();
+    void reportTiming(const FlowSeriesBuffer::Series*, const MappingFrameContext&);
     CvdMailbox& mailbox_;
     CvdPresentation& presentation_;
     CvdFeedPorts ports_;
@@ -84,5 +88,6 @@ private:
     QMetaObject::Connection sourceConnection_;
     QString symbol_;
     std::array<char, 21> unit_{};
+    FeedTiming timing_;
 };
 } // namespace chart

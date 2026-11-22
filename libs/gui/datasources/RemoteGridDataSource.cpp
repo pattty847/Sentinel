@@ -81,7 +81,9 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             &RemoteGridDataSource::onFlowBarsReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::flowHistoryFailed, this,
             [this](quint64 id, const QString& message, SentinelStreamClient::FlowFailure failure) {
-                if (m_flowBackfill.fail(id, failure, m_flowClock.elapsed())) {
+                const auto now = m_flowClock.elapsed();
+                m_flowProbe.failed(id, now);
+                if (m_flowBackfill.fail(id, failure, now)) {
                     emit errorOccurred(QStringLiteral("Flow history: ") + message);
                     if (const auto bucket = m_flowBackfill.takeRefusedBucket())
                         publishFlowCoverage(*bucket, SentinelStreamClient::FlowStatus::Refused);
@@ -97,6 +99,12 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
                 requestNextFlowPage();
             }, Qt::QueuedConnection);
     m_candleBuffer = std::make_unique<CandleSeriesBuffer>(this);
+    if (sentinel::logging::probeEnabled("client.mem")) { // no timer at all when the probe is off
+        auto* memory = new QTimer(this);
+        connect(memory, &QTimer::timeout, this,
+                [this] { logClientMemory(m_candleBuffer.get(), m_flowBuffer, m_replicaBooks); });
+        memory->start(5000);
+    }
     m_candleBackfillTimer.setSingleShot(true);
     m_candleBackfillTimer.setInterval(100);
     connect(&m_candleBackfillTimer, &QTimer::timeout, this, &RemoteGridDataSource::requestNextCandlePage);
@@ -720,6 +728,10 @@ void RemoteGridDataSource::requestFlowHistory(const QString& symbol, int64_t tf,
     const auto marginStart = std::max<int64_t>(0, start - (end - start));
     m_flowBackfill.setWindow(resetAnchor >= 0 ? std::min(marginStart, resetAnchor) : marginStart, end);
     m_flowBuffer.retainWindow(tf, m_flowBackfill.windowStartMs(), m_flowBackfill.windowEndMs());
+    // Before the request, so a new selection's first page keeps its send time.
+    if (m_flowProbe.on())
+        m_flowProbe.viewChanged(symbol, tf, start, end, m_flowBackfill, m_flowBuffer, m_flowClock.elapsed(),
+                                QDateTime::currentMSecsSinceEpoch());
     requestNextFlowPage();
 }
 
@@ -731,6 +743,7 @@ void RemoteGridDataSource::requestNextFlowPage() {
         sLog_Warning("Flow history page timed out: symbol=" << m_flowSymbol << " tfMs=" << m_flowTimeframeMs);
     const auto request = m_flowBackfill.next(now);
     m_flowTimer.stop();
+    bool sent = false;
     if (request) {
         if (!symbolPermitted(request->symbol.toStdString(), "flow history"))
             m_flowBackfill.refuseSelection();
@@ -739,10 +752,17 @@ void RemoteGridDataSource::requestNextFlowPage() {
                        << " tfMs=" << request->timeframeMs << " end=" << request->endMs << " limit=" << request->limit);
             m_client.requestFlowHistory(request->id, request->symbol.toStdString(), request->timeframeMs,
                                         request->endMs, request->limit);
+            sent = true;
         }
     }
     if (const auto at = m_flowBackfill.wakeAtMs(now); at > now) {
         m_flowTimer.start(int(std::min<int64_t>(at - now, INT_MAX)));
+    }
+    // Probe work last: it never delays a request or the wake timer.
+    if (m_flowProbe.on()) {
+        if (sent) m_flowProbe.sent(*request, now);
+        else if (!request) m_flowProbe.held(m_flowBackfill, now);
+        m_flowProbe.recheck(m_flowBackfill, m_flowBuffer, now, QDateTime::currentMSecsSinceEpoch());
     }
 }
 
@@ -750,15 +770,27 @@ void RemoteGridDataSource::onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr
     if (!batch) return;
     const auto now = m_flowClock.elapsed();
     if (batch->history) {
-        if (!m_flowBackfill.accept(*batch, now)) { requestNextFlowPage(); return; }
+        if (!m_flowBackfill.accept(*batch, now)) {
+            m_flowProbe.replied(*batch, false, now, 0, 0);
+            requestNextFlowPage();
+            return;
+        }
         sLog_Probe("flow.history", "applied id=" << batch->id << " symbol=" << batch->symbol
                    << " bars=" << batch->bars.size() << " oldest=" << batch->oldestMs);
     } else if (!m_flowSubscription || batch->id != m_flowSubscription || batch->symbol != m_flowSymbol ||
                batch->timeframeMs != m_flowTimeframeMs) return;
     if (!batch->history && !batch->bars.empty())
         m_flowBackfill.observeLive(batch->bars.front().bar.startMs, now);
+    QElapsedTimer timing;
+    if (m_flowProbe.on() && batch->history) timing.start();
+    const auto probed = timing.isValid() ? batch : nullptr;
     for (const auto bucket : m_flowBuffer.apply(*batch, now)) m_flowBackfill.refresh(bucket, now);
+    const double applyMs = timing.isValid() ? double(timing.nsecsElapsed()) / 1e6 : 0;
     emit flowBarsReceived(std::move(batch));
+    if (probed) {
+        m_flowProbe.replied(*probed, true, now, applyMs, double(timing.nsecsElapsed()) / 1e6 - applyMs);
+        m_flowProbe.pageApplied(m_flowBackfill, m_flowBuffer, m_flowClock.elapsed(), QDateTime::currentMSecsSinceEpoch());
+    }
     requestNextFlowPage();
 }
 

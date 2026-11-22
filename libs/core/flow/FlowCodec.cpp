@@ -183,7 +183,7 @@ Bytes encodeFlowDay(const DayFile& day) {
     for (const auto& frame : frames) w.b.insert(w.b.end(), frame.begin(), frame.end());
     return w.b;
 }
-DayFile decodeFlowDay(std::span<const uint8_t> bytes) {
+DayFile decodeFlowDay(std::span<const uint8_t> bytes, DayCheck check) {
     Reader r{bytes}; r.magic("FLD1");
     DayFile day; day.product = r.str(); day.dayStartMs = static_cast<int64_t>(r.u(8));
     day.timeframeMs = static_cast<int64_t>(r.u(8)); day.nativeTick = r.d();
@@ -208,7 +208,8 @@ DayFile decodeFlowDay(std::span<const uint8_t> bytes) {
     }
     if (end != bytes.size()) throw std::runtime_error("flow day trailing bytes");
     // Apply the same day and ordering validation as the writer.
-    if (encodeFlowDay(day) != Bytes(bytes.begin(), bytes.end())) throw std::runtime_error("invalid flow day");
+    if (check == DayCheck::ReEncode && encodeFlowDay(day) != Bytes(bytes.begin(), bytes.end()))
+        throw std::runtime_error("invalid flow day");
     return day;
 }
 } // namespace sentinel::flow

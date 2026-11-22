@@ -564,3 +564,17 @@ TEST(CandleSeriesBuffer, BoundedMemoryAnswersJoinThroughRetainedBarIslands) {
         EXPECT_FALSE(loop.buffer.coverage(kSym, tf)->covers(1010 * tf));
     }
 }
+
+// client.mem: each series holds its whole ring from first use, whatever its bar count.
+TEST(CandleSeriesBuffer, ApproxMemoryCountsTheFullRingOfEachSeries) {
+    CandleSeriesBuffer buffer;
+    EXPECT_EQ(buffer.approxMemory().ringBytes, 0u);
+    buffer.applyUpdate(kSym, kTfMs, bar(1, 100, false), 1, false);
+    buffer.applyUpdate(kSym, kTfMs, bar(2, 101, false), 2, false);
+    buffer.applyUpdate(kSym, 1000, bar(1, 100, false), 1, false);
+    const auto memory = buffer.approxMemory();
+    EXPECT_EQ(memory.series, 2u);
+    EXPECT_EQ(memory.bars, 3u);
+    EXPECT_GE(memory.ringSlots, 20'000u + 60'000u);
+    EXPECT_EQ(memory.ringBytes, memory.ringSlots * sizeof(Bar));
+}

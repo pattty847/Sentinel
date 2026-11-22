@@ -3,6 +3,7 @@
 #include "CandleSeriesBuffer.hpp"
 #include "CandleBackfillState.hpp"
 #include "FlowBackfillState.hpp"
+#include "FlowTimingProbe.hpp"
 #include <QElapsedTimer>
 #include "../models/MarketHealth.hpp"
 #include <QDateTime>
@@ -72,6 +73,7 @@ private:
     void publishFlowCoverage(int64_t bucket, SentinelStreamClient::FlowStatus status);
     FlowSeriesBuffer m_flowBuffer;
     FlowBackfillState m_flowBackfill;
+    FlowTimingProbe m_flowProbe; // flow.timing lines only; inert when the probe is off
     QTimer m_flowTimer;
     QElapsedTimer m_flowClock;
     QString m_flowSymbol;

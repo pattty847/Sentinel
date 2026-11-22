@@ -52,6 +52,9 @@ set(GRID_CORE_SOURCES
     datasources/FlowSeriesBuffer.cpp
     datasources/FlowBackfillState.hpp
     datasources/FlowBackfillState.cpp
+    datasources/FlowFillTracker.hpp
+    datasources/FlowTimingProbe.hpp
+    datasources/FlowTimingProbe.cpp
     datasources/CandleSeriesBuffer.hpp
     datasources/CandleSeriesBuffer.cpp
     UnifiedGridRenderer.cpp

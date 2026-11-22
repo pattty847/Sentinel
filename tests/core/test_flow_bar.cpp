@@ -215,3 +215,28 @@ TEST(FlowBar, CodecRejectsRowVolumesThatDisagreeWithSideTotals) {
         EXPECT_THROW(decodeFlowBar(frame), std::invalid_argument);
     }
 }
+
+// The default decode keeps the writer's whole-day check; BarsOnly skips only that
+// re-encode and still checks every bar and the index.
+TEST(FlowBar, DayDecodeBarsOnlySkipsOnlyTheWholeDayReEncode) {
+    auto b = builder();
+    accepted(b, {"1", 1'000, 100, 2, Side::Buy});
+    accepted(b, {"2", 61'000, 101, 3, Side::Sell});
+    DayFile day;
+    day.product = "BTC-USD"; day.dayStartMs = 0; day.timeframeMs = 60'000;
+    day.nativeTick = 1; day.priceScale = 100; day.baseScale = Base; day.quoteScale = Quote;
+    day.bars = b.bars(); day.revisions.assign(day.bars.size(), 1);
+    ASSERT_EQ(day.bars.size(), 2u);
+    const auto bytes = encodeFlowDay(day);
+    EXPECT_EQ(decodeFlowDay(bytes, DayCheck::BarsOnly), decodeFlowDay(bytes));
+    // dayStartMs follows the magic and the length-prefixed product. A start that is
+    // not on a UTC day passes every per-bar check and fails only the day re-encode.
+    auto shifted = bytes;
+    const size_t dayStartAt = 4 + 2 + day.product.size();
+    ++shifted[dayStartAt];
+    EXPECT_ANY_THROW(decodeFlowDay(shifted));
+    EXPECT_EQ(decodeFlowDay(shifted, DayCheck::BarsOnly).dayStartMs, 1);
+    auto truncated = bytes;
+    truncated.pop_back();
+    EXPECT_ANY_THROW(decodeFlowDay(truncated, DayCheck::BarsOnly));
+}

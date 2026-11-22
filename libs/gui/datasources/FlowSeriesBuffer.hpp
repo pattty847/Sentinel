@@ -36,6 +36,16 @@ public:
     int64_t sealedThroughMs() const { return m_sealedThroughMs; }
     void clear();
     void retainWindow(int64_t tf, int64_t fromMs, int64_t toMs);
+    // Approximate heap held, from sizes and capacities (client.mem probe). Map nodes
+    // count their value plus kMapNodeOverheadBytes; string heap is not counted.
+    static constexpr size_t kMapNodeOverheadBytes = 32;
+    struct MemoryApprox {
+        size_t series = 0, bars = 0, rows = 0, coverageRanges = 0;
+        size_t rowBytes = 0, notableBytes = 0, nodeBytes = 0;
+        int64_t coveredFromMs = 0, coveredToMs = 0; // span of all coverage ranges, 0 when none
+        size_t totalBytes() const { return rowBytes + notableBytes + nodeBytes; }
+    };
+    MemoryApprox approxMemory() const;
 private:
     QString m_symbol;
     int64_t m_sealedThroughMs = 0;
