@@ -71,6 +71,7 @@ private:
     void requestNextFlowPage();
     void onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr batch);
     void publishFlowCoverage(int64_t bucket, SentinelStreamClient::FlowStatus status);
+    void forgetTrimmedFlow();
     FlowSeriesBuffer m_flowBuffer;
     FlowBackfillState m_flowBackfill;
     FlowTimingProbe m_flowProbe; // flow.timing lines only; inert when the probe is off
