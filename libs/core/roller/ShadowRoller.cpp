@@ -666,15 +666,17 @@ class LiveSource {
   void inventory() {
     JournalReader r(cfg.journalRoot, product);
     runOrder.clear();
-    // Files of a run share one metadata object: copy it once per change.
-    const json *last = nullptr;
+    // The last file of each run wins. The catalog shares one metadata object
+    // across files and runs with identical values: copy it once per run, and
+    // again only where it changes inside a run.
+    const JournalFile *last = nullptr;
     for (const auto &f : r.files()) {
       const std::string &run = f.run;
       if (!runOrder.contains(run))
         runOrder[run] = runOrder.size();
-      if (f.metadata.get() != last)
+      if (!last || last->run != run || last->metadata != f.metadata)
         metadata[run] = *f.metadata;
-      last = f.metadata.get();
+      last = &f;
     }
   }
   bool older(const JournalPos &a, const JournalPos &b) {
