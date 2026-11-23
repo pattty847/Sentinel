@@ -195,6 +195,18 @@ struct FlowDataSourceTest : testing::Test {
     int64_t flowStart() const { return source.m_flowBackfill.windowStartMs(); }
     void load(const Client::FlowBatch& batch) { source.m_flowBuffer.apply(batch, 0); }
     int flowDelay() const { return source.m_flowTimer.remainingTime(); }
+    int64_t flowNow() const { return source.m_flowClock.elapsed(); }
+    int64_t liveSampleDue() const { return source.m_flowBackfill.liveSampleDueMs(); }
+    // The pager's wake timer fires at a deadline on the pager's own clock (m_flowClock) that
+    // lies in [earliest, latest]. The remaining time is read between two readings of that
+    // clock; 2 ms covers the millisecond rounding of the two clocks, never host load.
+    void expectWakeBetween(int64_t earliest, int64_t latest) {
+        const auto before = flowNow();
+        const int64_t delay = flowDelay();
+        const auto after = flowNow();
+        EXPECT_GE(delay, earliest - after - 2) << "wakes before its deadline";
+        EXPECT_LE(delay, latest - before + 2) << "wakes after its deadline";
+    }
     void flowTimingOn() { source.m_flowProbe = FlowTimingProbe(true); }
     int64_t flowRtt(quint64 id) const { return source.m_flowProbe.rttMs(id, source.m_flowClock.elapsed()); }
     void ready() {
@@ -443,9 +455,10 @@ TEST_F(FlowDataSourceTest, QueuedProvisionalPageArmsShortPagingTimerBeforeFuture
     ready(); select(); const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
     auto b = batch(bar(1, false), true); b.id = sent[1]["req"]; b.oldestMs = 60'000;
     b.ranges = {{60'000, 120'000, Status::Partial}};
+    const auto before = flowNow();
     client().flowBarsReceived(std::make_shared<const Client::FlowBatch>(b)); deliver();
-    EXPECT_GE(flowDelay(), 0);
-    EXPECT_LE(flowDelay(), 150); // QTimer may round a coarse 100 ms deadline.
+    const auto after = flowNow();
+    expectWakeBetween(before + 100, after + 100); // the 100 ms page gap
 }
 
 TEST(FlowBackfillState, SlidingWindowRequestsOnlyOneUncoveredBucket) {
@@ -888,10 +901,12 @@ TEST_F(FlowDataSourceTest, DroppedLiveFrameRecoversAndRefreshesTheBucketAfterItC
 }
 
 TEST_F(FlowDataSourceTest, HistoryFlightArmsFiveSecondTimeout) {
-    ready(); select();
+    ready();
+    const auto before = flowNow();
+    select();
+    const auto after = flowNow();
     const auto sent = requests(); ASSERT_EQ(sent.size(), 2u);
-    EXPECT_GE(flowDelay(), 4700);
-    EXPECT_LE(flowDelay(), 5300);
+    expectWakeBetween(before + 5000, after + 5000);
 }
 TEST_F(FlowDataSourceTest, OversizedOneBucketReplyExposesRefusedCoverage) {
     ready();
@@ -931,17 +946,22 @@ TEST_F(FlowDataSourceTest, RefusedSubscriptionLeavesTheLiveEdgeToHistory) {
     const auto page = requests(); ASSERT_EQ(page.size(), 1u);
     EXPECT_EQ(page[0]["type"], "flow_history_request");
     EXPECT_EQ(page[0]["end_time_ms"], live - tf) << "older buckets first";
+    const auto beforeSample = flowNow();
     emitPage(page[0]);
-    settle();
+    settle(); // the sample goes out after the 100 ms page gap
+    const auto afterSample = flowNow();
     if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
     const auto sample = requests(); ASSERT_EQ(sample.size(), 1u);
     EXPECT_EQ(sample[0]["end_time_ms"], live) << "the undelivered live bucket is sampled";
     EXPECT_EQ(sample[0]["limit"], 1);
+    const auto due = liveSampleDue();
+    EXPECT_GE(due, beforeSample + FlowSeriesBuffer::kRefetchIntervalMs) << "next sample one interval after this one";
+    EXPECT_LE(due, afterSample + FlowSeriesBuffer::kRefetchIntervalMs) << "next sample one interval after this one";
     emitPage(sample[0]);
     settle();
+    if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
     EXPECT_TRUE(requests().empty());
-    EXPECT_GT(flowDelay(), FlowSeriesBuffer::kRefetchIntervalMs - 1000) << "next sample after the refresh interval";
-    EXPECT_LE(flowDelay(), FlowSeriesBuffer::kRefetchIntervalMs);
+    expectWakeBetween(due, due);
 }
 // A symbol switch with the view running past the live edge (follow live): the first page
 // is the history below the live bucket, never the empty buckets after it.
