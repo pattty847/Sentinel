@@ -5,7 +5,8 @@
 //
 // Encoding::Spec writes exactly the section 4 flow payload (grid table,
 // coverage runs, summary section, rows section) and encodeDayFile/parseDayFile
-// exactly the section 5 day file. Encoding::Varint (no deltas) and
+// exactly the section 5 day file; stepFor/rebin implement the section 4 row
+// step. Encoding::Varint (no deltas) and
 // Encoding::Fixed (fixed-width arrays, the in-memory image) are measurement
 // variants with the same field order; they are not part of the spec.
 // trades.big is not prototyped.
@@ -45,9 +46,21 @@ struct CoverageRun {
     bool operator==(const CoverageRun&) const = default;
 };
 
+// Section 4 row step: a bar spans at most 65,535 rows; steps are 2^0..2^48.
+constexpr int64_t MaxOffset = 65'534;
+constexpr unsigned MaxStepExponent = 48;
+inline bool validStep(uint64_t step) {
+    return step && !(step & (step - 1)) && step <= (uint64_t(1) << MaxStepExponent);
+}
+// Row of a price at a step: floorDiv(native row, step).
+inline int64_t rowAt(int64_t priceUnits, int64_t rowTickUnits, uint64_t step) {
+    return recording::floorDiv(recording::floorDiv(priceUnits, rowTickUnits), int64_t(step));
+}
+
 struct FlowChunk {
     int64_t levelMs = 0, startMs = 0;
     uint32_t slotCount = 0;         // from the key, not the payload
+    uint64_t priceStep = 1;         // from the key; 0 for a flow.summary decode
     std::vector<Grid> grids;
     std::vector<CoverageRun> coverage;
     // Summary: one entry per present bar, ascending slot.
@@ -58,7 +71,7 @@ struct FlowChunk {
     std::vector<uint32_t> count;
     std::vector<uint32_t> rowBegin; // bars + 1 entries
     // Rows, parallel arrays.
-    std::vector<int16_t> offset;    // row - low row of its bar
+    std::vector<uint16_t> offset;   // row - low row of its bar, at priceStep
     std::vector<RowRecord> rows;
     size_t bars() const { return slot.size(); }
     bool operator==(const FlowChunk&) const = default;
@@ -104,7 +117,8 @@ inline FlowChunk fromBars(std::span<const FlowBar> bars, int64_t levelMs, int64_
         if (b.count > UINT32_MAX) throw std::invalid_argument("flow proto count");
         c.count.push_back(uint32_t(b.count));
         for (const auto& r : b.rows) {
-            c.offset.push_back(r.offset);
+            if (r.offset < 0) throw std::invalid_argument("flow proto negative offset");
+            c.offset.push_back(uint16_t(r.offset));
             c.rows.push_back({r.bidVol, r.askVol, r.bidCount, r.askCount});
         }
         c.rowBegin.push_back(uint32_t(c.rows.size()));
@@ -113,7 +127,9 @@ inline FlowChunk fromBars(std::span<const FlowBar> bars, int64_t levelMs, int64_
 }
 
 // Inverse of fromBars, without notables. lowRow, delta and maxRowVol are derived.
+// FlowBar offsets are int16 and native until step 3 widens them.
 inline std::vector<FlowBar> toBars(const FlowChunk& c) {
+    if (c.priceStep != 1) throw std::invalid_argument("flow proto FlowBar has no step");
     std::vector<FlowBar> out;
     out.reserve(c.bars());
     for (size_t i = 0; i < c.bars(); ++i) {
@@ -132,7 +148,8 @@ inline std::vector<FlowBar> toBars(const FlowChunk& c) {
         b.count = c.count[i];
         for (uint32_t r = c.rowBegin[i]; r < c.rowBegin[i + 1]; ++r) {
             const auto& rec = c.rows[r];
-            b.rows.push_back({c.offset[r], rec.bidVol, rec.askVol, rec.bidCount, rec.askCount});
+            if (c.offset[r] > INT16_MAX) throw std::invalid_argument("flow proto FlowBar offset is int16");
+            b.rows.push_back({int16_t(c.offset[r]), rec.bidVol, rec.askVol, rec.bidCount, rec.askCount});
             b.maxRowVol = std::max(b.maxRowVol, rec.bidVol + rec.askVol);
         }
         out.push_back(std::move(b));
@@ -211,9 +228,9 @@ inline std::vector<uint8_t> encode(const FlowChunk& c, Encoding e, bool summaryO
     if (summaryOnly) return std::move(o.b);
     for (size_t i = 0; i < n; ++i) u(c.rowBegin[i + 1] - c.rowBegin[i], 2);
     for (size_t i = 0; i < n; ++i) {
-        int prevOffset = -1;
+        int64_t prevOffset = -1;
         for (uint32_t r = c.rowBegin[i]; r < c.rowBegin[i + 1]; ++r) {
-            u(spec ? uint64_t(c.offset[r] - prevOffset - 1) : uint64_t(uint16_t(c.offset[r])), 2);
+            u(spec ? uint64_t(c.offset[r] - prevOffset - 1) : uint64_t(c.offset[r]), 2);
             prevOffset = c.offset[r];
         }
     }
@@ -225,14 +242,15 @@ inline std::vector<uint8_t> encode(const FlowChunk& c, Encoding e, bool summaryO
 }
 
 // Decodes and validates a payload (the section 4 decoder checks). summaryOnly
-// accepts a flow.summary payload (rows left empty).
+// accepts a flow.summary payload (rows left empty); priceStep is the key's.
 inline FlowChunk decode(std::span<const uint8_t> bytes, Encoding e, int64_t levelMs, int64_t startMs,
-                        uint32_t slotCount, bool summaryOnly = false) {
+                        uint32_t slotCount, bool summaryOnly = false, uint64_t priceStep = 1) {
     using detail::In;
     In in{bytes};
     FlowChunk c;
-    c.levelMs = levelMs; c.startMs = startMs; c.slotCount = slotCount;
-    if (levelMs <= 0 || slotCount == 0 || slotCount > UINT16_MAX) In::fail("key");
+    c.levelMs = levelMs; c.startMs = startMs; c.slotCount = slotCount; c.priceStep = summaryOnly ? 0 : priceStep;
+    if (levelMs <= 0 || slotCount == 0 || slotCount > UINT16_MAX || (!summaryOnly && !validStep(priceStep)))
+        In::fail("key");
     const bool fixed = e == Encoding::Fixed, spec = e == Encoding::Spec;
     const auto u = [&](size_t width) { return fixed ? in.fixed(width) : in.var(); };
     const auto gridCount = in.fixed(1);
@@ -294,7 +312,7 @@ inline FlowChunk decode(std::span<const uint8_t> bytes, Encoding e, int64_t leve
     c.rowBegin.assign(1, 0);
     if (!summaryOnly) {
         for (size_t i = 0; i < n; ++i) {
-            const auto rows = in.bounded(u(2), 32768);
+            const auto rows = in.bounded(u(2), MaxOffset + 1);
             if (rows > bytes.size() - in.p) In::fail("rows truncated");
             c.rowBegin.push_back(c.rowBegin.back() + uint32_t(rows));
         }
@@ -304,10 +322,10 @@ inline FlowChunk decode(std::span<const uint8_t> bytes, Encoding e, int64_t leve
         for (size_t i = 0; i < n; ++i) {
             int64_t prevOffset = -1;
             for (uint32_t r = c.rowBegin[i]; r < c.rowBegin[i + 1]; ++r) {
-                const int64_t v = spec ? prevOffset + 1 + int64_t(in.bounded(u(2), INT16_MAX))
-                                       : int64_t(int16_t(uint16_t(u(2))));
-                if (v <= prevOffset || v > INT16_MAX) In::fail("offset");
-                c.offset[r] = int16_t(v); prevOffset = v;
+                const int64_t v = spec ? prevOffset + 1 + int64_t(in.bounded(u(2), MaxOffset))
+                                       : int64_t(in.bounded(u(2), MaxOffset));
+                if (v <= prevOffset || v > MaxOffset) In::fail("offset");
+                c.offset[r] = uint16_t(v); prevOffset = v;
             }
         }
         c.rows.resize(total);
@@ -334,11 +352,47 @@ inline FlowChunk decode(std::span<const uint8_t> bytes, Encoding e, int64_t leve
                 In::fail("row volume");
             known += uint64_t(c.rows[r].bidCount) + c.rows[r].askCount;
         }
-        const auto lowRow = recording::floorDiv(c.low[i], g.rowTickUnits);
+        const auto lowRow = rowAt(c.low[i], g.rowTickUnits, priceStep);
         if (bid != c.sellVol[i] || ask != c.buyVol[i] || known > c.count[i] || c.offset[first] != 0 ||
-            c.offset[last - 1] != recording::floorDiv(c.high[i], g.rowTickUnits) - lowRow) In::fail("rows");
+            c.offset[last - 1] != rowAt(c.high[i], g.rowTickUnits, priceStep) - lowRow) In::fail("rows");
     }
     return c;
+}
+
+// The smallest step, at least minStep, at which a bar spans at most 65,535 rows.
+inline uint64_t stepFor(int64_t lowUnits, int64_t highUnits, int64_t rowTickUnits, uint64_t minStep = 1) {
+    if (!validStep(minStep) || lowUnits <= 0 || highUnits < lowUnits || rowTickUnits <= 0)
+        throw std::invalid_argument("flow proto step input");
+    for (uint64_t s = minStep; s <= (uint64_t(1) << MaxStepExponent); s *= 2)
+        if (rowAt(highUnits, rowTickUnits, s) - rowAt(lowUnits, rowTickUnits, s) <= MaxOffset) return s;
+    throw std::logic_error("flow proto no step fits"); // unreachable: 2^48 fits any i64 range
+}
+
+// Re-bins every bar of a chunk to a coarser step (exact: each step divides the next).
+inline FlowChunk rebin(const FlowChunk& c, uint64_t step) {
+    if (!validStep(step) || !validStep(c.priceStep) || step < c.priceStep)
+        throw std::invalid_argument("flow proto rebin step");
+    const auto ratio = int64_t(step / c.priceStep);
+    FlowChunk out = c;
+    out.priceStep = step; out.offset.clear(); out.rows.clear(); out.rowBegin.assign(1, 0);
+    for (size_t i = 0; i < c.bars(); ++i) {
+        const auto low = rowAt(c.low[i], c.grids.at(c.grid[i]).rowTickUnits, c.priceStep);
+        const auto newLow = recording::floorDiv(low, ratio);
+        int64_t last = -1;
+        for (uint32_t r = c.rowBegin[i]; r < c.rowBegin[i + 1]; ++r) {
+            const auto offset = recording::floorDiv(low + c.offset[r], ratio) - newLow;
+            if (offset > MaxOffset) throw std::invalid_argument("flow proto rebin range");
+            if (offset == last) {
+                auto& d = out.rows.back();
+                d.bidVol += c.rows[r].bidVol; d.askVol += c.rows[r].askVol;
+                d.bidCount += c.rows[r].bidCount; d.askCount += c.rows[r].askCount;
+            } else {
+                out.offset.push_back(uint16_t(offset)); out.rows.push_back(c.rows[r]); last = offset;
+            }
+        }
+        out.rowBegin.push_back(uint32_t(out.rows.size()));
+    }
+    return out;
 }
 
 // ---- Day file (section 5) ----------------------------------------------------
@@ -360,12 +414,13 @@ inline uint32_t crc32(std::span<const uint8_t> bytes, uint32_t crc = 0) {
 
 // Table entries: 0-23 flow 1m hours, 24 flow 1h day chunk, 25 flow 1d piece, 26-49 trades.big hours.
 constexpr size_t DaySections = 50;
-constexpr size_t TableEntryBytes = 25;
+constexpr size_t TableEntryBytes = 26;
 struct DaySection {
     bool sealed = false;
     uint32_t summaryLength = 0;     // flow sections: the summary prefix; 0 for trades.big
     uint64_t sourcePrefix = 0;      // hours: fingerprint of the RAWL2 prefix through the seal point
     std::vector<uint8_t> payload;
+    uint8_t stepExponent = 0;       // sealed flow sections: price_step = 2^k
     bool operator==(const DaySection&) const = default;
 };
 struct DayFile {
@@ -407,7 +462,7 @@ inline std::vector<uint8_t> encodeDayFile(const DayFile& d) {
         table.fixed(s.payload.empty() ? 0 : base + starts[i], 4);
         table.fixed(s.summaryLength, 4); table.fixed(s.payload.size(), 4);
         table.fixed(s.payload.empty() ? 0 : crc32(s.payload), 4);
-        table.fixed(s.sealed, 1); table.fixed(s.sourcePrefix, 8);
+        table.fixed(s.sealed, 1); table.fixed(s.sourcePrefix, 8); table.fixed(s.stepExponent, 1);
     }
     if (base + offset > UINT32_MAX) throw std::invalid_argument("flow proto day file too large");
     const auto tableCrc = crc32(table.b);
@@ -431,8 +486,9 @@ inline EntryKey flowEntryKey(size_t entry, int64_t dayStartMs) {
 
 // Validates the header CRC, the table CRC, the table (sections back to back in
 // table order; a sealed entry has a payload, an absent one none; a flow entry's
-// summary length is a decodable summary prefix of a decodable payload; a
-// trades.big entry has summary length 0) and every section CRC.
+// summary length is a decodable summary prefix of a payload decodable at its
+// step; a trades.big or absent entry has summary length 0 and step exponent 0)
+// and every section CRC.
 inline DayFile parseDayFile(std::span<const uint8_t> bytes) {
     using detail::In;
     In in{bytes};
@@ -464,17 +520,19 @@ inline DayFile parseDayFile(std::span<const uint8_t> bytes) {
         const auto offset = in.fixed(4), summary = in.fixed(4), length = in.fixed(4), crc = in.fixed(4);
         const auto sealed = in.fixed(1);
         s.sourcePrefix = in.fixed(8);
+        const auto stepExponent = in.fixed(1);
         const bool flow = i < 26;
         if (sealed > 1 || bool(sealed) != (length > 0) || (length ? offset != next : offset != 0) ||
-            length > bytes.size() - next || (flow ? (sealed && (summary == 0 || summary > length)) || (!sealed && summary)
-                                                  : summary != 0)) In::fail("day table");
-        s.sealed = sealed; s.summaryLength = uint32_t(summary);
+            length > bytes.size() - next || (flow && sealed ? stepExponent > MaxStepExponent : stepExponent != 0) ||
+            (flow ? (sealed && (summary == 0 || summary > length)) || (!sealed && summary)
+                  : summary != 0)) In::fail("day table");
+        s.sealed = sealed; s.summaryLength = uint32_t(summary); s.stepExponent = uint8_t(stepExponent);
         s.payload.assign(bytes.begin() + ptrdiff_t(next), bytes.begin() + ptrdiff_t(next + length));
         if (length && crc32(s.payload) != crc) In::fail("day section crc");
         if (flow && sealed) {
             const auto k = flowEntryKey(i, d.dayStartMs);
             decode(std::span(s.payload).first(summary), Encoding::Spec, k.levelMs, k.startMs, k.slots, true);
-            decode(s.payload, Encoding::Spec, k.levelMs, k.startMs, k.slots);
+            decode(s.payload, Encoding::Spec, k.levelMs, k.startMs, k.slots, false, uint64_t(1) << stepExponent);
         }
         next += length;
     }
@@ -483,9 +541,9 @@ inline DayFile parseDayFile(std::span<const uint8_t> bytes) {
 }
 
 // ---- Epoch state (section 7) -------------------------------------------------
-// The durable epoch file: counter, the rule identity it was advanced under, and
-// the days still pending a rebuild. A day is servable only when it is not
-// pending and its file was built under the current rule identity.
+// The durable epoch file of one instrument: counter, the rule identity it was
+// advanced under, and the days still pending a rebuild. A day is servable only
+// when it is not pending and its file was built under the current rule identity.
 struct EpochState {
     uint64_t counter = 0, ruleIdentity = 0;
     std::vector<int64_t> pending; // day starts, ascending
@@ -495,6 +553,7 @@ inline uint64_t fnv1a(std::span<const uint8_t> bytes, uint64_t h = 1469598103934
     for (auto b : bytes) { h ^= b; h *= 1099511628211ULL; }
     return h;
 }
+inline std::string flowDomain(const std::string& instrument) { return "flow:" + instrument; }
 inline uint64_t epochOf(const std::string& domain, const EpochState& e) {
     detail::Out o;
     o.b.assign(domain.begin(), domain.end());
@@ -525,15 +584,23 @@ inline void finishDay(EpochState& e, int64_t dayStartMs) {
 // Section 5 assembly of a 16-day 1d chunk from day pieces (entry 25 of each
 // day file: one-slot payloads keyed by the day). pieces[i] is the piece of
 // start + i days, or empty when that day has none; such days get `absent`.
-inline FlowChunk assembleDayChunk(int64_t startMs, std::span<const std::vector<uint8_t>> pieces, Status absent) {
+// steps[i] is piece i's price_step (all 1 when empty); the chunk takes the
+// largest and finer pieces are re-binned to it.
+inline FlowChunk assembleDayChunk(int64_t startMs, std::span<const std::vector<uint8_t>> pieces, Status absent,
+                                  std::span<const uint64_t> steps = {}) {
     constexpr int64_t Day = 86'400'000;
+    if (!steps.empty() && steps.size() != pieces.size()) throw std::invalid_argument("flow proto piece steps");
+    const auto stepOf = [&](size_t day) { return steps.empty() ? uint64_t(1) : steps[day]; };
     FlowChunk out;
     out.levelMs = Day; out.startMs = startMs; out.slotCount = uint32_t(pieces.size());
+    for (size_t day = 0; day < pieces.size(); ++day)
+        if (!pieces[day].empty()) out.priceStep = std::max(out.priceStep, stepOf(day));
     out.rowBegin.push_back(0);
     for (size_t day = 0; day < pieces.size(); ++day) {
         Status status = absent;
         if (!pieces[day].empty()) {
-            const auto p = decode(pieces[day], Encoding::Spec, Day, startMs + int64_t(day) * Day, 1);
+            const auto p = rebin(decode(pieces[day], Encoding::Spec, Day, startMs + int64_t(day) * Day, 1, false,
+                                        stepOf(day)), out.priceStep);
             status = p.coverage.front().status;
             if (p.bars()) {
                 size_t gi = 0;
