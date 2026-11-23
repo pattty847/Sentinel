@@ -198,9 +198,14 @@ struct FlowDataSourceTest : testing::Test {
     int64_t flowNow() const { return source.m_flowClock.elapsed(); }
     int64_t liveSampleDue() const { return source.m_flowBackfill.liveSampleDueMs(); }
     // The pager's wake timer fires at a deadline on the pager's own clock (m_flowClock) that
-    // lies in [earliest, latest]. The remaining time is read between two readings of that
-    // clock; 2 ms covers the millisecond rounding of the two clocks, never host load.
+    // lies in [earliest, latest]. The pager reads its clock before it arms the timer, so a
+    // caller's bound must take its readings before and after the call that armed the timer:
+    // a thread delayed between the pager's reading and start() moves the deadline later.
+    // The remaining time is read between two more readings of that clock; 2 ms covers the
+    // millisecond rounding of the two clocks, never host load. A coarse timer can land on
+    // the bound by chance, so the timer type is checked too.
     void expectWakeBetween(int64_t earliest, int64_t latest) {
+        EXPECT_EQ(source.m_flowTimer.timerType(), Qt::PreciseTimer) << "a coarse timer moves the deadline";
         const auto before = flowNow();
         const int64_t delay = flowDelay();
         const auto after = flowNow();
@@ -957,11 +962,14 @@ TEST_F(FlowDataSourceTest, RefusedSubscriptionLeavesTheLiveEdgeToHistory) {
     const auto due = liveSampleDue();
     EXPECT_GE(due, beforeSample + FlowSeriesBuffer::kRefetchIntervalMs) << "next sample one interval after this one";
     EXPECT_LE(due, afterSample + FlowSeriesBuffer::kRefetchIntervalMs) << "next sample one interval after this one";
+    // The reply arms the page gap; the gap's wake, inside settle(), arms the sample timer.
+    const auto beforeArm = flowNow();
     emitPage(sample[0]);
     settle();
+    const auto afterArm = flowNow();
     if (QDateTime::currentMSecsSinceEpoch() / tf * tf != live) GTEST_SKIP() << "crossed a minute boundary";
     EXPECT_TRUE(requests().empty());
-    expectWakeBetween(due, due);
+    expectWakeBetween(due, due + (afterArm - beforeArm));
 }
 // A symbol switch with the view running past the live edge (follow live): the first page
 // is the history below the live bucket, never the empty buckets after it.
