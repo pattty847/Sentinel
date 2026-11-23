@@ -174,6 +174,22 @@ TEST_F(ChunkStoreTest, ChangedSourceMovesOnlyItsEpoch) {
     fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
     ASSERT_EQ(store.runPass().failed, 0u); EXPECT_NE(store.epoch(Id), btc); EXPECT_EQ(store.epoch("coinbase:ETH-USD"), eth);
 }
+TEST_F(ChunkStoreTest, AvailabilityDiscardsRangesWhenEpochChangesDuringEnumeration) {
+    fixture(); FlowStore source(sourceOptions()); auto o = options();
+    FlowChunkStore *active = nullptr; bool changed = false;
+    o.afterAvailabilityReadForTest = [&] {
+        if (changed) return;
+        changed = true;
+        const auto path = source.archive("BTC-USD").catalog->files().front().path;
+        fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
+        EXPECT_EQ(active->runPass().failed, 0u);
+    };
+    FlowChunkStore store(source, o); active = &store;
+    ASSERT_EQ(store.runPass().failed, 0u); const auto epoch = store.epoch(Id);
+    EXPECT_TRUE(store.sealed(Id, Hour).empty());
+    EXPECT_NE(store.epoch(Id), epoch);
+    EXPECT_FALSE(store.sealed(Id, Hour).empty());
+}
 TEST_F(ChunkStoreTest, RuleChangeFencesAllDaysAndCrashResumeAdvancesAgain) {
     fixture(2); fixture(1, "ETH-USD"); FlowStore source(sourceOptions());
     uint64_t btc, eth, interrupted;

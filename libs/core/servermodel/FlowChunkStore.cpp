@@ -532,6 +532,8 @@ std::optional<FlowChunkStore::Payload> FlowChunkStore::read(const std::string &i
 }
 std::vector<FlowChunkStore::Range> FlowChunkStore::sealed(const std::string &id, int64_t level) {
     if (level != Minute && level != Hour && level != DayMs) return {};
+    const auto before = epoch(id);
+    if (!before) return {};
     std::set<int64_t> candidates;
     { std::lock_guard lock(mutex_); const auto it = instruments_.find(id); if (it == instruments_.end()) return {};
       for (const auto &[day, d] : it->second.days) {
@@ -544,6 +546,15 @@ std::vector<FlowChunkStore::Range> FlowChunkStore::sealed(const std::string &id,
         if (!out.empty() && out.back().toMs == start) out.back().toMs += span;
         else out.push_back({start, start + span});
     }
+    if (options_.afterAvailabilityReadForTest) options_.afterAvailabilityReadForTest();
+    // A range can span many disk reads. Apply the same final fence as read(),
+    // so a transition midway through enumeration cannot advertise stale keys.
+    { std::lock_guard lock(mutex_); const auto &i = instruments_.at(id);
+      if (chunks::epochOf(chunks::flowDomain(id), i.state) != before) return {};
+      for (const auto &[day, d] : i.days) {
+          if (!d.invalid && !std::binary_search(i.state.pending.begin(), i.state.pending.end(), day)) continue;
+          if (std::any_of(out.begin(), out.end(), [&](const auto &r) { return day < r.toMs && day + DayMs > r.fromMs; })) return {};
+      } }
     return out;
 }
 void FlowChunkStore::start() {

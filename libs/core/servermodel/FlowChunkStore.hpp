@@ -19,6 +19,7 @@ public:
         sentinel::metrics::MetricsRegistry *metrics = nullptr; // outlives store
         std::function<void(std::stop_token)> afterRecordForTest;
         std::function<void(int64_t)> afterDayForTest;
+        std::function<void()> afterAvailabilityReadForTest;
     };
     struct Payload {
         uint64_t epoch = 0;
