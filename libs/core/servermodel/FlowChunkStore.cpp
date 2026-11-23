@@ -60,6 +60,28 @@ std::optional<roller::JournalPos> scanCursor(const std::string &symbol, int64_t 
     }
     return cursor;
 }
+bool sealReached(int64_t sealMs, const roller::JournalReader &catalog, std::stop_token stop) {
+    // RAWL2 rotates on every receive-hour change. Only files opened in or
+    // after the seal hour can contain its first durable crossing record.
+    // This polls one hour's files without feeding or decoding the preceding
+    // hour's trades on every worker wake, including when W exceeds 60 s.
+    for (const auto &file : catalog.files()) {
+        check(stop);
+        if (file.openedNs / 1'000'000 / Hour < sealMs / Hour) continue;
+        try {
+            sentinel::capture::RecordReader probe(QString::fromStdString(file.path.string()), !file.superseded);
+            sentinel::capture::Record record;
+            while (probe.next(record)) {
+                check(stop);
+                if (record.time.systemNs / 1'000'000 >= sealMs) return true;
+            }
+        } catch (const std::exception &) {
+            // A damaged seal-hour file cannot suppress healthy later hours.
+            // buildHour will mark the affected hour unavailable.
+        }
+    }
+    return false;
+}
 chunks::FlowGrid gridOf(const FlowStoreGridValues &g) {
     return {g.scales.rowTickUnits, g.scales.priceScale, g.scales.baseScale, g.scales.quoteScale};
 }
@@ -395,13 +417,7 @@ void FlowChunkStore::buildDay(const std::string &id, int64_t day, const FlowStor
     if (!archive.catalog) { unavailableSource(); return; }
     const auto cursor = scanCursor(symbol, day - Minute, *archive.catalog, stop);
     if (!cursor) { unavailableSource(); return; }
-    roller::JournalReader probe(*archive.catalog, cursor);
-    roller::JournalRecord input;
-    bool sealable = false;
-    while (probe.next(input)) {
-        check(stop);
-        if (input.record.time.systemNs / 1'000'000 >= day + Hour + options_.rules.sealWindowMs) { sealable = true; break; }
-    }
+    const bool sealable = sealReached(day + Hour + options_.rules.sealWindowMs, *archive.catalog, stop);
     // A source-only forming day has no sealed bytes to revalidate. It remains
     // unavailable, but does not keep an archive recovery epoch pending forever.
     if (!sealable) { unavailableSource(); return; }
@@ -531,15 +547,7 @@ bool FlowChunkStore::unchanged(const std::string &id, int64_t day, const FlowSto
         // Poll the forming hour without rebuilding all of today's sealed
         // hours and their counters on every wake. A new seal resumes replay.
         const auto hour = day + firstMissing * Hour;
-        if (const auto cursor = scanCursor(symbol, hour - Minute, *archive.catalog, stop)) {
-            roller::JournalReader reader(*archive.catalog, cursor);
-            roller::JournalRecord record;
-            while (reader.next(record)) {
-                check(stop);
-                if (record.record.time.systemNs / 1'000'000 >= hour + Hour + options_.rules.sealWindowMs) return false;
-            }
-            if (reader.damaged()) return false;
-        }
+        if (sealReached(hour + Hour + options_.rules.sealWindowMs, *archive.catalog, stop)) return false;
     }
     { std::lock_guard lock(mutex_); instruments_.at(id).days.at(day).sources = saved.sources; }
     return file->grid == gridOf(sources_.gridFor(symbol, day, *archive.catalog, stop));
