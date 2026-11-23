@@ -76,6 +76,10 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
     qRegisterMetaType<trading::TradingSnapshot>("trading::TradingSnapshot");
     m_flowClock.start();
     m_flowTimer.setSingleShot(true);
+    // The pager's wake is a deadline (the live sample one refetch interval after the last,
+    // a bucket close, the page gap). A coarse QTimer of 20 s or more is very coarse: Qt
+    // snaps its deadline to a whole second, up to 500 ms either side of the requested time.
+    m_flowTimer.setTimerType(Qt::PreciseTimer);
     connect(&m_flowTimer, &QTimer::timeout, this, &RemoteGridDataSource::requestNextFlowPage);
     connect(&m_client, &SentinelStreamClient::flowBarsReceived, this,
             &RemoteGridDataSource::onFlowBarsReceived, Qt::QueuedConnection);
