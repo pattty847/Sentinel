@@ -1,6 +1,6 @@
 # Flow chunks
 
-**Chunk codecs implemented; serving and storage migration pending.** Flow history today (FLD1 day
+**Chunk codecs and parallel disk store implemented; serving migration pending.** Flow history today (FLD1 day
 files, FHE1 pages, `flow_bar` live messages) is in [MARKETDATA.md](MARKETDATA.md) "Live flow bars" and
 "Flow history". This spec replaces FLD1 and FHE1 and puts flow on heatmap-style chunks. The server
 (plan step 3) and the client (step 5) implement it; step 4 moves the heatmap onto the same envelope.
@@ -8,7 +8,14 @@ Measurements are in section 12. They come from `flow_history_bench --lateness` a
 (`tests/core/flow_history_bench.cpp`). Production byte codecs are in `libs/core/flow/FlowChunkCodec.*`,
 `FlowChunkDecode.cpp`, `FlowDayFile.*`, and `FlowEpoch.*`, with row steps in `FlowRowStep.hpp` and
 single-allocation decoded fields in `FlowChunk.hpp`. Golden bytes and validation tests are in
-`tests/core/test_flow_chunk.cpp`. These libraries add no disk I/O or request handling.
+`tests/core/test_flow_chunk.cpp`. These codec libraries add no disk I/O or request handling. The parallel disk store is
+`servermodel/FlowChunkStore.*`; it shares FlowStore's RAWL2 catalog, inventory, source
+identity primitives and grid lookup. The offline `flow_chunk_diff` tool builds selected
+days into scratch and compares their summary and rows against FLD1 (notables excluded).
+Example: `flow_chunk_diff <raw-l2> <hmc2> <hmc2-flow> <scratch> BTC-USD 2026-11-20`.
+The scratch root must be disjoint from all inputs. Each differing bar lists trade IDs
+added or removed by the canonical scan; a legacy replay must reproduce the FLD1 bar
+before that membership evidence is considered proven.
 
 Decided rules this spec makes exact:
 - RAWL2 is the only truth. Every flow file is a rebuildable index of it.

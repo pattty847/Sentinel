@@ -156,6 +156,13 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             if (readScalar(shadow, "fault_min_duration_ms", faultMinDurationMs))
                 cfg.rollerShadow.failureMinDuration = std::chrono::milliseconds(faultMinDurationMs);
         }
+        if (const auto flow = serverRoot["flow"]) {
+            int64_t window = cfg.flow.sealWindowMs;
+            if (readScalar(flow, "seal_window_ms", window)) {
+                if (window < 0 || window > 3600000) throw std::invalid_argument("flow.seal_window_ms must be in [0, 3600000]");
+                cfg.flow.sealWindowMs = uint32_t(window);
+            }
+        }
         if (serverRoot["recording"]) {
             auto rec = serverRoot["recording"];
             readScalar(rec, "enabled", cfg.recording.enabled);
@@ -163,6 +170,7 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
             readScalar(rec, "fallback_dir", cfg.recording.fallbackDir);
             readScalar(rec, "rollup_dir", cfg.recording.rollupDir);
             readScalar(rec, "flow_dir", cfg.recording.flowDir);
+            readScalar(rec, "flow_chunk_dir", cfg.recording.flowChunkDir);
             readScalar(rec, "price_scale", cfg.recording.priceScale);
             readScalar(rec, "size_floor", cfg.recording.sizeFloor);
             readScalar(rec, "codes_per_octave", cfg.recording.codesPerOctave);

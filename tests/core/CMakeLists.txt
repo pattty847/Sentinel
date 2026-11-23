@@ -63,3 +63,6 @@ target_include_directories(test_price_display_unit PRIVATE ${CMAKE_SOURCE_DIR}/l
 target_link_libraries(test_price_display_unit PRIVATE GTest::gtest_main)
 add_test(NAME PriceDisplayUnitTests COMMAND test_price_display_unit)
 set_tests_properties(PriceDisplayUnitTests PROPERTIES LABELS "core")
+
+add_executable(flow_chunk_diff EXCLUDE_FROM_ALL flow_chunk_diff.cpp)
+target_link_libraries(flow_chunk_diff PRIVATE sentinel_core)

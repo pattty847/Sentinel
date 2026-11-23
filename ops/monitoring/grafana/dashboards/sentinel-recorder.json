@@ -866,6 +866,162 @@
           "sort": "desc"
         }
       }
+    },
+    {
+      "id": 25,
+      "title": "Flow chunk pending days",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sentinel-vm"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 57,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sentinel_flow_chunk_pending_days",
+          "legendFormat": "{{instrument}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 26,
+      "title": "Flow chunk sealed hours / minute",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sentinel-vm"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 57,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(sentinel_flow_chunk_hours_sealed_total[5m]) * 60",
+          "legendFormat": "{{instrument}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 27,
+      "title": "Flow chunk build failures",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sentinel-vm"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 65,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(sentinel_flow_chunk_build_failures_total[1h])",
+          "legendFormat": "{{instrument}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 28,
+      "title": "Flow seal exclusions and receive regressions",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "sentinel-vm"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 65,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase({__name__=~\"sentinel_flow_(late_trades|receive_regressions)_total\"}[1h])",
+          "legendFormat": "{{instrument}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     }
   ]
 }

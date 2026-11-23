@@ -2,6 +2,7 @@
 #include <QObject>
 #include "roller/ShadowRoller.hpp"
 #include "servermodel/FlowStore.hpp"
+#include "servermodel/FlowChunkStore.hpp"
 #include <memory>
 #include "../../libs/core/marketdata/auth/Authenticator.hpp"
 #include "../../libs/core/servermodel/ServerDataModel.hpp"
@@ -41,6 +42,7 @@ private:
     std::unique_ptr<SentinelStreamServer> m_server;
     std::unique_ptr<sentinel::roller::ShadowRoller> m_shadowRoller;
     std::unique_ptr<recording::FlowStore> m_flowStore;
+    std::unique_ptr<recording::FlowChunkStore> m_flowChunkStore;
     // Declared last: destroyed first, so no scrape renders a destroyed component.
     std::unique_ptr<sentinel::metrics::MetricsHttpServer> m_httpServer;
 };
