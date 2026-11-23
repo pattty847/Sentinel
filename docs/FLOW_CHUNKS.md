@@ -463,6 +463,7 @@ Transition of one instrument, in this order:
   its key leaving `sealed`) hides it, until its key is sealed again. Fenced days of the moved instrument therefore
   hide until rebuilt; nothing of another instrument does.
 - A lost day file together with changed RAWL2 is not detected (open item 8).
+- Source identity inherits FLD1's path, size and modification-time rules; moving or restoring RAWL2 without preserving modification times changes the fingerprint and advances the affected epoch.
 
 ## 8. Live tail
 

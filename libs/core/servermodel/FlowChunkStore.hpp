@@ -20,6 +20,8 @@ public:
         std::function<void(std::stop_token)> afterRecordForTest;
         std::function<void(int64_t)> afterDayForTest;
         std::function<void()> afterAvailabilityReadForTest;
+        std::function<void()> beforeEpochWriteForTest;
+        std::function<void()> afterSectionReadForTest;
     };
     struct Payload {
         uint64_t epoch = 0;
@@ -28,6 +30,7 @@ public:
         std::vector<uint8_t> bytes;
     };
     struct Range { int64_t fromMs, toMs; bool operator==(const Range &) const = default; };
+    struct Availability { uint64_t epoch = 0; std::vector<Range> ranges; };
     struct SourceCheck {
         sentinel::roller::JournalPos cursor, first, last;
         uint64_t stamp = 0, prefix = 0;
@@ -51,7 +54,7 @@ public:
     // Offline targeted rebuild, sharing the production scan/composition/writer.
     FlowStore::PassResult rebuildDay(const std::string &instrument, int64_t day, std::stop_token stop = {});
     uint64_t epoch(const std::string &instrument) const;
-    std::vector<Range> sealed(const std::string &instrument, int64_t levelMs);
+    Availability sealed(const std::string &instrument, int64_t levelMs);
     std::optional<Payload> read(const std::string &instrument, int64_t levelMs, int64_t startMs);
     std::filesystem::path filePath(const std::string &instrument, int64_t day) const;
     // Canonical independent scan, also used by the read-only offline diff tool.
@@ -60,7 +63,13 @@ public:
                          std::stop_token stop = {}, bool evidence = false);
 private:
     struct Day {
+        struct Entry { uint32_t offset = 0, length = 0, summary = 0, crc = 0; uint8_t step = 0; };
         uint32_t hours = 0; bool coarse = false; bool invalid = false;
+        uint32_t badHours = 0, damageFailures = 0;
+        std::chrono::steady_clock::time_point retryAfter{};
+        uintmax_t fileSize = 0;
+        std::filesystem::file_time_type fileModified{};
+        std::array<Entry, 26> entries;
         // Replay validation metadata only; no duplicate journal catalog or bytes.
         std::array<std::optional<SourceCheck>, 24> sources;
     };
@@ -69,6 +78,7 @@ private:
         std::map<int64_t, Day> days;
         bool initialized = false;
         uint64_t generation = UINT64_MAX;
+        uint64_t integrity = UINT64_MAX;
         sentinel::metrics::Counter *late = nullptr, *regressions = nullptr, *failures = nullptr, *hours = nullptr;
         sentinel::metrics::Gauge *pending = nullptr;
     };
@@ -90,6 +100,9 @@ private:
     void buildDay(const std::string &, int64_t, const FlowStore::Archive &, std::stop_token,
                   FlowStore::PassResult &);
     bool unchanged(const std::string &, int64_t, const FlowStore::Archive &, std::stop_token);
+    std::optional<SourceCheck> locateHour(const std::string &, int64_t,
+                                          const sentinel::roller::JournalReader &, std::stop_token,
+                                          bool requireClosed = false);
     void publish(const std::string &, const sentinel::flow::chunks::DayFile &);
     void loop(std::stop_token);
 };

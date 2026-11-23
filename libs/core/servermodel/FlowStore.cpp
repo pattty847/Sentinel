@@ -795,7 +795,8 @@ std::shared_ptr<roller::JournalReader> FlowStore::catalogFor(const std::string &
     sourceKnownBeforeDay_[symbol] = knownBefore;
     return cached;
 }
-FlowStore::SourceState FlowStore::sourceState(const std::string &symbol, int64_t from, int64_t to, bool sealedEvidence) const {
+FlowStore::SourceState FlowStore::sourceState(const std::string &symbol, int64_t from, int64_t to,
+                                              bool sealedEvidence, int64_t tailMs) const {
     const auto day = dayFloor(from);
     // History requests need closed-day inventory. A canonical scan that has
     // actually reached its seal record can use the same inventory immediately.
@@ -814,10 +815,13 @@ FlowStore::SourceState FlowStore::sourceState(const std::string &symbol, int64_t
     // Trades use exchange time. The next day's first segment can hold late
     // trades for a window ending near midnight, within the replay's receive tail.
     const auto next = known->second.find(day + Day);
-    return next == known->second.end() || next->second > to + TradeTail ?
+    return next == known->second.end() || next->second > to + tailMs ?
         SourceState::Absent : SourceState::ReceiveTailOnly;
 }
 void FlowStore::refreshArchive(const std::string &symbol, std::stop_token stop) {
+    // Preserve the pre-inventory midnight boundary used by FLD1. An inventory
+    // started before midnight must not claim that day closed after it finishes.
+    const auto knownBefore = dayFloor(options_.nowMs());
     std::map<fs::path, FileIdentity> currentFiles;
     try { currentFiles = inventory(symbol, stop); }
     catch (...) {
@@ -869,7 +873,7 @@ void FlowStore::refreshArchive(const std::string &symbol, std::stop_token stop) 
     }
     try { catalogFor(symbol, stop); } catch (const roller::NoJournalFiles &) {}
     std::lock_guard lock(indexMutex_);
-    if (sourceDays_.contains(symbol)) sourceKnownBeforeDay_[symbol] = dayFloor(options_.nowMs());
+    if (sourceDays_.contains(symbol)) sourceKnownBeforeDay_[symbol] = knownBefore;
 }
 FlowStore::Archive FlowStore::archive(const std::string &symbol, std::stop_token stop) {
     std::unique_lock lockArchive(archiveMutex_, std::defer_lock);
@@ -883,9 +887,9 @@ FlowStore::Archive FlowStore::archive(const std::string &symbol, std::stop_token
     if (sourceDays_.contains(symbol)) {
         for (const auto &[day, first] : sourceDays_.at(symbol)) {
             result.days.push_back(day);
-            // The chunk seal window is at most an hour. A next-day receive
-            // tail may own exchange-time trades from the previous UTC day.
-            if (day >= Day && first < day + Hour) result.days.push_back(day - Day);
+            // A next-day receive tail may own trades from the previous UTC
+            // day through its last minute's seal (up to one hour of W).
+            if (day >= Day && first < day + 2 * Hour) result.days.push_back(day - Day);
         }
         std::sort(result.days.begin(), result.days.end());
         result.days.erase(std::unique(result.days.begin(), result.days.end()), result.days.end());

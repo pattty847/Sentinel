@@ -113,7 +113,8 @@ class FlowStore {
     };
     Archive archive(const std::string &symbol, std::stop_token stop = {});
     enum class SourceState { Unknown, Present, ReceiveTailOnly, Absent };
-    SourceState sourceState(const std::string &symbol, int64_t from, int64_t to, bool sealedEvidence = false) const;
+    SourceState sourceState(const std::string &symbol, int64_t from, int64_t to,
+                            bool sealedEvidence = false, int64_t tailMs = 60'000) const;
     FlowStoreGridValues gridFor(const std::string &symbol, int64_t day,
                                const sentinel::roller::JournalReader &catalog, std::stop_token stop = {});
     const Options &options() const { return options_; }
