@@ -3,6 +3,8 @@
 #include "FlowLiveTestAccess.hpp"
 #include "roller/fixtures/FlowJournal.hpp"
 #include "roller/Grid.hpp"
+#include "flow/FlowBarBuilder.hpp"
+#include "flow/FlowCodec.hpp"
 #include <gtest/gtest.h>
 #include <QCryptographicHash>
 #include <QFile>
@@ -779,6 +781,25 @@ TEST(FlowHistoryMerge, UnrecordedMixedWithRecordedConstituentIsPartial) {
     EXPECT_EQ(page.metadata["status"], "partial");
     EXPECT_EQ(page.metadata["ranges"][0]["status"], "partial");
     EXPECT_TRUE(page.bars.empty());
+}
+TEST(FlowHistoryMerge, CoarseBarFromFld1ComposesIntoFhe1Page) {
+    flow::FlowBarBuilder builder(Minute, 1, 100, 100'000'000, 100'000'000);
+    ASSERT_EQ(builder.add({"fine", 0, 100, 1, flow::Side::Buy}), flow::FlowBarBuilder::AddResult::Accepted);
+    ASSERT_EQ(builder.add({"low", Minute, 100, 1, flow::Side::Buy}), flow::FlowBarBuilder::AddResult::Accepted);
+    ASSERT_EQ(builder.add({"high", Minute + 1, 65635, 1, flow::Side::Sell}), flow::FlowBarBuilder::AddResult::Accepted);
+    flow::DayFile day;
+    day.product = "BTC-USD"; day.dayStartMs = 0; day.timeframeMs = Minute;
+    day.nativeTick = 1; day.priceScale = 100; day.baseScale = day.quoteScale = 100'000'000;
+    day.bars = builder.bars(); day.revisions.assign(day.bars.size(), 1);
+    ServerDataModel::FlowHistorySnapshot snapshot;
+    snapshot.data.bars = flow::decodeFlowDay(flow::encodeFlowDay(day), flow::DayCheck::ReEncode).bars;
+    snapshot.data.revisions = day.revisions;
+    snapshot.data.ranges = {{0, 5 * Minute, "complete", {}}};
+    const flow_history::Request q{1, "BTC-USD", 5 * Minute, 0, 5 * Minute};
+    const auto frame = decode(flow_history::build(q, snapshot));
+    ASSERT_EQ(frame.bars.size(), 1u);
+    EXPECT_EQ(frame.bars.front().nativeTick, 2);
+    EXPECT_EQ(frame.bars.front().rows.back().offset, 32767);
 }
 
 TEST_F(FlowHistory, ClosedAbsentPrefixInsideRamRetentionDoesNotHideLiveCoverage) {

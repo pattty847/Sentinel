@@ -1,4 +1,5 @@
 #include "FlowBarBuilder.hpp"
+#include "FlowRowStep.hpp"
 #include "servermodel/RecordingCodec.hpp"
 #include <algorithm>
 #include <array>
@@ -145,9 +146,8 @@ FlowBarBuilder::AddResult FlowBarBuilder::add(const Trade& t) {
     const auto* prior = existing == buckets_.end() ? nullptr : &existing->second;
     const auto minRow = prior ? std::min(row, prior->minRow) : row;
     const auto maxRow = prior ? std::max(row, prior->maxRow) : row;
-    if (maxRow - minRow > INT16_MAX ||
-        (prior && (!canAdd(prior->baseTotal, *base) || !canAdd(prior->quoteTotal, *quote) ||
-                   (sealed && prior->revision == UINT32_MAX)))) {
+    if (prior && (!canAdd(prior->baseTotal, *base) || !canAdd(prior->quoteTotal, *quote) ||
+                   (sealed && prior->revision == UINT32_MAX))) {
         ++rejectedCount_; return AddResult::Rejected;
     }
     auto& bucket = buckets_[start];
@@ -172,7 +172,13 @@ FlowBar FlowBarBuilder::materialize(int64_t start, Bucket& bucket) const {
     FlowBar bar;
     bar.startMs = start; bar.timeframeMs = timeframeMs_; bar.nativeTick = nativeTick_;
     bar.priceScale = priceScale_; bar.baseScale = baseScale_; bar.quoteScale = quoteScale_;
-    bar.lowRow = bucket.minRow;
+    // Choose the smallest fitting step before accumulating rows, so no trade is
+    // rejected for range and no finer detail is invented on materialization.
+    uint64_t step = 1;
+    while (recording::floorDiv(bucket.maxRow, int64_t(step)) -
+           recording::floorDiv(bucket.minRow, int64_t(step)) > chunks::MaxOffset) step *= 2;
+    bar.nativeTick *= double(step);
+    bar.lowRow = recording::floorDiv(bucket.minRow, int64_t(step));
     std::map<int64_t, Row> rows;
     bool first = true;
     for (const auto& accepted : bucket.trades) {
@@ -186,7 +192,7 @@ FlowBar FlowBarBuilder::materialize(int64_t start, Bucket& bucket) const {
         bar.baseVolume += accepted.baseUnits;
         bar.quoteVolume += accepted.quoteUnits;
         ++bar.count;
-        auto& row = rows[accepted.row];
+        auto& row = rows[recording::floorDiv(accepted.row, int64_t(step))];
         if (t.side == Side::Buy) {
             row.askVol += accepted.baseUnits; ++row.askCount; bar.buyVol += accepted.baseUnits;
         } else if (t.side == Side::Sell) {
@@ -194,7 +200,7 @@ FlowBar FlowBarBuilder::materialize(int64_t start, Bucket& bucket) const {
         }
     }
     for (auto& [r, row] : rows) {
-        row.offset = static_cast<int16_t>(r - bar.lowRow);
+        row.offset = static_cast<uint16_t>(r - bar.lowRow);
         bar.maxRowVol = std::max(bar.maxRowVol, row.bidVol + row.askVol);
         bar.rows.push_back(row);
     }

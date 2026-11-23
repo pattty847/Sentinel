@@ -1,4 +1,5 @@
 #include "FlowCodec.hpp"
+#include "FlowRowStep.hpp"
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -68,7 +69,7 @@ void validate(const FlowBar& b) {
     uint64_t knownCount = 0;
     int64_t bidSum = 0, askSum = 0;
     for (const auto& r : b.rows) {
-        if (r.offset < 0 || r.offset <= last) throw std::invalid_argument("invalid flow row offset");
+        if (r.offset > 65534 || r.offset <= last) throw std::invalid_argument("invalid flow row offset");
         if (r.bidVol < 0 || r.askVol < 0) throw std::invalid_argument("negative flow row volume");
         if (r.bidVol > b.sellVol - bidSum || r.askVol > b.buyVol - askSum)
             throw std::invalid_argument("flow row volume exceeds side total");
@@ -94,6 +95,13 @@ void validate(const FlowBar& b) {
                 throw std::invalid_argument("noncanonical flow notable order");
         }
     }
+}
+bool compatibleDayGrid(const FlowBar& bar, const DayFile& day) {
+    if (bar.priceScale != day.priceScale || bar.baseScale != day.baseScale ||
+        bar.quoteScale != day.quoteScale) return false;
+    const auto dayTick = chunks::tickUnits(day.nativeTick, day.priceScale);
+    const auto barTick = chunks::tickUnits(bar.nativeTick, bar.priceScale);
+    return barTick % dayTick == 0 && chunks::validStep(uint64_t(barTick / dayTick));
 }
 }
 Bytes encodeFlowBar(const FlowBar& b) {
@@ -133,7 +141,7 @@ FlowBar decodeFlowBar(std::span<const uint8_t> bytes) {
     b.count = r.u(8);
     const auto rowCount = r.u(2);
     for (size_t i = 0; i < rowCount; ++i) {
-        Row row; row.offset = static_cast<int16_t>(r.u(2));
+        Row row; row.offset = static_cast<uint16_t>(r.u(2));
         row.bidVol = static_cast<int64_t>(r.vu()); row.askVol = static_cast<int64_t>(r.vu());
         const auto bids = r.vu(), asks = r.vu();
         if (bids > UINT32_MAX || asks > UINT32_MAX) throw std::runtime_error("flow row count overflow");
@@ -162,9 +170,7 @@ Bytes encodeFlowDay(const DayFile& day) {
     for (const auto& bar : day.bars) {
         if (bar.startMs <= previous || bar.startMs < day.dayStartMs ||
             bar.startMs >= day.dayStartMs + 86'400'000 ||
-            bar.timeframeMs != day.timeframeMs || bar.nativeTick != day.nativeTick ||
-            bar.priceScale != day.priceScale || bar.baseScale != day.baseScale ||
-            bar.quoteScale != day.quoteScale)
+            bar.timeframeMs != day.timeframeMs || !compatibleDayGrid(bar, day))
             throw std::invalid_argument("invalid day bar index");
         previous = bar.startMs;
         frames.push_back(encodeFlowBar(bar));
@@ -203,6 +209,7 @@ DayFile decodeFlowDay(std::span<const uint8_t> bytes, DayCheck check) {
         if (e.offset != end || e.length > bytes.size() - end) throw std::runtime_error("invalid flow index");
         auto bar = decodeFlowBar(bytes.subspan(end, e.length));
         if (bar.startMs != e.start) throw std::runtime_error("flow index key mismatch");
+        if (!compatibleDayGrid(bar, day)) throw std::runtime_error("flow day bar grid mismatch");
         day.bars.push_back(std::move(bar)); day.revisions.push_back(e.revision);
         end += e.length;
     }

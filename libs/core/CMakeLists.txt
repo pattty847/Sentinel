@@ -3,6 +3,10 @@ project(sentinel_core)
 add_subdirectory(marketdata/analytics)
 
 add_library(sentinel_core
+    flow/FlowChunkCodec.cpp
+    flow/FlowChunkDecode.cpp
+    flow/FlowDayFile.cpp
+    flow/FlowEpoch.cpp
     flow/FlowBar.hpp
     flow/FlowBarBuilder.hpp
     flow/FlowBarBuilder.cpp

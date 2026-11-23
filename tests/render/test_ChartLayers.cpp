@@ -400,7 +400,7 @@ FlowSeriesBuffer::Series ladderSeries(int rows, int64_t nativeTick = 1) {
     auto& b = series.bars[0].bar;
     b.startMs = 0; b.timeframeMs = 1000; b.nativeTick = double(nativeTick); b.baseScale = 1;
     b.lowRow = 100 / nativeTick;
-    for (int i = 0; i < rows; ++i) b.rows.push_back({int16_t(i), 10 + i, 100 + i});
+    for (int i = 0; i < rows; ++i) b.rows.push_back({uint16_t(i), 10 + i, 100 + i});
     return series;
 }
 MappingFrameContext stripFrame(double rowPx) {
@@ -564,7 +564,7 @@ const FlowSeriesBuffer::Series& widestSeries() {
         FlowSeriesBuffer::Series out;
         sentinel::flow::FlowBar bar;
         bar.timeframeMs = 60000; bar.nativeTick = 1; bar.baseScale = 1; bar.lowRow = 100; bar.delta = 1;
-        for (int i = 0; i < 200; ++i) bar.rows.push_back({int16_t(i * 14), 10 + i, 100 + i});
+        for (int i = 0; i < 200; ++i) bar.rows.push_back({uint16_t(i * 14), 10 + i, 100 + i});
         for (int i = -100; i < heatmap::kMaxChartColumns + 100; ++i) {
             auto& slot = out.bars[int64_t(i) * 60000].bar; slot = bar; slot.startMs = int64_t(i) * 60000;
         }

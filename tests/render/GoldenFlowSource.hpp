@@ -29,7 +29,7 @@ public:
             bar.lowRow = std::llround(lowPrice / nativeTick);
             for (int r = 0; r < rows; ++r) {
                 const auto bid = int64_t(30 + 28 * std::sin(r * 0.9 + i)), ask = int64_t(30 + 28 * std::cos(r * 0.7 + i * 1.3));
-                bar.rows.push_back({int16_t(r), bid, ask, 1, 1});
+                bar.rows.push_back({uint16_t(r), bid, ask, 1, 1});
                 bar.sellVol += bid; bar.buyVol += ask;
                 bar.maxRowVol = std::max({bar.maxRowVol, bid, ask});
             }
