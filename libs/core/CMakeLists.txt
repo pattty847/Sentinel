@@ -21,6 +21,7 @@ add_library(sentinel_core
     roller/Grid.cpp
     roller/Roller.cpp
     roller/ShadowRoller.cpp
+    roller/FanoutPacketBuffer.cpp
     roller/Diff.cpp
     roller/RollCli.cpp
     Cpp20Utils.hpp
