@@ -131,9 +131,9 @@ JournalTradeEventSource::JournalTradeEventSource(std::filesystem::path root, std
     const auto& files = s.reader->files();
     std::optional<size_t> candidate;
     for (size_t i = 0; i < files.size(); ++i) {
-        if (sentinel::venueFromHeader(files[i].header) == sentinel::Venue::Kalshi)
+        if (files[i].venue == sentinel::Venue::Kalshi)
             throw std::runtime_error("Kalshi journal trade history is not supported");
-        if (files[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= fromMs) candidate = i;
+        if (files[i].openedNs / 1'000'000 <= fromMs) candidate = i;
     }
     if (candidate) {
         // A header's first ordinal need not contain a durable record after a crash.
@@ -148,7 +148,7 @@ JournalTradeEventSource::JournalTradeEventSource(std::filesystem::path root, std
                 });
             sentinel::capture::Record record;
             if (!probe.next(record)) continue;
-            start = sentinel::roller::JournalPos{s.product, file.header.at("run_id"),
+            start = sentinel::roller::JournalPos{s.product, file.run,
                                                  probe.result().recordOrdinal, probe.result().recordIndex};
             break;
         }

@@ -226,7 +226,7 @@ TEST(KalshiRecovery, ThreeHourDeltasOneSidedMidnightAndHourCrashHaveIdenticalByt
     ASSERT_EQ(state["book"]["bids"].size(),1u); ASSERT_TRUE(state["book"]["asks"].empty());
     JournalReader inventory(o.journalRoot,Product);
     fs::create_directories(root / "day2");
-    for (const auto& file : inventory.files()) if (file.header.at("opened_system_ns").get<int64_t>() / 1'000'000 >= midnight)
+    for (const auto& file : inventory.files()) if (file.openedNs / 1'000'000 >= midnight)
         fs::copy_file(file.path,root / "day2" / file.path.filename());
     auto resumed = o; resumed.journalRoot = root / "day2"; resumed.outputRoot = root / "anchored"; resumed.fromMs = midnight;
     AnchorStore::write(resumed.outputRoot,anchor);
@@ -298,7 +298,7 @@ static void instrumentChanges(bool sizes) {
     const auto anchor = AnchorStore::load(o.outputRoot / Product / "anchors/2026-10-25/0000.anchor");
     EXPECT_EQ(anchor.instrument,old);
     JournalReader inventory(o.journalRoot,Product); fs::create_directories(root / "day2");
-    for (const auto& file : inventory.files()) if (file.header.at("opened_system_ns").get<int64_t>() / 1'000'000 >= midnight)
+    for (const auto& file : inventory.files()) if (file.openedNs / 1'000'000 >= midnight)
         fs::copy_file(file.path,root / "day2" / file.path.filename());
     auto resumed = o; resumed.fromMs = midnight; resumed.journalRoot = root / "day2"; resumed.outputRoot = root / "anchor-only";
     AnchorStore::write(resumed.outputRoot,anchor);

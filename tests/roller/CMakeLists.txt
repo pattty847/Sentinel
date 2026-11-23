@@ -1,4 +1,4 @@
-add_executable(test_roller test_roller.cpp test_trade_seed.cpp)
+add_executable(test_roller test_roller.cpp test_trade_seed.cpp test_journal_catalog.cpp)
 target_link_libraries(test_roller PRIVATE sentinel_core capture_legacy_v2_fixture GTest::gtest_main Qt6::Core)
 add_test(NAME RollerTests COMMAND test_roller)
 set_tests_properties(RollerTests PROPERTIES LABELS "roller" TIMEOUT 120)
@@ -32,6 +32,10 @@ set_tests_properties(CandleRestoreTests PROPERTIES LABELS "roller" TIMEOUT 120)
 
 add_executable(candle_restore_bench candle_restore_bench.cpp)
 target_link_libraries(candle_restore_bench PRIVATE sentinel_core Qt6::Core)
+
+# Retained heap of JournalReader catalogs over a real journal root (read-only; not a ctest).
+add_executable(journal_catalog_memory_bench journal_catalog_memory_bench.cpp)
+target_link_libraries(journal_catalog_memory_bench PRIVATE sentinel_core Qt6::Core)
 
 # Startup cost of the candle rebuild in the production graph (scratch copies only; not a ctest).
 add_executable(candle_startup_bench candle_startup_bench.cpp

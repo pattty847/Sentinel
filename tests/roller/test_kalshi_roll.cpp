@@ -305,7 +305,7 @@ TEST(KalshiRoll, MidnightAnchorAndOldJournalSnapshotHaveIdenticalNextDayBytes) {
     // Retain only day 2 journal files: the original snapshot is deliberately absent.
     JournalReader inventory(root / "raw", A);
     fs::create_directories(root / "day2");
-    for (const auto& file : inventory.files()) if (file.header.at("opened_system_ns").get<int64_t>() / 1'000'000 >= midnight)
+    for (const auto& file : inventory.files()) if (file.openedNs / 1'000'000 >= midnight)
         fs::copy_file(file.path, root / "day2" / file.path.filename());
     o.fromMs = midnight; o.outputRoot = root / "anchored"; o.journalRoot = root / "day2";
     const auto target = o.outputRoot / A / "anchors/2026-10-25/0000.anchor";
@@ -386,9 +386,9 @@ TEST(KalshiRoll, JournalAnchorSearchAcrossHoursRunsAndForeignSnapshots) {
     JournalReader reader(root, A);
     EXPECT_FALSE(reader.anchor(Epoch));
     const auto old = reader.anchor(Epoch + Day);
-    ASSERT_TRUE(old); EXPECT_EQ(old->run, reader.files().front().header.at("run_id").get<std::string>());
+    ASSERT_TRUE(old); EXPECT_EQ(old->run, reader.files().front().run);
     JournalReader selected(root, A, old); JournalRecord record;
     ASSERT_TRUE(selected.next(record)); EXPECT_EQ(record.record.time.systemNs / 1'000'000, Epoch + 4 * 3'600'000);
     const auto newer = reader.anchor(Epoch + Day + 3'600'000);
-    ASSERT_TRUE(newer); EXPECT_EQ(newer->run, reader.files().back().header.at("run_id").get<std::string>());
+    ASSERT_TRUE(newer); EXPECT_EQ(newer->run, reader.files().back().run);
 }

@@ -360,7 +360,7 @@ TEST(AnchorReplay, EveryQuarterBoundedResumeAndIndependentMidnight) {
     // Copy only today's journal, excluding the snapshot in yesterday's segment.
     JournalReader inventory(root/"raw","BTC-USD");
     fs::create_directories(root/"today");
-    for (const auto& file:inventory.files()) if(file.header.at("opened_system_ns").get<int64_t>()/1000000>=Epoch)
+    for (const auto& file:inventory.files()) if(file.openedNs/1000000>=Epoch)
         fs::copy_file(file.path,root/"today"/file.path.filename());
     auto resumed=full; resumed.journalRoot=root/"today"; resumed.outputRoot=root/"resumed";
     resumed.anchorRoot=full.outputRoot; resumed.writeAnchors=false;
@@ -588,7 +588,7 @@ TEST(AnchorReplay, LateFirstRecordKeepsMidnightIndependent) {
     const auto a=AnchorStore::load(AnchorStore::candidates(full.outputRoot,"BTC-USD",Epoch).back());
     EXPECT_LT(json::from_cbor(a.feed.bytes)["feed"]["lastLocal"],Epoch);
     JournalReader inventory(root/"raw","BTC-USD"); fs::create_directories(root/"today");
-    for(const auto& f:inventory.files()) if(f.header.at("opened_system_ns").get<int64_t>()/1000000>=Epoch)
+    for(const auto& f:inventory.files()) if(f.openedNs/1000000>=Epoch)
         fs::copy_file(f.path,root/"today"/f.path.filename());
     auto o=full; o.outputRoot=root/"independent"; o.journalRoot=root/"today";
     o.anchorRoot=full.outputRoot; o.writeAnchors=false;

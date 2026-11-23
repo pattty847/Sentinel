@@ -76,7 +76,7 @@ int64_t sourceCutoff(int64_t day, uint32_t hours) {
 size_t sourceCount(const roller::JournalReader &catalog, int64_t cutoff) {
     size_t end = 0;
     for (size_t i = 0; i < catalog.files().size(); ++i)
-        if (catalog.files()[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= cutoff)
+        if (catalog.files()[i].openedNs / 1'000'000 <= cutoff)
             end = i + 1;
     return end;
 }
@@ -297,7 +297,7 @@ std::optional<roller::JournalPos> firstDurable(const roller::JournalReader &cata
     const auto &files = catalog.files();
     size_t candidate = 0;
     for (size_t i = 0; i < files.size(); ++i)
-        if (files[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= before)
+        if (files[i].openedNs / 1'000'000 <= before)
             candidate = i;
     for (size_t i = candidate; i < files.size(); ++i) {
         checkStop(stop);
@@ -312,16 +312,15 @@ std::optional<roller::JournalPos> firstDurable(const roller::JournalReader &cata
         if (!probe.next(record))
             continue;
         checkStop(stop);
-        return roller::JournalPos{file.header.at("product_metadata").at("product_id").get<std::string>(),
-                                  file.header.at("run_id"), probe.result().recordOrdinal, probe.result().recordIndex};
+        return roller::JournalPos{file.metadata->at("product_id").get<std::string>(),
+                                  file.run, probe.result().recordOrdinal, probe.result().recordIndex};
     }
     return {};
 }
 std::string sourcePath(const roller::JournalReader &catalog, const roller::JournalPos &start) {
     std::string path;
     for (const auto &file : catalog.files())
-        if (file.header.at("run_id") == start.run &&
-            file.header.at("first_block_ordinal").get<uint64_t>() <= start.block)
+        if (file.run == start.run && file.firstBlock <= start.block)
             path = file.path.generic_string();
     if (path.empty())
         throw std::runtime_error("flow replay cursor has no segment");
@@ -342,10 +341,10 @@ uint32_t revisionHint(const fs::path &path) {
 FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::string &symbol, int64_t day,
                              const fs::path &hmcPath, const roller::JournalReader &catalog,
                              std::stop_token stop) {
-    nlohmann::json metadata;
+    std::shared_ptr<const nlohmann::json> metadata;
     for (const auto &file : catalog.files()) {
-        if (file.header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= day || metadata.is_null())
-            metadata = file.header.at("product_metadata");
+        if (file.openedNs / 1'000'000 <= day || !metadata)
+            metadata = file.metadata;
     }
     FlowStoreGridValues values;
     roller::Grid grid;
@@ -407,7 +406,7 @@ FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::stri
         if (!ready)
             throw std::runtime_error("flow grid fallback found no two-sided snapshot");
     }
-    values.scales = flow::flowScales(grid, metadata);
+    values.scales = flow::flowScales(grid, metadata ? *metadata : nlohmann::json());
     values.sizeFloor = grid.sizeFloor;
     return values;
 }
@@ -765,7 +764,7 @@ std::shared_ptr<roller::JournalReader> FlowStore::catalogFor(const std::string &
                                                                 std::nullopt, stop);
         for (const auto &file : catalog->files()) {
             checkStop(stop);
-            const auto opened = file.header.at("opened_system_ns").get<int64_t>() / 1'000'000;
+            const auto opened = file.openedNs / 1'000'000;
             auto [it, added] = days.try_emplace(dayFloor(opened), opened);
             if (!added) it->second = std::min(it->second, opened);
         }
@@ -864,7 +863,7 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
         auto &files = getCatalog().files();
         int64_t first = through;
         for (const auto &file : files)
-            first = std::min(first, file.header.at("opened_system_ns").get<int64_t>() / 1'000'000);
+            first = std::min(first, file.openedNs / 1'000'000);
         firstHour_[symbol] = std::max<int64_t>(0, first / Hour * Hour);
     }
     const auto first = firstHour_.at(symbol);
@@ -1153,7 +1152,7 @@ FlowStore::Reply FlowStore::buildWindow(const std::string &symbol, int64_t from,
                 first = end;
                 continue;
             }
-            const auto firstJournalMs = catalog->files().front().header.at("opened_system_ns").get<int64_t>() / 1'000'000;
+            const auto firstJournalMs = catalog->files().front().openedNs / 1'000'000;
             if (firstJournalMs >= end) {
                 reply.ranges.push_back({first, end, "partial", {}});
                 first = end;
@@ -1208,7 +1207,7 @@ FlowStore::TradeWindow FlowStore::readTrades(const std::string &symbol, int64_t 
     result.coveredToMs = from;
     try {
         const auto catalog = catalogFor(symbol, stop);
-        const auto firstJournalMs = catalog->files().front().header.at("opened_system_ns").get<int64_t>() / 1'000'000;
+        const auto firstJournalMs = catalog->files().front().openedNs / 1'000'000;
         result.coveredFromMs = std::max(from, firstJournalMs);
         if (result.coveredFromMs >= to) { result.partial = true; return result; }
         const auto start = firstDurable(*catalog, std::max<int64_t>(0, from - TradeTail), stop);

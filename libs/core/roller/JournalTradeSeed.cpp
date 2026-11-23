@@ -12,8 +12,7 @@ JournalFeed::TradeSeedStats JournalFeed::seedTradeIds(
     reversed.reserve(TradeIdWindowCapacity);
     size_t end = 0;
     for (size_t i = 0; i < files.size(); ++i)
-        if (files[i].header.at("run_id") == cursor.run &&
-            files[i].header.at("first_block_ordinal").get<uint64_t>() <= cursor.block) end = i + 1;
+        if (files[i].run == cursor.run && files[i].firstBlock <= cursor.block) end = i + 1;
     if (!end || cursor.product != product_) {
         stats.degraded = true;
         end = 0;
@@ -26,10 +25,9 @@ JournalFeed::TradeSeedStats JournalFeed::seedTradeIds(
     };
     for (size_t i = end; i > 0 && reversed.size() < TradeIdWindowCapacity; --i) {
         const auto& file = files[i - 1];
-        const auto run = file.header.at("run_id").get<std::string>();
-        const auto segment = file.header.at("segment").get<uint64_t>();
-        if (i < end && files[i].header.at("run_id") == run &&
-            files[i].header.at("segment").get<uint64_t>() != segment + 1)
+        const auto& run = file.run;
+        const auto segment = file.segment;
+        if (i < end && files[i].run == run && files[i].segment != segment + 1)
             warn(file, "missing earlier segment");
         if (i == 1 && segment != 0) warn(file, "journal prefix missing");
         // Keep only the required suffix of this segment, then visit it backwards.

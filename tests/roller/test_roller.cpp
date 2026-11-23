@@ -96,8 +96,8 @@ TEST(Roller, KalshiHeaderInventoryFrameDeliveryAndNoSnapshotAnchor) {
         writer.append(record(1, capture::Kind::Frame, R"({"type":"orderbook_delta","msg":{"price":"0.5600","delta":"86.65"}})"));
         writer.close();
         JournalReader reader(temp.path().toStdString(), symbol);
-        ASSERT_EQ(reader.files().size(), 1); EXPECT_EQ(reader.files()[0].header.at("venue"), "kalshi");
-        EXPECT_EQ(reader.files()[0].header.at("instrument"), meta.at("instrument"));
+        ASSERT_EQ(reader.files().size(), 1); EXPECT_EQ(reader.files()[0].venue, Venue::Kalshi);
+        EXPECT_EQ(*reader.files()[0].instrument, meta.at("instrument"));
         JournalRecord r; ASSERT_TRUE(reader.next(r)); EXPECT_EQ(r.record.kind, capture::Kind::CaptureStarted);
         JournalFeed feed(symbol);
         feed.apply(r); // Account for the shared initial journal boundary first.

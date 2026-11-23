@@ -318,18 +318,18 @@ void journalDay(const fs::path& journalRoot, const fs::path& flowRoot, const std
     if (catalog.files().empty()) throw std::runtime_error("no journal files for " + symbol);
     size_t chosen = 0;
     for (size_t i = 0; i < catalog.files().size(); ++i) {
-        if (catalog.files()[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= dayMs) chosen = i;
+        if (catalog.files()[i].openedNs / 1'000'000 <= dayMs) chosen = i;
         else break;
     }
     size_t journalBytes = 0;
     int journalFiles = 0;
     for (size_t i = chosen; i < catalog.files().size(); ++i) {
-        if (catalog.files()[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000 > end + TradeTail) break;
+        if (catalog.files()[i].openedNs / 1'000'000 > end + TradeTail) break;
         journalBytes += fs::file_size(catalog.files()[i].path);
         ++journalFiles;
     }
-    const auto& h = catalog.files()[chosen].header;
-    const roller::JournalPos pos{symbol, h.at("run_id").get<std::string>(), h.at("first_block_ordinal").get<uint64_t>(), 0};
+    const auto& f = catalog.files()[chosen];
+    const roller::JournalPos pos{symbol, f.run, f.firstBlock, 0};
 
     // Trades: every frame goes through JournalFeed (dedupe and order need the l2 frames too).
     start = Clock::now();
@@ -405,13 +405,13 @@ void latenessDay(const fs::path& journalRoot, const std::string& symbol, int64_t
     uint64_t fileOrderRegressions = 0;
     int64_t previousOpen = INT64_MIN;
     for (size_t i = 0; i < catalog.files().size(); ++i) {
-        const auto opened = catalog.files()[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000;
+        const auto opened = catalog.files()[i].openedNs / 1'000'000;
         fileOrderRegressions += opened < previousOpen;
         previousOpen = std::max(previousOpen, opened);
         if (opened <= dayMs - LeadIn) chosen = i;
     }
-    const auto& h = catalog.files()[chosen].header;
-    const roller::JournalPos pos{symbol, h.at("run_id").get<std::string>(), h.at("first_block_ordinal").get<uint64_t>(), 0};
+    const auto& f = catalog.files()[chosen];
+    const roller::JournalPos pos{symbol, f.run, f.firstBlock, 0};
     const auto start = Clock::now();
     roller::JournalReader reader(catalog, pos);
     roller::JournalFeed feed(symbol);

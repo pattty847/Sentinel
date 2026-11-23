@@ -61,7 +61,7 @@ review_mutations = [
 ]
 mutations = [
  ('superseding run', 'libs/core/roller/JournalReader.cpp',
-  'files_[i].superseded = i + 1 < files_.size();', 'files_[i].superseded = false;', 'Roller.PendingFramingDeferredUntilSealedOrSuperseded'),
+  'files[i].superseded = i + 1 < files.size();', 'files[i].superseded = false;', 'Roller.PendingFramingDeferredUntilSealedOrSuperseded'),
  ('daily dry-run grid', 'libs/core/roller/Roller.cpp',
   'if (!gridReady)', 'if (!recorder)', 'Roller.DryRunAndEofDoNotInventTime'),
  ('derived grid', 'libs/core/roller/Grid.cpp',

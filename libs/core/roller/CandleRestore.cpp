@@ -43,9 +43,7 @@ Inventory inventory(const JournalReader& reader, const JournalPos& through) {
     Inventory inv;
     bool found = false;
     for (const auto& f : reader.files()) {
-        FileInfo info{f.header.at("run_id").get<std::string>(),
-                      f.header.at("first_block_ordinal").get<uint64_t>(),
-                      f.header.at("opened_system_ns").get<int64_t>() / 1'000'000};
+        FileInfo info{f.run, f.firstBlock, f.openedNs / 1'000'000};
         // Same rule as JournalReader's start file.
         if (info.run == through.run && info.firstBlock <= through.block) {
             inv.throughFile = inv.files.size();
