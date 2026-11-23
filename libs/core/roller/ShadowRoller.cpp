@@ -1,5 +1,6 @@
 #include "ShadowRoller.hpp"
 #include "CandleRestore.hpp"
+#include "FanoutPacketBuffer.hpp"
 #include "ResnapshotPolicy.hpp"
 #include "SentinelLogging.hpp"
 #include "capture/CaptureFanout.hpp"
@@ -638,7 +639,7 @@ class LiveSource {
   const std::string product;
   const std::atomic<bool> &stopping;
   QLocalSocket socket;
-  QByteArray bytes;
+  FanoutPacketBuffer buffer;
   std::deque<JournalRecord> pending;
   size_t pendingSize = 0;
   std::optional<JournalPos> ceiling, diskTarget, applied, received;
@@ -665,11 +666,17 @@ class LiveSource {
   void inventory() {
     JournalReader r(cfg.journalRoot, product);
     runOrder.clear();
+    // The last file of each run wins. The catalog shares one metadata object
+    // across files and runs with identical values: copy it once per run, and
+    // again only where it changes inside a run.
+    const JournalFile *last = nullptr;
     for (const auto &f : r.files()) {
-      const std::string run = f.header.at("run_id");
+      const std::string &run = f.run;
       if (!runOrder.contains(run))
         runOrder[run] = runOrder.size();
-      metadata[run] = f.header.at("product_metadata");
+      if (!last || last->run != run || last->metadata != f.metadata)
+        metadata[run] = *f.metadata;
+      last = &f;
     }
   }
   bool older(const JournalPos &a, const JournalPos &b) {
@@ -684,20 +691,8 @@ class LiveSource {
         std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (!stopping) {
       // Bound both Qt's buffer and ours, even for a peer that never frames.
-      if (bytes.size() >= 4) {
-        const auto n = little(bytes.data(), 4);
-        if (n < 4 || n > capture::MaxRecordBytes + 4096)
-          throw std::runtime_error("fanout packet length");
-        if (uint64_t(bytes.size()) >= n + 4) {
-          const auto jn = little(bytes.data() + 4, 4);
-          if (jn > n - 4 || jn > 4096)
-            throw std::runtime_error("fanout JSON length");
-          auto j = json::parse(bytes.data() + 8, bytes.data() + 8 + jn);
-          std::string raw(bytes.data() + 8 + jn, n - 4 - jn);
-          bytes.remove(0, n + 4);
-          return {std::move(j), std::move(raw)};
-        }
-      }
+      if (auto p = buffer.take())
+        return std::move(*p);
       if (socket.state() == QLocalSocket::UnconnectedState)
         throw std::runtime_error("fanout EOF; resume journal");
       if (std::chrono::steady_clock::now() > deadline)
@@ -712,7 +707,7 @@ class LiveSource {
       requestResnapshot();
       if (socket.bytesAvailable() == 0)
         socket.waitForReadyRead(50);
-      bytes += socket.read(capture::MaxRecordBytes + 4100 - bytes.size());
+      buffer.readFrom(socket);
     }
     throw ShadowStopped{};
   }
@@ -837,12 +832,12 @@ class LiveSource {
   }
   void handshake(const std::optional<JournalPos> &checkpoint) {
     socket.abort();
-    bytes.clear();
+    buffer.clear();
     discardProvisional();
     pendingSize = 0;
     ceiling.reset();
     received = applied;
-    socket.setReadBufferSize(capture::MaxRecordBytes + 4100);
+    socket.setReadBufferSize(FanoutPacketBuffer::Limit);
     const auto path =
         cfg.socketPath.empty()
             ? QDir::homePath() + "/Sentinel-runtime/run/capture.sock"
@@ -900,7 +895,7 @@ public:
     // A day-anchor rebuild can exceed the bounded server backlog. Hold no
     // socket during that replay; reconnect at the fully applied durable tip.
     socket.abort();
-    bytes.clear();
+    buffer.clear();
     discardProvisional();
     received.reset();
   }

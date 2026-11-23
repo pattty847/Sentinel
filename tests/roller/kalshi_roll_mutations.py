@@ -103,7 +103,7 @@ MUTATIONS = [
      '', 'KalshiRoll.FixedIdentityRejectsCheckpointAndVenueMismatch'),
     ('price bounds hash', 'Roller.cpp', 'if (c.priceBounds) j["priceBounds"] = {c.priceBounds->lower,c.priceBounds->upper};',
      '', 'KalshiRoll.FixedIdentityRejectsCheckpointAndVenueMismatch'),
-    ('journal snapshot search', 'JournalReader.cpp', 'const bool kalshi = venueFromHeader(f->header) == Venue::Kalshi;',
+    ('journal snapshot search', 'JournalReader.cpp', 'const bool kalshi = f->venue == Venue::Kalshi;',
      'const bool kalshi = false;', 'KalshiRoll.JournalAnchorSearchAcrossHoursRunsAndForeignSnapshots'),
     ('anchor instrument roundtrip', 'Roller.cpp', 'a.instrument = gridInstrument;',
      'a.instrument = nullptr;', 'KalshiRoll.MidnightAnchorAndOldJournalSnapshotHaveIdenticalNextDayBytes'),

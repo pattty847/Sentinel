@@ -9,6 +9,7 @@
 #include <set>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_map>
 
 namespace sentinel::roller {
 using nlohmann::json;
@@ -37,17 +38,42 @@ void reportCorruption(const std::string& product, const JournalFile& file,
     // Rare error path only. Remember run/segment/offset across anchor searches,
     // daily replay and independent batch comparisons in this process.
     std::lock_guard lock(state->mutex);
-    if (state->blocks.emplace(file.header.at("run_id").get<std::string>(),
-                              file.header.at("segment").get<uint64_t>(), block.offset).second) {
+    if (state->blocks.emplace(file.run, file.segment, block.offset).second) {
         state->count.inc();
         sLog_Error("Roller journal corrupt block product=" << product.c_str()
                    << " file=" << file.path.string().c_str() << " offset=" << block.offset
                    << " reason=" << reason << " action=skip_until_snapshot");
     }
 }
-auto order(const json& h) {
-    return std::tuple(h.at("run_started_system_ns").get<int64_t>(), h.at("run_id").get<std::string>(),
-                      h.at("segment").get<uint64_t>());
+auto order(const JournalFile& f) {
+    return std::tie(f.runStartedNs, f.run, f.segment);
+}
+// One shared value per distinct serialization: identical text parses to an
+// identical value, so every reader sees exactly what its own header held.
+class Interned {
+public:
+    std::shared_ptr<const json> operator()(const json& value) {
+        auto& shared = values_[value.dump()];
+        if (!shared) shared = std::make_shared<const json>(value);
+        return shared;
+    }
+private:
+    std::unordered_map<std::string, std::shared_ptr<const json>> values_;
+};
+// readHeader has validated these fields (types, ranges, venue, product).
+JournalFile catalogEntry(std::filesystem::path path, const json& h, Interned& interned) {
+    JournalFile f;
+    f.path = std::move(path);
+    f.run = h.at("run_id").get<std::string>();
+    f.segment = h.at("segment").get<uint64_t>();
+    f.firstBlock = h.at("first_block_ordinal").get<uint64_t>();
+    f.runStartedNs = h.at("run_started_system_ns").get<int64_t>();
+    f.openedNs = h.at("opened_system_ns").get<int64_t>();
+    f.formatVersion = h.at("format_version").get<int>();
+    f.venue = venueFromHeader(h);
+    f.metadata = interned(h.at("product_metadata"));
+    f.instrument = interned(h.value("instrument", json()));
+    return f;
 }
 bool snapshot(const capture::Record& r, const std::string& product) {
     if (r.kind != capture::Kind::Frame || r.payload.find("snapshot") == std::string::npos) return false;
@@ -77,21 +103,25 @@ JournalReader::JournalReader(std::filesystem::path root, std::string product,
     // enforces the actual venue rules for every file.
     capture::validateSymbol(product_, Venue::Kalshi);
     if (std::filesystem::is_directory(root / product_)) root /= product_;
+    std::vector<JournalFile> files;
+    Interned interned;
     for (const auto& e : std::filesystem::recursive_directory_iterator(root)) {
         if (stop.stop_requested()) throw std::runtime_error("journal catalog cancelled");
         if (!e.is_regular_file() || e.path().extension() != ".rawl2") continue;
-        auto h = capture::readHeader(QString::fromStdString(e.path().string()));
+        const auto h = capture::readHeader(QString::fromStdString(e.path().string()));
         if (afterHeaderForTest) afterHeaderForTest();
         if (stop.stop_requested()) throw std::runtime_error("journal catalog cancelled");
-        if (h.at("product_metadata").at("product_id") == product_) files_.push_back({e.path(), std::move(h)});
+        if (h.at("product_metadata").at("product_id") == product_) files.push_back(catalogEntry(e.path(), h, interned));
     }
     if (stop.stop_requested()) throw std::runtime_error("journal catalog cancelled");
-    std::sort(files_.begin(), files_.end(), [](const auto& a, const auto& b) { return order(a.header) < order(b.header); });
-    if (files_.empty()) throw NoJournalFiles(product_);
-    for (size_t i = 0; i < files_.size(); ++i) {
-        if (i && order(files_[i-1].header) == order(files_[i].header)) throw std::runtime_error("duplicate journal segment");
-        files_[i].superseded = i + 1 < files_.size();
+    std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) { return order(a) < order(b); });
+    if (files.empty()) throw NoJournalFiles(product_);
+    for (size_t i = 0; i < files.size(); ++i) {
+        if (i && order(files[i-1]) == order(files[i])) throw std::runtime_error("duplicate journal segment");
+        files[i].superseded = i + 1 < files.size();
     }
+    files.shrink_to_fit();
+    files_ = std::make_shared<const std::vector<JournalFile>>(std::move(files));
     selectStart();
 }
 JournalReader::JournalReader(const JournalReader& catalog, std::optional<JournalPos> start)
@@ -102,9 +132,9 @@ void JournalReader::selectStart() {
     if (start_) {
         if (start_->product != product_) throw std::runtime_error("journal position product mismatch");
         bool found = false;
-        for (size_t i = 0; i < files_.size(); ++i) {
-            const auto& h = files_[i].header;
-            if (h.at("run_id") == start_->run && h.at("first_block_ordinal").get<uint64_t>() <= start_->block) {
+        for (size_t i = 0; i < files_->size(); ++i) {
+            const auto& f = (*files_)[i];
+            if (f.run == start_->run && f.firstBlock <= start_->block) {
                 file_ = i; found = true;
             }
         }
@@ -116,14 +146,14 @@ void JournalReader::skipApplied(const JournalPos& applied) {
     if (!next(first)) throw std::runtime_error("resume cursor unavailable in journal");
     if (first.pos == applied) return;
     const auto runIndex = [&](const std::string& run) {
-        return std::find_if(files_.begin(), files_.end(), [&](const auto& f) {
-            return f.header.at("run_id") == run;
-        }) - files_.begin();
+        return std::find_if(files_->begin(), files_->end(), [&](const auto& f) {
+            return f.run == run;
+        }) - files_->begin();
     };
     const auto a = runIndex(applied.run), b = runIndex(first.pos.run);
     const bool successor = first.pos.run == applied.run
         ? std::pair(first.pos.block, first.pos.record) > std::pair(applied.block, applied.record)
-        : a < b && b < static_cast<decltype(b)>(files_.size());
+        : a < b && b < static_cast<decltype(b)>(files_->size());
     // gapBefore also marks the start of a reader. Require observed damage,
     // not just that initial marker, before admitting a different position.
     if (!first.gapBefore || !damaged_ || first.pos.product != applied.product || !successor)
@@ -138,8 +168,9 @@ void JournalReader::putBack(JournalRecord record) {
 }
 bool JournalReader::next(JournalRecord& out) {
     if (!buffered_.empty()) { out = std::move(buffered_.front()); buffered_.pop_front(); return true; }
-    while (file_ < files_.size()) {
-        const auto& f = files_[file_];
+    const auto& catalog = *files_;
+    while (file_ < catalog.size()) {
+        const auto& f = catalog[file_];
         if (!reader_) reader_ = std::make_unique<capture::RecordReader>(
             QString::fromStdString(f.path.string()), !f.superseded,
             start_ ? std::optional<uint64_t>(start_->block) : std::nullopt,
@@ -149,21 +180,21 @@ bool JournalReader::next(JournalRecord& out) {
                 gap_ = true;
                 // A saved cursor in a now-damaged block cannot be delivered;
                 // return its first readable successor with a gap.
-                if (start_ && f.header.at("run_id") == start_->run && start_->block == block.ordinal)
+                if (start_ && f.run == start_->run && start_->block == block.ordinal)
                     start_.reset();
             });
         capture::Record record;
         if (reader_->next(record)) {
             const auto& scan = reader_->result();
-            JournalPos pos{product_, f.header.at("run_id"), scan.recordOrdinal, scan.recordIndex};
+            JournalPos pos{product_, f.run, scan.recordOrdinal, scan.recordIndex};
             if (start_) {
                 if (pos.run == start_->run && std::pair(pos.block, pos.record) < std::pair(start_->block, start_->record)) continue;
                 if (pos != *start_) throw std::runtime_error("journal position missing record");
                 start_.reset();
             }
-            out = {std::move(record), std::move(pos), f.header.at("product_metadata"),
-                   std::exchange(gap_, false), f.header.at("format_version").get<int>(),
-                   venueFromHeader(f.header), f.header.value("instrument", json())};
+            out = {std::move(record), std::move(pos), *f.metadata,
+                   std::exchange(gap_, false), f.formatVersion,
+                   f.venue, *f.instrument};
             return true;
         }
         const auto& result = reader_->result();
@@ -171,16 +202,15 @@ bool JournalReader::next(JournalRecord& out) {
         gap_ = gap_ || result.tornTail || (f.superseded && !result.indexed);
         // Once per file: without its index a superseded file cannot prove its suffix.
         if (f.superseded && (result.tornTail || !result.indexed)) ++damaged_;
-        nextBlock_ = f.header.at("first_block_ordinal").get<uint64_t>() + result.index.size();
+        nextBlock_ = f.firstBlock + result.index.size();
         ++file_;
-        if (file_ < files_.size()) {
-            const auto& next = files_[file_].header;
-            const bool sameRun = next.at("run_id") == f.header.at("run_id");
-            const bool discontinuous = next.at("first_block_ordinal").get<uint64_t>() != nextBlock_ ||
-                next.at("segment").get<uint64_t>() != f.header.at("segment").get<uint64_t>() + 1;
+        if (file_ < catalog.size()) {
+            const auto& next = catalog[file_];
+            const bool sameRun = next.run == f.run;
+            const bool discontinuous = next.firstBlock != nextBlock_ || next.segment != f.segment + 1;
             gap_ = gap_ || !sameRun || discontinuous;
             // A different run entered inside the scan must start at its segment 0.
-            if (sameRun ? discontinuous : next.at("segment").get<uint64_t>() != 0) ++damaged_;
+            if (sameRun ? discontinuous : next.segment != 0) ++damaged_;
         }
         decoded_ += result.decodedRecords;
         reader_.reset();
@@ -191,8 +221,8 @@ bool JournalReader::next(JournalRecord& out) {
 std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs) const {
     // File opening times can regress. Walk journal order backwards, never binary
     // search wall time; then choose the last qualifying snapshot in that segment.
-    for (auto f = files_.rbegin(); f != files_.rend(); ++f) {
-        const bool kalshi = venueFromHeader(f->header) == Venue::Kalshi;
+    for (auto f = files_->rbegin(); f != files_->rend(); ++f) {
+        const bool kalshi = f->venue == Venue::Kalshi;
         const auto isSnapshot = [&](const capture::Record& r) {
             if (!kalshi) return snapshot(r, product_);
             if (r.kind != capture::Kind::Frame || r.payload.find("orderbook_snapshot") == std::string::npos) return false;
@@ -201,7 +231,7 @@ std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs) const {
                 j.contains("msg") && j["msg"].is_object() && j["msg"].contains("market_ticker") &&
                 j["msg"]["market_ticker"] == product_;
         };
-        if (f->header.at("opened_system_ns").get<int64_t>() / 1'000'000 > receiveMs) continue;
+        if (f->openedNs / 1'000'000 > receiveMs) continue;
         capture::RecordReader reader(QString::fromStdString(f->path.string()), !f->superseded, {},
             [&](const capture::BlockIndex& block, const char* reason) {
                 reportCorruption(product_, *f, block, reason);
@@ -209,7 +239,7 @@ std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs) const {
         capture::Record r;
         std::optional<JournalPos> found;
         while (reader.next(r)) if (r.time.systemNs / 1'000'000 <= receiveMs && isSnapshot(r)) {
-            found = JournalPos{product_, f->header.at("run_id"), reader.result().recordOrdinal, reader.result().recordIndex};
+            found = JournalPos{product_, f->run, reader.result().recordOrdinal, reader.result().recordIndex};
         }
         anchorDecoded_ += reader.result().decodedRecords;
         if (found) return found;

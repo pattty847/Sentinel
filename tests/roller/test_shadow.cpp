@@ -228,7 +228,7 @@ struct ShadowTest : testing::Test {
           ++resnapshots;
         });
   }
-  void startWriter() {
+  void startWriter(const json &metadata = meta()) {
     capture::WriterConfig c;
     c.root = QString::fromStdString(cfg.journalRoot);
     c.fsyncBlocks = 1;
@@ -238,7 +238,7 @@ struct ShadowTest : testing::Test {
       if (fanout && publish)
         fanout->publish(0, e);
     };
-    writer = std::make_unique<capture::Writer>(c, meta());
+    writer = std::make_unique<capture::Writer>(c, metadata);
   }
   void initial(int seconds = 63) {
     writer->append(record(0, snapshot()));
@@ -2690,6 +2690,95 @@ TEST_F(ShadowTest, JournalTapSeedsOneSnapshotEqualToBatchThenProvisionalUpdates)
   EXPECT_EQ(modelCount("updates"), 2u);
   EXPECT_EQ(modelCount("invalidate"), 0u);
   EXPECT_EQ(resnapshots.load(), 0);
+  shadow.reset();
+  writer->close();
+}
+// Every record of the product on disk, through a fresh catalog.
+size_t journalRecords(const ShadowTest &t) {
+  JournalReader reader(t.cfg.journalRoot, Product);
+  JournalRecord r;
+  size_t n = 0;
+  while (reader.next(r))
+    ++n;
+  return n;
+}
+// A capture restart with unchanged product metadata: the catalog shares one
+// metadata object across both runs, yet the live source must know the later run
+// (the model's metadata, and every durable socket record's metadata by run).
+TEST_F(ShadowTest, LaterRunWithIdenticalMetadataServesMetadataAndAppliesLiveRecords) {
+  tapModel();
+  initial();
+  writer->close();
+  startWriter(); // run B, same metadata
+  writer->append(record(64000, snapshot()));
+  for (int t = 65; t <= 70; ++t)
+    writer->append(record(t * 1000));
+  writer->flush();
+  const auto onDisk = journalRecords(*this);
+  start(); // cold start: the applied cursor is in run B
+  ASSERT_TRUE(eventually([&] { return count() == onDisk; }));
+  EXPECT_TRUE(eventually([&] { return modelCount("metadata") == 1; }));
+  for (const auto &e : modelLog("metadata"))
+    EXPECT_EQ(e.metadata, meta()["product_metadata"]);
+  ASSERT_TRUE(eventually([&] { return modelCount("connection") >= 1; }));
+  // At the socket tip: run B records become durable over several watermarks.
+  int t = 71;
+  for (int watermark = 0; watermark < 4; ++watermark) {
+    for (int i = 0; i < 5; ++i, ++t)
+      writer->append(record(t * 1000));
+    writer->flush();
+    const auto expected = journalRecords(*this);
+    ASSERT_TRUE(eventually([&] { return count() == expected; })) << watermark;
+  }
+  EXPECT_TRUE(has("sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 0"));
+  EXPECT_EQ(modelCount("metadata"), 1u);
+  EXPECT_EQ(modelCount("invalidate"), 0u);
+  shadow.reset();
+  writer->close();
+}
+// Metadata that changes inside a run: the run's last file wins, as the live
+// source always read it.
+TEST_F(ShadowTest, MetadataChangedInsideARunServesItsLastFile) {
+  tapModel();
+  writer.reset();
+  auto tagged = meta();
+  tagged["product_metadata"]["tag"] = "aaaa";
+  startWriter(tagged);
+  writer->append(record(0, snapshot()));
+  writer->append(record(1000));
+  writer->append(record(3600000, snapshot())); // hour rotation: segment 1
+  writer->append(record(3601000));
+  writer->flush();
+  // Segment 0 says "bbbb" (same length, header CRC re-signed); segment 1 "aaaa".
+  const auto first = JournalReader(cfg.journalRoot, Product).files().front().path;
+  std::string bytes;
+  {
+    std::ifstream in(first, std::ios::binary);
+    bytes.assign(std::istreambuf_iterator<char>(in), {});
+  }
+  const auto length = uint32_t(uint8_t(bytes[8])) | uint32_t(uint8_t(bytes[9])) << 8 |
+                      uint32_t(uint8_t(bytes[10])) << 16 | uint32_t(uint8_t(bytes[11])) << 24;
+  auto header = bytes.substr(16, length);
+  const auto at = header.find("\"aaaa\"");
+  ASSERT_NE(at, std::string::npos);
+  header.replace(at, 6, "\"bbbb\"");
+  const auto crc = sentinel::crc32(header.data(), header.size());
+  for (int i = 0; i < 4; ++i)
+    bytes[12 + i] = char(crc >> (8 * i));
+  bytes.replace(16, length, header);
+  {
+    std::ofstream out(first, std::ios::binary | std::ios::trunc);
+    out << bytes;
+  }
+  ASSERT_EQ(JournalReader(cfg.journalRoot, Product).files().front().metadata->at("tag"), "bbbb");
+  start();
+  ASSERT_TRUE(eventually([&] { return count() == 4; }));
+  ASSERT_TRUE(eventually([&] { return modelCount("metadata") >= 1; }));
+  EXPECT_EQ(modelLog("metadata").back().metadata.at("tag"), "aaaa");
+  writer->append(record(3602000));
+  writer->flush();
+  ASSERT_TRUE(eventually([&] { return count() == 5; }));
+  EXPECT_TRUE(has("sentinel_roller_shadow_setup_failures_total{product=\"BTC-USD\"} 0"));
   shadow.reset();
   writer->close();
 }

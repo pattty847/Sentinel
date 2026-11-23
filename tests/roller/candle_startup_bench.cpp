@@ -111,9 +111,9 @@ std::string framed(const capture::Record& r) {
 JournalPos fileStartBefore(const JournalReader& all, const std::string& product, int64_t ms) {
     size_t at = 0;
     for (size_t i = 0; i < all.files().size(); ++i)
-        if (all.files()[i].header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= ms) at = i;
-    const auto& h = all.files()[at].header;
-    return {product, h.at("run_id").get<std::string>(), h.at("first_block_ordinal").get<uint64_t>(), 0};
+        if (all.files()[i].openedNs / 1'000'000 <= ms) at = i;
+    const auto& f = all.files()[at];
+    return {product, f.run, f.firstBlock, 0};
 }
 
 struct Replay {
@@ -127,10 +127,8 @@ struct Replay {
 int64_t lastReceiveMs(const fs::path& root, const std::string& product) {
     JournalReader all(root, product);
     if (all.files().empty()) throw std::runtime_error("no journal for " + product);
-    const auto& h = all.files().back().header;
-    JournalReader reader(root, product,
-                         JournalPos{product, h.at("run_id").get<std::string>(),
-                                    h.at("first_block_ordinal").get<uint64_t>(), 0});
+    const auto& f = all.files().back();
+    JournalReader reader(root, product, JournalPos{product, f.run, f.firstBlock, 0});
     JournalRecord r;
     int64_t last = 0;
     while (reader.next(r)) last = std::max(last, receiveMs(r));

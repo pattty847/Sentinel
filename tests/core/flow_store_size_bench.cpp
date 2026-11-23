@@ -40,12 +40,10 @@ int main(int argc, char** argv) {
         if (catalog.files().empty()) throw std::runtime_error("no BTC-USD journal files");
         const JournalFile* chosen = &catalog.files().front();
         for (const auto& f : catalog.files()) {
-            if (f.header.at("opened_system_ns").get<int64_t>() / 1'000'000 <= start) chosen = &f;
+            if (f.openedNs / 1'000'000 <= start) chosen = &f;
             else break;
         }
-        const auto& h = chosen->header;
-        JournalReader reader(argv[1], "BTC-USD", JournalPos{"BTC-USD",
-            h.at("run_id").get<std::string>(), h.at("first_block_ordinal").get<uint64_t>(), 0});
+        JournalReader reader(argv[1], "BTC-USD", JournalPos{"BTC-USD", chosen->run, chosen->firstBlock, 0});
         JournalFeed feed("BTC-USD");
         std::unique_ptr<FlowBarBuilder> builder;
         double tick = 0;
@@ -67,7 +65,7 @@ int main(int argc, char** argv) {
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t.timestamp.time_since_epoch()).count();
             if (ms < start || ms >= end) return;
             if (!builder) {
-                const auto& metadata = chosen->header.at("product_metadata");
+                const auto& metadata = *chosen->metadata;
                 const auto grid = deriveGrid(metadata, t.price);
                 tick = grid.nearTick;
                 priceScale = std::llround(grid.priceScale);

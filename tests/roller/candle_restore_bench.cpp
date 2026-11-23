@@ -41,7 +41,7 @@ void refuseLiveRoot(const fs::path& root) {
         if (canonical.starts_with(live)) throw std::runtime_error("refusing a live data root");
 }
 
-int64_t openedMs(const JournalFile& f) { return f.header.at("opened_system_ns").get<int64_t>() / 1'000'000; }
+int64_t openedMs(const JournalFile& f) { return f.openedNs / 1'000'000; }
 
 // Replace run_started_system_ns in place (same digit count) and re-sign the header.
 void setRunStart(const fs::path& path, int64_t ns) {
@@ -74,8 +74,8 @@ int synth(const fs::path& root, int count, const std::vector<std::string>& produ
         int64_t oldest = INT64_MAX;
         for (const auto& f : reader.files())
             oldest = std::min({oldest, openedMs(f),
-                               f.header.at("run_started_system_ns").get<int64_t>() / 1'000'000});
-        const auto metadata = nlohmann::json{{"product_metadata", reader.files().front().header.at("product_metadata")}};
+                               f.runStartedNs / 1'000'000});
+        const auto metadata = nlohmann::json{{"product_metadata", *reader.files().front().metadata}};
         const int64_t base = oldest - oldest % HourMs - HourMs;
         capture::WriterConfig config;
         config.root = QString::fromStdString(root.string());
@@ -113,8 +113,7 @@ JournalPos findThrough(const Options& o, const std::string& product) {
     const int64_t opened = openedMs(file);
     const int64_t target = opened - opened % HourMs + int64_t(o.minute) * 60'000;
     JournalReader reader(o.root, product,
-                         JournalPos{product, file.header.at("run_id"),
-                                    file.header.at("first_block_ordinal").get<uint64_t>(), 0});
+                         JournalPos{product, file.run, file.firstBlock, 0});
     JournalRecord r;
     std::optional<JournalPos> found;
     while (reader.next(r) && r.record.time.systemNs / 1'000'000 <= target) found = r.pos;
@@ -165,8 +164,7 @@ Cmp compare(const Options& o, const CandleRestore& restore) {
     const auto& product = restore.product;
     JournalReader reader(o.root, product);
     const auto& start = reader.files().at(restore.startFile);
-    const JournalPos startPos{product, start.header.at("run_id"),
-                              start.header.at("first_block_ordinal").get<uint64_t>(), 0};
+    const JournalPos startPos{product, start.run, start.firstBlock, 0};
     TimeframeAggregator continuous(RestoreTfs, Caps);
     std::unique_ptr<TimeframeAggregator> mirror;
     std::unordered_set<std::string> seen, met; // delivered in the read; met in the read
