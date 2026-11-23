@@ -1,6 +1,6 @@
 // The lean flow chunk prototype (flow_chunk_proto.hpp) that flow_history_bench
 // --columnar measures for docs/FLOW_CHUNKS.md: payload round trip, golden
-// bytes, decoder checks, day file and 16-day assembly.
+// bytes, decoder checks, row steps, day file, 16-day assembly and epochs.
 #include "flow_chunk_proto.hpp"
 #include "flow/FlowBarBuilder.hpp"
 #include "flow/FlowCompose.hpp"
@@ -47,8 +47,8 @@ FlowBar dayBar(int64_t dayStart, double tick, double price) {
     return builder.bars().front();
 }
 proto::FlowChunk decodeSpec(std::span<const uint8_t> b, int64_t level, int64_t start, uint32_t slots,
-                            bool summary = false) {
-    return proto::decode(b, proto::Encoding::Spec, level, start, slots, summary);
+                            bool summary = false, uint64_t step = 1) {
+    return proto::decode(b, proto::Encoding::Spec, level, start, slots, summary, step);
 }
 }
 
@@ -128,7 +128,8 @@ TEST(FlowChunkProto, SpecIsSmallestAndFixedIsTheInMemoryWidth) {
     EXPECT_LT(spec.size(), varint.size());
 }
 
-TEST(FlowChunkProto, WidestInt16OffsetRoundTrips) {
+// Offsets are u16: a bar spans at most 65,535 rows (last offset 65534).
+TEST(FlowChunkProto, WidestOffsetRoundTrips) {
     FlowBar b;
     b.startMs = T0; b.timeframeMs = Minute; b.nativeTick = 1; b.priceScale = 100;
     b.baseScale = Base; b.quoteScale = Quote;
@@ -136,9 +137,50 @@ TEST(FlowChunkProto, WidestInt16OffsetRoundTrips) {
     b.lowRow = 100;
     b.rows = {{0, 5, 0, 1, 0}, {INT16_MAX, 0, 7, 0, 2}};
     b.baseVolume = 12; b.sellVol = 5; b.buyVol = 7; b.delta = 2; b.maxRowVol = 7; b.count = 3;
-    const auto chunk = proto::fromBars(std::span(&b, 1), Minute, T0, 60);
+    auto chunk = proto::fromBars(std::span(&b, 1), Minute, T0, 60);
     for (const auto e : encodings)
         EXPECT_EQ(proto::toBars(proto::decode(proto::encode(chunk, e), e, Minute, T0, 60)).front(), b) << int(e);
+    // Past int16, set on the chunk: FlowBar offsets stay int16 until step 3.
+    chunk.high[0] = chunk.close[0] = chunk.low[0] + proto::MaxOffset * 100; // row tick units 100
+    chunk.offset[1] = uint16_t(proto::MaxOffset);
+    for (const auto e : encodings)
+        EXPECT_EQ(proto::decode(proto::encode(chunk, e), e, Minute, T0, 60), chunk) << int(e);
+    EXPECT_ANY_THROW(proto::toBars(chunk));
+    auto tooWide = chunk;                                   // 65,536 rows
+    tooWide.high[0] = tooWide.close[0] += 100;
+    tooWide.offset[1] += 1;
+    for (const auto e : encodings)
+        EXPECT_ANY_THROW(proto::decode(proto::encode(tooWide, e), e, Minute, T0, 60)) << int(e);
+}
+
+// A bar wider than 65,535 native rows is stored at the smallest power-of-two
+// step that fits; nothing is rejected for range.
+TEST(FlowChunkProto, WideBarTakesTheSmallestFittingStep) {
+    constexpr int64_t tick = 100, low = 1000 * tick;
+    EXPECT_EQ(proto::stepFor(low, low + proto::MaxOffset * tick, tick), 1u);
+    EXPECT_EQ(proto::stepFor(low, low + (proto::MaxOffset + 1) * tick, tick), 2u);
+    EXPECT_EQ(proto::stepFor(low, low + 200'000 * tick, tick), 4u);    // 50,000 rows at step 4
+    EXPECT_EQ(proto::stepFor(low, low, tick, 8), 8u);                   // never finer than a constituent
+    EXPECT_EQ(proto::stepFor(1, INT64_MAX, 1), uint64_t(1) << 48);      // the widest i64 range fits
+
+    // 70,000 native rows (1000..71000) at step 2: rows 500..35500.
+    FlowBar b;
+    b.startMs = T0; b.timeframeMs = Minute; b.nativeTick = 1; b.priceScale = 100;
+    b.baseScale = Base; b.quoteScale = Quote;
+    b.open = b.low = 1000; b.high = b.close = 1001; b.lowRow = 1000;
+    b.rows = {{0, 5, 0, 1, 0}, {1, 0, 7, 0, 2}};
+    b.baseVolume = 12; b.sellVol = 5; b.buyVol = 7; b.delta = 2; b.maxRowVol = 7; b.count = 3;
+    auto chunk = proto::fromBars(std::span(&b, 1), Minute, T0, 60);
+    chunk.priceStep = 2;
+    chunk.high[0] = chunk.close[0] = 71'000 * tick;
+    chunk.offset[1] = 35'000;
+    EXPECT_EQ(proto::stepFor(chunk.low[0], chunk.high[0], tick), 2u);
+    const auto bytes = proto::encode(chunk, proto::Encoding::Spec);
+    EXPECT_EQ(decodeSpec(bytes, Minute, T0, 60, false, 2), chunk);
+    EXPECT_ANY_THROW(decodeSpec(bytes, Minute, T0, 60, false, 1));      // rows are not native
+    EXPECT_ANY_THROW(decodeSpec(bytes, Minute, T0, 60, false, 3));      // not a power of two
+    EXPECT_ANY_THROW(decodeSpec(bytes, Minute, T0, 60, false, uint64_t(1) << 49));
+    EXPECT_ANY_THROW(proto::toBars(chunk));
 }
 
 TEST(FlowChunkProto, DayChunkKeepsEachBarsGrid) {
@@ -188,13 +230,36 @@ TEST(FlowChunkProto, SixteenDayAssemblyFromDayPieces) {
     EXPECT_EQ(proto::encode(assembled, proto::Encoding::Spec), proto::encode(expected, proto::Encoding::Spec));
 }
 
+// Pieces at different steps compose at the coarsest: finer pieces are re-binned.
+TEST(FlowChunkProto, SixteenDayAssemblyComposesAtTheCoarsestStep) {
+    const int64_t start = T0 - 3 * Day;
+    const auto day0 = dayBar(start, 1, 91000.12), day1 = dayBar(start + Day, 1, 91000.12);
+    std::vector<std::vector<uint8_t>> pieces(16);
+    std::vector<uint64_t> steps(16, 1);
+    pieces[0] = proto::encode(proto::fromBars(std::span(&day0, 1), Day, start, 1), proto::Encoding::Spec);
+    pieces[1] = proto::encode(proto::rebin(proto::fromBars(std::span(&day1, 1), Day, start + Day, 1), 8),
+                              proto::Encoding::Spec);
+    steps[1] = 8;
+    const auto assembled = proto::assembleDayChunk(start, pieces, proto::Status::Unrecorded, steps);
+    EXPECT_EQ(assembled.priceStep, 8u);
+    // Native rows 91000, 91007, 91014, 91022, 91029, 91036 at step 8: 11375 (the first two merged) .. 11379.
+    const std::vector<uint16_t> offsets{0, 1, 2, 3, 4, 0, 1, 2, 3, 4};
+    EXPECT_EQ(assembled.offset, offsets);
+    EXPECT_EQ(assembled.rowBegin, (std::vector<uint32_t>{0, 5, 10}));
+    EXPECT_EQ(assembled.rows[0], (proto::RowRecord{150'000'000, 50'000'000, 1, 1})); // sell 1.5 + buy 0.5
+    const auto wire = proto::encode(assembled, proto::Encoding::Spec);
+    EXPECT_EQ(decodeSpec(wire, Day, start, 16, false, 8), assembled);
+    EXPECT_ANY_THROW(decodeSpec(wire, Day, start, 16, false, 1));
+}
+
+// Hour 0 is stored at step 2 (step exponent 1), hour 3 is an observed empty hour.
 proto::DayFile sampleDayFile() {
     proto::DayFile d;
     d.instrument = "coinbase:BTC-USD"; d.dayStartMs = T0; d.grid = {100, 100, Base, Quote};
     d.lateTrades = 2; d.regressions = 1;
-    const auto chunk = proto::fromBars(hourBars(), Minute, T0, 60);
+    const auto chunk = proto::rebin(proto::fromBars(hourBars(), Minute, T0, 60), 2);
     d.sections[0] = {true, uint32_t(proto::encode(chunk, proto::Encoding::Spec, true).size()), 0x1234,
-                     proto::encode(chunk, proto::Encoding::Spec)};
+                     proto::encode(chunk, proto::Encoding::Spec), 1};
     const auto empty = proto::fromBars({}, Minute, T0 + 3 * Hour, 60);
     d.sections[3] = {true, uint32_t(proto::encode(empty, proto::Encoding::Spec, true).size()), 0x99,
                      proto::encode(empty, proto::Encoding::Spec)};
@@ -224,7 +289,7 @@ TEST(FlowChunkProto, DayFileRoundTripAndValidation) {
 TEST(FlowChunkProto, DayFileTableCorruptionIsRefused) {
     const auto bytes = proto::encodeDayFile(sampleDayFile());
     const size_t entry0 = tableStart(bytes);
-    for (size_t field : {size_t(4), size_t(8), size_t(17)}) { // summary length, total length, fingerprint
+    for (size_t field : {size_t(4), size_t(8), size_t(17), size_t(25)}) { // summary, total length, fingerprint, step
         auto corrupt = bytes;
         corrupt[entry0 + field] ^= 1;
         EXPECT_ANY_THROW(proto::parseDayFile(corrupt)) << field;
@@ -245,6 +310,18 @@ TEST(FlowChunkProto, DayFileTableRules) {
     auto bigSummary = sampleDayFile();
     bigSummary.sections[30] = {true, 4, 0, {1, 2, 3, 4}};  // trades.big carries no summary length
     EXPECT_ANY_THROW(proto::parseDayFile(proto::encodeDayFile(bigSummary)));
+    auto wrongStep = sampleDayFile();
+    wrongStep.sections[0].stepExponent = 0;                // hour 0 was stored at step 2
+    EXPECT_ANY_THROW(proto::parseDayFile(proto::encodeDayFile(wrongStep)));
+    auto absentStep = sampleDayFile();
+    absentStep.sections[5].stepExponent = 1;               // an absent entry has no step
+    EXPECT_ANY_THROW(proto::parseDayFile(proto::encodeDayFile(absentStep)));
+    auto bigStep = sampleDayFile();
+    bigStep.sections[30] = {true, 0, 0, {1, 2, 3, 4}, 1};  // nor does trades.big
+    EXPECT_ANY_THROW(proto::parseDayFile(proto::encodeDayFile(bigStep)));
+    auto coarse = sampleDayFile();
+    coarse.sections[3].stepExponent = 49;                  // above 2^48
+    EXPECT_ANY_THROW(proto::parseDayFile(proto::encodeDayFile(coarse)));
 }
 
 TEST(FlowChunkProto, MalformedPayloadsAreRefused) {
@@ -292,12 +369,13 @@ TEST(FlowChunkProto, RuleChangeFencesEveryOldRuleDay) {
     auto oldFile = sampleDayFile();
     oldFile.ruleIdentity = 0xAAAA;
     ASSERT_TRUE(proto::servable(stored, oldFile));
-    const auto oldEpoch = proto::epochOf("flow", stored);
+    const auto domain = proto::flowDomain("coinbase:BTC-USD");
+    const auto oldEpoch = proto::epochOf(domain, stored);
     EXPECT_EQ(proto::startupTransition(stored, 0xAAAA, days), stored); // same rules, nothing pending: no change
 
     auto next = proto::startupTransition(stored, 0xBBBB, days);
     EXPECT_EQ(next.pending, days);
-    EXPECT_NE(proto::epochOf("flow", next), oldEpoch);
+    EXPECT_NE(proto::epochOf(domain, next), oldEpoch);
     EXPECT_FALSE(proto::servable(next, oldFile));
     proto::finishDay(next, T0);                       // T0 rebuilt...
     EXPECT_FALSE(proto::servable(next, oldFile));     // ...but this file is still the old-rule one
@@ -308,5 +386,22 @@ TEST(FlowChunkProto, RuleChangeFencesEveryOldRuleDay) {
 
     const auto crashed = proto::startupTransition(next, 0xBBBB, days); // restart with T0 - Day still pending
     EXPECT_EQ(crashed.counter, next.counter + 1);
-    EXPECT_NE(proto::epochOf("flow", crashed), proto::epochOf("flow", next));
+    EXPECT_NE(proto::epochOf(domain, crashed), proto::epochOf(domain, next));
+}
+
+// Each instrument has its own epoch domain and file: a rule change for one (its
+// big-trade floor) moves only its epoch and fences only its days.
+TEST(FlowChunkProto, EpochDomainIsPerInstrument) {
+    const std::vector<int64_t> days{T0 - Day, T0};
+    const proto::EpochState btc{7, 0xAAAA, {}}, eth{7, 0xAAAA, {}};
+    EXPECT_NE(proto::epochOf(proto::flowDomain("coinbase:BTC-USD"), btc),
+              proto::epochOf(proto::flowDomain("coinbase:ETH-USD"), eth));
+    const auto btcNext = proto::startupTransition(btc, 0xBBBB, days); // BTC's floor changed
+    const auto ethNext = proto::startupTransition(eth, 0xAAAA, days); // ETH's rules did not
+    EXPECT_EQ(btcNext.pending, days);
+    EXPECT_EQ(ethNext, eth);
+    auto ethFile = sampleDayFile();
+    ethFile.instrument = "coinbase:ETH-USD";
+    ethFile.ruleIdentity = 0xAAAA;
+    EXPECT_TRUE(proto::servable(ethNext, ethFile));
 }
