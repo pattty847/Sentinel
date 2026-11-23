@@ -25,11 +25,11 @@ One unit per quantity. Every price is in **price units**; rows are used only for
 | Quantity | Unit | Stored as | Source |
 | --- | --- | --- | --- |
 | Price, open, high, low, close | price units = price x `price_scale` | i64 | `price_scale` is at least 1 / quote increment (`roller/Grid.cpp:53`), so every trade price is an integer; conversion `recording::priceUnits` (`servermodel/RecordingCodec.hpp:89`) |
-| Row | native row `floorDiv(price units, row_tick_units)` on the day's recorder grid; at step s (section 4) `floorDiv(native row, s)` | not stored | `flow/FlowBarBuilder.cpp:142` |
+| Row | native row `floorDiv(price units, row_tick_units)` on the day's recorder grid; at step s (section 4) `floorDiv(native row, s)` | not stored | `flow/FlowBarBuilder.cpp:143` |
 | Row offset | row - low row of its bar, at the chunk's step | u16, 0..65534 | `flow/FlowBar.hpp:21` (u16) |
-| Low row | the row of `low` | derived | at step 1 holds for every FLD1 bar (section 12) |
+| Low row | the row of `low` at the bar's step | derived | legacy FLD1 bars use step 1; wide bars may use a coarser step |
 | Base volume | size x `base_scale` (10^decimals of `base_increment`) | i64, >= 0 | `flow/FlowScales.cpp:8-27` |
-| Quote volume | price x size x `quote_scale` (10^8), rounded once per trade | i64, >= 0 | `flow/FlowBarBuilder.cpp:95-116` |
+| Quote volume | price x size x `quote_scale` (10^8), rounded once per trade | i64, >= 0 | `flow/FlowBarBuilder.cpp:96-116` |
 | Trade count | trades, unknown side included | u32 | |
 | Time | ms since the Unix epoch, UTC | i64 | |
 
@@ -37,7 +37,7 @@ One unit per quantity. Every price is in **price units**; rows are used only for
   x `price_scale` for price units. Every bar has a trade, so `base_volume` > 0; a composed bucket with no bars
   has no VWAP.
 - varint: unsigned LEB128, 7 bits per byte, low group first, at most 10 bytes, the tenth byte at most 1, no
-  trailing 0x00 byte except for the value 0 itself (the FLB1 rule, `flow/FlowCodec.cpp:33-45`). zigzag varint:
+  trailing 0x00 byte except for the value 0 itself (the FLB1 rule, `flow/FlowCodec.cpp:34-46`). zigzag varint:
   varint of `(v << 1) ^ (v >> 63)`. Decoders reject everything else.
 - Fixed-width integers are little-endian. `str8` = u8 length, then bytes.
 
@@ -62,8 +62,10 @@ One unit per quantity. Every price is in **price units**; rows are used only for
 `trades.big` uses the same levels; for it the level only selects the span (events are not bars).
 
 Flow timeframes are the ones flow serves today: 1m multiples that divide a UTC day (MARKETDATA.md "Flow
-history"). A composed bucket therefore never crosses midnight and never mixes grids; `composeFlowBars`
-refuses mixed grids (`flow/FlowCompose.cpp:31-37`, test `ComposeRefusesMixedGrids`). 1w is open item 9.
+history"). A composed bucket therefore never crosses midnight. `composeFlowBars` accepts constituent ticks
+related by powers of two and uses the coarsest fitting step (`flow/FlowCompose.cpp:26-52`); it refuses different
+price/base/quote scales or ticks without that relation (`ComposeStillRefusesMixedGrids`). Because composition
+stays within one UTC day, a real day-grid change is not confused with a coarser row step. 1w is open item 9.
 
 ## 3. Envelope and availability
 
@@ -155,7 +157,7 @@ of the `flow.rows` payload, cut by the server without re-encoding. A held `flow.
 
 | Header field | Type | Meaning |
 | --- | --- | --- |
-| `grid_count` | u8 | 0 only when the chunk has no bars; 1 in 1m and 1h chunks (one UTC day has one grid, `flow/FlowCodec.cpp:165-167`); up to 16 in 1d chunks |
+| `grid_count` | u8 | 0 only when the chunk has no bars; 1 in 1m and 1h chunks (one UTC day has one grid, `flow/FlowCodec.cpp:169-175`); up to 16 in 1d chunks |
 | grids | `grid_count` x 32 | i64 `row_tick_units`, i64 `price_scale`, i64 `base_scale`, i64 `quote_scale` |
 | `run_count` | u8 | coverage runs |
 | runs | `run_count` x 5 | u16 from slot, u16 to slot (exclusive), u8 status: 1 complete, 2 partial, 3 unrecorded. Ascending, contiguous, covering `[0, slots)` exactly. A building slot never appears: a chunk with one is not sealed and not encoded. |
@@ -185,7 +187,7 @@ Rows section:
 
 Derived on read, never stored: low row, delta = buy - sell, unknown-side volume = base - buy - sell, maximum row
 volume, VWAP (section 1). A row with zero volumes exists where only unknown-side trades printed
-(`flow/FlowBarBuilder.cpp:189-195`).
+(`flow/FlowBarBuilder.cpp:189-201`).
 
 The decoder rejects: anything section 1 rejects; a `price_step` in the key that is not a power of two from 1 to
 2^48; runs that do not tile `[0, slots)` or carry an unknown status;
@@ -229,9 +231,9 @@ Events of the chunk's span: one UTC hour (level 60000), one UTC day (3600000) or
 
 - Order of steps per trade: the section 7 seal rule, trade-id deduplication, grouping, then the floor.
 - Grouping (canonical, as notables today): within each 1m bucket, sort the accepted trades by exchange ms, then
-  numeric trade id, then id text (`tradeLess`, `flow/FlowBarBuilder.cpp:20-26`). A sweep is a maximal run of
+  numeric trade id, then id text (`tradeLess`, `flow/FlowBarBuilder.cpp:21-27`). A sweep is a maximal run of
   neighbours in that order with consecutive numeric ids, equal exchange ms and equal side
-  (`flow/FlowBarBuilder.cpp:202-225`). A trade with a non-numeric id is its own event.
+  (`flow/FlowBarBuilder.cpp:208-230`). A trade with a non-numeric id is its own event.
 - Floor: an event is kept when its notional is at least the instrument's `big_floor_quote` (quote units, server
   config). Section 12 proposes floors (owner decision, open item 2). The floors are part of the instrument's
   rule identity (section 7).
@@ -347,7 +349,7 @@ same rule on what live saw, but nothing requires them to equal the sealed bar.
 - Trades that miss their bar are counted (header, `sentinel_flow_late_trades_total`) and stay in RAWL2.
 - Receive-time regressions (a record below M of its predecessor) are a diagnostic only: counted in the header and
   `sentinel_flow_receive_regressions_total`. They change neither coverage nor content.
-- 1h and 1d bars are `flow::composeFlowBars` (`flow/FlowCompose.cpp:9-70`) of sealed 1m bars only, at the step
+- 1h and 1d bars are `flow::composeFlowBars` (`flow/FlowCompose.cpp:11-95`) of sealed 1m bars only, at the step
   section 4 gives them.
 
 **Live.** Step 3 delivers every applied record's receive time to the flow model before the record's trades,

@@ -10,10 +10,10 @@ void validateDays(std::span<const int64_t> days) {
         if (days[i] % 86400000 || (i && days[i - 1] >= days[i]))
             throw std::invalid_argument("flow epoch pending days");
 }
-}
-inline uint64_t fnv1a(std::span<const uint8_t> bytes, uint64_t h = 14695981039346656037ULL) {
+uint64_t fnv1a(std::span<const uint8_t> bytes, uint64_t h = 14695981039346656037ULL) {
     for (auto b : bytes) { h ^= b; h *= 1099511628211ULL; }
     return h;
+}
 }
 std::string flowDomain(const std::string& instrument) { return "flow:" + instrument; }
 uint64_t epochOf(const std::string& domain, const EpochState& e) {

@@ -480,7 +480,10 @@ TEST(FlowChunkDecode, OpenDeltaOverflowFromPreviousClose) {
     bytes.insert(bytes.begin() + at, 2); // +1 on INT64_MAX
     EXPECT_ANY_THROW(codec::decode(bytes, Minute, T0, 60, true));
 }
-TEST(FlowChunkDecode, NonpositiveLow) { Payload p; p.down = 100; refused(p); }
+TEST(FlowChunkDecode, NonpositiveLow) {
+    Payload p; p.down = 100;
+    EXPECT_ANY_THROW(codec::decode(p.bytes(true), Minute, T0, 60, true));
+}
 TEST(FlowChunkDecode, CloseAboveHigh) { Payload p; p.close = 3; refused(p); }
 TEST(FlowChunkDecode, SideVolumesAboveBase) { Payload p; p.base = 2; refused(p); }
 TEST(FlowChunkDecode, VolumeOutsideI64) { Payload p; p.quote = uint64_t(INT64_MAX) + 1; refused(p); }
@@ -493,7 +496,10 @@ TEST(FlowChunkDecode, BidSumOverflow) { Payload p; p.bids = {INT64_MAX, 1}; refu
 TEST(FlowChunkDecode, KnownCountsAboveCount) { Payload p; p.bidCounts[0] = 2; refused(p); }
 TEST(FlowChunkDecode, RowCountOutsideU32) { Payload p; p.bidCounts[0] = uint64_t(UINT32_MAX) + 1; refused(p); }
 TEST(FlowChunkDecode, NonascendingOffsetGap) { Payload p; p.offsets[1] = UINT64_MAX; refused(p); }
-TEST(FlowChunkDecode, OffsetAbove65534) { Payload p; p.offsets[1] = 65534; refused(p); }
+TEST(FlowChunkDecode, OffsetAbove65534) {
+    Payload p; p.up = p.close = 65535; p.offsets[1] = 65534;
+    refused(p);
+}
 TEST(FlowChunkDecode, FirstOffsetNotZero) { Payload p; p.offsets[0] = 1; refused(p); }
 TEST(FlowChunkDecode, LastOffsetNotHighRow) { Payload p; p.offsets[1] = 0; refused(p); }
 TEST(FlowChunkDecode, TrailingBytes) {

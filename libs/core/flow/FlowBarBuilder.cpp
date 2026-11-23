@@ -175,7 +175,8 @@ FlowBar FlowBarBuilder::materialize(int64_t start, Bucket& bucket) const {
     // Choose the smallest fitting step before accumulating rows, so no trade is
     // rejected for range and no finer detail is invented on materialization.
     uint64_t step = 1;
-    while (bucket.maxRow / int64_t(step) - bucket.minRow / int64_t(step) > chunks::MaxOffset) step *= 2;
+    while (recording::floorDiv(bucket.maxRow, int64_t(step)) -
+           recording::floorDiv(bucket.minRow, int64_t(step)) > chunks::MaxOffset) step *= 2;
     bar.nativeTick *= double(step);
     bar.lowRow = recording::floorDiv(bucket.minRow, int64_t(step));
     std::map<int64_t, Row> rows;

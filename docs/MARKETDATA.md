@@ -311,6 +311,9 @@ For a final bucket with partial or building store coverage, an available bar
 is `source: "store"`, `complete: false`, with its store revision; a later
 complete store page replaces it by store revision.
 Store revisions use the FLD1 day generation, including empty constituent hours.
+An FLD1 day retains the recorder grid in its header; an individual wide bar may carry a power-of-two coarser
+`nativeTick` and its `lowRow` and u16 offsets use that bar's tick. FLD1 readers and coarse FHE1 composition accept
+those bars.
 Revision and completeness are envelope metadata; FLB1 content is unchanged.
 Each range has half-open `from_ms`, `to_ms`, `status`, `price_scale` and
 `row_tick_units`. There is one range per requested bucket, including buckets

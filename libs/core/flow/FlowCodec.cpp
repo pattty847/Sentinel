@@ -1,4 +1,5 @@
 #include "FlowCodec.hpp"
+#include "FlowRowStep.hpp"
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -95,6 +96,13 @@ void validate(const FlowBar& b) {
         }
     }
 }
+bool compatibleDayGrid(const FlowBar& bar, const DayFile& day) {
+    if (bar.priceScale != day.priceScale || bar.baseScale != day.baseScale ||
+        bar.quoteScale != day.quoteScale) return false;
+    const auto dayTick = chunks::tickUnits(day.nativeTick, day.priceScale);
+    const auto barTick = chunks::tickUnits(bar.nativeTick, bar.priceScale);
+    return barTick % dayTick == 0 && chunks::validStep(uint64_t(barTick / dayTick));
+}
 }
 Bytes encodeFlowBar(const FlowBar& b) {
     validate(b);
@@ -162,9 +170,7 @@ Bytes encodeFlowDay(const DayFile& day) {
     for (const auto& bar : day.bars) {
         if (bar.startMs <= previous || bar.startMs < day.dayStartMs ||
             bar.startMs >= day.dayStartMs + 86'400'000 ||
-            bar.timeframeMs != day.timeframeMs || bar.nativeTick != day.nativeTick ||
-            bar.priceScale != day.priceScale || bar.baseScale != day.baseScale ||
-            bar.quoteScale != day.quoteScale)
+            bar.timeframeMs != day.timeframeMs || !compatibleDayGrid(bar, day))
             throw std::invalid_argument("invalid day bar index");
         previous = bar.startMs;
         frames.push_back(encodeFlowBar(bar));
@@ -203,6 +209,7 @@ DayFile decodeFlowDay(std::span<const uint8_t> bytes, DayCheck check) {
         if (e.offset != end || e.length > bytes.size() - end) throw std::runtime_error("invalid flow index");
         auto bar = decodeFlowBar(bytes.subspan(end, e.length));
         if (bar.startMs != e.start) throw std::runtime_error("flow index key mismatch");
+        if (!compatibleDayGrid(bar, day)) throw std::runtime_error("flow day bar grid mismatch");
         day.bars.push_back(std::move(bar)); day.revisions.push_back(e.revision);
         end += e.length;
     }

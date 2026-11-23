@@ -1,8 +1,11 @@
 #include "flow/FlowBarBuilder.hpp"
 #include "flow/FlowCodec.hpp"
 #include "flow/FlowCompose.hpp"
+#include "flow/FlowChunkCodec.hpp"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <limits>
 
 using namespace sentinel::flow;
@@ -261,6 +264,57 @@ TEST(FlowBar, BuilderCoarsensWideBarToStepTwo) {
     EXPECT_EQ(bar.rows.back().offset, 32767);
     EXPECT_EQ(bar.rows.front().bidVol, 2 * Base); EXPECT_EQ(bar.rows.front().askVol, Base);
     EXPECT_EQ(bar.count, 3); EXPECT_EQ(decodeFlowBar(encodeFlowBar(bar)), bar);
+}
+TEST(FlowBar, DayFileRoundTripsCoarseBarAndComposesHistoryPage) {
+    auto b = builder();
+    accepted(b, {"fine", 0, 100, 1, Side::Buy});
+    accepted(b, {"low", 60000, 100, 1, Side::Buy});
+    accepted(b, {"high", 60001, 65635, 1, Side::Sell});
+    DayFile day;
+    day.product = "BTC-USD"; day.dayStartMs = 0; day.timeframeMs = 60000;
+    day.nativeTick = 1; day.priceScale = 100; day.baseScale = Base; day.quoteScale = Quote;
+    day.bars = b.bars(); day.revisions.assign(day.bars.size(), 0);
+    ASSERT_EQ(day.bars.size(), 2u);
+    ASSERT_EQ(day.bars.back().nativeTick, 2);
+    const auto bytes = encodeFlowDay(day);
+    const auto decoded = decodeFlowDay(bytes, DayCheck::ReEncode);
+    EXPECT_EQ(decoded, day);
+    EXPECT_EQ(decodeFlowDay(bytes, DayCheck::BarsOnly), day);
+    const auto page = composeFlowBars(decoded.bars, 120000);
+    EXPECT_EQ(page.nativeTick, 2);
+    EXPECT_EQ(decodeFlowBar(encodeFlowBar(page)), page);
+    auto mixed = day;
+    mixed.bars.back().nativeTick *= 3;
+    EXPECT_THROW(encodeFlowDay(mixed), std::invalid_argument);
+}
+TEST(FlowBar, ComposeStepOnePreservesNativeTickBits) {
+    FlowBarBuilder b(60000, 4.9999999999999996e-06, 1'000'000, Base, Quote);
+    accepted(b, {"a", 0, 1, 1, Side::Buy});
+    accepted(b, {"b", 60000, 1.000005, 1, Side::Sell});
+    const auto bars = b.bars();
+    ASSERT_EQ(bars.size(), 2u);
+    const auto composed = composeFlowBars(bars, 120000);
+    EXPECT_EQ(std::bit_cast<uint64_t>(composed.nativeTick), std::bit_cast<uint64_t>(bars.front().nativeTick));
+}
+TEST(FlowBar, LargePowerOfTwoTicksRemainRepresentable) {
+    FlowBarBuilder b(60000, 0.07, 100, Base, Quote);
+    accepted(b, {"low", 0, 0.07, 0.000001, Side::Buy});
+    accepted(b, {"high", 1, 4e13, 0.000001, Side::Sell});
+    auto coarse = b.bars().front();
+    EXPECT_EQ(coarse.nativeTick, 0.07 * double(uint64_t(1) << 34));
+    EXPECT_NO_THROW(composeFlowBars(std::span(&coarse, 1), 120000));
+    const chunks::FlowGrid grid{7, 100, Base, Quote};
+    EXPECT_NO_THROW(chunks::fromBars(std::span(&coarse, 1), 60000, 0, 60, nullptr, std::span(&grid, 1)));
+
+    FlowBarBuilder small(60000, 0.07, 100, Base, Quote);
+    accepted(small, {"a", 0, 0.07, 1, Side::Buy});
+    accepted(small, {"b", 60000, 0.07, 1, Side::Sell});
+    auto bars = small.bars();
+    bars.back().nativeTick *= double(uint64_t(1) << 48);
+    bars.back().lowRow = 0;
+    EXPECT_NO_THROW(composeFlowBars(bars, 120000));
+    const std::array<chunks::FlowGrid, 2> grids{grid, grid};
+    EXPECT_NO_THROW(chunks::fromBars(bars, 60000, 0, 60, nullptr, grids));
 }
 TEST(FlowBar, ComposeStepsOneAndFourUsesFour) {
     FlowBarBuilder a(60000, 1, 100, Base, Quote), b(60000, 4, 100, Base, Quote);

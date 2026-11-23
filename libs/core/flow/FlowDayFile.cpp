@@ -109,6 +109,7 @@ DayFile parseDayFile(std::span<const uint8_t> bytes) {
         s.sourcePrefix = in.fixed(8);
         const auto stepExponent = in.fixed(1);
         const bool flow = i < 26;
+        // trades.big entries stay zero until their payload and source rules land.
         if ((i >= 24 && s.sourcePrefix) || (!flow && (sealed || length)) || sealed > 1 || bool(sealed) != (length > 0) || (length ? offset != next : offset != 0) ||
             length > bytes.size() - next || length > 16 * 1024 * 1024 || (flow && sealed ? stepExponent > MaxStepExponent : stepExponent != 0) ||
             (flow ? (sealed && (summary == 0 || summary > length)) || (!sealed && summary)

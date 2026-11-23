@@ -24,11 +24,13 @@ FlowBar composeFlowBars(std::span<const FlowBar> bars, int64_t timeframeMs) {
     out.high = bars.front().high;
     out.low = bars.front().low;
     int64_t finestTick = INT64_MAX, coarsestTick = 0;
+    double finestNativeTick = 0;
     for (const auto& bar : bars) {
         if (bar.priceScale != out.priceScale || bar.baseScale != out.baseScale || bar.quoteScale != out.quoteScale)
             throw std::invalid_argument("incompatible flow scales");
         const auto tick = chunks::tickUnits(bar.nativeTick, bar.priceScale);
-        finestTick = std::min(finestTick, tick); coarsestTick = std::max(coarsestTick, tick);
+        if (tick < finestTick) { finestTick = tick; finestNativeTick = bar.nativeTick; }
+        coarsestTick = std::max(coarsestTick, tick);
         out.low = std::min(out.low, bar.low); out.high = std::max(out.high, bar.high);
     }
     for (const auto& bar : bars) {
@@ -43,7 +45,7 @@ FlowBar composeFlowBars(std::span<const FlowBar> bars, int64_t timeframeMs) {
     int64_t outputTick;
     if (__builtin_mul_overflow(finestTick, int64_t(step), &outputTick))
         throw std::overflow_error("flow tick overflow");
-    out.nativeTick = double(outputTick) / double(out.priceScale);
+    out.nativeTick = finestNativeTick * double(step);
     out.lowRow = recording::floorDiv(*low, outputTick);
     std::map<int64_t, Row> rows;
     int64_t previous = out.startMs - 1;

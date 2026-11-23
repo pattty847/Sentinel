@@ -43,6 +43,8 @@
 #include "flow/FlowCompose.hpp"
 #include "flow/FlowChunkCodec.hpp"
 #include "flow/FlowDayFile.hpp"
+#include "flow/FlowRowStep.hpp"
+#include "servermodel/RecordingCodec.hpp"
 #include "roller/JournalFeed.hpp"
 #include "heatmap/ChunkCodec.hpp"
 #include <zstd.h>
@@ -613,6 +615,19 @@ struct LeanDay {
 };
 LeanDay leanDay(const std::string& symbol, const flow::DayFile& day, LeanSizes* minute, LeanSizes* hour, Checks& checks) {
     LeanDay out;
+    // Some historical FLD1 bars have a lowRow that disagrees with their price.
+    // Count and omit those bars so one legacy inconsistency does not abort a day.
+    std::vector<flow::FlowBar> usable;
+    usable.reserve(day.bars.size());
+    for (const auto& bar : day.bars) {
+        const auto low = recording::priceUnits(bar.low, double(bar.priceScale));
+        const auto tick = flow::chunks::tickUnits(bar.nativeTick, bar.priceScale);
+        if (low && recording::floorDiv(*low, tick) != bar.lowRow) {
+            ++checks.stats.lowRowMismatch;
+            continue;
+        }
+        usable.push_back(bar);
+    }
     out.file.instrument = "coinbase:" + symbol;
     out.file.dayStartMs = day.dayStartMs;
     out.file.grid = {std::llround(day.nativeTick * double(day.priceScale)), day.priceScale, day.baseScale, day.quoteScale};
@@ -620,7 +635,7 @@ LeanDay leanDay(const std::string& symbol, const flow::DayFile& day, LeanSizes* 
     for (int h = 0; h < 24; ++h) {
         const int64_t from = day.dayStartMs + h * Hour;
         std::vector<flow::FlowBar> bars;
-        for (const auto& b : day.bars) if (b.startMs >= from && b.startMs < from + Hour) bars.push_back(b);
+        for (const auto& b : usable) if (b.startMs >= from && b.startMs < from + Hour) bars.push_back(b);
         auto payload = chunkSizes(minute ? *minute : scratch, bars, Minute, from, 60, checks);
         const auto summary = codec::encode(codec::fromBars(bars, Minute, from, 60), true);
         out.file.sections[size_t(h)] = {true, uint32_t(summary.size()), 0, payload};
@@ -630,8 +645,8 @@ LeanDay leanDay(const std::string& symbol, const flow::DayFile& day, LeanSizes* 
     auto hourPayload = chunkSizes(hour ? *hour : scratch, out.hourBars, Hour, day.dayStartMs, 24, checks);
     out.file.sections[24] = {true, uint32_t(codec::encode(codec::fromBars(out.hourBars, Hour, day.dayStartMs, 24), true).size()), 0, hourPayload};
     std::vector<flow::FlowBar> dayBars;
-    if (!day.bars.empty()) {
-        try { out.dayBar = flow::composeFlowBars(day.bars, Day); dayBars.push_back(*out.dayBar); }
+    if (!usable.empty()) {
+        try { out.dayBar = flow::composeFlowBars(usable, Day); dayBars.push_back(*out.dayBar); }
         catch (const std::out_of_range&) {}
     }
     const auto piece = codec::fromBars(dayBars, Day, day.dayStartMs, 1);
