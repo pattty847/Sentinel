@@ -161,11 +161,11 @@ TEST(FlowBar, RecorderRowFloorAndRejectedInputs) {
     EXPECT_EQ(b.bars().front().startMs, -60'000);
     EXPECT_EQ(b.add({"bad", 0, std::numeric_limits<double>::quiet_NaN(), 1, Side::Buy}),
               FlowBarBuilder::AddResult::Rejected);
-    EXPECT_EQ(b.add({"far", -2, 140000, 1, Side::Buy}), FlowBarBuilder::AddResult::Rejected);
+    accepted(b, {"far", -2, 140000, 1, Side::Buy});
     EXPECT_EQ(b.add({"side", 0, 100, 1, static_cast<Side>(3)}),
               FlowBarBuilder::AddResult::Rejected);
-    EXPECT_EQ(b.rejectedCount(), 3);
-    EXPECT_EQ(b.bars().front().count, 1);
+    EXPECT_EQ(b.rejectedCount(), 2);
+    EXPECT_EQ(b.bars().front().count, 2);
 }
 
 TEST(FlowBar, MixedIdsHaveDeterministicTimeTieOrder) {
@@ -239,4 +239,60 @@ TEST(FlowBar, DayDecodeBarsOnlySkipsOnlyTheWholeDayReEncode) {
     auto truncated = bytes;
     truncated.pop_back();
     EXPECT_ANY_THROW(decodeFlowDay(truncated, DayCheck::BarsOnly));
+}
+
+TEST(FlowBar, BuilderAcceptsOffsetAbove32767AndFlb1RoundTrips) {
+    auto b = builder();
+    accepted(b, {"lo", 0, 100, 1, Side::Buy});
+    accepted(b, {"hi", 1, 40100, 1, Side::Sell});
+    const auto bar = b.bars().front();
+    EXPECT_EQ(bar.rows.back().offset, 40000); EXPECT_EQ(bar.nativeTick, 1);
+    EXPECT_EQ(bar.count, 2); EXPECT_EQ(b.rejectedCount(), 0u);
+    EXPECT_EQ(decodeFlowBar(encodeFlowBar(bar)), bar);
+}
+TEST(FlowBar, BuilderCoarsensWideBarToStepTwo) {
+    auto b = builder();
+    accepted(b, {"lo", 0, 101, 1, Side::Buy});
+    accepted(b, {"same-bin", 1, 100, 2, Side::Sell});
+    accepted(b, {"hi", 2, 65635, 3, Side::Buy});
+    const auto bar = b.bars().front();
+    EXPECT_EQ(bar.nativeTick, 2); EXPECT_EQ(bar.lowRow, 50);
+    ASSERT_EQ(bar.rows.size(), 2u);
+    EXPECT_EQ(bar.rows.back().offset, 32767);
+    EXPECT_EQ(bar.rows.front().bidVol, 2 * Base); EXPECT_EQ(bar.rows.front().askVol, Base);
+    EXPECT_EQ(bar.count, 3); EXPECT_EQ(decodeFlowBar(encodeFlowBar(bar)), bar);
+}
+TEST(FlowBar, ComposeStepsOneAndFourUsesFour) {
+    FlowBarBuilder a(60000, 1, 100, Base, Quote), b(60000, 4, 100, Base, Quote);
+    accepted(a, {"a", 0, 101, 1, Side::Buy});
+    accepted(b, {"b", 60000, 107, 2, Side::Sell});
+    std::vector<FlowBar> bars{a.bars().front(), b.bars().front()};
+    const auto composed = composeFlowBars(bars, 120000);
+    EXPECT_EQ(composed.nativeTick, 4); EXPECT_EQ(composed.lowRow, 25);
+    ASSERT_EQ(composed.rows.size(), 2u); EXPECT_EQ(composed.rows.back().offset, 1);
+    EXPECT_EQ(decodeFlowBar(encodeFlowBar(composed)), composed);
+    bars[1].baseScale *= 2;
+    EXPECT_THROW(composeFlowBars(bars, 120000), std::invalid_argument);
+}
+TEST(FlowBar, ComposeWideRangeChoosesSmallestFittingStep) {
+    auto b = builder();
+    accepted(b, {"lo", 0, 100, 1, Side::Buy});
+    accepted(b, {"hi", 60000, 200100, 1, Side::Sell});
+    const auto composed = composeFlowBars(b.bars(), 120000);
+    EXPECT_EQ(composed.nativeTick, 4); EXPECT_EQ(composed.rows.back().offset, 50000);
+    EXPECT_EQ(decodeFlowBar(encodeFlowBar(composed)), composed);
+}
+TEST(FlowBar, ComposeStillRefusesMixedGrids) {
+    auto b = builder();
+    accepted(b, {"a", 0, 100, 1, Side::Buy}); accepted(b, {"b", 60000, 101, 1, Side::Sell});
+    const auto original = b.bars();
+    for (int field = 0; field < 5; ++field) {
+        auto bars = original;
+        if (field == 0) bars[1].priceScale *= 2;
+        if (field == 1) bars[1].baseScale *= 2;
+        if (field == 2) bars[1].quoteScale *= 2;
+        if (field == 3) bars[1].nativeTick *= 3;
+        if (field == 4) bars[1].nativeTick += 0.001;
+        EXPECT_THROW(composeFlowBars(bars, 120000), std::invalid_argument) << field;
+    }
 }

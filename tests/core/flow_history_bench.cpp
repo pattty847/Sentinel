@@ -36,12 +36,13 @@
 //   flow_history_bench --columnar <fld1-root> <symbol> <YYYY-MM-DD>...
 //
 // Columnar mode: re-lays FLD1 days in the section 4 payload and the section 5
-// day file of docs/FLOW_CHUNKS.md (flow_chunk_proto.hpp) and prints sizes raw
+// day file of docs/FLOW_CHUNKS.md (flow/FlowChunkCodec.hpp) and prints sizes raw
 // and with zstd against FLB1, read cost, 1h and assembled 16-day 1d chunks, row
 // density, int16 offset headroom and big-trade floor counts over every FLD1 day.
 #include "flow/FlowCodec.hpp"
 #include "flow/FlowCompose.hpp"
-#include "flow_chunk_proto.hpp"
+#include "flow/FlowChunkCodec.hpp"
+#include "flow/FlowDayFile.hpp"
 #include "roller/JournalFeed.hpp"
 #include "heatmap/ChunkCodec.hpp"
 #include <zstd.h>
@@ -510,7 +511,7 @@ void latenessDay(const fs::path& journalRoot, const std::string& symbol, int64_t
 }
 
 // ---- Columnar mode -------------------------------------------------------
-namespace proto = flow::proto;
+namespace codec = flow::chunks;
 
 size_t zstdSize(const std::vector<uint8_t>& raw, int level) {
     if (raw.empty()) return 0;
@@ -548,24 +549,22 @@ std::vector<uint8_t> flb1Form(std::span<const flow::FlowBar> bars, bool notables
     }
     return out;
 }
-struct LeanSizes { Size3 flb1, flb1NoNotables, fixed, varint, spec, summary; size_t bars = 0; };
+struct LeanSizes { Size3 flb1, flb1NoNotables, spec, summary; size_t bars = 0; };
 
-struct Checks { proto::Stats stats; uint64_t roundTrip = 0, assembly = 0, dayFile = 0; };
+struct Checks { codec::Stats stats; uint64_t roundTrip = 0, assembly = 0, dayFile = 0; };
 
 // One chunk at one level: the spec payload (flow.rows), its summary prefix
-// (flow.summary) and the two measurement variants; checks the spec round trip.
+// (flow.summary); checks the production round trip.
 std::vector<uint8_t> chunkSizes(LeanSizes& s, std::span<const flow::FlowBar> bars, int64_t level, int64_t start,
                                 uint32_t slotCount, Checks& checks) {
     s.bars += bars.size();
     s.flb1.add(flb1Form(bars, true));
     s.flb1NoNotables.add(flb1Form(bars, false));
-    const auto chunk = proto::fromBars(bars, level, start, slotCount, &checks.stats);
-    s.fixed.add(proto::encode(chunk, proto::Encoding::Fixed));
-    s.varint.add(proto::encode(chunk, proto::Encoding::Varint));
-    auto spec = proto::encode(chunk, proto::Encoding::Spec);
+    const auto chunk = codec::fromBars(bars, level, start, slotCount, &checks.stats);
+    auto spec = codec::encode(chunk);
     s.spec.add(spec);
-    s.summary.add(proto::encode(chunk, proto::Encoding::Spec, true));
-    const auto back = proto::toBars(proto::decode(spec, proto::Encoding::Spec, level, start, slotCount));
+    s.summary.add(codec::encode(chunk, true));
+    const auto back = codec::toBars(codec::decode(spec, level, start, slotCount));
     if (back.size() != bars.size()) checks.roundTrip += bars.size();
     else for (size_t i = 0; i < bars.size(); ++i) checks.roundTrip += !(back[i] == stripNotables(bars[i]));
     return spec;
@@ -573,7 +572,6 @@ std::vector<uint8_t> chunkSizes(LeanSizes& s, std::span<const flow::FlowBar> bar
 void printLean(const std::string& symbol, const std::string& label, const LeanSizes& s) {
     std::cout << "mode=columnar symbol=" << symbol << ' ' << label << " bars=" << s.bars
               << fmt("flb1", s.flb1, s.bars) << fmt("flb1_no_notables", s.flb1NoNotables, s.bars)
-              << fmt("variant_fixed", s.fixed, s.bars) << fmt("variant_varint", s.varint, s.bars)
               << fmt("spec_rows", s.spec, s.bars) << fmt("spec_summary", s.summary, s.bars) << '\n';
 }
 
@@ -608,7 +606,7 @@ void printDensity(const std::string& symbol, const char* level, Density& d) {
 // Every hour present in FLD1 is taken as sealed and complete; an hour without
 // bars is a sealed empty section.
 struct LeanDay {
-    proto::DayFile file;
+    codec::DayFile file;
     std::vector<flow::FlowBar> hourBars;
     std::optional<flow::FlowBar> dayBar;
     std::vector<std::vector<uint8_t>> hourPayloads;
@@ -624,22 +622,21 @@ LeanDay leanDay(const std::string& symbol, const flow::DayFile& day, LeanSizes* 
         std::vector<flow::FlowBar> bars;
         for (const auto& b : day.bars) if (b.startMs >= from && b.startMs < from + Hour) bars.push_back(b);
         auto payload = chunkSizes(minute ? *minute : scratch, bars, Minute, from, 60, checks);
-        const auto summary = proto::encode(proto::fromBars(bars, Minute, from, 60), proto::Encoding::Spec, true);
+        const auto summary = codec::encode(codec::fromBars(bars, Minute, from, 60), true);
         out.file.sections[size_t(h)] = {true, uint32_t(summary.size()), 0, payload};
         out.hourPayloads.push_back(std::move(payload));
         if (!bars.empty()) out.hourBars.push_back(flow::composeFlowBars(bars, Hour));
     }
     auto hourPayload = chunkSizes(hour ? *hour : scratch, out.hourBars, Hour, day.dayStartMs, 24, checks);
-    out.file.sections[24] = {true, uint32_t(proto::encode(proto::fromBars(out.hourBars, Hour, day.dayStartMs, 24),
-                                                          proto::Encoding::Spec, true).size()), 0, hourPayload};
+    out.file.sections[24] = {true, uint32_t(codec::encode(codec::fromBars(out.hourBars, Hour, day.dayStartMs, 24), true).size()), 0, hourPayload};
     std::vector<flow::FlowBar> dayBars;
     if (!day.bars.empty()) {
         try { out.dayBar = flow::composeFlowBars(day.bars, Day); dayBars.push_back(*out.dayBar); }
         catch (const std::out_of_range&) {}
     }
-    const auto piece = proto::fromBars(dayBars, Day, day.dayStartMs, 1);
-    out.file.sections[25] = {true, uint32_t(proto::encode(piece, proto::Encoding::Spec, true).size()), 0,
-                             proto::encode(piece, proto::Encoding::Spec)};
+    const auto piece = codec::fromBars(dayBars, Day, day.dayStartMs, 1);
+    out.file.sections[25] = {true, uint32_t(codec::encode(piece, true).size()), 0,
+                             codec::encode(piece)};
     return out;
 }
 
@@ -653,17 +650,17 @@ void columnar(const fs::path& root, const std::string& symbol, const std::vector
         const double fldDecodeMs = msSince(start);
         LeanSizes minute, hour;
         const auto lean = leanDay(symbol, day, &minute, &hour, checks);
-        const auto file = proto::encodeDayFile(lean.file);
+        const auto file = codec::encodeDayFile(lean.file);
         Size3 fldFile, leanFile;
         fldFile.add(bytes);
         leanFile.add(file);
         // Read cost: parse the day file (header, table, CRCs) and decode its 24 hour sections.
         start = Clock::now();
-        const auto parsed = proto::parseDayFile(file);
+        const auto parsed = codec::parseDayFile(file);
         size_t decodedBars = 0;
         for (int h = 0; h < 24; ++h)
-            decodedBars += proto::decode(parsed.sections[size_t(h)].payload, proto::Encoding::Spec, Minute,
-                                         dayMs + h * Hour, 60).bars();
+            decodedBars += codec::decode(parsed.sections[size_t(h)].payload, Minute,
+                                         dayMs + h * Hour, 60).bars;
         const double leanDecodeMs = msSince(start);
         checks.dayFile += !(parsed == lean.file);
         printLean(symbol, "day=" + dayName(dayMs) + " level=1m unit=hour_chunks", minute);
@@ -722,11 +719,11 @@ void columnar(const fs::path& root, const std::string& symbol, const std::vector
     for (auto& [start, bars] : dayBars) {
         std::sort(bars.begin(), bars.end(), [](const auto& a, const auto& b) { return a.startMs < b.startMs; });
         LeanSizes s;
-        auto direct = proto::fromBars(bars, Day, start, uint32_t(heatmap::kDayChunkDays));
+        auto direct = codec::fromBars(bars, Day, start, uint32_t(heatmap::kDayChunkDays));
         // Assembly from the day pieces must give the direct encoding (absent days: unrecorded).
         std::vector<std::vector<uint8_t>> span(static_cast<size_t>(heatmap::kDayChunkDays));
         for (const auto& [day, piece] : pieces[start]) span[size_t((day - start) / Day)] = piece;
-        const auto assembled = proto::assembleDayChunk(start, span, proto::Status::Unrecorded);
+        const auto assembled = codec::assembleDayChunk(start, span, codec::Status::Unrecorded);
         direct.coverage = assembled.coverage;
         checks.assembly += !(assembled == direct);
         chunkSizes(s, bars, Day, start, uint32_t(heatmap::kDayChunkDays), checks);

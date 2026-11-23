@@ -1,13 +1,14 @@
 # Flow chunks
 
-**Draft spec, not implemented.** Nothing here describes running code. Flow history today (FLD1 day
+**Chunk codecs implemented; serving and storage migration pending.** Flow history today (FLD1 day
 files, FHE1 pages, `flow_bar` live messages) is in [MARKETDATA.md](MARKETDATA.md) "Live flow bars" and
 "Flow history". This spec replaces FLD1 and FHE1 and puts flow on heatmap-style chunks. The server
 (plan step 3) and the client (step 5) implement it; step 4 moves the heatmap onto the same envelope.
 Measurements are in section 12. They come from `flow_history_bench --lateness` and `--columnar`
-(`tests/core/flow_history_bench.cpp`). `tests/core/flow_chunk_proto.hpp` is a prototype of the section 4
-payload and row steps, the section 5 day file, the 16-day assembly and the section 7 epoch state, with golden bytes
-in `test_flow_chunk_proto.cpp`.
+(`tests/core/flow_history_bench.cpp`). Production byte codecs are in `libs/core/flow/FlowChunkCodec.*`,
+`FlowChunkDecode.cpp`, `FlowDayFile.*`, and `FlowEpoch.*`, with row steps in `FlowRowStep.hpp` and
+single-allocation decoded fields in `FlowChunk.hpp`. Golden bytes and validation tests are in
+`tests/core/test_flow_chunk.cpp`. These libraries add no disk I/O or request handling.
 
 Decided rules this spec makes exact:
 - RAWL2 is the only truth. Every flow file is a rebuildable index of it.
@@ -25,7 +26,7 @@ One unit per quantity. Every price is in **price units**; rows are used only for
 | --- | --- | --- | --- |
 | Price, open, high, low, close | price units = price x `price_scale` | i64 | `price_scale` is at least 1 / quote increment (`roller/Grid.cpp:53`), so every trade price is an integer; conversion `recording::priceUnits` (`servermodel/RecordingCodec.hpp:89`) |
 | Row | native row `floorDiv(price units, row_tick_units)` on the day's recorder grid; at step s (section 4) `floorDiv(native row, s)` | not stored | `flow/FlowBarBuilder.cpp:142` |
-| Row offset | row - low row of its bar, at the chunk's step | u16, 0..65534 | `flow/FlowBar.hpp:21` (int16 today; step 3 widens it) |
+| Row offset | row - low row of its bar, at the chunk's step | u16, 0..65534 | `flow/FlowBar.hpp:21` (u16) |
 | Low row | the row of `low` | derived | at step 1 holds for every FLD1 bar (section 12) |
 | Base volume | size x `base_scale` (10^decimals of `base_increment`) | i64, >= 0 | `flow/FlowScales.cpp:8-27` |
 | Quote volume | price x size x `quote_scale` (10^8), rounded once per trade | i64, >= 0 | `flow/FlowBarBuilder.cpp:95-116` |
@@ -194,7 +195,7 @@ sum other than buy; known row counts above `count`; offsets not ascending or abo
 than 0; a last offset other than the row of `high` - low row, on the bar's own grid at the key's step; trailing
 bytes. A `complete` slot without a bar is an observed empty minute; `unrecorded` means no recording.
 
-Golden bytes for one bar: `test_flow_chunk_proto.cpp`, `GoldenSpecBytes`.
+Golden bytes for one bar: `tests/core/test_flow_chunk.cpp`, `GoldenSpecBytes`.
 
 ### Row step
 
@@ -213,12 +214,12 @@ FLB1 included. Nothing is rejected for its price range: a wider bar is stored at
   A coarse bucket whose constituents have different steps is composed at the coarsest, or coarser if it needs it.
 - One wide bar coarsens its whole chunk (an hour of 1m rows, a day of 1h rows, 16 days of 1d rows); per-bar steps
   would need a payload field, and no measured bar needs a step above 1 (section 12).
-- Step 3 widens production to match: `FlowBar::Row.offset` becomes u16 (`flow/FlowBar.hpp:21`), `FlowBarBuilder`
-  stops rejecting a trade that widens its bar past 32,767 rows (`flow/FlowBarBuilder.cpp:148`), and
-  `composeFlowBars` applies this rule instead of throwing (`flow/FlowCompose.cpp:56`). FLB1 has no step field: a
+- Production rows follow this rule: `Row.offset` is u16 (`flow/FlowBar.hpp:21`), `FlowBarBuilder`
+  retains trades that widen a bar and materializes at the smallest fitting step;
+  `composeFlowBars` accepts power-of-two-related ticks and applies the same rule. FLB1 has no step field: a
   live bar at step s is sent with row tick `row_tick_units x s`, the same rows.
 
-Prototype: `stepFor`, `rebin`; tests `WidestOffsetRoundTrips`, `WideBarTakesTheSmallestFittingStep`,
+Production: `FlowRowStep.hpp::stepFor`, `FlowChunkCodec.cpp::rebin`; tests `WidestOffsetRoundTrips`, `WideBarTakesTheSmallestFittingStep`,
 `SixteenDayAssemblyComposesAtTheCoarsestStep`.
 
 ### trades.big
@@ -253,7 +254,7 @@ Trade ids are not stored: sealed chunks and the live tape meet at the sealed bou
 
 ## 5. Per-day file (replaces FLD1)
 
-Path `<flow_root>/<venue>/<symbol>/<YYYY-MM-DD>.flc` (UTC day). Prototype: `encodeDayFile`, `parseDayFile`.
+Path `<flow_root>/<venue>/<symbol>/<YYYY-MM-DD>.flc` (UTC day). Production: `FlowDayFile.cpp::encodeDayFile`, `parseDayFile`.
 
 | Part | Layout |
 | --- | --- |
@@ -281,7 +282,7 @@ are complete, `unrecorded` if all are unrecorded, otherwise `partial` (the FHE1 
 - Serving 1m and 1h: the section bytes are the payload (cut at the summary length for `flow.summary`), without
   decode or re-encode; field 8 is 2^k (0 for `flow.summary`).
 - Serving the 16-day 1d chunk and the day and 16-day `trades.big` chunks: assembled once from pieces, encoded and
-  cached (prototype `assembleDayChunk`):
+  cached (`FlowChunkCodec.cpp::assembleDayChunk`):
   1. slot = (day - chunk start) / 1 day. A day with a sealed piece takes the piece's coverage status and bar. A day
      without a RAWL2 source is `unrecorded`. Any other day leaves the chunk unsealed (not served).
   2. Grids in slot order of first use; a grid index per bar when there is more than one. The chunk's step is the
@@ -412,7 +413,9 @@ its epoch; every other instrument keeps its epoch, byte cache and held chunks.
 
 - Rule identity, per instrument = FNV-1a 64 of every rule and config value that can change its sealed bytes:
   builder rule version, W, scale rule version, its big-trade floor, payload versions, and any later one. Each day
-  file header records the identity it was built under.
+  file header records the identity it was built under. `FlowEpoch.cpp::ruleIdentity` serializes the current
+  tuple as little-endian u8 builder version, u32 W, u8 scale version, u64 big-trade floor, then u16 payload
+  versions for summary, rows and big trades, in that order.
 - epoch = FNV-1a 64 of (domain name, rule identity, counter).
 - `<flow_root>/<venue>/<symbol>/epoch` holds the instrument's u64 counter, u64 rule identity, u32 count of pending
   days, i64 day starts, u32 CRC-32; it is always replaced atomically (temp file, fsync, rename, directory fsync).
@@ -439,7 +442,7 @@ Transition of one instrument, in this order:
 
 - New bytes are never served under the old epoch (the counter moves at step 2, before any new file exists), and old
   bytes of affected days are never served under the new epoch (fenced until rebuilt, and refused by the rule
-  identity check). Prototype: `EpochState`, `startupTransition`, `servable`; tests `RuleChangeFencesEveryOldRuleDay`,
+  identity check). Production: `FlowEpoch.*` (`EpochState`, `startupTransition`, `servable`); tests `RuleChangeFencesEveryOldRuleDay`,
   `EpochDomainIsPerInstrument`.
 - A missing or unreadable epoch file is recreated with counter = current Unix time in ms (far above any earlier
   counter) and every day of the instrument pending: no day is served before its table fingerprints are checked
@@ -513,6 +516,8 @@ Retry, busy backoff, deadlines and reconnect follow the heatmap fetcher (MARKETD
 
 Run 2026-11-22 on `/Volumes/T7/sentinel-data` (read-only): `flow_history_bench --lateness <raw-l2> <symbol>
 <days...>` and `flow_history_bench --columnar <hmc2-flow> <symbol> <days...>`.
+The columnar benchmark now uses the production codecs and tests above; the historical Fixed/Varint
+measurement variants have been removed. The tables below retain the original measurements.
 
 ### Lateness
 

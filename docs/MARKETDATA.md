@@ -209,6 +209,11 @@ The server sends JSON `flow_bar` with `schema_version`, `sub`, `symbol`,
 and `bar` (base64-encoded FLB1 bytes).
 FLB1 contains OHLC, integer base/quote volumes and scales, count, native price
 rows, buy/sell totals, delta, maximum row volume and up to eight notable trades.
+Row offsets are unsigned 16-bit values in 0..65534. A wider bar uses the smallest
+power-of-two row step that fits; its `nativeTick` (and envelope `row_tick_units`)
+includes that step, and `lowRow` is on that tick. Composition accepts ticks related
+by powers of two at the coarsest constituent step, or coarser when needed; scales
+must still match. See [FLOW_CHUNKS.md](FLOW_CHUNKS.md#row-step).
 Revision is **only envelope metadata**, never part of FLB1 content. A forming
 update and close republish can share a live revision. Coverage begins when the server
 receives its first live trade; a bar is complete only if that trade was at or

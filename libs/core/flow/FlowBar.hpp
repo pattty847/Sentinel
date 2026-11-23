@@ -18,7 +18,7 @@ struct Trade {
 };
 
 struct Row {
-    int16_t offset = 0; // From lowRow, inclusive.
+    uint16_t offset = 0; // From lowRow on nativeTick (which includes the row step), 0..65534.
     int64_t bidVol = 0, askVol = 0; // baseScale units.
     uint32_t bidCount = 0, askCount = 0;
     bool operator==(const Row&) const = default;

@@ -68,7 +68,7 @@ void validate(const FlowBar& b) {
     uint64_t knownCount = 0;
     int64_t bidSum = 0, askSum = 0;
     for (const auto& r : b.rows) {
-        if (r.offset < 0 || r.offset <= last) throw std::invalid_argument("invalid flow row offset");
+        if (r.offset > 65534 || r.offset <= last) throw std::invalid_argument("invalid flow row offset");
         if (r.bidVol < 0 || r.askVol < 0) throw std::invalid_argument("negative flow row volume");
         if (r.bidVol > b.sellVol - bidSum || r.askVol > b.buyVol - askSum)
             throw std::invalid_argument("flow row volume exceeds side total");
@@ -133,7 +133,7 @@ FlowBar decodeFlowBar(std::span<const uint8_t> bytes) {
     b.count = r.u(8);
     const auto rowCount = r.u(2);
     for (size_t i = 0; i < rowCount; ++i) {
-        Row row; row.offset = static_cast<int16_t>(r.u(2));
+        Row row; row.offset = static_cast<uint16_t>(r.u(2));
         row.bidVol = static_cast<int64_t>(r.vu()); row.askVol = static_cast<int64_t>(r.vu());
         const auto bids = r.vu(), asks = r.vu();
         if (bids > UINT32_MAX || asks > UINT32_MAX) throw std::runtime_error("flow row count overflow");

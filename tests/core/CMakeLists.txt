@@ -11,10 +11,10 @@ add_executable(flow_history_bench EXCLUDE_FROM_ALL flow_history_bench.cpp)
 find_package(zstd CONFIG REQUIRED)
 target_link_libraries(flow_history_bench PRIVATE sentinel_core
     $<IF:$<TARGET_EXISTS:zstd::libzstd_shared>,zstd::libzstd_shared,zstd::libzstd_static>)
-add_executable(test_flow_chunk_proto test_flow_chunk_proto.cpp)
-target_link_libraries(test_flow_chunk_proto PRIVATE sentinel_core GTest::gtest_main)
-add_test(NAME FlowChunkProtoTests COMMAND test_flow_chunk_proto)
-set_tests_properties(FlowChunkProtoTests PROPERTIES LABELS "core")
+add_executable(test_flow_chunk test_flow_chunk.cpp)
+target_link_libraries(test_flow_chunk PRIVATE sentinel_core GTest::gtest_main)
+add_test(NAME FlowChunkTests COMMAND test_flow_chunk)
+set_tests_properties(FlowChunkTests PROPERTIES LABELS "core")
 
 # Test Target: test_log_throttle
 add_executable(test_log_throttle test_log_throttle.cpp)
