@@ -142,3 +142,33 @@ TEST(FanoutPacketBuffer, InvalidLengthsThrowAsBefore) {
     QByteArray overrun; put32(overrun, 8); put32(overrun, 5); overrun.append("{}  ");
     EXPECT_EQ(failure(overrun), "fanout JSON length");
 }
+
+TEST(FanoutPacketBuffer, OneByteReadsSplitEveryPrefix) {
+    std::vector<Expected> expected;
+    for (uint32_t i = 0; i < 4; ++i) expected.push_back({record(2, i), raw(40 + i, 'p')});
+    QByteArray wire;
+    for (const auto& e : expected) wire += packet(e.header, e.raw);
+    ChunkedSource source(split(wire, 1));
+    FanoutPacketBuffer buffer;
+    for (const auto& e : expected) {
+        const auto [header, suffix] = next(buffer, source);
+        EXPECT_EQ(header, e.header);
+        EXPECT_EQ(suffix, e.raw);
+    }
+    EXPECT_EQ(buffer.size(), 0);
+}
+
+TEST(FanoutPacketBuffer, ClearOnReconnectDropsAPartialPacket) {
+    const auto first = packet(record(3, 0), raw(5000, 'q'));
+    ChunkedSource dropped({first.left(first.size() / 2)});
+    FanoutPacketBuffer buffer;
+    buffer.readFrom(dropped);
+    EXPECT_FALSE(buffer.take());
+    buffer.clear(); // LiveSource::handshake on a new socket
+    EXPECT_EQ(buffer.size(), 0);
+    const auto again = packet(record(3, 0), raw(5000, 'q'));
+    ChunkedSource reconnected({again});
+    const auto [header, suffix] = next(buffer, reconnected);
+    EXPECT_EQ(header, record(3, 0));
+    EXPECT_EQ(suffix, raw(5000, 'q'));
+}
