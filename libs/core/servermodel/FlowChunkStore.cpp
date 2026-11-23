@@ -290,9 +290,16 @@ void FlowChunkStore::buildDay(const std::string &id, int64_t day, const FlowStor
                                std::stop_token stop, FlowStore::PassResult &result) {
     const auto symbol = symbolOf(id);
     auto old = load(id, day);
-    if (!archive.catalog) return;
+    auto unavailableSource = [&] {
+        if (old) {
+            transition(id, day);
+            throw std::runtime_error("RAWL2 no longer reaches a previously sealed day");
+        }
+        finishPending(id, day);
+    };
+    if (!archive.catalog) { unavailableSource(); return; }
     const auto cursor = scanCursor(symbol, day - Minute, *archive.catalog, stop);
-    if (!cursor) { if (!old) finishPending(id, day); return; }
+    if (!cursor) { unavailableSource(); return; }
     roller::JournalReader probe(*archive.catalog, cursor);
     roller::JournalRecord input;
     bool sealable = false;
@@ -302,7 +309,7 @@ void FlowChunkStore::buildDay(const std::string &id, int64_t day, const FlowStor
     }
     // A source-only forming day has no sealed bytes to revalidate. It remains
     // unavailable, but does not keep an archive recovery epoch pending forever.
-    if (!sealable) { if (!old) finishPending(id, day); return; }
+    if (!sealable) { unavailableSource(); return; }
     const auto grid = sources_.gridFor(symbol, day, *archive.catalog, stop);
     chunks::DayFile file;
     file.instrument = id; file.dayStartMs = day; file.grid = gridOf(grid);
@@ -356,10 +363,15 @@ bool FlowChunkStore::unchanged(const std::string &id, int64_t day, const FlowSto
     try {
     Day saved;
     { std::lock_guard lock(mutex_); saved = instruments_.at(id).days.at(day); }
-    if (!saved.coarse || saved.invalid) return false;
+    if (!saved.hours || saved.invalid) return false;
     const auto symbol = symbolOf(id);
+    int firstMissing = -1;
     for (int h = 0; h < 24; ++h) {
         check(stop);
+        if (!(saved.hours & (1u << h))) {
+            if (firstMissing < 0) firstMissing = h;
+            continue;
+        }
         if (!saved.sources[h]) return false;
         auto &s = *saved.sources[h];
         const auto hour = day + h * Hour;
@@ -380,6 +392,20 @@ bool FlowChunkStore::unchanged(const std::string &id, int64_t day, const FlowSto
             }
             if (first != s.first || FlowStore::prefixIdentity(*archive.catalog, s.first, s.last, stop) != s.prefix) return false;
             s.stamp = stamp;
+        }
+    }
+    if (firstMissing >= 0) {
+        // Poll the forming hour without rebuilding all of today's sealed
+        // hours and their counters on every wake. A new seal resumes replay.
+        const auto hour = day + firstMissing * Hour;
+        if (const auto cursor = scanCursor(symbol, hour - Minute, *archive.catalog, stop)) {
+            roller::JournalReader reader(*archive.catalog, cursor);
+            roller::JournalRecord record;
+            while (reader.next(record)) {
+                check(stop);
+                if (record.record.time.systemNs / 1'000'000 >= hour + Hour + options_.rules.sealWindowMs) return false;
+            }
+            if (reader.damaged()) return false;
         }
     }
     { std::lock_guard lock(mutex_); instruments_.at(id).days.at(day).sources = saved.sources; }
@@ -438,7 +464,7 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
                 if (!needsBuild && !load(id, *it)) needsBuild = true;
                 if (!needsBuild) continue;
                 try {
-                    if (sourceChanged && unchanged(id, *it, archive, stop)) {
+                    if (unchanged(id, *it, archive, stop)) {
                         if (pendingCount) --pendingCount;
                         if (i.pending) i.pending->set(double(pendingCount));
                         continue;
