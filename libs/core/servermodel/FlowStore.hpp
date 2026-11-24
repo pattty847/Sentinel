@@ -175,7 +175,9 @@ class FlowStore {
     std::map<std::pair<std::string, int64_t>, uint64_t> buildFailures_; // builder thread only
     std::stop_source stopSource_;
     std::thread thread_;
+    bool startupSeeded_ = false; // passMutex_; all symbols before the first serial build
     void builderLoop(std::stop_token stop);
+    void seedBuiltThrough(const std::string &symbol, std::stop_token stop);
     void passSymbol(const std::string &symbol, std::stop_token stop, PassResult &result);
     void writeDay(const sentinel::flow::DayFile &day, uint32_t hours, uint32_t revision,
                   const FlowStoreGridValues &grid, const std::string &sources,

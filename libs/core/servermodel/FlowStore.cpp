@@ -1,5 +1,7 @@
 // FLD1 replay remains independent of sealed chunk replay. Both derived stores
 // share this archive inventory, catalog, grid fallback and source identities.
+// Before serial builds, restore every symbol's FLD1 indexes and watermark with
+// the normal file/source validation, without grid discovery or trade replay.
 #include "FlowStore.hpp"
 #include "RollupStore.hpp"
 #include "PersistenceIo.hpp"
@@ -743,6 +745,26 @@ void FlowStore::writeDay(const flow::DayFile &day, uint32_t hours, uint32_t revi
 FlowStore::PassResult FlowStore::runPass(std::stop_token stop) {
     std::lock_guard lock(passMutex_);
     PassResult result;
+    if (!startupSeeded_) {
+        const auto started = std::chrono::steady_clock::now();
+        for (const auto &symbol : options_.symbols) {
+            try {
+                checkStop(stop);
+                seedBuiltThrough(symbol, stop);
+            } catch (const Cancelled &) {
+                result.stopped = true;
+                return result;
+            } catch (const roller::NoJournalFiles &) {
+            } catch (const std::exception &e) {
+                sLog_Warning("Flow startup seed failed symbol=" << symbol << " error=" << e.what());
+            }
+        }
+        if (stop.stop_requested()) { result.stopped = true; return result; }
+        startupSeeded_ = true;
+        sLog_Data("Flow startup seeded symbols=" << options_.symbols.size() << " ms="
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - started).count());
+    }
     for (const auto &symbol : options_.symbols) {
         try {
             checkStop(stop);
@@ -758,6 +780,54 @@ FlowStore::PassResult FlowStore::runPass(std::stop_token stop) {
     }
     result.stopped = result.stopped || stop.stop_requested();
     return result;
+}
+void FlowStore::seedBuiltThrough(const std::string &symbol, std::stop_token stop) {
+    const auto through = options_.hourThrough(symbol) / Hour * Hour;
+    std::unique_lock archiveLock(archiveMutex_);
+    refreshArchive(symbol, stop);
+    const auto catalog = catalogFor(symbol, stop);
+    archiveLock.unlock();
+    if (through <= 0) return;
+    auto first = through;
+    for (const auto &file : catalog->files())
+        first = std::min(first, file.openedNs / 1'000'000);
+    first = std::max<int64_t>(0, first / Hour * Hour);
+    // Validate older days too: window() can serve them as soon as the recent
+    // watermark advances, even if their journals have since disappeared.
+    // Leave archiveChanges_ for the normal build pass.
+    auto firstDay = dayFloor(first);
+    const auto directory = filePath(symbol, firstDay).parent_path();
+    if (!ownedPath(directory)) throw std::runtime_error("unsafe flow directory");
+    if (fs::is_directory(directory))
+        for (const auto &entry : fs::directory_iterator(directory)) {
+            checkStop(stop);
+            const auto name = entry.path().filename().string();
+            if (name.size() != 14 || !name.ends_with(".flb")) continue;
+            const auto date = QDate::fromString(QString::fromStdString(name.substr(0, 10)), "yyyy-MM-dd");
+            if (!date.isValid()) continue;
+            const auto day = date.startOfDay(QTimeZone::UTC).toMSecsSinceEpoch();
+            if (day >= 0) firstDay = std::min(firstDay, day);
+        }
+    for (auto day = firstDay; day < through; day += Day) {
+        checkStop(stop);
+        auto index = loadIndex(symbol, day);
+        if (index.valid) {
+            try {
+                index.valid = sourcesMatch(Sources::parse(index.sources), *catalog,
+                                           sourceCutoff(day, index.hours), stop);
+            } catch (const Cancelled &) { throw; }
+            catch (const std::exception &e) {
+                index.valid = false;
+                sLog_Warning("Flow startup source check failed symbol=" << symbol << " day=" << day
+                             << " error=" << e.what());
+            }
+            if (!index.valid) index.hours = 0;
+        }
+        std::lock_guard lock(indexMutex_);
+        index_[{symbol, day}] = std::move(index);
+    }
+    firstHour_[symbol] = first;
+    refreshBuiltThrough(symbol);
 }
 std::shared_ptr<roller::JournalReader> FlowStore::catalogFor(const std::string &symbol, std::stop_token stop) {
     checkStop(stop);
