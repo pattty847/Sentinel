@@ -22,6 +22,9 @@ public:
         std::function<void(int64_t)> afterDayForTest;
         std::function<void(int64_t)> beforeDayLoadForTest;
         std::function<void()> afterAvailabilityReadForTest;
+        std::function<void()> afterAvailabilityStatForTest;
+        std::function<void()> beforeVerifyForTest;
+        std::function<bool()> rejectVerifyForTest;
         std::function<void()> beforeEpochWriteForTest;
         std::function<void()> afterSectionReadForTest;
         std::function<void(int64_t)> afterLocateForTest;
@@ -115,6 +118,7 @@ private:
         std::map<int64_t, Day> days;
         bool initialized = false;
         uint64_t serial = 0;
+        int64_t oldestSourceDay = INT64_MAX;
         uint64_t generation = UINT64_MAX;
         uint64_t integrity = UINT64_MAX;
         sentinel::metrics::Counter *late = nullptr, *regressions = nullptr, *failures = nullptr, *hours = nullptr;
@@ -126,11 +130,11 @@ private:
     std::function<void(const std::string&, std::optional<int64_t>)> invalidate_;
     void changed(const std::string&, std::optional<int64_t> day); // mutex held
     std::optional<Stamp> stampLocked(const std::string&, int64_t, int64_t) const;
+    std::optional<std::pair<uint64_t, std::array<std::vector<Range>, 3>>> scanLevels(const std::string&);
     std::mutex passMutex_, wakeMutex_;
     std::condition_variable wakeCv_;
     bool woken_ = false;
     std::map<std::string, Instrument> instruments_;
-    std::map<std::string, std::pair<uint64_t, uint64_t>> observedArchives_; // passMutex_
     std::stop_source stopSource_;
     std::thread thread_;
     std::filesystem::path checked(const std::filesystem::path &) const;

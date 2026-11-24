@@ -9,7 +9,18 @@ struct FlowChunkService::Cache {
     using CacheKey = std::tuple<std::string, std::string, int64_t, int64_t, uint64_t, uint16_t>;
     struct Entry { CacheKey key; Bytes bytes; wire::Frame header; FlowChunkStore::Stamp stamp; };
     std::mutex mutex;
-    std::array<std::mutex, 32> builds; // serialize a chunk across summary/rows requests
+    using BuildKey = std::tuple<std::string, int64_t, int64_t>;
+    std::mutex buildsMutex;
+    std::map<BuildKey, std::weak_ptr<std::mutex>> builds;
+    std::mutex availabilityMutex;
+    std::condition_variable availabilityReady;
+    struct SnapshotEntry {
+        std::pair<uint64_t, int64_t> fingerprint{};
+        std::optional<FlowChunkStore::Snapshot> snapshot;
+        bool building = false;
+    };
+    std::map<std::string, SnapshotEntry> snapshots;
+    std::map<CacheKey, FlowChunkStore::Stamp> oversized; // bounded negative cache
     size_t limit;
     Stats stats;
     std::list<Entry> lru;
@@ -20,19 +31,45 @@ struct FlowChunkService::Cache {
         if (!m) return;
         hits = &m->counter("sentinel_flow_chunk_cache_hits_total", "Finished SCK1 frame cache hits.");
         misses = &m->counter("sentinel_flow_chunk_cache_misses_total", "Finished SCK1 frame cache misses.");
-        evictions = &m->counter("sentinel_flow_chunk_cache_evictions_total", "Finished SCK1 frames removed from cache.");
+        evictions = &m->counter("sentinel_flow_chunk_cache_evictions_total", "Finished SCK1 frames removed by the byte budget.");
         bytes = &m->gauge("sentinel_flow_chunk_cache_bytes", "Finished SCK1 frame bytes resident in cache.");
     }
     static CacheKey key(const Key& k, uint64_t epoch) {
         return {k.instrument, k.channel, k.levelMs, k.startMs, epoch, wire::PayloadVersion};
     }
-    void erase(std::list<Entry>::iterator it) {
-        stats.bytes -= it->bytes->size(); ++stats.evictions;
-        if (evictions) evictions->inc(); if (bytes) bytes->set(double(stats.bytes));
+    void erase(std::list<Entry>::iterator it, bool budgetEviction = false) {
+        stats.bytes -= it->bytes->size();
+        if (budgetEviction) { ++stats.evictions; if (evictions) evictions->inc(); }
+        if (bytes) bytes->set(double(stats.bytes));
         index.erase(it->key); lru.erase(it);
+    }
+    std::shared_ptr<std::mutex> buildLock(const Key& key) {
+        std::lock_guard lock(buildsMutex);
+        if (builds.size() > 1024) std::erase_if(builds, [](const auto& item) { return item.second.expired(); });
+        const BuildKey id{key.instrument, key.levelMs, key.startMs};
+        auto& weak = builds[id];
+        if (auto held = weak.lock()) return held;
+        auto fresh = std::make_shared<std::mutex>();
+        weak = fresh;
+        return fresh;
+    }
+    bool failedOversize(const Key& k, const FlowChunkStore::Stamp& stamp) {
+        std::lock_guard lock(mutex);
+        const auto found = oversized.find(key(k, stamp.epoch));
+        return found != oversized.end() && found->second == stamp;
+    }
+    void rememberOversize(const Key& k, const FlowChunkStore::Stamp& stamp) {
+        std::lock_guard lock(mutex);
+        if (oversized.size() >= 1024) oversized.erase(oversized.begin());
+        oversized[key(k, stamp.epoch)] = stamp;
     }
     void invalidate(const std::string& id, std::optional<int64_t> day) {
         std::lock_guard lock(mutex);
+        std::erase_if(oversized, [&](const auto& item) {
+            const auto& [instrument, channel, level, start, epoch, version] = item.first;
+            return instrument == id && (!day || (start < *day + heatmap::kDayMs &&
+                start + heatmap::chunkSpanMs(level) > *day));
+        });
         for (auto it = lru.begin(); it != lru.end();) {
             const auto& k = it->header.key;
             if (k.instrument == id && (!day ||
@@ -53,7 +90,7 @@ struct FlowChunkService::Cache {
         std::lock_guard lock(mutex);
         if (entry.bytes->size() > limit) return;
         if (const auto old = index.find(entry.key); old != index.end()) erase(old->second);
-        while (stats.bytes > limit - entry.bytes->size()) erase(std::prev(lru.end()));
+        while (stats.bytes > limit - entry.bytes->size()) erase(std::prev(lru.end()), true);
         stats.bytes += entry.bytes->size(); if (bytes) bytes->set(double(stats.bytes));
         lru.push_front(std::move(entry)); index.emplace(lru.front().key, lru.begin());
     }
@@ -74,64 +111,107 @@ FlowChunkService::Bytes FlowChunkService::error(const Key& key, wire::Error code
     message.resize(std::min<size_t>(255, message.size())); f.message = std::move(message);
     return std::make_shared<const std::vector<uint8_t>>(wire::encode(f));
 }
+std::optional<FlowChunkStore::Snapshot> FlowChunkService::availability(const std::string& id) {
+    const auto fingerprint = store_.fingerprint(id);
+    std::unique_lock lock(cache_->availabilityMutex);
+    auto& slot = cache_->snapshots[id];
+    while (slot.building) cache_->availabilityReady.wait(lock);
+    if (slot.snapshot && slot.fingerprint == fingerprint) return slot.snapshot;
+    slot.building = true;
+    lock.unlock();
+    std::optional<FlowChunkStore::Snapshot> built;
+    try { built = store_.snapshot(id); }
+    catch (...) {
+        lock.lock(); slot.building = false; lock.unlock(); cache_->availabilityReady.notify_all();
+        throw;
+    }
+    lock.lock();
+    slot.snapshot = built;
+    if (built) slot.fingerprint = {built->serial, built->liveFromMs};
+    slot.building = false;
+    lock.unlock(); cache_->availabilityReady.notify_all();
+    return built;
+}
 FlowChunkService::Reply FlowChunkService::serve(const Key& key, std::optional<uint64_t> have) {
     if (!wire::validKey(key) || (key.channel == "flow.rows" && key.priceStep != 1))
         return {error(key, wire::Error::InvalidRequest, "invalid flow chunk key"), {}};
-    const auto initial = store_.stamp(key.instrument, key.levelMs, key.startMs);
-    if (!initial) return {error(key, wire::Error::Unavailable, "flow chunk is not sealed"), {}};
-    auto current = [&](auto action) { return store_.ifCurrent(key.instrument, key.levelMs, key.startMs, *initial, action); };
-    try {
-        const auto shard = (std::hash<std::string>{}(key.instrument) ^ uint64_t(key.startMs / heatmap::kHourMs) ^ uint64_t(key.levelMs / heatmap::kMinuteMs)) % cache_->builds.size();
-        std::lock_guard build(cache_->builds[shard]);
-        if (!store_.verify(key.instrument, key.levelMs, key.startMs, *initial))
-            return {error(key, wire::Error::Unavailable, "flow chunk unavailable"), {}};
-        std::optional<Cache::Entry> entry;
-        if (!current([&] { entry = cache_->get(key, *initial); })) return {};
-        if (!entry) {
-            const auto payload = store_.read(key.instrument, key.levelMs, key.startMs);
-            if (!payload) {
-                if (!current([] {})) return {}; // fenced while the worker read
-                return {error(key, wire::Error::Unavailable, "flow chunk unavailable"), {}};
+    std::optional<FlowChunkStore::Stamp> failedVerify;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto initial = store_.stamp(key.instrument, key.levelMs, key.startMs);
+        if (!initial) return {error(key, wire::Error::Unavailable, "flow chunk is not sealed"), {}};
+        const auto current = [&](const auto& action) {
+            return store_.ifCurrent(key.instrument, key.levelMs, key.startMs, *initial, action);
+        };
+        // nullopt means the key's indexed generation changed during this attempt.
+        auto once = [&]() -> std::optional<Reply> {
+            auto buildMutex = cache_->buildLock(key);
+            std::lock_guard build(*buildMutex);
+            if (!store_.verify(key.instrument, key.levelMs, key.startMs, *initial)) {
+                // A file can be between atomic write and publish while its
+                // indexed stamp still matches. Recheck the whole key once.
+                failedVerify = *initial;
+                return {};
             }
-            if (payload->stamp != *initial) return {};
-            // Both channels share one store read/16-day assembly. Keep finished
-            // frames only; the summary always uses the stored byte prefix.
-            std::array<std::optional<Cache::Entry>, 2> built;
-            for (size_t n = 0; n < built.size(); ++n) {
-                wire::Frame frame; frame.key = key; frame.epoch = payload->epoch;
-                frame.key.channel = n ? "flow.rows" : "flow.summary";
-                frame.key.priceStep = n ? uint64_t(1) << payload->stepExponent : 0;
-                frame.endMs = key.startMs + heatmap::chunkSpanMs(key.levelMs); frame.committedThroughMs = frame.endMs;
-                const auto length = n ? payload->bytes.size() : payload->summaryLength;
-                frame.payload.assign(payload->bytes.begin(), payload->bytes.begin() + ptrdiff_t(length));
-                frame.contentHash = wire::contentHash(frame);
-                Bytes bytes;
-                try { bytes = std::make_shared<const std::vector<uint8_t>>(wire::encode(frame)); }
-                catch (const std::exception&) {
-                    if (frame.key.channel == key.channel) throw;
-                    continue; // a sibling exceeding the frame limit cannot fail this channel
+            if (cache_->failedOversize(key, *initial))
+                return Reply{error(key, wire::Error::BuildFailed, "flow chunk exceeds frame limit"), *initial};
+            std::optional<Cache::Entry> entry;
+            if (!current([&] { entry = cache_->get(key, *initial); })) return {};
+            if (!entry) {
+                const auto payload = store_.read(key.instrument, key.levelMs, key.startMs);
+                if (!payload) {
+                    if (!current([] {})) return {};
+                    return Reply{error(key, wire::Error::Unavailable, "flow chunk unavailable"), {}};
                 }
-                std::vector<uint8_t>{}.swap(frame.payload);
-                const auto cacheKey = Cache::key(frame.key, initial->epoch);
-                built[n] = Cache::Entry{cacheKey, std::move(bytes), std::move(frame), *initial};
-            }
-            entry = built[key.channel == "flow.rows" ? 1 : 0];
-            if (!current([&] {
+                if (payload->stamp != *initial) return {};
+                std::array<std::optional<Cache::Entry>, 2> built;
+                for (size_t n = 0; n < built.size(); ++n) {
+                    wire::Frame frame; frame.key = key; frame.epoch = payload->epoch;
+                    frame.key.channel = n ? "flow.rows" : "flow.summary";
+                    frame.key.priceStep = n ? uint64_t(1) << payload->stepExponent : 0;
+                    frame.endMs = key.startMs + heatmap::chunkSpanMs(key.levelMs); frame.committedThroughMs = frame.endMs;
+                    const auto length = n ? payload->bytes.size() : payload->summaryLength;
+                    frame.payload.assign(payload->bytes.begin(), payload->bytes.begin() + ptrdiff_t(length));
+                    if (beforeEncodeForTest) beforeEncodeForTest(frame);
+                    frame.contentHash = wire::contentHash(frame);
+                    Bytes bytes;
+                    try { bytes = std::make_shared<const std::vector<uint8_t>>(wire::encode(frame)); }
+                    catch (const std::invalid_argument&) {
+                        if (frame.key.channel == key.channel) {
+                            if (!current([] {})) return {};
+                            cache_->rememberOversize(key, *initial);
+                            return Reply{error(key, wire::Error::BuildFailed, "flow chunk exceeds frame limit"), *initial};
+                        }
+                        continue; // an oversized sibling does not fail this channel
+                    }
+                    std::vector<uint8_t>{}.swap(frame.payload);
+                    built[n] = Cache::Entry{Cache::key(frame.key, initial->epoch), std::move(bytes),
+                                           std::move(frame), *initial};
+                }
                 const auto wanted = key.channel == "flow.rows" ? 1u : 0u;
-                if (built[1-wanted]) cache_->put(std::move(*built[1-wanted]));
-                cache_->put(std::move(*built[wanted]));
-            })) return {};
+                entry = built[wanted];
+                if (!current([&] {
+                    if (built[1-wanted]) cache_->put(std::move(*built[1-wanted]));
+                    cache_->put(std::move(*built[wanted]));
+                })) return {};
+            }
+            if (have && *have == entry->header.contentHash) {
+                auto header = entry->header; header.kind = wire::Kind::NotModified;
+                return Reply{std::make_shared<const std::vector<uint8_t>>(wire::encode(header)), *initial};
+            }
+            return Reply{entry->bytes, *initial};
+        };
+        try { if (auto reply = once()) return *reply; }
+        catch (const std::exception& e) {
+            sLog_Warning("Flow chunk serving failed instrument=" << key.instrument << " start=" << key.startMs << " error=" << e.what());
+            if (!current([] {})) continue;
+            return {error(key, wire::Error::BuildFailed, "flow chunk build failed"), *initial};
         }
-        if (have && *have == entry->header.contentHash) {
-            auto header = entry->header; header.kind = wire::Kind::NotModified;
-            return {std::make_shared<const std::vector<uint8_t>>(wire::encode(header)), *initial};
-        }
-        return {entry->bytes, *initial};
-    } catch (const std::exception& e) {
-        sLog_Warning("Flow chunk serving failed instrument=" << key.instrument << " start=" << key.startMs << " error=" << e.what());
-        if (!current([] {})) return {};
-        return {error(key, wire::Error::BuildFailed, "flow chunk build failed"), {}};
     }
+    const auto latest = store_.stamp(key.instrument, key.levelMs, key.startMs);
+    const auto code = !latest || (failedVerify && *latest == *failedVerify)
+        ? wire::Error::Unavailable : wire::Error::Busy;
+    return {error(key, code,
+                  "flow chunk changed during request"), {}};
 }
 bool FlowChunkService::admit(const Key& key, const Reply& reply, const std::function<void()>& action) const {
     if (!reply.bytes) return false;

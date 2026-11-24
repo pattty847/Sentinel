@@ -37,6 +37,7 @@ struct FlowChunkWireTest {
     static void budget(Session& s, size_t jobs, size_t bytes) { on(s, [&](auto& v) { v.chunkJobs_ = jobs; v.chunkBytes_ = bytes; }); }
     static void after(SentinelStreamServer& s, std::function<void(const protocol::chunks::Key&)> fn) { s.m_afterFlowChunkServeForTest = std::move(fn); }
     static bool submit(SentinelStreamServer& s, std::function<void()> fn) { return s.submitHistoryTask(std::move(fn)); }
+    static void detach(SentinelStreamServer& s) { s.m_flowChunks.reset(); }
     static void drain(SentinelStreamServer& s, Session& session) {
         const auto until = std::chrono::steady_clock::now()+5s;
         while (s.m_pendingHistoryTasks.load() && std::chrono::steady_clock::now() < until) std::this_thread::yield();
@@ -65,6 +66,7 @@ protected:
     std::vector<wire::Envelope> binary;
     std::vector<Json> text;
     std::thread::id readThread;
+    std::function<void()> beforeEpochWrite;
     void SetUp() override {
         fs::create_directories(raw); fs::create_directories(hmc);
         Journal j(raw); j.snapshot(-Minute); j.trades(1000, {trade(100,"1",100000)}); j.heartbeat(Hour+15000); j.close();
@@ -74,6 +76,7 @@ protected:
         source=std::make_unique<recording::FlowStore>(o);
         recording::FlowChunkStore::Options c; c.root=base/"flc"; c.lowerPriority=false; c.rules.sealWindowMs=15000;
         c.afterSectionReadForTest=[&] { readThread=std::this_thread::get_id(); };
+        c.beforeEpochWriteForTest=[&] { if (beforeEpochWrite) beforeEpochWrite(); };
         store=std::make_unique<recording::FlowChunkStore>(*source,c); ASSERT_EQ(store->runPass().failed,0u);
         config.recording.enabled=false; config.rollerShadow.enabled=false;
         model=std::make_unique<ServerDataModel>(config); auth=std::make_unique<Authenticator>((base/"no-credentials").string());
@@ -126,7 +129,7 @@ TEST_F(FlowChunkWire, ByteAndGlobalHistoryBudgetsRefuseExplicitly) {
     FlowChunkWireTest::request(*session,request(2)); ASSERT_TRUE(wait(2));
     EXPECT_EQ(std::get<wire::Frame>(binary[1].frame).error,wire::Error::Busy);
 }
-TEST_F(FlowChunkWire, FenceAfterHistoryBuildDiscardsReplyAtSocketAdmission) {
+TEST_F(FlowChunkWire, EpochChangeAfterHistoryBuildRetriesCurrentReply) {
     std::promise<void> entered, release; auto gate=release.get_future().share(); std::atomic<bool> once=false;
     FlowChunkWireTest::after(*server,[&](const auto&) { if(!once.exchange(true)) { entered.set_value(); gate.wait(); } });
     auto cleanup=qScopeGuard([&] { release.set_value(); FlowChunkWireTest::drain(*server,*session); });
@@ -134,8 +137,57 @@ TEST_F(FlowChunkWire, FenceAfterHistoryBuildDiscardsReplyAtSocketAdmission) {
     const auto victim=source->archive("BTC-USD").catalog->files().front().path;
     fs::last_write_time(victim,fs::last_write_time(victim)+2s); ASSERT_EQ(store->runPass().failed,0u);
     cleanup.dismiss(); release.set_value(); FlowChunkWireTest::drain(*server,*session);
-    { std::lock_guard lock(mutex); EXPECT_TRUE(binary.empty()); }
-    FlowChunkWireTest::request(*session,request(2)); ASSERT_TRUE(wait(1)); EXPECT_EQ(binary[0].requestId,2u);
+    ASSERT_TRUE(wait(1));
+    EXPECT_EQ(binary[0].requestId, 1u);
+    EXPECT_EQ(std::get<wire::Frame>(binary[0].frame).kind, wire::Kind::Chunk);
+    EXPECT_EQ(std::get<wire::Frame>(binary[0].frame).epoch, store->epoch(Id));
+    FlowChunkWireTest::request(*session,request(2)); ASSERT_TRUE(wait(2)); EXPECT_EQ(binary[1].requestId,2u);
+}
+TEST_F(FlowChunkWire, SameEpochRepublishAfterHistoryBuildRetriesCurrentReply) {
+    std::promise<void> entered, release; auto gate=release.get_future().share(); std::atomic<bool> once=false;
+    FlowChunkWireTest::after(*server,[&](const auto&) { if(!once.exchange(true)) { entered.set_value(); gate.wait(); } });
+    auto cleanup=qScopeGuard([&] { release.set_value(); FlowChunkWireTest::drain(*server,*session); });
+    const auto epoch=store->epoch(Id);
+    FlowChunkWireTest::request(*session,request(1));
+    ASSERT_EQ(entered.get_future().wait_for(5s),std::future_status::ready);
+    Journal later(raw); later.snapshot(Hour+20000);
+    later.trades(Hour+21000,{trade(Hour+100,"2",100001)});
+    later.heartbeat(2*Hour+15000); later.close();
+    ASSERT_EQ(store->runPass().failed,0u); ASSERT_EQ(store->epoch(Id),epoch);
+    cleanup.dismiss(); release.set_value(); ASSERT_TRUE(wait(1));
+    EXPECT_EQ(binary[0].requestId,1u);
+    EXPECT_EQ(std::get<wire::Frame>(binary[0].frame).kind,wire::Kind::Chunk);
+    EXPECT_EQ(std::get<wire::Frame>(binary[0].frame).epoch,epoch);
+}
+TEST_F(FlowChunkWire, FencedInFlightStartReceivesUnavailable) {
+    std::promise<void> served, releaseServe, fenced, releaseFence;
+    auto serveGate=releaseServe.get_future().share(), fenceGate=releaseFence.get_future().share();
+    std::atomic<bool> once=false, fenceOnce=false, serveOpen=false, fenceOpen=false;
+    FlowChunkWireTest::after(*server,[&](const auto&) { if(!once.exchange(true)) { served.set_value(); serveGate.wait(); } });
+    beforeEpochWrite=[&] { if(!fenceOnce.exchange(true)) { fenced.set_value(); fenceGate.wait(); } };
+    std::thread transition;
+    auto cleanup=qScopeGuard([&] {
+        if(!serveOpen.exchange(true)) releaseServe.set_value();
+        if(!fenceOpen.exchange(true)) releaseFence.set_value();
+        if(transition.joinable()) transition.join();
+        FlowChunkWireTest::drain(*server,*session);
+    });
+    FlowChunkWireTest::request(*session,request(1));
+    ASSERT_EQ(served.get_future().wait_for(5s),std::future_status::ready);
+    const auto victim=raw/"BTC-USD"/"2027"/"01"/"01"/"00.rawl2";
+    fs::last_write_time(victim,fs::last_write_time(victim)+2s);
+    transition=std::thread([&] { store->runPass(); });
+    ASSERT_EQ(fenced.get_future().wait_for(5s),std::future_status::ready);
+    if(!serveOpen.exchange(true)) releaseServe.set_value();
+    ASSERT_TRUE(wait(1));
+    EXPECT_EQ(binary[0].requestId,1u);
+    EXPECT_EQ(std::get<wire::Frame>(binary[0].frame).error,wire::Error::Unavailable);
+}
+TEST_F(FlowChunkWire, SubscribeWithoutFlowStoreReturnsError) {
+    FlowChunkWireTest::on(*session,[&](auto&) { FlowChunkWireTest::detach(*server); });
+    FlowChunkWireTest::subscribe(*session,{{"instruments",{Id}}}); ASSERT_TRUE(wait(1,true));
+    EXPECT_EQ(text[0]["context"],"chunk_availability_subscribe");
+    EXPECT_EQ(text[0]["type"],"error");
 }
 TEST_F(FlowChunkWire, AvailabilitySubscribeNewSealEpochAndCoalescing) {
     source->setLiveRetentionFloor("BTC-USD",Epoch-6*Hour);

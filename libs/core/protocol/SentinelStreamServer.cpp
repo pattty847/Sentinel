@@ -455,8 +455,10 @@ class Session : public std::enable_shared_from_this<Session> {
             protocol::chunks::Key key;
             recording::FlowChunkService::Reply reply;
             std::string payload;
-            bool ready = false, charged = false;
+            std::optional<uint64_t> have;
+            bool ready = false, charged = false, retried = false;
         };
+        uint64_t req = 0;
         std::vector<Item> items;
         size_t next = 0;
     };
@@ -866,22 +868,75 @@ class Session : public std::enable_shared_from_this<Session> {
         write_queue_.push_back({std::move(payload), true, true});
         if (write_queue_.size() == 1) internal_async_write();
     }
+    // Every admitted start completes with one response, including a generation
+    // change between worker completion and queue admission.
+    bool queueFlowChunkItem(const std::shared_ptr<recording::FlowChunkService>& service,
+                            const std::shared_ptr<FlowChunkBatch>& batch, size_t n,
+                            std::function<void(const protocol::chunks::Key&)> after = {}) {
+        ++chunkJobs_;
+        const auto key = batch->items[n].key;
+        const auto executor = ws_.get_executor();
+        const bool queued = owner_->submitHistoryTask([weak = weak_from_this(), executor, service,
+            batch, n, key, have = batch->items[n].have, after = std::move(after)] {
+            recording::FlowChunkService::Reply reply;
+            try { reply = service->serve(key, have); }
+            catch (const std::exception& e) {
+                sLog_Warning("Flow chunk request failed instrument=" << key.instrument << " start=" << key.startMs << " error=" << e.what());
+                reply.bytes = recording::FlowChunkService::error(key, heatmap::ChunkError::BuildFailed,
+                                                                  "flow chunk build failed");
+            }
+            auto payload = reply.bytes ? chunkEnvelope(batch->req, *reply.bytes) : std::string{};
+            if (after) after(key);
+            net::post(executor, [weak, service, batch, n, reply = std::move(reply), payload = std::move(payload)]() mutable {
+                const auto self = weak.lock();
+                if (!self) return;
+                if (self->chunkJobs_) --self->chunkJobs_;
+                if (self->closing_.load()) return;
+                auto& item = batch->items[n];
+                item.reply = std::move(reply); item.payload = std::move(payload);
+                item.ready = true; item.charged = true;
+                self->chunkBytes_ += item.payload.size();
+                self->drainFlowChunks(batch, service);
+            });
+        });
+        if (!queued) --chunkJobs_;
+        return queued;
+    }
     // Completed replies waiting for an earlier start count against the same
     // byte budget as socket-queued chunks. Refusals retain ordinary accounting.
     void drainFlowChunks(const std::shared_ptr<FlowChunkBatch>& batch,
                          const std::shared_ptr<recording::FlowChunkService>& service) {
         while (batch->next < batch->items.size() && batch->items[batch->next].ready) {
-            auto& item = batch->items[batch->next++];
+            auto& item = batch->items[batch->next];
             const auto bytes = item.payload.size();
             const bool idle = write_queue_.empty();
             if (item.charged) {
                 const bool accepted = service->admit(item.key, item.reply, [&] {
                     write_queue_.push_back({std::move(item.payload), true, true});
                 });
-                if (!accepted) chunkBytes_ -= std::min(chunkBytes_, bytes);
-                else if (idle) internal_async_write();
-            } else if (!item.payload.empty()) do_write(std::move(item.payload), true, {}, true);
-            item.reply = {};
+                if (accepted) {
+                    if (idle) internal_async_write();
+                    item.reply = {}; ++batch->next; continue;
+                }
+                chunkBytes_ -= std::min(chunkBytes_, bytes);
+                item.reply = {}; item.payload.clear();
+                if (!item.retried) {
+                    item.retried = true; item.ready = false;
+                    if (chunkJobs_ < kMaxChunkJobs && chunkBytes_ < kMaxChunkBytes &&
+                        queueFlowChunkItem(service, batch, batch->next)) return;
+                    item.ready = true;
+                    item.payload = chunkEnvelope(batch->req, *recording::FlowChunkService::error(
+                        item.key, heatmap::ChunkError::Busy, "server chunk workers busy"));
+                } else {
+                    const auto code = service->servable(item.key) ? heatmap::ChunkError::Busy
+                                                                   : heatmap::ChunkError::Unavailable;
+                    item.payload = chunkEnvelope(batch->req, *recording::FlowChunkService::error(
+                        item.key, code, "flow chunk changed during request"));
+                }
+                item.charged = false;
+            }
+            if (!item.payload.empty()) do_write(std::move(item.payload), true, {}, true);
+            item.reply = {}; ++batch->next;
         }
     }
     void handleFlowChunkRequest(const nlohmann::json& j) {
@@ -892,9 +947,9 @@ class Session : public std::enable_shared_from_this<Session> {
             return;
         }
         const auto service = owner_->m_flowChunks;
-        auto batch = std::make_shared<FlowChunkBatch>(); batch->items.resize(q.starts.size());
+        auto batch = std::make_shared<FlowChunkBatch>(); batch->req = q.req; batch->items.resize(q.starts.size());
         for (size_t n = 0; n < q.starts.size(); ++n) {
-            auto& item = batch->items[n]; item.key = q.at(n);
+            auto& item = batch->items[n]; item.key = q.at(n); item.have = q.have[n];
             auto refuse = [&](heatmap::ChunkError code, const char* message) {
                 item.payload = chunkEnvelope(q.req, *recording::FlowChunkService::error(item.key, code, message));
                 item.ready = true;
@@ -903,26 +958,8 @@ class Session : public std::enable_shared_from_this<Session> {
             if (chunkJobs_ >= kMaxChunkJobs || chunkBytes_ >= kMaxChunkBytes) {
                 refuse(heatmap::ChunkError::Busy, "session chunk budget exhausted"); continue;
             }
-            ++chunkJobs_;
-            const bool queued = owner_->submitHistoryTask([weak = weak_from_this(), executor = ws_.get_executor(),
-                service, batch, n, key = item.key, have = q.have[n], req = q.req,
-                after = owner_->m_afterFlowChunkServeForTest] {
-                auto reply = service->serve(key, have);
-                auto payload = reply.bytes ? chunkEnvelope(req, *reply.bytes) : std::string{};
-                if (after) after(key);
-                net::post(executor, [weak, service, batch, n, reply = std::move(reply), payload = std::move(payload)]() mutable {
-                    const auto self = weak.lock();
-                    if (!self) return;
-                    if (self->chunkJobs_) --self->chunkJobs_;
-                    if (self->closing_.load()) return;
-                    auto& item = batch->items[n];
-                    item.reply = std::move(reply); item.payload = std::move(payload);
-                    item.ready = true; item.charged = true;
-                    self->chunkBytes_ += item.payload.size();
-                    self->drainFlowChunks(batch, service);
-                });
-            });
-            if (!queued) { --chunkJobs_; refuse(heatmap::ChunkError::Busy, "server chunk workers busy"); }
+            if (!queueFlowChunkItem(service, batch, n, owner_->m_afterFlowChunkServeForTest))
+                refuse(heatmap::ChunkError::Busy, "server chunk workers busy");
         }
         drainFlowChunks(batch, service);
     }
@@ -964,6 +1001,10 @@ class Session : public std::enable_shared_from_this<Session> {
         std::vector<std::string> ids;
         if (const auto error = protocol::flowchunks::parseSubscribe(j, ids)) {
             send_error("chunk_availability_subscribe", "", *error); return;
+        }
+        if (!owner_->m_flowChunks) {
+            send_error("chunk_availability_subscribe", "", "flow chunks unavailable");
+            return;
         }
         std::erase_if(flowAvailability_, [&](const auto& item) {
             return std::find(ids.begin(), ids.end(), item.first) == ids.end();

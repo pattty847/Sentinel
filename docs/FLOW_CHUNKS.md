@@ -138,7 +138,7 @@ empty unsubscribes all). Updates are coalesced to at most one per instrument per
 Both channels and all three levels are always present. `oldest_ms`/`latest_ms` are sealed chunk starts,
 null for an empty level. Before initialization, epoch is zero and ranges are empty. The cache default
 is 64 MiB (`flow.chunk_cache_bytes`, CONFIG.md); readers and final queue admission recheck day versions
-as well as epoch, so withdrawal/rebuild under the same epoch also discards in-flight replies.
+as well as epoch. A reply whose indexed day changed is retried once; a fenced key answers `unavailable`, and repeated concurrent change answers `busy`.
 
 `sealed` lists every coalesced run of sealed chunk starts as half-open ranges, ascending. `meta` is
 channel-specific; empty for flow.
@@ -300,7 +300,9 @@ are complete, `unrecorded` if all are unrecorded, otherwise `partial` (the FHE1 
 - Serving the 16-day 1d chunk and the day and 16-day `trades.big` chunks: assembled once from pieces, encoded and
   cached (`FlowChunkCodec.cpp::assembleDayChunk`):
   1. slot = (day - chunk start) / 1 day. A day with a sealed piece takes the piece's coverage status and bar. A day
-     without a RAWL2 source is `unrecorded`. Any other day leaves the chunk unsealed (not served).
+     without a RAWL2 source is `unrecorded` only if it precedes the instrument's oldest RAWL2 day. A missing
+     day after that floor may gain source data, so its 16-day chunk remains unsealed. Any present day without a
+     sealed piece likewise leaves the chunk unsealed. This refusal is recomputed at startup.
   2. Grids in slot order of first use; a grid index per bar when there is more than one. The chunk's step is the
      largest piece step; bars of finer pieces are re-binned to it (section 4, Row step).
   3. Coverage runs from the slot statuses, equal neighbours merged.
@@ -444,7 +446,9 @@ its epoch; every other instrument keeps its epoch, byte cache and held chunks.
     and `trades.big` chunk derived from it;
   - a rebuild finds a sealed section whose new source fingerprint differs from its table entry (RAWL2 changed under
     it): that day;
-  - the owner-approved RAWL2 repair procedure: the days it names.
+  - the owner-approved RAWL2 repair procedure: the days it names. A historical arrival before the oldest
+    recorded RAWL2 day is a repair and must use this transition; ordinary 16-day serving refuses unrecorded
+    slots after the oldest source day. Cached negative source claims are rechecked before `not_modified`.
 - A day is served only when it is not pending and its file header carries the current rule identity, so an
   old-rule section is never served, or confirmed through `not_modified`, under the new identity, even if the
   pending list were lost.
@@ -453,7 +457,7 @@ Transition of one instrument, in this order:
 
 | Step | Action | Crash after this step |
 | --- | --- | --- |
-| 1 | Fence the affected days in memory: their keys leave `sealed`, requests get `unavailable`, their byte-cache entries are dropped, and replies for them still in the history pool are discarded when they finish. Frames already queued on a socket carry the old bytes with the old epoch, a consistent pair. | nothing durable changed; the next rescan finds the same mismatch and starts again |
+| 1 | Fence the affected days in memory: their keys leave `sealed`, requests get `unavailable`, their byte-cache entries are dropped, and replies for them still in the history pool are rechecked before admission. A fenced key gets `unavailable`; a key already rebuilt under a new epoch gets one retry and a current reply. Frames already queued on a socket carry the old bytes with the old epoch, a consistent pair. | nothing durable changed; the next rescan finds the same mismatch and starts again |
 | 2 | Write the epoch file: counter + 1, the current rule identity, pending = the affected days | restart reads the pending list: step 6 |
 | 3 | Advertise the new epoch in the instrument's availability. The byte cache is keyed by epoch, so the instrument's other entries are dropped. | step 6 |
 | 4 | Rebuild the pending days newest first and write their files. After each day, rewrite the epoch file without it and unfence it; a 16-day chunk is unfenced when all its days are. | step 6 |

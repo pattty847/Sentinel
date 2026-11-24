@@ -24,10 +24,13 @@ public:
     // Called on the network executor. The action only admits already-built bytes
     // to the queue; the store holds its fence until admission is complete.
     bool admit(const Key&, const Reply&, const std::function<void()>& action) const;
+    bool servable(const Key& key) const { return bool(store_.stamp(key.instrument, key.levelMs, key.startMs)); }
     static Bytes error(const Key&, protocol::chunks::Error, std::string message);
-    std::optional<FlowChunkStore::Snapshot> availability(const std::string& id) { return store_.snapshot(id); }
+    // Concurrent subscribers share one scan per instrument generation.
+    std::optional<FlowChunkStore::Snapshot> availability(const std::string& id);
     auto fingerprint(const std::string& id) const { return store_.fingerprint(id); }
     Stats stats() const;
+    std::function<void(protocol::chunks::Frame&)> beforeEncodeForTest;
 private:
     struct Cache;
     FlowChunkStore& store_;

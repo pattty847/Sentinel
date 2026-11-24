@@ -124,7 +124,7 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `sentinel_flow_chunk_cache_hits_total` | counter | - | Finished SCK1 frame cache hits, including matching-hash replies. |
 | `sentinel_flow_chunk_cache_misses_total` | counter | - | Servable keys absent from the finished-frame cache. |
 | `sentinel_flow_chunk_cache_bytes` | gauge | - | Encoded frame bytes held by the LRU; excludes history jobs and socket queues. Atomic, no scrape-time locking. |
-| `sentinel_flow_chunk_cache_evictions_total` | counter | - | Cached frames removed by byte pressure, day withdrawal or an instrument epoch move. |
+| `sentinel_flow_chunk_cache_evictions_total` | counter | - | Cached frames removed by byte pressure; day withdrawal and epoch invalidation are not counted. |
 | `sentinel_rollup_days_built_total` | counter | - | Rollup days built (one product, layer and UTC day: its 1h and 1d files) by the server's background rollup builder. Grows by 2 per product a day, more during a backfill. Resets with the process. Absent when recording is not served. |
 | `sentinel_rollup_build_failures_total` | counter | - | Rollup day or series builds that failed (logged `Rollup day build failed`); they are retried every pass (1 min). Expected 0. |
 | `sentinel_rollup_build_seconds_total` | counter | - | Elapsed wall seconds of successful rollup day builds (read, compose, encode, write), including time the background-priority thread spent waiting for CPU or disk; failed builds are not counted. Not CPU time: `rate(x[1h])` is the fraction of wall time spent building, not a share of a core. |
