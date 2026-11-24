@@ -157,6 +157,11 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
                 cfg.rollerShadow.failureMinDuration = std::chrono::milliseconds(faultMinDurationMs);
         }
         if (const auto flow = serverRoot["flow"]) {
+            int64_t cache = int64_t(cfg.flow.chunkCacheBytes);
+            if (readScalar(flow, "chunk_cache_bytes", cache)) {
+                if (cache < 0 || uint64_t(cache) > SIZE_MAX) throw std::invalid_argument("flow.chunk_cache_bytes out of range");
+                cfg.flow.chunkCacheBytes = uint64_t(cache);
+            }
             int64_t window = cfg.flow.sealWindowMs;
             if (readScalar(flow, "seal_window_ms", window)) {
                 if (window < 0 || window > 3600000) throw std::invalid_argument("flow.seal_window_ms must be in [0, 3600000]");

@@ -1,6 +1,7 @@
 // Synthetic durable RAWL2 fixtures exercise disk recovery, canonical seals and
 // epoch fencing. Never opens the recorder's roots or starts a server/service.
 #include "servermodel/FlowChunkStore.hpp"
+#include "servermodel/FlowChunkService.hpp"
 #include "roller/fixtures/FlowJournal.hpp"
 #include "roller/JournalReader.hpp"
 #include "flow/FlowCompose.hpp"
@@ -460,10 +461,11 @@ TEST_F(ChunkStoreTest, DefaultRootWithTrailingSlashIsSiblingOfHmc) {
 TEST_F(ChunkStoreTest, ConfigFlatWrappedDefaultsAndInvalidWindow) {
     ServerConfig cfg;
     EXPECT_TRUE(cfg.recording.flowChunkDir.empty()); EXPECT_EQ(cfg.flow.sealWindowMs, 300000u);
+    EXPECT_EQ(cfg.flow.chunkCacheBytes, 64u * 1024u * 1024u);
     const auto path = base / "config.yaml";
-    { std::ofstream f(path); f << "flow:\n  seal_window_ms: 25000\nrecording:\n  flow_chunk_dir: " << root.string() << "\n"; }
+    { std::ofstream f(path); f << "flow:\n  seal_window_ms: 25000\n  chunk_cache_bytes: 1234\nrecording:\n  flow_chunk_dir: " << root.string() << "\n"; }
     ASSERT_TRUE(ConfigLoader::loadServerConfig(path.string(), &cfg));
-    EXPECT_EQ(cfg.flow.sealWindowMs, 25000u); EXPECT_EQ(cfg.recording.flowChunkDir, root.string());
+    EXPECT_EQ(cfg.flow.chunkCacheBytes, 1234u); EXPECT_EQ(cfg.flow.sealWindowMs, 25000u); EXPECT_EQ(cfg.recording.flowChunkDir, root.string());
     { std::ofstream f(path); f << "server:\n  flow:\n    seal_window_ms: 15000\n"; }
     ASSERT_TRUE(ConfigLoader::loadServerConfig(path.string(), &cfg)); EXPECT_EQ(cfg.flow.sealWindowMs, 15000u);
     { std::ofstream f(path); f << "flow:\n  seal_window_ms: -1\n"; }
@@ -825,11 +827,13 @@ TEST_F(ChunkStoreTest, MidnightPrioritySealsBothProductsBeforeOlderBackfill) {
 }
 TEST_F(ChunkStoreTest, SteadyInventoryRefreshCountIsIndependentOfClosedDays) {
     fixture(12); FlowStore source(sourceOptions());
-    auto o = options(); size_t refreshed = 0;
+    auto o = options(); size_t refreshed = 0, closedLoads = 0;
+    o.beforeDayLoadForTest = [&](int64_t day) { if (day >= Epoch && day < Epoch + 12 * Day) ++closedLoads; };
     o.afterArchiveRefreshForTest = [&] { ++refreshed; };
     FlowChunkStore store(source, o); ASSERT_EQ(store.runPass().failed, 0u);
-    refreshed = 0;
+    refreshed = 0; closedLoads = 0;
     ASSERT_EQ(store.runPass().failed, 0u);
+    EXPECT_EQ(closedLoads, 0u);
     EXPECT_LE(refreshed, source.options().symbols.size());
 }
 TEST_F(ChunkStoreTest, PriorityFailureBacksOffWithinTheSamePass) {
@@ -969,6 +973,174 @@ TEST_F(ChunkStoreTest, FailedEpochWriteCannotMarkDayPendingInMemory) {
     ASSERT_EQ(store.runPass().failed, 0u);
     EXPECT_NE(store.epoch(Id), before);
     EXPECT_TRUE(store.read(Id, Minute, Epoch));
+}
+TEST_F(ChunkStoreTest, ServingUsesStoredPrefixStepAndHashes) {
+    Journal journal(raw); journal.snapshot(-Minute);
+    journal.trades(1000, {trade(100, "1", 100000), trade(200, "2", 10000000)});
+    journal.heartbeat(Hour + 15000); journal.close();
+    FlowStore source(sourceOptions()); FlowChunkStore store(source, options());
+    ASSERT_EQ(store.runPass().failed, 0u);
+    recording::FlowChunkService service(store, 1024 * 1024, &metrics);
+    protocol::chunks::Key rows{Id, "flow.rows", Minute, 1, Epoch};
+    auto summary = rows; summary.channel = "flow.summary"; summary.priceStep = 0;
+    const auto stored = store.read(Id, Minute, Epoch); ASSERT_TRUE(stored); ASSERT_GT(stored->stepExponent, 0);
+    auto reply = service.serve(rows); ASSERT_TRUE(reply.bytes);
+    const auto r = protocol::chunks::decode(*reply.bytes);
+    EXPECT_EQ(r.payload, stored->bytes); EXPECT_EQ(r.key.priceStep, uint64_t(1) << stored->stepExponent);
+    auto sreply = service.serve(summary); ASSERT_TRUE(sreply.bytes);
+    const auto s = protocol::chunks::decode(*sreply.bytes);
+    EXPECT_EQ(s.payload, (std::vector<uint8_t>(stored->bytes.begin(), stored->bytes.begin() + stored->summaryLength)));
+    EXPECT_NE(s.contentHash, r.contentHash); EXPECT_EQ(s.key.priceStep, 0u);
+    const auto nm = protocol::chunks::decode(*service.serve(rows, r.contentHash).bytes);
+    EXPECT_EQ(nm.kind, protocol::chunks::Kind::NotModified); EXPECT_EQ(nm.epoch, store.epoch(Id));
+    EXPECT_EQ(nm.key.priceStep, r.key.priceStep); EXPECT_EQ(nm.committedThroughMs, Epoch + Hour);
+    EXPECT_EQ(protocol::chunks::decode(*service.serve(rows, r.contentHash ^ 1).bytes).kind, protocol::chunks::Kind::Chunk);
+    rows.startMs += Hour;
+    EXPECT_EQ(protocol::chunks::decode(*service.serve(rows, r.contentHash).bytes).error, protocol::chunks::Error::Unavailable);
+    EXPECT_GE(service.stats().hits, 3u); EXPECT_EQ(service.stats().misses, 1u);
+    EXPECT_NE(metrics.render().find("sentinel_flow_chunk_cache_hits_total 3"), std::string::npos);
+}
+TEST_F(ChunkStoreTest, ServingFenceDropsCacheAndInFlightBeforeEpochWrite) {
+    fixture(); fixture(1, "ETH-USD"); FlowStore source(sourceOptions()); auto o = options();
+    recording::FlowChunkService* service = nullptr;
+    protocol::chunks::Key key{Id, "flow.rows", Minute, 1, Epoch};
+    recording::FlowChunkService::Reply inflight;
+    uint64_t hash = 0; bool observed = false;
+    o.beforeEpochWriteForTest = [&] {
+        observed = true;
+        const auto refused = protocol::chunks::decode(*service->serve(key, hash).bytes);
+        EXPECT_EQ(refused.kind, protocol::chunks::Kind::Error);
+        EXPECT_EQ(refused.error, protocol::chunks::Error::Unavailable);
+        EXPECT_FALSE(service->admit(key, inflight, [] { ADD_FAILURE() << "fenced reply admitted"; }));
+    };
+    FlowChunkStore store(source, o); ASSERT_EQ(store.runPass().failed, 0u);
+    recording::FlowChunkService serving(store); service = &serving;
+    inflight = service->serve(key); ASSERT_TRUE(inflight.bytes); hash = protocol::chunks::decode(*inflight.bytes).contentHash;
+    const auto before = store.epoch(Id);
+    auto eth = key; eth.instrument = "coinbase:ETH-USD";
+    auto untouched = service->serve(eth); ASSERT_TRUE(untouched.bytes);
+    const auto victim = raw / "BTC-USD" / "2027" / "01" / "01" / "05.rawl2";
+    fs::last_write_time(victim, fs::last_write_time(victim) + std::chrono::seconds(2));
+    ASSERT_EQ(store.runPass().failed, 0u); EXPECT_TRUE(observed); EXPECT_NE(store.epoch(Id), before);
+    EXPECT_FALSE(service->admit(key, inflight, [] { ADD_FAILURE(); }));
+    const auto hits = service->stats().hits;
+    EXPECT_EQ(service->serve(eth).bytes, untouched.bytes); EXPECT_EQ(service->stats().hits, hits + 1);
+    const auto fresh = protocol::chunks::decode(*service->serve(key, hash).bytes);
+    EXPECT_EQ(fresh.epoch, store.epoch(Id)); EXPECT_EQ(fresh.kind, protocol::chunks::Kind::NotModified);
+    EXPECT_GT(service->stats().evictions, 0u);
+}
+TEST_F(ChunkStoreTest, ServingWithdrawnFileInvalidatesCacheAndSameEpochInFlightReply) {
+    fixture(); FlowStore source(sourceOptions()); FlowChunkStore store(source, options());
+    ASSERT_EQ(store.runPass().failed, 0u); recording::FlowChunkService service(store);
+    protocol::chunks::Key key{Id, "flow.rows", Minute, 1, Epoch};
+    const auto inflight = service.serve(key); ASSERT_TRUE(inflight.bytes);
+    const auto hash = protocol::chunks::decode(*inflight.bytes).contentHash;
+    const auto epoch = store.epoch(Id);
+    { std::ofstream corrupt(store.filePath(Id, Epoch), std::ios::trunc); corrupt << "damaged"; }
+    const auto refused = service.serve(key, hash); ASSERT_TRUE(refused.bytes);
+    EXPECT_EQ(protocol::chunks::decode(*refused.bytes).error, protocol::chunks::Error::Unavailable);
+    EXPECT_EQ(service.stats().bytes, 0u); EXPECT_EQ(store.epoch(Id), epoch);
+    ASSERT_EQ(store.runPass().failed, 0u); EXPECT_EQ(store.epoch(Id), epoch);
+    EXPECT_FALSE(service.admit(key, inflight, [] { ADD_FAILURE() << "withdrawn generation admitted"; }));
+    const auto fresh = service.serve(key, hash); ASSERT_TRUE(fresh.bytes);
+    EXPECT_EQ(protocol::chunks::decode(*fresh.bytes).kind, protocol::chunks::Kind::NotModified);
+}
+TEST_F(ChunkStoreTest, ServingPendingRuleChangeNeverConfirmsOldHash) {
+    fixture(); FlowStore source(sourceOptions()); uint64_t hash;
+    protocol::chunks::Key key{Id, "flow.rows", Minute, 1, Epoch};
+    { FlowChunkStore original(source, options()); ASSERT_EQ(original.runPass().failed, 0u);
+      recording::FlowChunkService service(original); hash = protocol::chunks::decode(*service.serve(key).bytes).contentHash; }
+    auto o = options(); ++o.rules.builderVersion;
+    FlowChunkStore pending(source, o); pending.initialize(); recording::FlowChunkService service(pending);
+    const auto reply = protocol::chunks::decode(*service.serve(key, hash).bytes);
+    EXPECT_EQ(reply.kind, protocol::chunks::Kind::Error); EXPECT_EQ(reply.error, protocol::chunks::Error::Unavailable);
+}
+TEST_F(ChunkStoreTest, ServingSixteenDaysAssemblesOnceForBothChannelsAndAvailability) {
+    fixture(10); FlowStore source(sourceOptions()); auto o = options(); size_t reads = 0;
+    o.afterSectionReadForTest = [&] { ++reads; };
+    FlowChunkStore store(source, o); ASSERT_EQ(store.runPass().failed, 0u);
+    recording::FlowChunkService service(store);
+    protocol::chunks::Key key{Id, "flow.rows", Day, 1, heatmap::chunkStartOf(Day, Epoch)};
+    const auto a = service.serve(key); ASSERT_TRUE(a.bytes);
+    EXPECT_EQ(protocol::chunks::decode(*a.bytes).kind, protocol::chunks::Kind::Chunk);
+    EXPECT_EQ(service.serve(key).bytes, a.bytes);
+    key.channel = "flow.summary"; key.priceStep = 0;
+    EXPECT_EQ(protocol::chunks::decode(*service.serve(key).bytes).kind, protocol::chunks::Kind::Chunk);
+    ASSERT_TRUE(service.availability(Id)); ASSERT_TRUE(service.availability(Id));
+    EXPECT_EQ(reads, 1u);
+}
+TEST_F(ChunkStoreTest, ServingCachedSixteenDaysRechecksUnrecordedSourceDays) {
+    fixture(10); FlowStore source(sourceOptions()); FlowChunkStore store(source, options());
+    ASSERT_EQ(store.runPass().failed, 0u); recording::FlowChunkService service(store);
+    protocol::chunks::Key key{Id, "flow.rows", Day, 1, heatmap::chunkStartOf(Day, Epoch)};
+    const auto cached = service.serve(key); ASSERT_TRUE(cached.bytes);
+    const auto frame = protocol::chunks::decode(*cached.bytes); ASSERT_EQ(frame.kind, protocol::chunks::Kind::Chunk);
+    const auto missingDay = key.startMs < Epoch - Day ? key.startMs : Epoch + 11 * Day;
+    ASSERT_LT(missingDay, key.startMs + 16 * Day);
+    Journal later(raw); later.snapshot(missingDay - Epoch); later.close();
+    source.archive("BTC-USD"); // Shared inventory moves before the chunk builder.
+    const auto reply = service.serve(key, frame.contentHash); ASSERT_TRUE(reply.bytes);
+    EXPECT_EQ(protocol::chunks::decode(*reply.bytes).error, protocol::chunks::Error::Unavailable);
+}
+TEST_F(ChunkStoreTest, ServingCacheIsByteBoundedAndEvictsLeastRecentlyUsed) {
+    fixture(); FlowStore source(sourceOptions()); FlowChunkStore store(source, options());
+    ASSERT_EQ(store.runPass().failed, 0u);
+    recording::FlowChunkService service(store, 800);
+    protocol::chunks::Key key{Id, "flow.rows", Minute, 1, Epoch};
+    for (int h = 0; h < 24; ++h) {
+        key.startMs = Epoch + h * Hour; ASSERT_TRUE(service.serve(key).bytes); EXPECT_LE(service.stats().bytes, 800u);
+    }
+    EXPECT_GT(service.stats().evictions, 0u);
+    const auto misses = service.stats().misses; service.serve(key); EXPECT_EQ(service.stats().misses, misses);
+    key.startMs = Epoch; service.serve(key); EXPECT_EQ(service.stats().misses, misses + 1);
+    recording::FlowChunkService disabled(store, 0); disabled.serve(key);
+    EXPECT_EQ(disabled.stats().bytes, 0u);
+}
+TEST_F(ChunkStoreTest, AvailabilitySnapshotCoalescesAndTracksLiveFloorAndEpoch) {
+    fixture(); FlowStore source(sourceOptions()); FlowChunkStore store(source, options());
+    ASSERT_EQ(store.runPass().failed, 0u); source.setLiveRetentionFloor("BTC-USD", Epoch - 6 * Hour);
+    auto snapshot = store.snapshot(Id); ASSERT_TRUE(snapshot);
+    EXPECT_EQ(snapshot->liveFromMs, Epoch - 6 * Hour); EXPECT_EQ(snapshot->epoch, store.epoch(Id));
+    EXPECT_TRUE(std::any_of(snapshot->levels[0].begin(), snapshot->levels[0].end(), [](auto r) {
+        return r.fromMs <= Epoch && r.toMs >= Epoch + Day;
+    }));
+    for (size_t n = 1; n < snapshot->levels[0].size(); ++n)
+        EXPECT_LT(snapshot->levels[0][n-1].toMs, snapshot->levels[0][n].fromMs);
+    const auto victim = source.archive("BTC-USD").catalog->files().front().path;
+    fs::last_write_time(victim, fs::last_write_time(victim) + std::chrono::seconds(2));
+    ASSERT_EQ(store.runPass().failed, 0u);
+    const auto updated = store.snapshot(Id); ASSERT_TRUE(updated); EXPECT_NE(updated->epoch, snapshot->epoch);
+}
+TEST_F(ChunkStoreTest, FailedAndSkippedDayRetainsPreviousIntegrityUntilItIsChecked) {
+    fixture(2); fixture(1, "ETH-USD"); FlowStore source(sourceOptions()); auto o = options();
+    bool fail = false; size_t loads = 0;
+    auto tick = std::chrono::steady_clock::time_point{}; o.schedulerNow = [&] { return tick; };
+    o.beforeDayLoadForTest = [&](int64_t day) {
+        if (day == Epoch && fail) { ++loads; throw std::runtime_error("injected day load failure"); }
+    };
+    FlowChunkStore store(source, o); ASSERT_EQ(store.runPass().failed, 0u);
+    const auto path = raw / "BTC-USD" / "2027" / "01" / "01" / "05.rawl2";
+    fs::last_write_time(path, fs::last_write_time(path) + std::chrono::seconds(2));
+    fail = true; EXPECT_GT(store.runPass().failed, 0u); EXPECT_GT(loads, 0u);
+    const auto failedLoads = loads;
+    store.runPass(); EXPECT_EQ(loads, failedLoads); // backoff skipped the day
+    tick += std::chrono::seconds(61);
+    EXPECT_GT(store.runPass().failed, 0u); EXPECT_GT(loads, failedLoads); // integrity still forces retry
+    fail = false; tick += std::chrono::seconds(121);
+    ASSERT_EQ(store.runPass().failed, 0u); EXPECT_TRUE(store.read(Id, Minute, Epoch));
+}
+
+TEST_F(ChunkStoreTest, SuccessfulPassRemembersIntegrityObservedDuringReplay) {
+    fixture(3); FlowStore source(sourceOptions()); auto o = options(); bool rotated = false; size_t closedLoads = 0;
+    o.afterRecordForTest = [&](std::stop_token) {
+        if (std::exchange(rotated, true)) return;
+        Journal later(raw); later.snapshot(20 * Day); later.close();
+    };
+    o.beforeDayLoadForTest = [&](int64_t day) { if (day >= Epoch && day < Epoch + 3 * Day) ++closedLoads; };
+    FlowChunkStore store(source, o); ASSERT_EQ(store.runPass().failed, 0u);
+    closedLoads = 0;
+    store.runPass(); // Newly discovered open days need not have a usable grid yet.
+    EXPECT_EQ(closedLoads, 0u); // the final shared inventory was already observed by replay
 }
 
 }

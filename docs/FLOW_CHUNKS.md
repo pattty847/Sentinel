@@ -1,6 +1,6 @@
 # Flow chunks
 
-**Chunk codecs and parallel disk store implemented; serving migration pending.** Flow history today (FLD1 day
+**Chunk codecs, parallel disk store and sealed flow serving implemented; client and live migration pending.** Flow history today (FLD1 day
 files, FHE1 pages, `flow_bar` live messages) is in [MARKETDATA.md](MARKETDATA.md) "Live flow bars" and
 "Flow history". This spec replaces FLD1 and FHE1 and puts flow on heatmap-style chunks. The server
 (plan step 3) and the client (step 5) implement it; step 4 moves the heatmap onto the same envelope.
@@ -8,7 +8,7 @@ Measurements are in section 12. They come from `flow_history_bench --lateness` a
 (`tests/core/flow_history_bench.cpp`). Production byte codecs are in `libs/core/flow/FlowChunkCodec.*`,
 `FlowChunkDecode.cpp`, `FlowDayFile.*`, and `FlowEpoch.*`, with row steps in `FlowRowStep.hpp` and
 single-allocation decoded fields in `FlowChunk.hpp`. Golden bytes and validation tests are in
-`tests/core/test_flow_chunk.cpp`. These codec libraries add no disk I/O or request handling. The parallel disk store is
+`tests/core/test_flow_chunk.cpp`. SCK1 transport and SHE1 dispatch are in `protocol/ChunkFrame.*`; `FlowChunkService` and the stream server serve sealed flow requests and availability. The parallel disk store is
 `servermodel/FlowChunkStore.*`; it shares FlowStore's RAWL2 catalog, inventory, source
 identity primitives and grid lookup. The offline `flow_chunk_diff` tool builds selected
 days into scratch and compares their summary and rows against FLD1 (notables excluded).
@@ -132,6 +132,13 @@ every change. Each channel's `epoch` is the instrument's current epoch for it:
    "levels":[{"level_ms":60000,"chunk_span_ms":3600000,"oldest_ms":..,"latest_ms":..,
               "sealed":[[<from>,<to>],...]}]}}}            // book levels add "committed_through_ms"
 ```
+
+`chunk_availability_subscribe` replaces a session's interests with `instruments` (0..8 distinct ids;
+empty unsubscribes all). Updates are coalesced to at most one per instrument per second per session.
+Both channels and all three levels are always present. `oldest_ms`/`latest_ms` are sealed chunk starts,
+null for an empty level. Before initialization, epoch is zero and ranges are empty. The cache default
+is 64 MiB (`flow.chunk_cache_bytes`, CONFIG.md); readers and final queue admission recheck day versions
+as well as epoch, so withdrawal/rebuild under the same epoch also discards in-flight replies.
 
 `sealed` lists every coalesced run of sealed chunk starts as half-open ranges, ascending. `meta` is
 channel-specific; empty for flow.

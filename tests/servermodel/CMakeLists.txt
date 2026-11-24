@@ -273,3 +273,10 @@ set_tests_properties(FlowChunkStoreTests PROPERTIES LABELS "servermodel;flow" TI
 add_dependencies(servermodel_tests test_flow_chunk_store)
 target_compile_definitions(test_flow_chunk_store PRIVATE FLOW_CHUNK_DIFF_EXE="$<TARGET_FILE:flow_chunk_diff>")
 add_dependencies(test_flow_chunk_store flow_chunk_diff)
+
+add_executable(test_flow_chunk_wire test_flow_chunk_wire.cpp)
+target_include_directories(test_flow_chunk_wire PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(test_flow_chunk_wire PRIVATE sentinel_core GTest::gtest_main Qt6::Core Qt6::Network)
+add_test(NAME FlowChunkWireTests COMMAND test_flow_chunk_wire)
+set_tests_properties(FlowChunkWireTests PROPERTIES LABELS "servermodel;flow" TIMEOUT 120)
+add_dependencies(servermodel_tests test_flow_chunk_wire)

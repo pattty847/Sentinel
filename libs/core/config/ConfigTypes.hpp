@@ -103,6 +103,7 @@ struct ServerRecordingConfig {
 };
 
 struct ServerFlowConfig {
+    uint64_t chunkCacheBytes = 64u * 1024u * 1024u; // finished SCK1 frame LRU; zero disables retention
     uint32_t sealWindowMs = 300000; // canonical receive watermark; [0, 3600000]
 };
 

@@ -10,6 +10,7 @@
 #include "capture/RawCapture.hpp"
 #include "RecordingCapability.hpp"
 #include "ChunkWire.hpp"
+#include "FlowChunkWire.hpp"
 #include <list>
 #include "SentinelLogging.hpp"
 #include "../servermodel/SessionManager.hpp"
@@ -367,6 +368,7 @@ std::string build(const Request& q, const ServerDataModel::FlowHistorySnapshot& 
 class Session : public std::enable_shared_from_this<Session> {
     friend struct RecordingServerStopTest;
     friend struct HeatmapChunkWireTest;
+    friend struct FlowChunkWireTest;
     friend struct ServerFeedAdmissionTest;
     friend struct FlowLiveWireTestAccess;
     websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws_;
@@ -391,6 +393,9 @@ class Session : public std::enable_shared_from_this<Session> {
     std::stop_source flowReplayStop_;
 #ifdef SENTINEL_FLOW_HISTORY_TEST
     std::function<void(std::string, bool)> flowHistoryWriteForTest_;
+#endif
+#ifdef SENTINEL_FLOW_CHUNK_TEST
+    std::function<void(std::string, bool)> chunkWriteForTest_;
 #endif
     std::atomic_size_t pendingWriteBytes_{0};
     std::atomic_size_t pendingModelEvents_{0};
@@ -438,6 +443,23 @@ class Session : public std::enable_shared_from_this<Session> {
     // was built from, per subscribed symbol. Executor-only.
     struct AvailabilityState { std::vector<int64_t> fingerprint; std::string sent; bool busy = false; };
     std::unordered_map<std::string, AvailabilityState> availability_;
+    struct FlowAvailabilityState {
+        std::pair<uint64_t, int64_t> fingerprint{};
+        std::string sent;
+        bool busy = false, refresh = true;
+        std::chrono::steady_clock::time_point lastSent{};
+    };
+    std::map<std::string, std::shared_ptr<FlowAvailabilityState>> flowAvailability_;
+    struct FlowChunkBatch {
+        struct Item {
+            protocol::chunks::Key key;
+            recording::FlowChunkService::Reply reply;
+            std::string payload;
+            bool ready = false, charged = false;
+        };
+        std::vector<Item> items;
+        size_t next = 0;
+    };
 
     void releaseWrite(const PendingWrite& write) {
         if (write.rawLive) rawWriteSlot_->release(write.payload.size());
@@ -844,6 +866,114 @@ class Session : public std::enable_shared_from_this<Session> {
         write_queue_.push_back({std::move(payload), true, true});
         if (write_queue_.size() == 1) internal_async_write();
     }
+    // Completed replies waiting for an earlier start count against the same
+    // byte budget as socket-queued chunks. Refusals retain ordinary accounting.
+    void drainFlowChunks(const std::shared_ptr<FlowChunkBatch>& batch,
+                         const std::shared_ptr<recording::FlowChunkService>& service) {
+        while (batch->next < batch->items.size() && batch->items[batch->next].ready) {
+            auto& item = batch->items[batch->next++];
+            const auto bytes = item.payload.size();
+            const bool idle = write_queue_.empty();
+            if (item.charged) {
+                const bool accepted = service->admit(item.key, item.reply, [&] {
+                    write_queue_.push_back({std::move(item.payload), true, true});
+                });
+                if (!accepted) chunkBytes_ -= std::min(chunkBytes_, bytes);
+                else if (idle) internal_async_write();
+            } else if (!item.payload.empty()) do_write(std::move(item.payload), true, {}, true);
+            item.reply = {};
+        }
+    }
+    void handleFlowChunkRequest(const nlohmann::json& j) {
+        protocol::flowchunks::Request q;
+        if (const auto error = protocol::flowchunks::parseRequest(j, q)) {
+            do_write(chunkEnvelope(q.req, *recording::FlowChunkService::error(q.key,
+                heatmap::ChunkError::InvalidRequest, *error)), true);
+            return;
+        }
+        const auto service = owner_->m_flowChunks;
+        auto batch = std::make_shared<FlowChunkBatch>(); batch->items.resize(q.starts.size());
+        for (size_t n = 0; n < q.starts.size(); ++n) {
+            auto& item = batch->items[n]; item.key = q.at(n);
+            auto refuse = [&](heatmap::ChunkError code, const char* message) {
+                item.payload = chunkEnvelope(q.req, *recording::FlowChunkService::error(item.key, code, message));
+                item.ready = true;
+            };
+            if (!service) { refuse(heatmap::ChunkError::Unavailable, "flow chunks unavailable"); continue; }
+            if (chunkJobs_ >= kMaxChunkJobs || chunkBytes_ >= kMaxChunkBytes) {
+                refuse(heatmap::ChunkError::Busy, "session chunk budget exhausted"); continue;
+            }
+            ++chunkJobs_;
+            const bool queued = owner_->submitHistoryTask([weak = weak_from_this(), executor = ws_.get_executor(),
+                service, batch, n, key = item.key, have = q.have[n], req = q.req,
+                after = owner_->m_afterFlowChunkServeForTest] {
+                auto reply = service->serve(key, have);
+                auto payload = reply.bytes ? chunkEnvelope(req, *reply.bytes) : std::string{};
+                if (after) after(key);
+                net::post(executor, [weak, service, batch, n, reply = std::move(reply), payload = std::move(payload)]() mutable {
+                    const auto self = weak.lock();
+                    if (!self) return;
+                    if (self->chunkJobs_) --self->chunkJobs_;
+                    if (self->closing_.load()) return;
+                    auto& item = batch->items[n];
+                    item.reply = std::move(reply); item.payload = std::move(payload);
+                    item.ready = true; item.charged = true;
+                    self->chunkBytes_ += item.payload.size();
+                    self->drainFlowChunks(batch, service);
+                });
+            });
+            if (!queued) { --chunkJobs_; refuse(heatmap::ChunkError::Busy, "server chunk workers busy"); }
+        }
+        drainFlowChunks(batch, service);
+    }
+    void pushFlowAvailability(const std::string& id) {
+        const auto service = owner_->m_flowChunks;
+        const auto state = flowAvailability_.at(id);
+        const auto now = std::chrono::steady_clock::now();
+        if (!service || closing_.load() || state->busy || now - state->lastSent < std::chrono::seconds(1)) return;
+        const auto fingerprint = service->fingerprint(id);
+        if (!state->refresh && !state->sent.empty() && state->fingerprint == fingerprint) return;
+        state->busy = true;
+        const bool queued = owner_->submitHistoryTask([weak = weak_from_this(), executor = ws_.get_executor(), service, id, state] {
+            std::string payload;
+            std::optional<recording::FlowChunkStore::Snapshot> snapshot;
+            try {
+                snapshot = service->availability(id);
+                if (snapshot) payload = protocol::flowchunks::availability(id, *snapshot).dump();
+            } catch (const std::exception& e) {
+                sLog_Warning("Flow chunk availability failed instrument=" << id << " error=" << e.what());
+            }
+            net::post(executor, [weak, service, id, state, snapshot = std::move(snapshot), payload = std::move(payload)]() mutable {
+                const auto self = weak.lock();
+                if (!self || self->closing_.load()) return;
+                const auto it = self->flowAvailability_.find(id);
+                if (it == self->flowAvailability_.end() || it->second != state) return;
+                state->busy = false;
+                if (!snapshot || payload.empty()) return;
+                const auto fingerprint = std::pair(snapshot->serial, snapshot->liveFromMs);
+                if (service->fingerprint(id) != fingerprint) return;
+                state->fingerprint = fingerprint;
+                if (!state->refresh && payload == state->sent) return;
+                state->refresh = false; state->sent = payload; state->lastSent = std::chrono::steady_clock::now();
+                self->do_write(std::move(payload));
+            });
+        });
+        if (!queued) state->busy = false;
+    }
+    void handleFlowAvailabilitySubscribe(const nlohmann::json& j) {
+        std::vector<std::string> ids;
+        if (const auto error = protocol::flowchunks::parseSubscribe(j, ids)) {
+            send_error("chunk_availability_subscribe", "", *error); return;
+        }
+        std::erase_if(flowAvailability_, [&](const auto& item) {
+            return std::find(ids.begin(), ids.end(), item.first) == ids.end();
+        });
+        for (const auto& id : ids) {
+            auto& state = flowAvailability_[id];
+            if (!state) state = std::make_shared<FlowAvailabilityState>();
+            state->refresh = true; pushFlowAvailability(id);
+        }
+    }
     void pushAvailability(const std::string& symbol) {
         const auto service = chunkService();
         if (!service || closing_.load()) return;
@@ -878,13 +1008,14 @@ class Session : public std::enable_shared_from_this<Session> {
         do_write(std::move(payload));
     }
     void armAvailabilityTimer() {
-        if (closing_.load() || !chunkService()) return;
+        if (closing_.load()) return;
         availabilityTimer_.expires_after(std::chrono::seconds(1));
         availabilityTimer_.async_wait([weak = weak_from_this()](beast::error_code ec) {
             if (auto self = weak.lock(); self && !ec && !self->closing_.load()) {
                 std::vector<std::string> symbols;
                 for (const auto& [symbol, state] : self->availability_) symbols.push_back(symbol);
                 for (const auto& symbol : symbols) self->pushAvailability(symbol);
+                for (const auto& [id, state] : self->flowAvailability_) self->pushFlowAvailability(id);
                 self->armAvailabilityTimer();
             }
         });
@@ -1139,6 +1270,10 @@ public:
                     rawViews_.erase(it);
                     sLog_Data("Raw heatmap unsubscribe: peer=" << peer_ << " symbol=" << symbol);
                 }
+            } else if (type == "chunk_request") {
+                handleFlowChunkRequest(j);
+            } else if (type == "chunk_availability_subscribe") {
+                handleFlowAvailabilitySubscribe(j);
             } else if (type == "heatmap_chunk_request") {
                 handleChunkRequest(j);
             } else if (type == "tpo_history_request") {
@@ -1912,7 +2047,7 @@ public:
     }
 
     void do_write(std::string payload, bool binary = false,
-                  std::shared_ptr<FlowSubscription> flow = {}) {
+                  std::shared_ptr<FlowSubscription> flow = {}, bool onExecutor = false) {
 #ifdef SENTINEL_FLOW_HISTORY_TEST
         if (flowHistoryWriteForTest_) {
             flowHistoryWriteForTest_(std::move(payload), binary);
@@ -1944,6 +2079,9 @@ public:
             }
         }
 
+        // Ordered flow batches are already on this executor. Enqueue their
+        // refusals inline so a later completed chunk cannot overtake one.
+        if (onExecutor) { on_write_post(std::move(payload), binary, std::move(flow)); return; }
         net::post(ws_.get_executor(),
             beast::bind_front_handler(
                 &Session::on_write_post,
@@ -1992,6 +2130,15 @@ public:
             write_queue_.pop_front();
         }
         if (write_queue_.empty()) return;
+#ifdef SENTINEL_FLOW_CHUNK_TEST
+        if (chunkWriteForTest_) {
+            auto payload = write_queue_.front().payload;
+            const auto binary = write_queue_.front().binary;
+            chunkWriteForTest_(std::move(payload), binary);
+            on_write_complete({}, write_queue_.front().payload.size());
+            return;
+        }
+#endif
         ws_.binary(write_queue_.front().binary);
         ws_.async_write(
             net::buffer(write_queue_.front().payload),
@@ -2570,4 +2717,10 @@ void SentinelStreamServer::broadcastTradingSnapshot(const std::string& reason, c
              << " openOrders=" << snapshot.openOrders.size()
              << " runningAlgos=" << snapshot.runningAlgos.size());
     broadcastJson(m_tradingBroadcastMutex, m_tradingBroadcasters, trading::tradingSnapshotJson(snapshot).dump());
+}
+
+void SentinelStreamServer::attachFlowChunks(recording::FlowChunkStore& store, sentinel::metrics::MetricsRegistry* metrics) {
+    if (m_running.load()) throw std::logic_error("attach flow chunks before start");
+    m_flowChunks = std::make_shared<recording::FlowChunkService>(store,
+        size_t(m_serverConfig.flow.chunkCacheBytes), metrics);
 }

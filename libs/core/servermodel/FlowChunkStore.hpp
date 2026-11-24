@@ -20,6 +20,7 @@ public:
         sentinel::metrics::MetricsRegistry *metrics = nullptr; // outlives store
         std::function<void(std::stop_token)> afterRecordForTest;
         std::function<void(int64_t)> afterDayForTest;
+        std::function<void(int64_t)> beforeDayLoadForTest;
         std::function<void()> afterAvailabilityReadForTest;
         std::function<void()> beforeEpochWriteForTest;
         std::function<void()> afterSectionReadForTest;
@@ -33,7 +34,15 @@ public:
         };
         std::chrono::milliseconds damageRetry{60'000}; // test seam; production backoff base
     };
+    // Versions fence a reply even if a day is withdrawn and rebuilt under the
+    // same epoch before its history job finishes. Zero denotes an absent day.
+    struct Stamp {
+        uint64_t epoch = 0;
+        std::vector<uint64_t> days;
+        bool operator==(const Stamp&) const = default;
+    };
     struct Payload {
+        Stamp stamp;
         uint64_t epoch = 0;
         uint32_t summaryLength = 0;
         uint8_t stepExponent = 0;
@@ -67,6 +76,22 @@ public:
     uint64_t epoch(const std::string &instrument) const;
     Availability sealed(const std::string &instrument, int64_t levelMs);
     std::optional<Payload> read(const std::string &instrument, int64_t levelMs, int64_t startMs);
+    struct Snapshot {
+        uint64_t epoch = 0, serial = 0;
+        int64_t liveFromMs = 0;
+        std::array<std::vector<Range>, 3> levels;
+    };
+    std::optional<Snapshot> snapshot(const std::string& instrument);
+    std::pair<uint64_t, int64_t> fingerprint(const std::string& instrument) const;
+    std::optional<Stamp> stamp(const std::string& instrument, int64_t level, int64_t start) const;
+    // History-worker stat validation for cached frames; never assembles payloads.
+    bool verify(const std::string& instrument, int64_t level, int64_t start, const Stamp&);
+    // Runs only a short memory operation under the store fence (never I/O).
+    bool ifCurrent(const std::string& instrument, int64_t level, int64_t start,
+                   const Stamp&, const std::function<void()>& action) const;
+    // One serving cache; callback only erases memory, under the store mutex.
+    // null day means epoch move (drop every entry of this instrument).
+    void onInvalidation(std::function<void(const std::string&, std::optional<int64_t>)> handler);
     std::filesystem::path filePath(const std::string &instrument, int64_t day) const;
     // Canonical independent scan, also used by the read-only offline diff tool.
     HourResult buildHour(const std::string &symbol, int64_t hour,
@@ -89,6 +114,7 @@ private:
         sentinel::flow::chunks::EpochState state;
         std::map<int64_t, Day> days;
         bool initialized = false;
+        uint64_t serial = 0;
         uint64_t generation = UINT64_MAX;
         uint64_t integrity = UINT64_MAX;
         sentinel::metrics::Counter *late = nullptr, *regressions = nullptr, *failures = nullptr, *hours = nullptr;
@@ -97,10 +123,14 @@ private:
     FlowStore &sources_;
     Options options_;
     mutable std::mutex mutex_;
+    std::function<void(const std::string&, std::optional<int64_t>)> invalidate_;
+    void changed(const std::string&, std::optional<int64_t> day); // mutex held
+    std::optional<Stamp> stampLocked(const std::string&, int64_t, int64_t) const;
     std::mutex passMutex_, wakeMutex_;
     std::condition_variable wakeCv_;
     bool woken_ = false;
     std::map<std::string, Instrument> instruments_;
+    std::map<std::string, std::pair<uint64_t, uint64_t>> observedArchives_; // passMutex_
     std::stop_source stopSource_;
     std::thread thread_;
     std::filesystem::path checked(const std::filesystem::path &) const;

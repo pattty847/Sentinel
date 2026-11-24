@@ -233,7 +233,9 @@ FlowChunkStore::FlowChunkStore(FlowStore &sources, Options options) : sources_(s
 FlowChunkStore::~FlowChunkStore() { stop(); }
 FlowStore::Archive FlowChunkStore::sharedArchive(const std::string &symbol, std::stop_token stop) {
     if (options_.afterArchiveRefreshForTest) options_.afterArchiveRefreshForTest();
-    return sources_.archive(symbol, stop);
+    auto result = sources_.archive(symbol, stop);
+    observedArchives_[symbol] = {result.generation, result.integrity};
+    return result;
 }
 fs::path FlowChunkStore::checked(const fs::path &path) const {
     const auto &o = sources_.options();
@@ -270,6 +272,7 @@ void FlowChunkStore::write(const fs::path &path, const std::vector<uint8_t> &dat
 }
 std::optional<chunks::DayFile> FlowChunkStore::load(const std::string &id, int64_t day,
                                                     std::optional<uint64_t> expectedRevision) {
+    if (options_.beforeDayLoadForTest) options_.beforeDayLoadForTest(day);
     try {
         auto result = chunks::parseDayFile(bytes(checked(filePath(id, day))));
         if (result.instrument != id || result.dayStartMs != day) throw std::runtime_error("chunk file identity");
@@ -278,7 +281,7 @@ std::optional<chunks::DayFile> FlowChunkStore::load(const std::string &id, int64
         bool log = false;
         { std::lock_guard lock(mutex_); auto &d = instruments_.at(id).days[day];
           if (!expectedRevision || d.indexRevision == *expectedRevision) {
-              log = d.hours != 0; const auto next = d.indexRevision + 1; d = {0, false, true}; d.indexRevision = next;
+              log = d.hours != 0; const auto next = d.indexRevision + 1; d = {0, false, true}; d.indexRevision = next; changed(id, day);
           } }
         if (log) sLog_Warning("Flow chunk withdrawn instrument=" << id << " day=" << day << " error=" << e.what());
         if (log) wake();
@@ -337,7 +340,7 @@ void FlowChunkStore::initializeInstrument(const std::string &id, const FlowStore
     auto next = chunks::startupTransition(stored, chunks::ruleIdentity(rules), days, uint64_t(sources_.options().nowMs()));
     // Nothing can be served until the new epoch is durable.
     write(directory / "epoch", chunks::encodeEpochFile(next));
-    { std::lock_guard lock(mutex_); auto &i = instruments_.at(id); i.state = next; i.initialized = true;
+    { std::lock_guard lock(mutex_); auto &i = instruments_.at(id); i.state = next; i.initialized = true; changed(id, {});
       for (auto day : days) i.days.try_emplace(day); }
     for (auto day : days) if (auto file = load(id, day)) {
         publish(id, *file);
@@ -362,7 +365,7 @@ void FlowChunkStore::publish(const std::string &id, const chunks::DayFile &file,
     auto &d = i.days[file.dayStartMs];
     if (expectedRevision && d.indexRevision != *expectedRevision) return;
     const auto revision = d.indexRevision + 1;
-    d = {}; d.indexRevision = revision;
+    d = {}; d.indexRevision = revision; changed(id, file.dayStartMs);
     if (!chunks::servable(i.state, file)) return;
     for (int h = 0; h < 24; ++h) if (file.sections[h].sealed) d.hours |= 1u << h;
     d.coarse = file.sections[24].sealed && file.sections[25].sealed;
@@ -436,7 +439,7 @@ void FlowChunkStore::transition(const std::string &id, int64_t day) {
       // Fence readers before disk I/O, but do not enter pending or advance
       // the counter until the epoch write succeeds. A failed write retries the
       // transition on the next pass and cannot publish new bytes under old epoch.
-      i.days[day].invalid = true;
+      i.days[day].invalid = true; ++i.days[day].indexRevision; changed(id, day);
       next = i.state; }
     next.pending.push_back(day);
     std::sort(next.pending.begin(), next.pending.end());
@@ -444,7 +447,9 @@ void FlowChunkStore::transition(const std::string &id, int64_t day) {
     ++next.counter;
     if (options_.beforeEpochWriteForTest) options_.beforeEpochWriteForTest();
     write(filePath(id, day).parent_path() / "epoch", chunks::encodeEpochFile(next));
-    { std::lock_guard lock(mutex_); auto &i = instruments_.at(id); i.state = next; i.days[day] = {0, false, true}; }
+    { std::lock_guard lock(mutex_); auto &i = instruments_.at(id); i.state = next;
+      auto revision = i.days[day].indexRevision + 1; i.days[day] = {0, false, true};
+      i.days[day].indexRevision = revision; changed(id, {}); }
     sLog_Data("Flow epoch changed instrument=" << id << " day=" << day << " counter=" << next.counter);
 }
 FlowChunkStore::HourResult FlowChunkStore::buildHour(const std::string &symbol, int64_t hour,
@@ -543,7 +548,7 @@ void FlowChunkStore::finishPending(const std::string &id, int64_t day) {
     if (!std::binary_search(next.pending.begin(), next.pending.end(), day)) return;
     chunks::finishDay(next, day);
     write(filePath(id, day).parent_path() / "epoch", chunks::encodeEpochFile(next));
-    { std::lock_guard lock(mutex_); instruments_.at(id).state = next; }
+    { std::lock_guard lock(mutex_); instruments_.at(id).state = next; changed(id, day); }
 }
 void FlowChunkStore::buildDay(const std::string &id, int64_t day, const FlowStore::Archive &archive,
                                std::stop_token stop, FlowStore::PassResult &result) {
@@ -757,6 +762,7 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
     using Attempt = std::tuple<std::string, int64_t, uint64_t>;
     std::set<Attempt> attempted;
     std::set<std::pair<std::string, int64_t>> failedThisPass;
+    std::set<std::string> incomplete;
     auto liveDays = [&](const std::string &symbol, const FlowStore::Archive &archive) {
         std::vector<int64_t> days;
         if (archive.days.empty()) return days;
@@ -796,7 +802,7 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
         if (!attempted.emplace(id, day, archive.generation).second) return;
         { std::lock_guard lock(mutex_);
           const auto &d = instruments_.at(id).days.at(day);
-          if ((d.badHours || d.buildFailures) && options_.schedulerNow() < d.retryAfter) return; }
+          if ((d.badHours || d.buildFailures) && options_.schedulerNow() < d.retryAfter) { incomplete.insert(id); return; } }
         bool work = needsWork(id, day, archive);
         if (!work) return;
         try {
@@ -813,13 +819,13 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
             if (build && !unchanged(id, day, archive, stop)) buildDay(id, day, archive, stop, result);
             { std::lock_guard lock(mutex_);
               auto &d = instruments_.at(id).days.at(day);
-              if (d.badHours) failedThisPass.emplace(id, day);
+              if (d.badHours) { failedThisPass.emplace(id, day); incomplete.insert(id); }
               if (!d.badHours) { d.buildFailures = 0; d.retryAfter = {}; } }
         } catch (const Cancelled &) { throw; }
           catch (const std::exception &e) {
             if (stop.stop_requested()) throw Cancelled{};
             ++result.failed;
-            failedThisPass.emplace(id, day);
+            failedThisPass.emplace(id, day); incomplete.insert(id);
             auto &i = instruments_.at(id);
             if (i.failures) i.failures->inc();
             { std::lock_guard lock(mutex_);
@@ -864,6 +870,7 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
                         try { known = sharedArchive(freshSymbol, stop); }
                         catch (const std::exception &e) {
                             ++result.failed;
+                            incomplete.insert("coinbase:" + freshSymbol);
                             sLog_Warning("Flow chunk priority refresh failed instrument=" << freshSymbol << " error=" << e.what());
                         }
                     }
@@ -875,9 +882,14 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
     } catch (const Cancelled &) { result.stopped = true; }
     for (auto &[symbol, archive] : archives) {
         const auto id = "coinbase:" + symbol;
+        // Replay may refresh the shared inventory (e.g. a tail closes). Record
+        // the end-of-pass state only after all of this instrument's days passed.
         std::lock_guard lock(mutex_);
         auto &i = instruments_.at(id);
-        i.generation = archive.generation; i.integrity = archive.integrity;
+        if (!result.stopped && !incomplete.contains(id)) {
+            const auto observed = observedArchives_.at(symbol);
+            i.generation = observed.first; i.integrity = observed.second;
+        }
         uint64_t remaining = 0;
         const auto newest = i.days.empty() ? -1 : i.days.rbegin()->first;
         for (const auto &[day, d] : i.days)
@@ -905,14 +917,15 @@ uint64_t FlowChunkStore::epoch(const std::string &id) const {
 std::optional<FlowChunkStore::Payload> FlowChunkStore::read(const std::string &id, int64_t level, int64_t start) {
     if (start < 0 || (level != Minute && level != Hour && level != DayMs) ||
         heatmap::chunkStartOf(level, start) != start) return {};
-    const auto before = epoch(id);
-    if (!before) return {};
+    const auto initial = stamp(id, level, start);
+    if (!initial) return {};
+    const auto before = initial->epoch;
     const auto symbol = symbolOf(id);
     const auto day = start / DayMs * DayMs;
     const auto count = level == DayMs ? 16 : 1;
     std::vector<std::vector<uint8_t>> pieces(16);
     std::vector<uint64_t> steps(16, 1);
-    Payload out; out.epoch = before;
+    Payload out; out.epoch = before; out.stamp = *initial;
     for (int n = 0; n < count; ++n) {
         const auto date = day + n * DayMs;
         bool known = false, ready = false;
@@ -964,14 +977,7 @@ std::optional<FlowChunkStore::Payload> FlowChunkStore::read(const std::string &i
         out.stepExponent = uint8_t(std::countr_zero(data.priceStep));
     }
     if (options_.afterSectionReadForTest) options_.afterSectionReadForTest();
-    // Fence or epoch changes invalidate reads already in a history worker.
-    { std::lock_guard lock(mutex_); const auto &i = instruments_.at(id);
-      if (chunks::epochOf(chunks::flowDomain(id), i.state) != before) return {};
-      for (int n = 0; n < count; ++n) {
-          const auto date = day + n * DayMs;
-          if (std::binary_search(i.state.pending.begin(), i.state.pending.end(), date)) return {};
-          if (const auto it = i.days.find(date); it != i.days.end() && it->second.invalid) return {};
-      } }
+    if (!ifCurrent(id, level, start, *initial, [] {})) return {};
     return out;
 }
 FlowChunkStore::Availability FlowChunkStore::sealed(const std::string &id, int64_t level) {
@@ -988,7 +994,9 @@ FlowChunkStore::Availability FlowChunkStore::sealed(const std::string &id, int64
           if (level == Minute) { for (int h = 0; h < 24; ++h) if (d.hours & (1u << h)) candidates.insert(day + h * Hour); }
           else if (d.coarse) candidates.insert(heatmap::chunkStartOf(level, day));
       } }
-    std::set<int64_t> validDays;
+    std::set<int64_t> validDays, coarseDays;
+    { std::lock_guard lock(mutex_);
+      for (const auto& [day, d] : instruments_.at(id).days) if (d.coarse) coarseDays.insert(day); }
     for (const auto &[day, size, modified, revision] : days) {
         try {
             const auto path = checked(filePath(id, day));
@@ -1003,7 +1011,18 @@ FlowChunkStore::Availability FlowChunkStore::sealed(const std::string &id, int64
     }
     const auto span = level == Minute ? Hour : level == Hour ? DayMs : 16 * DayMs;
     std::vector<Range> out;
-    for (auto start : candidates) if ((level == DayMs ? bool(read(id, level, start)) : validDays.contains(start / DayMs * DayMs))) {
+    auto ready = [&](int64_t start) {
+        if (level != DayMs) return validDays.contains(start / DayMs * DayMs);
+        for (int n = 0; n < 16; ++n) {
+            const auto day = start + n * DayMs;
+            if (validDays.contains(day) && coarseDays.contains(day)) continue;
+            { std::lock_guard lock(mutex_);
+              if (instruments_.at(id).days.contains(day)) return false; }
+            if (sources_.sourceState(symbolOf(id), day, day + DayMs) != FlowStore::SourceState::Absent) return false;
+        }
+        return true;
+    };
+    for (auto start : candidates) if (ready(start)) {
         if (!out.empty() && out.back().toMs == start) out.back().toMs += span;
         else out.push_back({start, start + span});
     }
@@ -1017,6 +1036,94 @@ FlowChunkStore::Availability FlowChunkStore::sealed(const std::string &id, int64
           if (std::any_of(out.begin(), out.end(), [&](const auto &r) { return day < r.toMs && day + DayMs > r.fromMs; })) return {};
       } }
     return {before, std::move(out)};
+}
+void FlowChunkStore::changed(const std::string& id, std::optional<int64_t> day) {
+    ++instruments_.at(id).serial;
+    if (invalidate_) invalidate_(id, day);
+}
+void FlowChunkStore::onInvalidation(std::function<void(const std::string&, std::optional<int64_t>)> handler) {
+    std::lock_guard lock(mutex_); invalidate_ = std::move(handler);
+}
+std::optional<FlowChunkStore::Stamp> FlowChunkStore::stampLocked(const std::string& id, int64_t level, int64_t start) const {
+    const auto span = heatmap::chunkSpanMs(level);
+    if (!span || start < kHmc2MinMs || start > kHmc2EndMs - span || !heatmap::isChunkStart(level, start)) return {};
+    const auto found = instruments_.find(id);
+    if (found == instruments_.end() || !found->second.initialized) return {};
+    const auto& i = found->second;
+    Stamp out{chunks::epochOf(chunks::flowDomain(id), i.state), {}};
+    const auto day = start / DayMs * DayMs;
+    for (int n = 0; n < (level == DayMs ? 16 : 1); ++n) {
+        const auto date = day + n * DayMs;
+        if (std::binary_search(i.state.pending.begin(), i.state.pending.end(), date)) return {};
+        const auto it = i.days.find(date);
+        if (it == i.days.end()) {
+            if (level != DayMs) return {};
+            out.days.push_back(0); continue; // read() must prove absence from RAWL2
+        }
+        const auto& d = it->second;
+        if (d.invalid || (level == Minute ? !(d.hours & (1u << ((start - day) / Hour))) : !d.coarse)) return {};
+        out.days.push_back(d.indexRevision);
+    }
+    return out;
+}
+std::optional<FlowChunkStore::Stamp> FlowChunkStore::stamp(const std::string& id, int64_t level, int64_t start) const {
+    std::lock_guard lock(mutex_); return stampLocked(id, level, start);
+}
+bool FlowChunkStore::verify(const std::string& id, int64_t level, int64_t start, const Stamp& expected) {
+    struct File { int64_t day; uintmax_t size; fs::file_time_type modified; uint64_t revision; };
+    std::vector<File> files;
+    if (!ifCurrent(id, level, start, expected, [&] {
+        const auto& i = instruments_.at(id);
+        const auto day = start / DayMs * DayMs;
+        for (size_t n = 0; n < expected.days.size(); ++n) {
+            const auto date = day + int64_t(n) * DayMs;
+            if (const auto it = i.days.find(date); it != i.days.end())
+                files.push_back({date, it->second.fileSize, it->second.fileModified, it->second.indexRevision});
+        }
+    })) return false;
+    // Negative source claims are part of a 16-day frame too. A shared archive
+    // refresh can discover a previously unrecorded day before our next pass.
+    for (size_t n = 0; n < expected.days.size(); ++n) {
+        if (expected.days[n]) continue;
+        const auto date = start + int64_t(n) * DayMs;
+        if (sources_.sourceState(symbolOf(id), date, date + DayMs) != FlowStore::SourceState::Absent)
+            return false;
+    }
+    for (const auto& f : files) {
+        try {
+            const auto path = checked(filePath(id, f.day));
+            if (fs::file_size(path) == f.size && fs::last_write_time(path) == f.modified) continue;
+        } catch (const std::exception&) {}
+        try { if (const auto fresh = load(id, f.day, f.revision)) publish(id, *fresh, f.revision); }
+        catch (const std::exception&) {}
+        wake(); return false;
+    }
+    return ifCurrent(id, level, start, expected, [] {});
+}
+bool FlowChunkStore::ifCurrent(const std::string& id, int64_t level, int64_t start,
+                                const Stamp& expected, const std::function<void()>& action) const {
+    std::lock_guard lock(mutex_);
+    const auto current = stampLocked(id, level, start);
+    if (!current || *current != expected) return false;
+    action(); return true;
+}
+std::pair<uint64_t, int64_t> FlowChunkStore::fingerprint(const std::string& id) const {
+    const auto floor = id.starts_with("coinbase:") ? sources_.liveRetentionFloor(id.substr(9)).value_or(0) : 0;
+    std::lock_guard lock(mutex_);
+    const auto it = instruments_.find(id);
+    return {it == instruments_.end() ? 0 : it->second.serial, floor};
+}
+std::optional<FlowChunkStore::Snapshot> FlowChunkStore::snapshot(const std::string& id) {
+    const auto before = fingerprint(id);
+    Snapshot out; out.serial = before.first; out.liveFromMs = before.second;
+    out.epoch = epoch(id);
+    for (size_t n = 0; n < heatmap::kChunkLevels.size(); ++n) {
+        auto level = sealed(id, heatmap::kChunkLevels[n]);
+        if (level.epoch != out.epoch) return {};
+        out.levels[n] = std::move(level.ranges);
+    }
+    if (fingerprint(id) != before) return {};
+    return out;
 }
 void FlowChunkStore::start() {
     if (thread_.joinable()) return;

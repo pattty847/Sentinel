@@ -24,6 +24,7 @@
 #include <unordered_map>
 #include "../servermodel/ServerDataModel.hpp"
 #include "../servermodel/ChunkService.hpp"
+#include "../servermodel/FlowChunkService.hpp"
 #include "../config/ConfigTypes.hpp"
 #include "../trading/TradingTypes.hpp"
 #include "../trading/LiveTradingSession.hpp"
@@ -47,6 +48,8 @@ public:
                                   QObject* parent = nullptr);
     ~SentinelStreamServer();
 
+    // Attach before start; the app owns the store beyond stop()'s worker join.
+    void attachFlowChunks(recording::FlowChunkStore& store, sentinel::metrics::MetricsRegistry* metrics = nullptr);
     // Validate before constructing the application (and starting recording/feeds).
     // Throws for an unparseable address or an address not assigned locally.
     static net::ip::address validateBindAddress(const ServerConfig& config);
@@ -91,6 +94,7 @@ private:
     friend class Session;
     friend struct RecordingServerStopTest;
     friend struct HeatmapChunkWireTest;
+    friend struct FlowChunkWireTest;
     friend struct ServerFeedAdmissionTest;
 
     // Accept chain of one start(); `generation` fences completions queued by an earlier one.
@@ -105,6 +109,8 @@ private:
     // Heatmap chunk serving; null when recording is unavailable. Shared with
     // history-worker jobs, which the server joins in stop().
     std::shared_ptr<recording::ChunkService> m_chunks;
+    std::shared_ptr<recording::FlowChunkService> m_flowChunks;
+    std::function<void(const protocol::chunks::Key&)> m_afterFlowChunkServeForTest;
     // Stored 1h/1d levels; its builder thread runs between start() and stop().
     std::shared_ptr<recording::RollupStore> m_rollups;
     std::unique_ptr<CoinbaseRestClient> m_restClient;

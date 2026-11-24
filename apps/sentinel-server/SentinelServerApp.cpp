@@ -250,6 +250,7 @@ bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
                     chunks.rules.sealWindowMs = m_serverConfig.flow.sealWindowMs;
                     chunks.metrics = &m_metrics;
                     m_flowChunkStore = std::make_unique<recording::FlowChunkStore>(*m_flowStore, std::move(chunks));
+                    m_server->attachFlowChunks(*m_flowChunkStore, &m_metrics);
                     m_flowChunkStore->start();
                 } catch (const std::exception &e) {
                     sLog_Error("Flow chunk store unavailable error=" << e.what());
