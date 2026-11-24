@@ -849,7 +849,7 @@ TEST_F(ChunkStoreTest, PriorityFailureBacksOffWithinTheSamePass) {
             EXPECT_TRUE(active->read("coinbase:ETH-USD", Minute, Epoch + 2 * Day + 23 * Hour));
             // Force a new archive generation while day 2 is still damaged.
             Journal next(raw); next.snapshot(3 * Day + 1000); next.close();
-            tick += std::chrono::seconds(31);
+            tick += std::chrono::seconds(65); // beyond backoff, still one attempt in this pass
         }
     };
     FlowChunkStore store(source, o); active = &store;

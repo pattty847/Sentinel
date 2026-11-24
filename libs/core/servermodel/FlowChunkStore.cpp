@@ -756,6 +756,7 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
     }
     using Attempt = std::tuple<std::string, int64_t, uint64_t>;
     std::set<Attempt> attempted;
+    std::set<std::pair<std::string, int64_t>> failedThisPass;
     auto liveDays = [&](const std::string &symbol, const FlowStore::Archive &archive) {
         std::vector<int64_t> days;
         if (archive.days.empty()) return days;
@@ -791,6 +792,7 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
     };
     auto process = [&](const std::string &symbol, int64_t day, FlowStore::Archive &archive) {
         const auto id = "coinbase:" + symbol;
+        if (failedThisPass.contains({id, day})) return;
         if (!attempted.emplace(id, day, archive.generation).second) return;
         { std::lock_guard lock(mutex_);
           const auto &d = instruments_.at(id).days.at(day);
@@ -811,11 +813,13 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
             if (build && !unchanged(id, day, archive, stop)) buildDay(id, day, archive, stop, result);
             { std::lock_guard lock(mutex_);
               auto &d = instruments_.at(id).days.at(day);
+              if (d.badHours) failedThisPass.emplace(id, day);
               if (!d.badHours) { d.buildFailures = 0; d.retryAfter = {}; } }
         } catch (const Cancelled &) { throw; }
           catch (const std::exception &e) {
             if (stop.stop_requested()) throw Cancelled{};
             ++result.failed;
+            failedThisPass.emplace(id, day);
             auto &i = instruments_.at(id);
             if (i.failures) i.failures->inc();
             { std::lock_guard lock(mutex_);
