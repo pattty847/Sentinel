@@ -1091,9 +1091,12 @@ std::optional<ServerDataModel::LiveFlowBar> ServerDataModel::composeLiveFlowBar(
     result.complete = product->second.firstLiveMs >= 0 && product->second.firstLiveMs <= start &&
         !flowLossIn(product->second.lossyMinutes, start, start + tf);
     const auto dayStart = start / 86'400'000 * 86'400'000;
-    if (const auto day = product->second.days.find(dayStart); day != product->second.days.end())
-        for (const auto& [hour, revision] : day->second.retiredRevisionByHour)
-            if (hour >= start && hour < start + tf) result.revision += revision;
+    if (const auto day = product->second.days.find(dayStart); day != product->second.days.end()) {
+        const auto& retired = day->second.retiredRevisionByMinute;
+        for (auto it = retired.lower_bound(start); it != retired.end() && it->first < start + tf; ++it)
+            result.revision += it->second;
+    }
+    std::map<int64_t, sentinel::flow::FlowBar> fallbackHours;
     for (auto minute = start; minute < start + tf && minute <= product->second.receiveMax; minute += 60'000) {
         const auto hour = minute / 3'600'000 * 3'600'000;
         const bool disk = flowHourSealed(sub.symbol, hour);
@@ -1107,6 +1110,24 @@ std::optional<ServerDataModel::LiveFlowBar> ServerDataModel::composeLiveFlowBar(
             // A sealed empty minute is covered without a row bar.
             continue;
         }
+        if (!sealed && tf >= 3'600'000 && hour >= start && hour + 3'600'000 <= start + tf &&
+            day != product->second.days.end()) {
+            const auto& retired = day->second.retiredRevisionByMinute;
+            const auto first = retired.lower_bound(hour);
+            if (first != retired.end() && first->first < hour + 3'600'000) {
+                // The legacy GUI has no availability handover. When a whole
+                // hour has left minute RAM but FLC1 is absent or invalidated,
+                // its retained closed-hour composite keeps the forming day
+                // growing without duplicating its remaining minute bars.
+                if (!fallbackHours.contains(hour)) {
+                    const auto old = day->second.hours.find(hour);
+                    if (old == day->second.hours.end()) return {};
+                    fallbackHours.emplace(hour, old->second.bar);
+                    result.complete &= old->second.complete;
+                }
+                continue;
+            }
+        }
         if (builder) {
             if (auto bar = builder->snapshotBar(minute)) {
                 parts.push_back(std::move(*bar));
@@ -1114,10 +1135,9 @@ std::optional<ServerDataModel::LiveFlowBar> ServerDataModel::composeLiveFlowBar(
             }
         }
         // An index epoch can invalidate the decoded seal after its live
-        // minutes were retired. Keep the last legacy frame until replacement
-        // sealed content arrives; availability-aware sessions see the hole.
+        // minutes were retired. Availability-aware sessions see the hole.
         if (day != product->second.days.end() &&
-            day->second.retiredRevisionByHour.contains(hour)) {
+            day->second.retiredRevisionByMinute.contains(minute)) {
             if (!sealed) return {};
             result.complete = false;
             result.building = true;
@@ -1131,7 +1151,7 @@ std::optional<ServerDataModel::LiveFlowBar> ServerDataModel::composeLiveFlowBar(
             result.building = true;
         }
     }
-    if (parts.empty()) {
+    if (parts.empty() && fallbackHours.empty()) {
         // Today's client has no availability subscription and its buffer,
         // footprint, and CVD treat count-0 carriers as actual zero columns.
         // Keep its last real bar until content arrives.
@@ -1144,7 +1164,31 @@ std::optional<ServerDataModel::LiveFlowBar> ServerDataModel::composeLiveFlowBar(
         result.bar.baseScale = s.baseScale; result.bar.quoteScale = s.quoteScale;
     } else if (tf == 60'000) result.bar = std::move(parts.front());
     else {
-        try { result.bar = sentinel::flow::composeFlowBars(parts, tf); }
+        try {
+            if (fallbackHours.empty()) result.bar = sentinel::flow::composeFlowBars(parts, tf);
+            else {
+                // The shared composer requires equal source timeframes. Fold
+                // retained minutes into hours, then combine them with closed
+                // hour fallbacks at the subscribed timeframe.
+                std::vector<sentinel::flow::FlowBar> hours;
+                hours.reserve(size_t(tf / 3'600'000));
+                size_t next = 0;
+                for (auto hour = start; hour < start + tf && hour <= product->second.receiveMax;
+                     hour += 3'600'000) {
+                    if (const auto old = fallbackHours.find(hour); old != fallbackHours.end()) {
+                        hours.push_back(old->second);
+                        continue;
+                    }
+                    const auto first = next;
+                    while (next < parts.size() && parts[next].startMs < hour + 3'600'000) ++next;
+                    if (next > first)
+                        hours.push_back(sentinel::flow::composeFlowBars(
+                            std::span<const sentinel::flow::FlowBar>(parts.data() + first, next - first),
+                            3'600'000));
+                }
+                result.bar = sentinel::flow::composeFlowBars(hours, tf);
+            }
+        }
         catch (const std::exception& e) {
             const auto key = std::tuple{sub.symbol, tf, start};
             if (m_flowComposeWarned.insert(key).second)
@@ -1463,11 +1507,10 @@ void ServerDataModel::pruneFlowSeries(const std::string& symbol, int64_t clock, 
             const bool safeDisk = flowHourSealed(symbol, hour) &&
                 fldSealedThrough >= slot.start + tf;
             if (slot.start < drop || safeDisk) {
-                // Retain the contribution to coarse envelope revisions after
-                // its source minute has left RAM. The bar content comes from
-                // the decoded sealed store, but revision must not retreat.
+                // Retain each minute's contribution so sub-hour and day
+                // envelopes do not retreat when their source leaves RAM.
                 product.days.at(slot.start / 86'400'000 * 86'400'000)
-                    .retiredRevisionByHour[hour] += series.builder.revisionAt(slot.start).value_or(0);
+                    .retiredRevisionByMinute[slot.start] += series.builder.revisionAt(slot.start).value_or(0);
                 series.builder.dropBucket(slot.start);
                 slot = {}; ++m_flowDroppedBuckets;
             }

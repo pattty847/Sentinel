@@ -234,7 +234,7 @@ private:
         std::map<int64_t, FlowComposite> hours; // closed hours; at most 24 per product
         std::optional<std::pair<int64_t, FlowComposite>> formingHour;
         std::map<std::pair<int64_t, int64_t>, FlowComposite> coarse;
-        std::map<int64_t, uint32_t> retiredRevisionByHour; // transferred from sealed RAM minutes
+        std::map<int64_t, uint32_t> retiredRevisionByMinute; // transferred from pruned RAM minutes
     };
     struct FlowProduct {
         int64_t clock = 0;

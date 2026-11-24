@@ -17,8 +17,8 @@ struct FlowLiveTestAccess {
   static size_t hourCount(ServerDataModel &m, int64_t day) {
     return m.m_flowProducts.at("BTC-USD").days.at(day).hours.size();
   }
-  static size_t retiredRevisionHours(ServerDataModel& m, int64_t day) {
-    return m.m_flowProducts.at("BTC-USD").days.at(day).retiredRevisionByHour.size();
+  static size_t retiredRevisionMinutes(ServerDataModel& m, int64_t day) {
+    return m.m_flowProducts.at("BTC-USD").days.at(day).retiredRevisionByMinute.size();
   }
   static uint64_t missingGridDrops(ServerDataModel &m) { return m.m_flowMissingGridTrades; }
   static uint64_t totalDrops(ServerDataModel &m) { return m.m_flowDroppedTrades; }

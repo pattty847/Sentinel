@@ -406,6 +406,66 @@ TEST_F(FlowLive, DailySubscriptionKeepsOnlyMinuteAndSecondBuilders) {
   EXPECT_EQ(frames.back()["complete"], true);
 }
 
+TEST_F(FlowLive, LegacyDailyKeepsGrowingWhenNoHourSealsPastRetention) {
+  auto daily = subscribe(86'400'000);
+  for (int hour = 0; hour <= 8; ++hour) {
+    model->onTrade(trade(Day + hour * 3'600'000, std::to_string(hour)));
+    tick(Day + hour * 3'600'000 + 2 * 60'000);
+    ASSERT_FALSE(frames.empty());
+    const auto bar = sentinel::flow::decodeFlowBar(bytes(frames.back()));
+    EXPECT_EQ(bar.count, uint32_t(hour + 1)) << hour;
+    EXPECT_EQ(bar.baseVolume, int64_t(hour + 1) * 100'000'000) << hour;
+    EXPECT_FALSE(frames.back().contains("coverage"));
+  }
+  EXPECT_GT(FlowLiveTestAccess::retiredRevisionMinutes(*model, Day), 0u);
+  const auto& minutes = FlowLiveTestAccess::series(*model, "BTC-USD", Day, 60'000).builder.bars();
+  int64_t retainedVolume = 0;
+  for (const auto& bar : minutes)
+    if (bar.startMs >= Day + 2 * 3'600'000) retainedVolume += bar.baseVolume;
+  const auto closedVolume = FlowLiveTestAccess::hour(*model, Day, Day).bar.baseVolume +
+      FlowLiveTestAccess::hour(*model, Day, Day + 3'600'000).bar.baseVolume;
+  EXPECT_EQ(sentinel::flow::decodeFlowBar(bytes(frames.back())).baseVolume,
+            closedVolume + retainedVolume);
+  daily->active.store(false);
+}
+
+TEST_F(FlowLive, EmptyBuildingCarrierIsSentOnlyToAvailabilityAwareSession) {
+  model->onTrade(trade(Day + 3'600'000, "first-live"));
+  tick(Day + 3'600'000 + 1'000);
+  auto replay = [&](bool aware) {
+    auto sub = std::make_shared<FlowSubscription>();
+    sub->sub = aware ? 902 : 901; sub->symbol = "BTC-USD";
+    sub->timeframeMs = 60'000;
+    if (aware) std::atomic_store_explicit(&sub->sealedHours,
+        std::make_shared<const std::set<int64_t>>(), std::memory_order_release);
+    std::vector<Json> delivered;
+    size_t count = 0;
+    sub->startReplay = [&](int64_t, uint64_t n) { count = n; };
+    sub->replayFrame = [&](std::string payload, bool done) {
+      if (!done) delivered.push_back(Json::parse(payload));
+    };
+    model->subscribeFlow(sub);
+    for (size_t i = 0; i <= count; ++i) model->nextFlowReplayFrame(sub);
+    sub->active.store(false);
+    return delivered;
+  };
+  const auto legacy = replay(false);
+  const auto aware = replay(true);
+  const auto target = Day + 59 * 60'000;
+  const auto at = [&](const auto& frames) {
+    return std::find_if(frames.begin(), frames.end(), [&](const Json& frame) {
+      return frame.at("bucket_start_ms").template get<int64_t>() == target;
+    });
+  };
+  EXPECT_EQ(at(legacy), legacy.end());
+  for (const auto& frame : legacy)
+    EXPECT_GT(sentinel::flow::decodeFlowBar(bytes(frame)).count, 0u);
+  const auto built = at(aware);
+  ASSERT_NE(built, aware.end());
+  EXPECT_EQ((*built).at("coverage"), "building");
+  EXPECT_EQ(sentinel::flow::decodeFlowBar(bytes(*built)).count, 0u);
+}
+
 TEST_F(FlowLive, MissingGridTradeIsCounted) {
   ServerDataModel bare(config);
   FlowLiveTestAccess::stopTimer(bare);
@@ -778,6 +838,7 @@ TEST_F(FlowLive, ReplayCoalescesUpdatesBehindBarrierAndUnsubscribeCancelsQueue) 
 TEST_F(FlowLive, SealedStoreAndLiveModelShareSealMembershipAndReplayOnlyOpenHours) {
   namespace ff = flow_fixture;
   namespace chunks = sentinel::flow::chunks;
+  config.chart.timeframesMs.push_back(15 * ff::Minute);
   QTemporaryDir temp;
   ASSERT_TRUE(temp.isValid());
   const auto base = std::filesystem::path(temp.path().toStdString());
@@ -787,10 +848,16 @@ TEST_F(FlowLive, SealedStoreAndLiveModelShareSealMembershipAndReplayOnlyOpenHour
     ff::Journal journal(base / "raw");
     journal.snapshot(-ff::Minute);
     journal.trades(1'000, {ff::trade(0, "first", 100000)});
+    journal.heartbeat(2 * ff::Minute); // closes the first minute before its late trade
     journal.trades(6 * ff::Minute - 1, {ff::trade(200, "before-seal", 100001)});
     journal.trades(6 * ff::Minute, {ff::trade(300, "at-seal", 100002)});
+    journal.trades(16 * ff::Minute + 100,
+                   {ff::trade(16 * ff::Minute, "quarter-first", 100003)});
+    journal.heartbeat(18 * ff::Minute);
     journal.reconnect(20 * ff::Minute);
     journal.trades(20 * ff::Minute + 1, {ff::trade(400, "resend", 100003)}, true);
+    journal.trades(21 * ff::Minute + 59'000,
+                   {ff::trade(16 * ff::Minute + 200, "quarter-late", 100004)});
     journal.trades(ff::Hour - 1'000,
                    {ff::trade(ff::Hour - ff::Minute + 100, "last-minute", 100004)});
     journal.trades(ff::Hour + 1'000, {ff::trade(ff::Hour + 100, "hour-one", 100004)});
@@ -867,6 +934,13 @@ TEST_F(FlowLive, SealedStoreAndLiveModelShareSealMembershipAndReplayOnlyOpenHour
   const auto initialFour = legacyFrames[4 * ff::Hour].back();
   EXPECT_TRUE(initialDaily.at("complete").get<bool>());
   EXPECT_TRUE(initialFour.at("complete").get<bool>());
+  ASSERT_GT(initialDaily.at("revision").get<uint32_t>(), 0u);
+  ASSERT_GT(initialFour.at("revision").get<uint32_t>(), 0u);
+  FlowSubscription quarter;
+  quarter.symbol = "BTC-USD"; quarter.timeframeMs = 15 * ff::Minute;
+  const auto beforeQuarter = FlowLiveTestAccess::composed(live, quarter, ff::Epoch + 15 * ff::Minute);
+  ASSERT_TRUE(beforeQuarter);
+  ASSERT_GT(beforeQuarter->revision, 0u);
   // Stage the archive: hour 01 has its seal-point record in the 02 file.
   // Exposing that file only after the first pass makes the two hour seals
   // independent while the live model has already applied the full stream.
@@ -892,6 +966,10 @@ TEST_F(FlowLive, SealedStoreAndLiveModelShareSealMembershipAndReplayOnlyOpenHour
   ASSERT_TRUE(FlowLiveTestAccess::sealed(live, ff::Epoch));
   EXPECT_FALSE(FlowLiveTestAccess::sealed(live, ff::Epoch + ff::Hour));
   FlowLiveTestAccess::tick(live);
+  const auto afterQuarter = FlowLiveTestAccess::composed(live, quarter, ff::Epoch + 15 * ff::Minute);
+  ASSERT_TRUE(afterQuarter);
+  EXPECT_EQ(afterQuarter->bar.count, beforeQuarter->bar.count);
+  EXPECT_GE(afterQuarter->revision, beforeQuarter->revision);
   std::map<int64_t, uint32_t> firstSealRevisions;
   for (const auto [tf, before] : std::vector<std::pair<int64_t, Json>>{
            {86'400'000, initialDaily}, {4 * ff::Hour, initialFour}}) {
@@ -915,7 +993,7 @@ TEST_F(FlowLive, SealedStoreAndLiveModelShareSealMembershipAndReplayOnlyOpenHour
   EXPECT_FALSE(FlowLiveTestAccess::sealed(live, ff::Epoch + 2 * ff::Hour));
   EXPECT_EQ(FlowLiveTestAccess::sealMismatches(live), 0u);
   FlowLiveTestAccess::tick(live);
-  EXPECT_EQ(FlowLiveTestAccess::retiredRevisionHours(live, ff::Epoch), 2u);
+  EXPECT_GE(FlowLiveTestAccess::retiredRevisionMinutes(live, ff::Epoch), 4u);
   for (const auto [tf, before] : std::vector<std::pair<int64_t, Json>>{
            {86'400'000, initialDaily}, {4 * ff::Hour, initialFour}}) {
     ASSERT_GT(legacyFrames[tf].size(), 1u);
@@ -940,7 +1018,7 @@ TEST_F(FlowLive, SealedStoreAndLiveModelShareSealMembershipAndReplayOnlyOpenHour
   FlowLiveTestAccess::tick(live);
   EXPECT_GT(legacyFrames[86'400'000].back().at("revision").get<uint32_t>(), sealedDailyRevision);
   EXPECT_GT(legacyFrames[4 * ff::Hour].back().at("revision").get<uint32_t>(), sealedFourRevision);
-  EXPECT_EQ(sentinel::flow::decodeFlowBar(bytes(legacyFrames[86'400'000].back())).count, 7u);
+  EXPECT_EQ(sentinel::flow::decodeFlowBar(bytes(legacyFrames[86'400'000].back())).count, 9u);
   dailyLegacy->active.store(false);
   fourLegacy->active.store(false);
   const auto firstPayload = store.read("coinbase:BTC-USD", ff::Minute, ff::Epoch);
@@ -986,7 +1064,7 @@ TEST_F(FlowLive, SealedStoreAndLiveModelShareSealMembershipAndReplayOnlyOpenHour
     if (tf == 86'400'000) {
       const auto daily = FlowLiveTestAccess::composed(live, *sub, ff::Epoch);
       ASSERT_TRUE(daily);
-      EXPECT_EQ(daily->bar.count, 7u);
+      EXPECT_EQ(daily->bar.count, 9u);
       EXPECT_FALSE(daily->building); // the observed forming minute is covered
       const auto hourOnePayload = store.read("coinbase:BTC-USD", ff::Minute, ff::Epoch + ff::Hour);
       ASSERT_TRUE(hourOnePayload);
@@ -1061,9 +1139,12 @@ TEST_F(FlowLive, SealedStoreAndLiveModelShareSealMembershipAndReplayOnlyOpenHour
   restarted.subscribeFlow(afterRestart);
   EXPECT_EQ(restartedBuckets, 6u);
   // A store epoch may clear decoded bars before its replacement day arrives.
-  // The old client keeps its last full frame; a new client sees a hole.
+  // The old client composes retained closed hours; a new client sees a hole.
   live.onFlowChunkIndexChange("coinbase:BTC-USD", ff::Epoch, 1'000'000);
-  EXPECT_FALSE(FlowLiveTestAccess::composed(live, *dailyLegacy, ff::Epoch));
+  const auto legacyGap = FlowLiveTestAccess::composed(live, *dailyLegacy, ff::Epoch);
+  ASSERT_TRUE(legacyGap);
+  EXPECT_EQ(legacyGap->bar.count, 9u);
+  EXPECT_FALSE(legacyGap->building);
   FlowSubscription invalidatedDay;
   invalidatedDay.symbol = "BTC-USD"; invalidatedDay.timeframeMs = 86'400'000;
   std::atomic_store_explicit(&invalidatedDay.sealedHours,

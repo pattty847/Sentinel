@@ -195,6 +195,9 @@ so there is no single global grid in the connection handshake.
 
 A client sends
 `{"type":"flow_live_subscribe","sub":7,"symbol":"BTC-USD","timeframe_ms":60000}`.
+For ownership filtering, send `chunk_availability_subscribe` first and wait for
+that instrument's `chunk_availability` payload before `flow_live_subscribe`;
+the view uses legacy ownership until the session has received that payload.
 `sub` is an unsigned 64-bit connection-local identifier. Reusing it replaces the
 previous subscription. Supported timeframes are 1 s, 1 m, and configured chart
 timeframes from 1 m through 1 d that divide a UTC day exactly. Sub-second flow is
@@ -223,8 +226,9 @@ trade, is covered. A minute neither retained live nor decoded from a sealed
 hour has `coverage: "building"` when the session owns its bucket.
 Every accepted late trade behind the published close watermark increments the revision; multiple
 late trades can coalesce into one publication with a correspondingly larger revision.
-Coarse revisions retain the contributions of minutes retired after sealing, so
-the revision never decreases when an hour leaves live RAM.
+Coarse revisions retain each minute's contribution after it leaves live RAM, so
+the revision never decreases when an hour leaves live RAM, including for
+sub-hour coarse buckets.
 
 Trades use exchange-time, UTC-aligned half-open buckets and the shared
 `flow::FlowBarBuilder`. Its 4,096-id window protects against reconnect resends;
@@ -234,9 +238,13 @@ precision and a quote-volume scale of 100,000,000. The existing TPO/VP tape rema
 The live model starts at the first live trade after process start. It builds
 only 1 s and 1 m bars from trades. Each emitted coarse live bucket composes
 its sealed minutes from the flow chunk store and its unsealed minutes from
-retained live bars. Closed-hour composites remain internal publication triggers;
-they are retained for the UTC day and its 60-second rollover grace, at most
-24 per product; the forming hour is separate.
+retained live bars. Closed-hour composites provide publication triggers and
+legacy fallback content. They are retained for the UTC day and its 60-second
+rollover grace, at most 24 per product; the forming hour is separate.
+For a legacy session without availability, a retained closed-hour composite
+supplies an hour whose minutes have left RAM but whose decoded sealed bars are
+unavailable; the forming 4 h and 1 d bars continue to grow. An availability-aware
+session marks those missing minutes `building`.
 A coarse composite is recomputed when a constituent minute changes, its
 coverage changes, a subscriber attaches, or its bucket closes. No journal
 rebuild or historical coverage is implied by these live messages.
