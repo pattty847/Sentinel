@@ -117,6 +117,8 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `sentinel_recorder_live_publish_drops_total` | counter | - | Live publications that were refused (series limit or stale). |
 | `sentinel_recorder_resnapshot_requests_total` | counter | product | Serving roller: capture resnapshot commands written to the fan-out connection while the history book waits for a snapshot (any invalidation without a later accepted snapshot, or no usable snapshot yet), 10 s after the wait began and after the newest connection change, while records still arrive at the live tip. Growth means retries; read `Recording resnapshot request` / `reply` in the server log. Present at zero from start. |
 | `sentinel_flow_late_trades_total` | counter | instrument | Trades excluded when an hour first seals in this process; rebuilding an already sealed hour does not add them again. The day header records the deterministic count for its sealed hours. |
+| `sentinel_flow_live_late_trades_total` | counter | instrument | Trades excluded when the live receive maximum reaches the 1 m bar's seal point. |
+| `sentinel_flow_live_seal_mismatch_total` | counter | instrument | Live-final 1 m bars held at disk seal that differ from the decoded sealed bar. |
 | `sentinel_flow_receive_regressions_total` | counter | instrument | Receive times below the prior running maximum in newly sealed hour scans, including warmup. Diagnostic only. |
 | `sentinel_flow_chunk_hours_sealed_total` | counter | instrument | Hour sections first sealed in this process; retries and restarts do not count stored sections again. |
 | `sentinel_flow_chunk_build_failures_total` | counter | instrument | Failed chunk day builds, retried on the next pass; see `Flow chunk build failed`. |

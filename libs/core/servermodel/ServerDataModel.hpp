@@ -1,6 +1,7 @@
 #pragma once
 #include "RecordingLive.hpp"
 #include "FlowStore.hpp"
+#include "FlowChunkStore.hpp"
 #include "protocol/TradeHistoryWire.hpp"
 #include "flow/FlowBarBuilder.hpp"
 #include "flow/FlowScales.hpp"
@@ -19,6 +20,7 @@
 #include <atomic>
 #include <filesystem>
 #include <optional>
+#include <tuple>
 #include <nlohmann/json.hpp>
 #include <QObject>
 #include <QByteArray>
@@ -44,6 +46,13 @@ struct FlowSubscription {
     std::function<void(std::string)> publish;
     std::function<void(std::string)> publishError;
     bool initial = true;
+    std::shared_ptr<const std::set<int64_t>> sealedHours; // atomic_load/store free functions
+    // Model thread delivers replay one frame at a time; the session controls
+    // write admission on its executor and asks for the next frame on release.
+    std::function<void(int64_t, uint64_t)> startReplay;
+    std::function<void(std::string, bool)> replayFrame;
+    std::vector<int64_t> replayBuckets; // model thread only
+    size_t replayCursor = 0;
 };
 
 class ServerDataModel : public QObject {
@@ -74,6 +83,11 @@ public:
     };
     // Model-thread only. Attachment occurs before the stream server starts.
     void attachFlowStore(recording::FlowStore* store);
+    void onFlowChunkIndexChange(const std::string& instrument, std::optional<int64_t> day, uint64_t serial);
+    void onFlowChunkDayPublished(const std::string& instrument, int64_t day, uint64_t serial,
+                                 std::vector<sentinel::flow::FlowBar> bars, std::vector<int64_t> hours);
+    void nextFlowReplayFrame(const std::shared_ptr<FlowSubscription>& subscription);
+    void onFlowAvailabilityChanged(const std::string& symbol);
     struct TradeHistorySnapshot {
         std::vector<protocol::tradewire::Row> rows;
         int64_t retainedFromMs = 0;
@@ -146,6 +160,12 @@ public:
     // product: closes its candles up to journalMs - kJournalCandleLagMs.
     static constexpr int64_t kJournalCandleLagMs = 1000;
     void onFeedWatermark(const std::string& symbol, int64_t journalMs);
+    // Roller worker: fixed-key atomics only; the trade callback carries its own
+    // exact M so model-thread delivery cannot race a later receive record.
+    void flowTradePosted(const std::string& symbol) noexcept;
+    void flowRecordApplied(const std::string& symbol, int64_t receiveMax) noexcept;
+    // Main thread, in the already queued trade callback.
+    void onFlowTrade(const Trade& trade, int64_t receiveMax);
     void setReseedHandler(std::function<void(const std::string&)> handler);
     // The aggregator's candle timeframes (fixed at construction).
     std::vector<int64_t> candleTimeframes() const;
@@ -191,12 +211,12 @@ private:
     void updateExchangeOffsetMs(int64_t exchangeMs);
     struct FlowSlot {
         int64_t start = -1;
-        bool dirty = false, closed = false;
+        bool dirty = false, closed = false, final = false, compared = false;
     };
     struct FlowSeries {
         sentinel::flow::FlowBarBuilder builder;
         std::vector<FlowSlot> bucketSlots;
-        FlowSeries(int64_t tf, const sentinel::flow::FlowScales& scales, bool extendedMinutes = false);
+        FlowSeries(int64_t tf, const sentinel::flow::FlowScales& scales);
         uint64_t capacityDrops = 0;
     };
     struct FlowComposite {
@@ -214,9 +234,11 @@ private:
         std::map<int64_t, FlowComposite> hours; // closed hours; at most 24 per product
         std::optional<std::pair<int64_t, FlowComposite>> formingHour;
         std::map<std::pair<int64_t, int64_t>, FlowComposite> coarse;
+        std::map<int64_t, uint32_t> retiredRevisionByMinute; // transferred from pruned RAM minutes
     };
     struct FlowProduct {
         int64_t clock = 0;
+        int64_t receiveMax = INT64_MIN;
         int64_t lastLagWarningClock = INT64_MIN;
         int64_t firstLiveMs = -1;
         std::set<int64_t> missingGridWarnedDays;
@@ -226,6 +248,11 @@ private:
         sentinel::flow::Trade scratch;
     };
     recording::FlowStore* m_flowStore = nullptr;
+    struct FlowReceiveState {
+        std::atomic<int64_t> maximum{INT64_MIN};
+        std::atomic<uint32_t> pendingTrades{0};
+    };
+    std::map<std::string, FlowReceiveState> m_flowReceiveStates; // fixed at construction
     std::map<std::string, int64_t> m_flowWakeThrough;
     std::map<std::string, int64_t> m_flowRetentionFloor;
     std::map<std::string, FlowProduct> m_flowProducts;
@@ -233,6 +260,26 @@ private:
     QTimer m_flowTimer;
     uint64_t m_flowDroppedTrades = 0, m_flowDroppedBuckets = 0, m_flowMissingGridTrades = 0;
     uint64_t m_flowHourShrinkRefusals = 0;
+    std::map<std::string, uint64_t> m_flowLateTrades;
+    std::map<std::string, uint64_t> m_flowSealMismatches;
+    struct SealedFlowDay {
+        uint64_t serial = 0;
+        std::set<int64_t> hours;
+        std::map<int64_t, sentinel::flow::FlowBar> bars;
+    };
+    std::map<std::string, std::map<int64_t, SealedFlowDay>> m_flowSealed;
+    std::map<std::string, int64_t> m_flowLatestSealedDay;
+    std::map<std::string, uint64_t> m_flowLatestIndexSerial, m_flowEpochFenceSerial;
+    mutable std::set<std::tuple<std::string, int64_t, int64_t>> m_flowComposeWarned;
+    bool flowHourSealed(const std::string& symbol, int64_t hour) const;
+    std::optional<sentinel::flow::FlowBar> flowSealedMinute(const std::string& symbol, int64_t minute) const;
+    bool flowOwnsBucket(const FlowSubscription& sub, int64_t start) const;
+    struct LiveFlowBar {
+        sentinel::flow::FlowBar bar;
+        uint32_t revision = 0;
+        bool complete = false, building = false;
+    };
+    std::optional<LiveFlowBar> composeLiveFlowBar(const FlowSubscription& sub, int64_t start) const;
     int64_t flowMinuteRetainedFrom(const std::string& symbol, int64_t clock) const;
     void updateFlowRetentionFloor(const std::string& symbol, int64_t clock);
     void pruneFlowSeries(const std::string& symbol, int64_t clock, int64_t tf, FlowSeries& series);

@@ -257,6 +257,7 @@ void FlowBarBuilder::dropBefore(int64_t start) {
     droppedBefore_ = std::max(droppedBefore_, std::min(start, sealedThrough_));
     buckets_.erase(buckets_.begin(), buckets_.lower_bound(droppedBefore_));
 }
+void FlowBarBuilder::dropBucket(int64_t start) { buckets_.erase(start); }
 std::optional<uint32_t> FlowBarBuilder::revisionAt(int64_t start) const {
     const auto it = buckets_.find(start);
     if (it == buckets_.end()) return {};

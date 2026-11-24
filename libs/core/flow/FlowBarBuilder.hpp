@@ -28,6 +28,8 @@ public:
     // Drop only behind the seal when the caller's lateness window closes.
     // A request beyond the seal is clamped. Dropped buckets cannot reappear.
     void dropBefore(int64_t exclusiveStartMs);
+    // A disk-sealed hour may be separated from other sealed hours by a hole.
+    void dropBucket(int64_t bucketStartMs);
     std::optional<uint32_t> revisionAt(int64_t bucketStartMs) const;
     uint64_t rejectedCount() const { return rejectedCount_; }
     // Subset of rejectedCount caused by the drop watermark.

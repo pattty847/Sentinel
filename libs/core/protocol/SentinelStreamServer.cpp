@@ -384,11 +384,22 @@ class Session : public std::enable_shared_from_this<Session> {
         bool binary = false, chunk = false, rawLive = false;
         std::weak_ptr<recording::LiveService::RawSubscription> rawSubscription;
         std::shared_ptr<FlowSubscription> flowSubscription;
+        bool flowReplay = false;
     };
     std::list<PendingWrite> write_queue_; // insertion preserves the in-flight Beast buffer
     std::shared_ptr<recording::LiveWriteBudget> rawWriteSlot_ = std::make_shared<recording::LiveWriteBudget>();
     std::map<std::string, std::shared_ptr<recording::LiveService::RawSubscription>> rawViews_;
     std::map<uint64_t, std::shared_ptr<FlowSubscription>> flowViews_;
+    struct FlowReplayState {
+        std::shared_ptr<FlowSubscription> view;
+        int64_t liveFromMs = 0;
+        size_t queuedBytes = 0, sent = 0;
+        bool awaitingFrame = false, sourceDone = false, barrierQueued = false;
+        std::string pendingFrame;
+        std::map<int64_t, std::string> updates;
+    };
+    std::map<uint64_t, FlowReplayState> flowReplays_;
+    static constexpr size_t kFlowReplayThreshold = 1024U * 1024U;
     bool flowHistoryBusy_ = false;
     std::stop_source flowReplayStop_;
 #ifdef SENTINEL_FLOW_HISTORY_TEST
@@ -422,6 +433,7 @@ class Session : public std::enable_shared_from_this<Session> {
 
 #ifdef SENTINEL_CANDLE_TEST
     std::atomic<size_t> peakModelEvents_{0}, peakWriteBytes_{0};
+    bool flowReplayHoldForTest_ = false;
     static void recordPeak(std::atomic<size_t> &peak, size_t value) {
         auto old = peak.load(std::memory_order_relaxed);
         while (old < value && !peak.compare_exchange_weak(old, value, std::memory_order_relaxed)) {
@@ -446,6 +458,7 @@ class Session : public std::enable_shared_from_this<Session> {
     struct FlowAvailabilityState {
         std::pair<uint64_t, int64_t> fingerprint{};
         std::string sent;
+        std::shared_ptr<const std::set<int64_t>> sealedHours;
         bool busy = false, refresh = true;
         std::chrono::steady_clock::time_point lastSent{};
     };
@@ -551,6 +564,7 @@ class Session : public std::enable_shared_from_this<Session> {
         rawViews_.clear();
         for (const auto& [id, view] : flowViews_) view->active.store(false);
         flowViews_.clear();
+        flowReplays_.clear();
         if (owner_ && m_tradingBroadcasterRegistered) {
             owner_->unregisterTradingBroadcaster(m_tradingBroadcasterId);
             m_tradingBroadcasterRegistered = false;
@@ -992,7 +1006,22 @@ class Session : public std::enable_shared_from_this<Session> {
                 state->fingerprint = fingerprint;
                 if (!state->refresh && payload == state->sent) return;
                 state->refresh = false; state->sent = payload; state->lastSent = std::chrono::steady_clock::now();
-                self->do_write(std::move(payload));
+                // Queue availability before adopting its sealed set. Later
+                // live frames on this executor cannot overtake the notice.
+                self->do_write(std::move(payload), false, {}, true);
+                auto sealed = std::make_shared<std::set<int64_t>>();
+                for (const auto& range : snapshot->levels[0])
+                    for (auto hour = range.fromMs; hour < range.toMs; hour += 3'600'000)
+                        sealed->insert(hour);
+                state->sealedHours = sealed;
+                const auto symbol = id.substr(std::string("coinbase:").size());
+                for (const auto& [subId, view] : self->flowViews_)
+                    if (view->symbol == symbol)
+                        std::atomic_store_explicit(&view->sealedHours,
+                            std::shared_ptr<const std::set<int64_t>>(sealed), std::memory_order_release);
+                QMetaObject::invokeMethod(&self->model_, [model = &self->model_, symbol] {
+                    model->onFlowAvailabilityChanged(symbol);
+                }, Qt::QueuedConnection);
             });
         });
         if (!queued) state->busy = false;
@@ -1968,8 +1997,75 @@ public:
       }
       if (const auto it = flowViews_.find(j["sub"].get<uint64_t>()); it != flowViews_.end()) {
           it->second->active.store(false);
+          flowReplays_.erase(it->first);
           flowViews_.erase(it);
       }
+  }
+
+  void requestNextFlowReplay(FlowReplayState& state) {
+      if (state.awaitingFrame || state.sourceDone || !state.view->active.load()) return;
+      state.awaitingFrame = true;
+      auto view = state.view;
+      QMetaObject::invokeMethod(&model_, [model = &model_, view] {
+          model->nextFlowReplayFrame(view);
+      }, Qt::QueuedConnection);
+  }
+
+  void pumpFlowReplay(uint64_t id) {
+      const auto it = flowReplays_.find(id);
+      if (it == flowReplays_.end()) return;
+      auto& state = it->second;
+      if (!state.view->active.load()) { flowReplays_.erase(it); return; }
+      if (!state.pendingFrame.empty() && state.queuedBytes < kFlowReplayThreshold) {
+          auto frame = std::move(state.pendingFrame);
+          state.pendingFrame.clear();
+          state.queuedBytes += frame.size();
+          ++state.sent;
+          do_write(std::move(frame), false, state.view, true, true);
+      }
+      if (!state.pendingFrame.empty() || state.queuedBytes >= kFlowReplayThreshold) return;
+      if (!state.sourceDone) { requestNextFlowReplay(state); return; }
+      if (state.barrierQueued) return;
+      state.barrierQueued = true;
+      do_write(nlohmann::json{{"type", "flow_live_ready"}, {"sub", id},
+          {"live_from_ms", state.liveFromMs}, {"buckets", state.sent}}.dump(),
+          false, state.view, true);
+      for (auto& [start, payload] : state.updates)
+          do_write(std::move(payload), false, state.view, true);
+      state.updates.clear();
+  }
+
+  void flowReplayFrame(const std::shared_ptr<FlowSubscription>& view,
+                       std::string payload, bool done) {
+      const auto it = flowReplays_.find(view->sub);
+      if (it == flowReplays_.end() || it->second.view != view || !view->active.load()) return;
+      auto& state = it->second;
+      state.awaitingFrame = false;
+      if (done) state.sourceDone = true;
+      else state.pendingFrame = std::move(payload);
+      pumpFlowReplay(view->sub);
+  }
+
+  void flowUpdate(const std::shared_ptr<FlowSubscription>& view, std::string payload) {
+      if (!view->active.load()) return;
+      const auto it = flowReplays_.find(view->sub);
+      if (it != flowReplays_.end() && it->second.view == view && !it->second.barrierQueued) {
+          const auto j = nlohmann::json::parse(payload, nullptr, false);
+          if (j.is_object() && j.contains("bucket_start_ms")) {
+              auto& updates = it->second.updates;
+              const auto start = j.at("bucket_start_ms").get<int64_t>();
+              const auto old = updates.find(start);
+              if (old != updates.end()) {
+                  const auto prior = nlohmann::json::parse(old->second, nullptr, false);
+                  if (prior.is_object() && (prior.value("revision", 0u) > j.value("revision", 0u) ||
+                      (prior.value("revision", 0u) == j.value("revision", 0u) &&
+                       prior.value("complete", false) && !j.value("complete", false)))) return;
+              }
+              updates[start] = std::move(payload);
+              return;
+          }
+      }
+      do_write(std::move(payload), false, view, true);
   }
 
   void handleFlowSubscribe(const nlohmann::json &j) {
@@ -1990,19 +2086,42 @@ public:
                  "invalid series or subscription capacity reached");
       return;
     }
-    if (const auto old = flowViews_.find(id); old != flowViews_.end())
+    if (const auto old = flowViews_.find(id); old != flowViews_.end()) {
       old->second->active.store(false);
+      flowReplays_.erase(id);
+    }
     auto view = std::make_shared<FlowSubscription>();
     view->sub = id;
     view->symbol = symbol;
     view->timeframeMs = tf;
+    if (const auto avail = flowAvailability_.find("coinbase:" + symbol); avail != flowAvailability_.end())
+        std::atomic_store_explicit(&view->sealedHours, avail->second->sealedHours, std::memory_order_release);
     view->publish = [weak = weak_from_this(),
                      token = std::weak_ptr(view)](std::string payload) {
       const auto subscription = token.lock();
       if (!subscription || !subscription->active.load())
         return;
       if (const auto self = weak.lock())
-        self->do_write(std::move(payload), false, subscription);
+        net::post(self->ws_.get_executor(), [self, subscription, payload = std::move(payload)]() mutable {
+            self->flowUpdate(subscription, std::move(payload));
+        });
+    };
+    view->startReplay = [weak = weak_from_this(), token = std::weak_ptr(view)](int64_t floor, uint64_t) {
+        if (const auto self = weak.lock())
+            net::post(self->ws_.get_executor(), [self, token, floor] {
+                const auto view = token.lock();
+                if (!view || !view->active.load() || self->flowViews_.find(view->sub) == self->flowViews_.end() ||
+                    self->flowViews_.at(view->sub) != view) return;
+                auto& replay = self->flowReplays_[view->sub];
+                replay = {}; replay.view = view; replay.liveFromMs = floor;
+                self->pumpFlowReplay(view->sub);
+            });
+    };
+    view->replayFrame = [weak = weak_from_this(), token = std::weak_ptr(view)](std::string payload, bool done) {
+        if (const auto self = weak.lock())
+            net::post(self->ws_.get_executor(), [self, token, payload = std::move(payload), done]() mutable {
+                if (const auto view = token.lock()) self->flowReplayFrame(view, std::move(payload), done);
+            });
     };
     view->publishError = [weak = weak_from_this()](std::string payload) {
         if (const auto self = weak.lock()) self->do_write(std::move(payload));
@@ -2088,10 +2207,19 @@ public:
     }
 
     void do_write(std::string payload, bool binary = false,
-                  std::shared_ptr<FlowSubscription> flow = {}, bool onExecutor = false) {
+                  std::shared_ptr<FlowSubscription> flow = {}, bool onExecutor = false,
+                  bool flowReplay = false) {
 #ifdef SENTINEL_FLOW_HISTORY_TEST
         if (flowHistoryWriteForTest_) {
             flowHistoryWriteForTest_(std::move(payload), binary);
+            if (flowReplay && flow) {
+                if (auto it = flowReplays_.find(flow->sub); it != flowReplays_.end() && it->second.view == flow) {
+                    it->second.queuedBytes = 0;
+                    net::post(ws_.get_executor(), [self = shared_from_this(), id = flow->sub] {
+                        self->pumpFlowReplay(id);
+                    });
+                }
+            }
             return;
         }
 #endif
@@ -2122,12 +2250,12 @@ public:
 
         // Ordered flow batches are already on this executor. Enqueue their
         // refusals inline so a later completed chunk cannot overtake one.
-        if (onExecutor) { on_write_post(std::move(payload), binary, std::move(flow)); return; }
+        if (onExecutor) { on_write_post(std::move(payload), binary, std::move(flow), flowReplay); return; }
         net::post(ws_.get_executor(),
             beast::bind_front_handler(
                 &Session::on_write_post,
                 shared_from_this(),
-                std::move(payload), binary, std::move(flow)));
+                std::move(payload), binary, std::move(flow), flowReplay));
     }
 
     void send_error(const std::string& context, const std::string& symbol, const std::string& message) {
@@ -2144,12 +2272,12 @@ public:
     }
     
     void on_write_post(std::string payload, bool binary,
-                       std::shared_ptr<FlowSubscription> flow) {
+                       std::shared_ptr<FlowSubscription> flow, bool flowReplay) {
         if (closing_.load(std::memory_order_acquire)) {
             releasePendingWriteBytes(payload.size());
             return;
         }
-        write_queue_.push_back({std::move(payload), binary, false, false, {}, std::move(flow)});
+        write_queue_.push_back({std::move(payload), binary, false, false, {}, std::move(flow), flowReplay});
         
         if (write_queue_.size() > 1) {
             return;
@@ -2171,6 +2299,9 @@ public:
             write_queue_.pop_front();
         }
         if (write_queue_.empty()) return;
+#ifdef SENTINEL_CANDLE_TEST
+        if (flowReplayHoldForTest_) return;
+#endif
 #ifdef SENTINEL_FLOW_CHUNK_TEST
         if (chunkWriteForTest_) {
             auto payload = write_queue_.front().payload;
@@ -2189,7 +2320,15 @@ public:
     }
     
     void on_write_complete(beast::error_code ec, std::size_t) {
+        std::optional<uint64_t> replayId;
         if (!write_queue_.empty()) {
+            const auto& front = write_queue_.front();
+            if (front.flowReplay && front.flowSubscription) {
+                replayId = front.flowSubscription->sub;
+                if (auto it = flowReplays_.find(*replayId); it != flowReplays_.end() &&
+                    it->second.view == front.flowSubscription)
+                    it->second.queuedBytes -= std::min(it->second.queuedBytes, front.payload.size());
+            }
             releaseWrite(write_queue_.front());
             write_queue_.pop_front();
         }
@@ -2200,6 +2339,7 @@ public:
         if (!write_queue_.empty()) {
             internal_async_write();
         }
+        if (replayId) pumpFlowReplay(*replayId);
     }
 
     void fail(beast::error_code ec, char const* what) {

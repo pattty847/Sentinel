@@ -195,6 +195,9 @@ so there is no single global grid in the connection handshake.
 
 A client sends
 `{"type":"flow_live_subscribe","sub":7,"symbol":"BTC-USD","timeframe_ms":60000}`.
+For ownership filtering, send `chunk_availability_subscribe` first and wait for
+that instrument's `chunk_availability` payload before `flow_live_subscribe`;
+the view uses legacy ownership until the session has received that payload.
 `sub` is an unsigned 64-bit connection-local identifier. Reusing it replaces the
 previous subscription. Supported timeframes are 1 s, 1 m, and configured chart
 timeframes from 1 m through 1 d that divide a UTC day exactly. Sub-second flow is
@@ -218,9 +221,14 @@ Revision is **only envelope metadata**, never part of FLB1 content. A forming
 update and close republish can share a live revision. Coverage begins when the server
 receives its first live trade; a bar is complete only if that trade was at or
 before the bucket start and no trade in the bucket was lost or rejected. An
-empty minute is covered, not a loss. Every accepted late
-trade behind the published close watermark increments the revision; multiple
+observed empty minute, including the current forming minute before its first
+trade, is covered. A minute neither retained live nor decoded from a sealed
+hour has `coverage: "building"` when the session owns its bucket.
+Every accepted late trade behind the published close watermark increments the revision; multiple
 late trades can coalesce into one publication with a correspondingly larger revision.
+Coarse revisions retain each minute's contribution after it leaves live RAM, so
+the revision never decreases when an hour leaves live RAM, including for
+sub-hour coarse buckets.
 
 Trades use exchange-time, UTC-aligned half-open buckets and the shared
 `flow::FlowBarBuilder`. Its 4,096-id window protects against reconnect resends;
@@ -228,30 +236,51 @@ unknown aggressor side contributes to total volume/count only. The native grid
 is supplied by the recorder for that UTC day, with decimal base-increment
 precision and a quote-volume scale of 100,000,000. The existing TPO/VP tape remains.
 The live model starts at the first live trade after process start. It builds
-only 1 s and 1 m bars from trades. It composes 5 m, 15 m and 1 h bars from
-retained 1 m bars, and 4 h and 1 d bars from closed-hour composites plus the
-forming hour. Closed-hour composites are retained for the UTC day and its
-60-second rollover grace, at most 24 per product; the forming hour is separate.
+only 1 s and 1 m bars from trades. Each emitted coarse live bucket composes
+its sealed minutes from the flow chunk store and its unsealed minutes from
+retained live bars. Closed-hour composites provide publication triggers and
+legacy fallback content. They are retained for the UTC day and its 60-second
+rollover grace, at most 24 per product; the forming hour is separate.
+For a legacy session without availability, a retained closed-hour composite
+supplies an hour whose minutes have left RAM but whose decoded sealed bars are
+unavailable; the forming 4 h and 1 d bars continue to grow. An availability-aware
+session marks those missing minutes `building`.
 A coarse composite is recomputed when a constituent minute changes, its
 coverage changes, a subscriber attaches, or its bucket closes. No journal
 rebuild or historical coverage is implied by these live messages.
 
 The model's Qt-thread timer materializes and encodes changed bars at most once
 per `recording.live_publish_ms` (clamped to the configured 250–5,000 ms range).
-A newly attached subscriber receives the newest retained bucket on its next
-turn. During midnight rollover, this may include the newest slot of both the
-preceding and current UTC days. A final close is republished once even if the
-content did not change.
+A 1 m or coarser subscriber receives every live-owned bucket, oldest first,
+then `{"type":"flow_live_ready","sub":7,"live_from_ms":<i64>,"buckets":<count>}`.
+Replay admission pauses while at least 1 MiB of that subscription's replay
+frames are queued. One oversized FLB1 frame can be admitted alone. Updates
+during replay coalesce by bucket and follow the barrier. Replacement or
+unsubscribe cancels queued replay; a new subscription resets live revisions.
+A 1 s subscriber still receives only its newest retained bucket on the next
+turn. A close is republished once even if content did not change.
 The product clock is its monotonic journal receive watermark minus 1,000 ms;
 wall time and quiet/disconnected intervals do not close bars. Publication
-precedes `sealThrough`; late trades remain revisable until retention drops them.
+precedes `sealThrough`; accepted trades behind the close increment revisions.
+The roller passes every model-delivered record's running maximum receive time
+to live flow before that record's trades; initial durable catch-up is not
+delivered to the model. A trade is excluded when that maximum reaches its
+1 m bar end plus `flow.seal_window_ms` (default 300 seconds). The bar is
+live-final at the same seal point. Live retains 1 m buckets from `live_from_ms`
+until both FLC1 and FLD1 seal their hour; coarse buckets compose decoded sealed
+FLC1 minutes and retained live minutes regardless of the session's availability
+subscription. Availability determines whether the session still owns a bucket.
+An unobserved minute or a sealed hour whose decoded bars have not reached the
+model has `coverage: "building"`. A session without availability never receives
+an empty FLB1 carrier for such a bucket, so the existing GUI keeps its last
+real footprint and CVD column.
 
-The 1 s series keeps the last 30 minutes, and the 1 m series keeps the forming
-UTC hour with 60 seconds of rollover grace for the preceding hour. A subscribed
+The 1 s series keeps the last 30 minutes, and the 1 m series keeps the last
+six hours from the UTC hour of the receive watermark minus 60 seconds. A subscribed
 coarse view keeps its forming composite and the preceding composite until 60
 seconds after close. Fixed slots cap each day/series at 1,802 second buckets
-and 62 minute buckets, including clock/publication slack. Only the
-current and preceding UTC day can be held. Watermark maintenance drops only
+and 422 minute buckets with or without a FlowStore, including clock/publication
+slack. Only the current and preceding UTC day can be held. Watermark maintenance drops only
 already-published, unchanged finals; a stalled publication loop refuses additions
 that would overrun the slots. `sentinel_flow_dropped_trades_total` counts additions
 refused behind the retention watermark, at capacity, for missing grids or by
