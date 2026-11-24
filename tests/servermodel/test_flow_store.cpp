@@ -265,6 +265,44 @@ TEST_F(FlowStoreTest, StartupSeedsEverySymbolBeforeFirstSymbolReplays) {
     for (const auto &range : reply.ranges) EXPECT_EQ(range.status, "complete");
     restarted.stop();
 }
+TEST_F(FlowStoreTest, DelayedRollerWatermarkSeedsAnotherSymbolDuringBlockedPass) {
+    auto o = completeSymbols();
+    std::atomic<int64_t> aaaThrough{0}, btcThrough{0};
+    o.hourThrough = [&](const std::string &symbol) {
+        return symbol == "BTC-USD" ? btcThrough.load() : aaaThrough.load();
+    };
+    // Both writer watermarks are zero until the builder thread starts.
+    o.afterBuilderStartForTest = [&] { aaaThrough = through; };
+    std::promise<void> aaaEntered;
+    auto aaaReady = aaaEntered.get_future();
+    std::atomic<bool> paused{false};
+    o.afterRecordForTest = [&](std::stop_token stop) {
+        if (paused.exchange(true)) return;
+        aaaEntered.set_value();
+        std::mutex mutex;
+        std::condition_variable_any cv;
+        std::unique_lock lock(mutex);
+        cv.wait(lock, stop, [] { return false; });
+    };
+    FlowStore restarted(o);
+    restarted.start();
+    ASSERT_EQ(aaaReady.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    EXPECT_EQ(restarted.sealedThroughMs("BTC-USD"), 0);
+    btcThrough = through; // The roller opens BTC after the flow builder began.
+    restarted.wake();
+    std::mutex waitMutex;
+    std::condition_variable readyCv;
+    std::unique_lock lock(waitMutex);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (restarted.sealedThroughMs("BTC-USD") == 0 && std::chrono::steady_clock::now() < deadline)
+        readyCv.wait_for(lock, std::chrono::milliseconds(10));
+    EXPECT_EQ(restarted.sealedThroughMs("BTC-USD"), through);
+    const auto reply = restarted.window("BTC-USD", Epoch, through);
+    EXPECT_FALSE(reply.building);
+    ASSERT_EQ(reply.bars.size(), 24u);
+    for (const auto &range : reply.ranges) EXPECT_EQ(range.status, "complete");
+    restarted.stop();
+}
 TEST_F(FlowStoreTest, StartupRejectsCorruptAndStaleOlderDaysBeforeTheirSymbolPass) {
     for (const std::string damage : {"corrupt", "stale", "missing"}) {
         SCOPED_TRACE(damage);
@@ -274,6 +312,8 @@ TEST_F(FlowStoreTest, StartupRejectsCorruptAndStaleOlderDaysBeforeTheirSymbolPas
         root = base / (damage + "-flow");
         fs::create_directory(journal);
         auto o = completeSymbols(damage == "missing" ? 3 : 2);
+        std::atomic<int> wakes{0};
+        o.afterWakeForTest = [&] { ++wakes; };
         if (damage == "missing") {
             fs::rename(firstJournal().parent_path(), base / "offline-first-day");
         } else if (damage == "stale") {
@@ -309,6 +349,7 @@ TEST_F(FlowStoreTest, StartupRejectsCorruptAndStaleOlderDaysBeforeTheirSymbolPas
         EXPECT_TRUE(old.building);
         EXPECT_TRUE(old.bars.empty());
         for (const auto &range : old.ranges) EXPECT_EQ(range.status, "building");
+        if (damage == "missing") EXPECT_EQ(wakes, 0);
         restarted.stop();
     }
 }
