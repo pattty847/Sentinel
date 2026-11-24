@@ -598,6 +598,61 @@ TEST_F(FlowHistory, RestartLoadsBuiltWatermarkBeforeNextHourCommits) {
     EXPECT_EQ(pass.get().built, 1u);
     EXPECT_EQ(store->sealedThroughMs("BTC-USD"), Epoch + 3 * Hour);
 }
+TEST_F(FlowHistory, RestartServesCompleteMinuteAndFourHourHistoryBeforeSymbolPass) {
+    auto options = store->options();
+    options.symbols = {"AAA-USD", "BTC-USD"};
+    options.lowerPriority = false;
+    through = Epoch + 24 * Hour;
+    options.nowMs = [this] { return through + Hour; };
+    for (const auto &symbol : options.symbols) {
+        Journal writer(journal, symbol);
+        writer.snapshot(0);
+        for (int hour = 0; hour < 24; ++hour)
+            writer.trades(hour * Hour + 1000, {trade(hour * Hour + 800, std::to_string(hour),
+                                                    100000, "BUY", symbol)});
+        writer.heartbeat(24 * Hour + Minute + 1);
+        writer.close();
+    }
+    {
+        recording::FlowStore original(options);
+        ASSERT_EQ(original.runPass().built, 48u);
+    }
+    fixture->model->attachFlowStore(nullptr);
+    store.reset();
+    std::promise<void> entered;
+    auto ready = entered.get_future();
+    options.afterRecordForTest = [&](std::stop_token stop) {
+        entered.set_value(); // First symbol's grid fallback holds the serial builder.
+        std::mutex mutex;
+        std::condition_variable_any cv;
+        std::unique_lock lock(mutex);
+        cv.wait(lock, stop, [] { return false; });
+    };
+    store = std::make_unique<recording::FlowStore>(options);
+    fixture->model->attachFlowStore(store.get());
+    store->start();
+    // Stop before destroying the callback's promise, including assertion exits.
+    const auto stopStore = qScopeGuard([&] { store->stop(); });
+    ASSERT_EQ(ready.wait_for(10s), std::future_status::ready);
+    for (const auto tf : {Minute, 4 * Hour}) {
+        const flow_history::Request q{1, "BTC-USD", tf, Epoch, Epoch + 4 * Hour};
+        const auto snapshot = fixture->model->flowHistorySnapshot(q.symbol, tf, q.from, q.to);
+        ASSERT_TRUE(snapshot.data.bars.empty()); // Fresh process has no RAM history.
+        const auto reply = decode(flow_history::build(q, snapshot));
+        EXPECT_EQ(reply.header["status"], "complete");
+        EXPECT_EQ(reply.header["sealed_through_ms"], through);
+        ASSERT_EQ(reply.bars.size(), tf == Minute ? 4u : 1u);
+        for (const auto &range : reply.header["ranges"]) EXPECT_EQ(range["status"], "complete");
+        for (const auto &bar : reply.header["bars"]) {
+            EXPECT_EQ(bar["source"], "store");
+            EXPECT_EQ(bar["complete"], true);
+        }
+        const auto expected = store->window("BTC-USD", q.from, q.to).bars;
+        if (tf == Minute) EXPECT_EQ(reply.bars, expected);
+        else EXPECT_EQ(flow::encodeFlowBar(reply.bars.front()),
+                       flow::encodeFlowBar(flow::composeFlowBars(expected, tf)));
+    }
+}
 TEST_F(FlowHistory, OldFailedHourDoesNotPinRecentBuiltWatermark) {
     Journal writer(journal);
     writer.snapshot(0);

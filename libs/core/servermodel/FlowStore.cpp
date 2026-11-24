@@ -1,5 +1,8 @@
 // FLD1 replay remains independent of sealed chunk replay. Both derived stores
 // share this archive inventory, catalog, grid fallback and source identities.
+// Restore each symbol's FLD1 watermark when its roller writer first publishes
+// a watermark, including while another symbol's serial pass is running.
+// Seeding validates files and sources without grid discovery or trade replay.
 #include "FlowStore.hpp"
 #include "RollupStore.hpp"
 #include "PersistenceIo.hpp"
@@ -524,12 +527,14 @@ FlowStore::FlowStore(Options options) : options_(std::move(options)) {
         throw std::invalid_argument("flow store needs disjoint roots and an hour watermark");
     for (const auto &symbol : options_.symbols)
         sentinel::capture::validateSymbol(symbol);
+    for (const auto &symbol : options_.symbols) seedStates_.try_emplace(symbol);
 }
 FlowStore::~FlowStore() { stop(); }
 void FlowStore::start() {
     if (thread_.joinable())
         return;
     stopSource_ = std::stop_source{};
+    seedThread_ = std::thread([this, stop = stopSource_.get_token()] { seedLoop(stop); });
     thread_ = std::thread([this, stop = stopSource_.get_token()] { builderLoop(stop); });
 }
 void FlowStore::stop() {
@@ -537,6 +542,9 @@ void FlowStore::stop() {
     wake();
     if (thread_.joinable())
         thread_.join();
+    seedCv_.notify_all();
+    if (seedThread_.joinable())
+        seedThread_.join();
 }
 void FlowStore::wake() {
     if (options_.afterWakeForTest) options_.afterWakeForTest();
@@ -545,6 +553,23 @@ void FlowStore::wake() {
         woken_ = true;
     }
     wakeCv_.notify_all();
+    seedCv_.notify_all();
+}
+void FlowStore::seedLoop(std::stop_token stop) {
+    try {
+        sentinel::logging::setCurrentThreadName("flow-seed");
+        if (options_.lowerPriority && !lowerThreadPriority())
+            sLog_Warning("Flow seed could not lower thread priority");
+        while (!stop.stop_requested()) {
+            seedReadySymbols(stop);
+            std::unique_lock lock(seedWakeMutex_);
+            seedCv_.wait_for(lock, std::chrono::seconds(1));
+        }
+    } catch (const std::exception &e) {
+        sLog_Error("Flow seed terminated error=" << e.what());
+    } catch (...) {
+        sLog_Error("Flow seed terminated unexpectedly");
+    }
 }
 void FlowStore::builderLoop(std::stop_token stop) {
     try {
@@ -553,6 +578,7 @@ void FlowStore::builderLoop(std::stop_token stop) {
         if (!lowered)
             sLog_Warning("Flow builder could not lower thread priority");
         sLog_Data("Flow builder started root=" << options_.root.string() << " symbols=" << options_.symbols.size());
+        if (options_.afterBuilderStartForTest) options_.afterBuilderStartForTest();
         while (!stop.stop_requested()) {
             try {
                 runPass(stop);
@@ -662,15 +688,20 @@ std::optional<int64_t> FlowStore::liveRetentionFloor(const std::string &symbol) 
     return it == liveRetentionFloor_.end() ? std::nullopt : std::optional<int64_t>(it->second);
 }
 void FlowStore::refreshBuiltThrough(const std::string &symbol) {
-    const auto first = firstHour_.find(symbol);
-    if (first == firstHour_.end()) return;
+    int64_t first;
+    {
+        std::lock_guard lock(indexMutex_);
+        const auto it = firstHour_.find(symbol);
+        if (it == firstHour_.end()) return;
+        first = it->second;
+    }
     const auto through = options_.hourThrough(symbol) / Hour * Hour;
     int64_t floor = std::max<int64_t>(0, through - 6 * Hour);
     {
         std::lock_guard lock(indexMutex_);
         if (const auto it = liveRetentionFloor_.find(symbol); it != liveRetentionFloor_.end()) floor = it->second;
     }
-    auto built = std::max(first->second, floor);
+    auto built = std::max(first, floor);
     for (auto hour = built; hour < through; hour += Hour) {
         const auto index = indexFor(symbol, dayFloor(hour));
         if (!index.valid || !(index.hours & (1u << ((hour - dayFloor(hour)) / Hour)))) break;
@@ -678,6 +709,22 @@ void FlowStore::refreshBuiltThrough(const std::string &symbol) {
     }
     std::lock_guard lock(indexMutex_);
     builtThrough_[symbol] = std::min(built, through);
+}
+void FlowStore::logMissingJournalDay(const std::string &symbol, int64_t day) {
+    bool first;
+    {
+        std::lock_guard lock(indexMutex_);
+        first = missingJournalLogged_.emplace(symbol, day).second;
+    }
+    if (first)
+        sLog_Warning("Flow day cannot validate without journal symbol=" << symbol << " day=" << day);
+}
+std::optional<bool> FlowStore::journalSourceCanReachDay(const std::string &symbol, int64_t day) const {
+    std::lock_guard lock(indexMutex_);
+    const auto it = sourceDays_.find(symbol);
+    if (it == sourceDays_.end()) return {};
+    // A preceding day's last segment can still supply replay warmup.
+    return it->second.contains(day) || it->second.contains(day - Day);
 }
 void FlowStore::noteBuildFailure(const std::string &symbol, int64_t hour, const std::string &reason) {
     const auto count = ++buildFailures_[{symbol, hour}];
@@ -743,9 +790,12 @@ void FlowStore::writeDay(const flow::DayFile &day, uint32_t hours, uint32_t revi
 FlowStore::PassResult FlowStore::runPass(std::stop_token stop) {
     std::lock_guard lock(passMutex_);
     PassResult result;
+    seedReadySymbols(stop);
     for (const auto &symbol : options_.symbols) {
         try {
             checkStop(stop);
+            seedReadySymbols(stop);
+            std::lock_guard symbolLock(seedStates_.at(symbol).mutex);
             passSymbol(symbol, stop, result);
         } catch (const Cancelled &) {
             result.stopped = true;
@@ -758,6 +808,85 @@ FlowStore::PassResult FlowStore::runPass(std::stop_token stop) {
     }
     result.stopped = result.stopped || stop.stop_requested();
     return result;
+}
+void FlowStore::seedReadySymbols(std::stop_token stop) {
+    for (const auto &symbol : options_.symbols) {
+        if (stop.stop_requested()) return;
+        auto &state = seedStates_.at(symbol);
+        std::unique_lock symbolLock(state.mutex, std::try_to_lock);
+        if (!symbolLock || state.done) continue;
+        try {
+            if (options_.hourThrough(symbol) < Hour) continue;
+            const auto started = std::chrono::steady_clock::now();
+            if (!seedBuiltThrough(symbol, stop)) continue;
+            state.done = true;
+            sLog_Data("Flow startup seeded symbol=" << symbol << " sealedThroughMs="
+                      << sealedThroughMs(symbol) << " ms="
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - started).count());
+        } catch (const Cancelled &) { return; }
+        catch (const roller::NoJournalFiles &) {}
+        catch (const std::exception &e) {
+            sLog_Warning("Flow startup seed failed symbol=" << symbol << " error=" << e.what());
+        }
+    }
+}
+bool FlowStore::seedBuiltThrough(const std::string &symbol, std::stop_token stop) {
+    const auto through = options_.hourThrough(symbol) / Hour * Hour;
+    if (through <= 0) return false;
+    std::unique_lock archiveLock(archiveMutex_);
+    refreshArchive(symbol, stop);
+    const auto catalog = catalogFor(symbol, stop);
+    archiveLock.unlock();
+    auto first = through;
+    for (const auto &file : catalog->files())
+        first = std::min(first, file.openedNs / 1'000'000);
+    first = std::max<int64_t>(0, first / Hour * Hour);
+    // Validate older days too: window() can serve them as soon as the recent
+    // watermark advances, even if their journals have since disappeared.
+    // Leave archiveChanges_ for the normal build pass.
+    auto firstDay = dayFloor(first);
+    const auto directory = filePath(symbol, firstDay).parent_path();
+    if (!ownedPath(directory)) throw std::runtime_error("unsafe flow directory");
+    if (fs::is_directory(directory))
+        for (const auto &entry : fs::directory_iterator(directory)) {
+            checkStop(stop);
+            const auto name = entry.path().filename().string();
+            if (name.size() != 14 || !name.ends_with(".flb")) continue;
+            const auto date = QDate::fromString(QString::fromStdString(name.substr(0, 10)), "yyyy-MM-dd");
+            if (!date.isValid()) continue;
+            const auto day = date.startOfDay(QTimeZone::UTC).toMSecsSinceEpoch();
+            if (day >= 0) firstDay = std::min(firstDay, day);
+        }
+    for (auto day = firstDay; day < through; day += Day) {
+        checkStop(stop);
+        auto index = loadIndex(symbol, day);
+        if (index.valid) {
+            try {
+                index.valid = sourcesMatch(Sources::parse(index.sources), *catalog,
+                                           sourceCutoff(day, index.hours), stop);
+            } catch (const Cancelled &) { throw; }
+            catch (const std::exception &e) {
+                index.valid = false;
+                sLog_Warning("Flow startup source check failed symbol=" << symbol << " day=" << day
+                             << " error=" << e.what());
+            }
+            if (!index.valid) index.hours = 0;
+        }
+        // A closed day's grid may have changed; the normal pass compares it
+        // with index.grid and rebuilds the revision. Until then, serve the
+        // validated saved grid, as window() did before startup seeding.
+        if (!index.valid && index.file.present && journalSourceCanReachDay(symbol, day) == false)
+            logMissingJournalDay(symbol, day);
+        std::lock_guard lock(indexMutex_);
+        index_[{symbol, day}] = std::move(index);
+    }
+    {
+        std::lock_guard lock(indexMutex_);
+        firstHour_[symbol] = first;
+    }
+    refreshBuiltThrough(symbol);
+    return true;
 }
 std::shared_ptr<roller::JournalReader> FlowStore::catalogFor(const std::string &symbol, std::stop_token stop) {
     checkStop(stop);
@@ -982,14 +1111,24 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
     archiveLock.unlock();
     if (through <= 0) return;
     auto getCatalog = [&]() -> roller::JournalReader & { return *catalog; };
-    if (!firstHour_.contains(symbol) || structuralChanged) {
+    bool needsFirst;
+    {
+        std::lock_guard lock(indexMutex_);
+        needsFirst = !firstHour_.contains(symbol);
+    }
+    if (needsFirst || structuralChanged) {
         auto &files = getCatalog().files();
         int64_t first = through;
         for (const auto &file : files)
             first = std::min(first, file.openedNs / 1'000'000);
+        std::lock_guard lock(indexMutex_);
         firstHour_[symbol] = std::max<int64_t>(0, first / Hour * Hour);
     }
-    const auto first = firstHour_.at(symbol);
+    int64_t first;
+    {
+        std::lock_guard lock(indexMutex_);
+        first = firstHour_.at(symbol);
+    }
     // Load the recent committed indexes before any journal replay can block this pass.
     refreshBuiltThrough(symbol);
     const auto nearDays = hmcDayPaths(options_, symbol, stop);
@@ -1397,7 +1536,7 @@ FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int6
         throw std::invalid_argument("invalid flow minute window");
     Reply reply;
     bool missingSealed = false;
-    bool sealedRequested = false;
+    bool wakeableRequested = false;
     try {
         const auto through = sealedThroughMs(symbol);
         reply.sealedThroughMs = through;
@@ -1406,7 +1545,11 @@ FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int6
             const auto index = indexFor(symbol, day);
             const bool readable = index.valid && stamp(path) == index.file &&
                                   stamp(path.string() + ".state") == index.state;
+            const bool orphaned = index.file.present && !index.valid &&
+                                  journalSourceCanReachDay(symbol, day) == false;
+            if (orphaned) logMissingJournalDay(symbol, day);
             uint32_t required = 0;
+            uint32_t wakeable = 0;
             for (auto hour = std::max(day, from / Hour * Hour); hour < std::min(day + Day, to); hour += Hour) {
                 const bool noStoredHour = (!index.file.present && !index.state.present) ||
                     (readable && !(index.hours & (1u << ((hour - day) / Hour))));
@@ -1422,19 +1565,22 @@ FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int6
                                         ready ? "complete" : "building", index.grid.scales, index.revision});
                 if (hour + Hour > through)
                     reply.building = true;
-                else
+                else {
                     required |= 1u << ((hour - day) / Hour);
+                    if (source != SourceState::Absent && !orphaned)
+                        wakeable |= 1u << ((hour - day) / Hour);
+                }
             }
-            sealedRequested |= required != 0;
+            wakeableRequested |= wakeable != 0;
             if (!readable) {
                 reply.building |= required != 0;
-                missingSealed |= required != 0;
+                missingSealed |= wakeable != 0;
                 continue;
             }
             const auto absent = required & ~index.hours;
             if (absent) {
                 reply.building = true;
-                missingSealed = true;
+                missingSealed |= (absent & wakeable) != 0;
             }
             const auto bytes = readFile(path, MaxDayBytes);
             auto data = flow::decodeFlowDay(spanOf(bytes));
@@ -1454,7 +1600,7 @@ FlowStore::Reply FlowStore::window(const std::string &symbol, int64_t from, int6
         reply.bars.clear();
         reply.revisions.clear();
         reply.building = true;
-        missingSealed = sealedRequested;
+        missingSealed = wakeableRequested;
         sLog_Warning("Flow read failed symbol=" << symbol << " error=" << e.what());
     }
     if (missingSealed) {

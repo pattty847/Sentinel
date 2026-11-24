@@ -58,6 +58,27 @@ class FlowStoreTest : public testing::Test {
         j.heartbeat(2 * Hour + Minute + 1);
         j.close();
     }
+    FlowStore::Options completeSymbols(int days = 1) {
+        through = Epoch + days * 24 * Hour;
+        auto o = options();
+        o.symbols = {"AAA-USD", "BTC-USD"};
+        o.nowMs = [this] { return through + Hour; };
+        o.lowerPriority = false;
+        for (const auto &symbol : o.symbols) {
+            Journal j(journal, symbol);
+            j.snapshot(0);
+            for (int hour = 0; hour < days * 24; ++hour) {
+                if (hour && hour % 24 == 0) j.snapshot(hour * Hour);
+                j.trades(hour * Hour + 1000, {trade(hour * Hour + 800, std::to_string(hour),
+                                                   100000, "BUY", symbol)});
+            }
+            j.heartbeat(days * 24 * Hour + Minute + 1);
+            j.close();
+        }
+        FlowStore original(o);
+        EXPECT_EQ(original.runPass().built, uint64_t(days * 48));
+        return o;
+    }
     fs::path firstJournal() {
         sentinel::roller::JournalReader reader(journal, "BTC-USD");
         return reader.files().front().path;
@@ -221,6 +242,116 @@ TEST_F(FlowStoreTest, EmptySealedHoursRemainCompleteAcrossRestart) {
     const auto reply = restarted.window("BTC-USD", Epoch, Epoch + 3 * Hour);
     EXPECT_FALSE(reply.building);
     EXPECT_TRUE(reply.bars.empty());
+}
+TEST_F(FlowStoreTest, StartupSeedsEverySymbolBeforeFirstSymbolReplays) {
+    auto o = completeSymbols();
+    std::promise<void> entered;
+    auto ready = entered.get_future();
+    o.afterRecordForTest = [&](std::stop_token stop) {
+        entered.set_value(); // AAA's grid fallback, before BTC's first pass.
+        std::mutex mutex;
+        std::condition_variable_any cv;
+        std::unique_lock lock(mutex);
+        cv.wait(lock, stop, [] { return false; });
+    };
+    FlowStore restarted(o);
+    restarted.start();
+    ASSERT_EQ(ready.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    EXPECT_EQ(restarted.sealedThroughMs("BTC-USD"), through);
+    const auto reply = restarted.window("BTC-USD", Epoch, through);
+    EXPECT_FALSE(reply.building);
+    ASSERT_EQ(reply.bars.size(), 24u);
+    ASSERT_EQ(reply.ranges.size(), 24u);
+    for (const auto &range : reply.ranges) EXPECT_EQ(range.status, "complete");
+    restarted.stop();
+}
+TEST_F(FlowStoreTest, DelayedRollerWatermarkSeedsAnotherSymbolDuringBlockedPass) {
+    auto o = completeSymbols();
+    std::atomic<int64_t> aaaThrough{0}, btcThrough{0};
+    o.hourThrough = [&](const std::string &symbol) {
+        return symbol == "BTC-USD" ? btcThrough.load() : aaaThrough.load();
+    };
+    // Both writer watermarks are zero until the builder thread starts.
+    o.afterBuilderStartForTest = [&] { aaaThrough = through; };
+    std::promise<void> aaaEntered;
+    auto aaaReady = aaaEntered.get_future();
+    std::atomic<bool> paused{false};
+    o.afterRecordForTest = [&](std::stop_token stop) {
+        if (paused.exchange(true)) return;
+        aaaEntered.set_value();
+        std::mutex mutex;
+        std::condition_variable_any cv;
+        std::unique_lock lock(mutex);
+        cv.wait(lock, stop, [] { return false; });
+    };
+    FlowStore restarted(o);
+    restarted.start();
+    ASSERT_EQ(aaaReady.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    EXPECT_EQ(restarted.sealedThroughMs("BTC-USD"), 0);
+    btcThrough = through; // The roller opens BTC after the flow builder began.
+    restarted.wake();
+    std::mutex waitMutex;
+    std::condition_variable readyCv;
+    std::unique_lock lock(waitMutex);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (restarted.sealedThroughMs("BTC-USD") == 0 && std::chrono::steady_clock::now() < deadline)
+        readyCv.wait_for(lock, std::chrono::milliseconds(10));
+    EXPECT_EQ(restarted.sealedThroughMs("BTC-USD"), through);
+    const auto reply = restarted.window("BTC-USD", Epoch, through);
+    EXPECT_FALSE(reply.building);
+    ASSERT_EQ(reply.bars.size(), 24u);
+    for (const auto &range : reply.ranges) EXPECT_EQ(range.status, "complete");
+    restarted.stop();
+}
+TEST_F(FlowStoreTest, StartupRejectsCorruptAndStaleOlderDaysBeforeTheirSymbolPass) {
+    for (const std::string damage : {"corrupt", "stale", "missing"}) {
+        SCOPED_TRACE(damage);
+        // Separate synthetic roots for each case; keep a valid recent day as
+        // positive proof that seeding ran, even though the old day is refused.
+        journal = base / (damage + "-journal");
+        root = base / (damage + "-flow");
+        fs::create_directory(journal);
+        auto o = completeSymbols(damage == "missing" ? 3 : 2);
+        std::atomic<int> wakes{0};
+        o.afterWakeForTest = [&] { ++wakes; };
+        if (damage == "missing") {
+            fs::rename(firstJournal().parent_path(), base / "offline-first-day");
+        } else if (damage == "stale") {
+            changeFingerprint();
+        } else {
+            FlowStore paths(o);
+            const auto path = paths.filePath("BTC-USD", Epoch).string() + ".state";
+            auto state = bytes(path);
+            ASSERT_FALSE(state.isEmpty());
+            state.back() ^= 1;
+            QFile f(QString::fromStdString(path));
+            ASSERT_TRUE(f.open(QIODevice::WriteOnly));
+            ASSERT_EQ(f.write(state), state.size());
+        }
+        std::promise<void> entered;
+        auto ready = entered.get_future();
+        o.afterRecordForTest = [&](std::stop_token stop) {
+            entered.set_value();
+            std::mutex mutex;
+            std::condition_variable_any cv;
+            std::unique_lock lock(mutex);
+            cv.wait(lock, stop, [] { return false; });
+        };
+        FlowStore restarted(o);
+        restarted.start();
+        ASSERT_EQ(ready.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+        EXPECT_EQ(restarted.sealedThroughMs("BTC-USD"), through);
+        const auto recent = restarted.window("BTC-USD", through - 24 * Hour, through);
+        EXPECT_FALSE(recent.building);
+        EXPECT_EQ(recent.bars.size(), 24u);
+        for (const auto &range : recent.ranges) EXPECT_EQ(range.status, "complete");
+        const auto old = restarted.window("BTC-USD", Epoch, Epoch + 24 * Hour);
+        EXPECT_TRUE(old.building);
+        EXPECT_TRUE(old.bars.empty());
+        for (const auto &range : old.ranges) EXPECT_EQ(range.status, "building");
+        if (damage == "missing") EXPECT_EQ(wakes, 0);
+        restarted.stop();
+    }
 }
 TEST_F(FlowStoreTest, RefusesOverlapsAndSymlinksWithEitherSource) {
     for (const auto &forbidden : {hmc2, hmc2 / "flow", base, journal, journal / "flow"}) {

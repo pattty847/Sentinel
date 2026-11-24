@@ -51,6 +51,7 @@ class FlowStore {
         std::function<void()> afterCatalogConstructForTest;
         std::function<void()> afterWakeForTest;
         std::function<void(std::stop_token)> afterInventoryFileForTest;
+        std::function<void()> afterBuilderStartForTest;
         std::function<int64_t()> nowMs = [] {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
@@ -155,6 +156,7 @@ class FlowStore {
     mutable std::mutex indexMutex_;
     std::map<std::pair<std::string, int64_t>, DayIndex> index_;
     std::map<std::string, int64_t> builtThrough_;
+    std::set<std::pair<std::string, int64_t>> missingJournalLogged_; // indexMutex_
     std::map<std::string, int64_t> liveRetentionFloor_;
     std::map<std::string, std::map<std::filesystem::path, FileIdentity>> journalInventory_;
     std::set<std::string> journalProductDirectories_; // indexMutex_; retain across inventory failures
@@ -171,11 +173,18 @@ class FlowStore {
     std::map<std::string, ArchiveChanges> archiveChanges_; // archiveMutex_
     std::map<std::string, uint64_t> archiveGenerations_, archiveIntegrity_; // archiveMutex_
     void refreshArchive(const std::string &symbol, std::stop_token stop);
-    std::map<std::string, int64_t> firstHour_; // builder thread only
+    std::map<std::string, int64_t> firstHour_; // indexMutex_ for map access
     std::map<std::pair<std::string, int64_t>, uint64_t> buildFailures_; // builder thread only
     std::stop_source stopSource_;
-    std::thread thread_;
+    std::thread thread_, seedThread_;
+    struct SeedState { std::mutex mutex; bool done = false; };
+    std::map<std::string, SeedState> seedStates_; // fixed after construction
+    std::mutex seedWakeMutex_;
+    std::condition_variable seedCv_;
     void builderLoop(std::stop_token stop);
+    void seedLoop(std::stop_token stop);
+    void seedReadySymbols(std::stop_token stop);
+    bool seedBuiltThrough(const std::string &symbol, std::stop_token stop);
     void passSymbol(const std::string &symbol, std::stop_token stop, PassResult &result);
     void writeDay(const sentinel::flow::DayFile &day, uint32_t hours, uint32_t revision,
                   const FlowStoreGridValues &grid, const std::string &sources,
@@ -186,6 +195,8 @@ class FlowStore {
     DayIndex indexFor(const std::string &symbol, int64_t day);
     void publishIndex(const std::string &symbol, int64_t day, const DayIndex &index);
     void refreshBuiltThrough(const std::string &symbol);
+    void logMissingJournalDay(const std::string &symbol, int64_t day);
+    std::optional<bool> journalSourceCanReachDay(const std::string &symbol, int64_t day) const;
     void noteBuildFailure(const std::string &symbol, int64_t hour, const std::string &reason);
     std::filesystem::path journalDirectory(const std::string &symbol);
     std::map<std::filesystem::path, FileIdentity> inventory(const std::string &symbol, std::stop_token stop);
