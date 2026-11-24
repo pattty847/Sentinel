@@ -411,6 +411,7 @@ struct ShadowTest : testing::Test {
     bool connected = false;
     json metadata;
     size_t applied = 0;
+    int64_t receiveMax = INT64_MIN;
   };
   std::mutex modelMutex;
   std::vector<ModelEvent> modelEvents;
@@ -451,6 +452,21 @@ struct ShadowTest : testing::Test {
       e.kind = "trade";
       e.product = t.product_id;
       e.trade = t;
+      push(std::move(e));
+    };
+    cfg.model.flowTrade = [push](const Trade &t, int64_t receiveMax) {
+      ModelEvent e;
+      e.kind = "trade";
+      e.product = t.product_id;
+      e.trade = t;
+      e.receiveMax = receiveMax;
+      push(std::move(e));
+    };
+    cfg.model.flowReceive = [push](const std::string &p, int64_t receiveMax) {
+      ModelEvent e;
+      e.kind = "flow_receive";
+      e.product = p;
+      e.receiveMax = receiveMax;
       push(std::move(e));
     };
     cfg.model.connection = [push](const std::string &p, bool connected) {
@@ -3108,9 +3124,75 @@ TEST_F(ShadowTest, JournalTapDeliversEachTradeOnceAcrossRecovery) {
   // Coinbase reports the maker; the model gets the aggressor (A4).
   EXPECT_EQ(modelLog("trade")[0].trade.side, AggressorSide::Sell);
   EXPECT_EQ(modelLog("trade")[1].trade.side, AggressorSide::Buy);
+  EXPECT_EQ(modelLog("trade")[0].receiveMax, Epoch + 64000);
+  EXPECT_EQ(modelLog("trade")[1].receiveMax, Epoch + 66000);
+  EXPECT_EQ(modelLog("trade")[2].receiveMax, Epoch + 68000);
   EXPECT_EQ(resnapshots.load(), 0);
   shadow.reset();
   writer->close();
+}
+TEST_F(ShadowTest, JournalTapCarriesExactReceiveMaximumThroughSameSecondAndClockStep) {
+  tapModel();
+  initial();
+  start();
+  ASSERT_TRUE(eventually([&] { return modelCount("snapshot") == 1; }));
+  writer->append(record(64'000, trades("BUY", "first")));
+  writer->append(record(64'001));
+  writer->append(record(64'002, trades("SELL", "second")));
+  ASSERT_TRUE(eventually([&] { return modelCount("trade") == 2 && modelCount("flow_receive") >= 3; }));
+  const auto first = modelLog("trade");
+  ASSERT_EQ(first.size(), 2u);
+  EXPECT_EQ(first[0].receiveMax, Epoch + 64'000);
+  EXPECT_EQ(first[1].receiveMax, Epoch + 64'002);
+  const auto received = modelLog("flow_receive");
+  EXPECT_EQ(received[0].receiveMax, Epoch + 64'000);
+  EXPECT_EQ(received[1].receiveMax, Epoch + 64'001);
+  EXPECT_EQ(received[2].receiveMax, Epoch + 64'002);
+  writer->append(record(63'500)); // diagnostic receive-time regression
+  writer->append(record(420'000, trades("BUY", "at-seal")));
+  ASSERT_TRUE(eventually([&] { return modelCount("trade") == 3 && modelCount("flow_receive") >= 5; }));
+  EXPECT_EQ(modelLog("flow_receive")[3].receiveMax, Epoch + 64'002);
+  EXPECT_EQ(modelLog("trade")[2].receiveMax, Epoch + 420'000);
+  shadow.reset(); writer->close();
+}
+TEST_F(ShadowTest, DISABLED_JournalTapReceiveHandoffCostBenchmark) {
+  // Isolates the record-side logic: the old once-per-second candle callback
+  // and the new maximum plus preallocated, allocation-free atomic hand-off.
+  constexpr int records = 5'000'000;
+  const std::string product = "BTC-USD";
+  std::map<std::string, std::atomic<int64_t>> receive;
+  receive.try_emplace(product, INT64_MIN);
+  std::function<void(const std::string&, int64_t)> callback =
+      [&](const std::string& id, int64_t ms) {
+        auto& value = receive.find(id)->second;
+        auto old = value.load(std::memory_order_relaxed);
+        while (old < ms && !value.compare_exchange_weak(old, ms,
+                std::memory_order_release, std::memory_order_relaxed)) {}
+      };
+  auto measure = [&](bool flow) {
+    int64_t maximum = INT64_MIN, sentSecond = INT64_MIN;
+    const auto begin = std::chrono::steady_clock::now();
+    for (int i = 0; i < records; ++i) {
+      const int64_t ms = Epoch + i / 1000;
+      if (flow) {
+        maximum = std::max(maximum, ms);
+        callback(product, maximum);
+      } else if (ms / 1000 > sentSecond) {
+        sentSecond = ms / 1000;
+        callback(product, ms);
+      }
+    }
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - begin).count();
+    return double(ns) / records;
+  };
+  const auto before = measure(false);
+  receive.at(product).store(INT64_MIN, std::memory_order_relaxed);
+  const auto after = measure(true);
+  EXPECT_EQ(receive.at(product).load(), Epoch + (records - 1) / 1000);
+  std::cout << "FLOW_RECEIVE_COST records=" << records
+            << " before_ns_per_record=" << before
+            << " after_ns_per_record=" << after << '\n';
 }
 // A reconnect that resumes from the fan-out ring replays provisional records
 // the model already has: their trades are not delivered again.

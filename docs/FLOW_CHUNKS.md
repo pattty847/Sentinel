@@ -1,6 +1,6 @@
 # Flow chunks
 
-**Chunk codecs, parallel disk store and sealed flow serving implemented; client and live migration pending.** Flow history today (FLD1 day
+**Chunk codecs, parallel disk store, sealed flow serving and live seal/replay implemented; client migration pending.** Flow history today (FLD1 day
 files, FHE1 pages, `flow_bar` live messages) is in [MARKETDATA.md](MARKETDATA.md) "Live flow bars" and
 "Flow history". This spec replaces FLD1 and FHE1 and puts flow on heatmap-style chunks. The server
 (plan step 3) and the client (step 5) implement it; step 4 moves the heatmap onto the same envelope.

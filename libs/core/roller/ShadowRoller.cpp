@@ -253,6 +253,7 @@ class ModelTap {
   bool shown = false;    // the model holds a book from this tap
   bool reported = false; // last connection state handed to the model
   int64_t sentSecond = INT64_MIN; // last ModelSink::watermark journal second
+  int64_t flowReceiveMax = INT64_MIN; // exact M before this record's trades
   bool tradeHere = false; // the record being applied carries new trades
   const JournalFeed *history = nullptr;
   std::unique_ptr<JournalFeed> feed;
@@ -338,6 +339,12 @@ class ModelTap {
     if (cfg.model.watermark)
       cfg.model.watermark(product, ms);
   }
+  void advanceFlowReceive(const JournalRecord &r) {
+    flowReceiveMax = std::max(flowReceiveMax, r.record.time.systemNs / 1000000);
+  }
+  void handOffFlowReceive() {
+    if (cfg.model.flowReceive) cfg.model.flowReceive(product, flowReceiveMax);
+  }
   // Every trade of an applied record goes through here (history and live).
   void deliver(const Trade &t) {
     if (!tradeHere)
@@ -357,7 +364,8 @@ class ModelTap {
                   << " drops=" << gate.drops);
       }
     }
-    cfg.model.trade(t);
+    if (cfg.model.flowTrade) cfg.model.flowTrade(t, flowReceiveMax);
+    else cfg.model.trade(t);
   }
   void unseed() {
     seeded = false;
@@ -434,16 +442,19 @@ public:
     unseed();
   }
   // Before history applies a durable record (RollOptions::nextRecord).
-  void durableRecord(const JournalPos &p) {
-    tradeHere = !seeded && undelivered(p);
+  void durableRecord(const JournalRecord &r) {
+    tradeHere = !seeded && undelivered(r.pos);
     if (tradeHere)
-      delivered = p;
+      delivered = r.pos;
+    advanceFlowReceive(r);
   }
   // After history applied a durable record: a gap-fill record (its trades
   // were delivered) also advances the candle watermark.
   void durableApplied(const JournalRecord &r) {
-    if (tradeHere && !seeded)
+    handOffFlowReceive();
+    if (tradeHere && !seeded) {
       sendWatermark(r);
+    }
   }
   // At the socket tip, after every returned record reached history.
   void ensure(const std::deque<JournalRecord> &pending,
@@ -514,6 +525,7 @@ public:
     tradeHere = undelivered(r.pos);
     if (tradeHere)
       delivered = r.pos;
+    advanceFlowReceive(r);
     sLog_Probe("journal.live",
                "product=" << product << " kind=" << int(r.record.kind)
                           << " ageMs="
@@ -524,6 +536,7 @@ public:
       drop(std::string("journal live feed failed: ") + e.what());
       return;
     }
+    handOffFlowReceive();
     sendWatermark(r);
     serviceReseed();
   }
@@ -1593,7 +1606,7 @@ struct ShadowRoller::Impl {
           if (!source.next(reader, input))
             return false;
           if (tap.enabled())
-            tap.durableRecord(input.pos);
+            tap.durableRecord(input);
           return true;
         };
         o.onApplied = [&](const JournalRecord &input) {

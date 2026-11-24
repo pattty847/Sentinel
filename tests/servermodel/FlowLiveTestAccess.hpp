@@ -20,6 +20,12 @@ struct FlowLiveTestAccess {
   static uint64_t missingGridDrops(ServerDataModel &m) { return m.m_flowMissingGridTrades; }
   static uint64_t totalDrops(ServerDataModel &m) { return m.m_flowDroppedTrades; }
   static uint64_t hourShrinkRefusals(ServerDataModel &m) { return m.m_flowHourShrinkRefusals; }
+  static uint64_t lateDrops(ServerDataModel &m) { return m.m_flowLateTrades["BTC-USD"]; }
+  static uint64_t sealMismatches(ServerDataModel &m) { return m.m_flowSealMismatches["BTC-USD"]; }
+  static bool sealed(ServerDataModel &m, int64_t hour) { return m.flowHourSealed("BTC-USD", hour); }
+  static auto composed(ServerDataModel &m, const FlowSubscription &sub, int64_t start) {
+    return m.composeLiveFlowBar(sub, start);
+  }
   static const auto& hour(ServerDataModel &m, int64_t day, int64_t start) {
     return m.m_flowProducts.at("BTC-USD").days.at(day).hours.at(start);
   }

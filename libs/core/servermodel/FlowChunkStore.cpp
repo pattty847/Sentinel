@@ -359,25 +359,49 @@ void FlowChunkStore::publish(const std::string &id, const chunks::DayFile &file,
     const auto path = checked(filePath(id, file.dayStartMs));
     const auto size = fs::file_size(path);
     const auto modified = fs::last_write_time(path);
-    std::lock_guard lock(mutex_);
-    auto &i = instruments_.at(id);
-    auto &d = i.days[file.dayStartMs];
-    if (expectedRevision && d.indexRevision != *expectedRevision) return;
-    const auto revision = d.indexRevision + 1;
-    d = {}; d.indexRevision = revision; changed(id, file.dayStartMs);
-    if (!chunks::servable(i.state, file)) return;
-    for (int h = 0; h < 24; ++h) if (file.sections[h].sealed) d.hours |= 1u << h;
-    d.coarse = file.sections[24].sealed && file.sections[25].sealed;
-    d.fileSize = size; d.fileModified = modified;
-    uint64_t offset = 12 + 1 + id.size() + 8 + 32 + 1 + 4 + 12 + 8 + 4 +
-                      chunks::DaySections * chunks::TableEntryBytes;
-    for (size_t n = 0; n < d.entries.size(); ++n) {
-        const auto &section = file.sections[n];
-        d.entries[n] = {uint32_t(offset), uint32_t(section.payload.size()), section.summaryLength,
-                        section.payload.empty() ? 0u : sentinel::crc32(section.payload.data(), section.payload.size()),
-                        section.stepExponent};
-        offset += section.payload.size();
+    uint64_t serial = 0;
+    bool servable = false, notifyLive = false;
+    {
+        std::lock_guard lock(mutex_);
+        auto &i = instruments_.at(id);
+        auto &d = i.days[file.dayStartMs];
+        if (expectedRevision && d.indexRevision != *expectedRevision) return;
+        const auto revision = d.indexRevision + 1;
+        d = {}; d.indexRevision = revision; changed(id, file.dayStartMs);
+        serial = i.serial;
+        if (chunks::servable(i.state, file)) {
+            servable = true;
+            // Only the newest source day and its predecessor can intersect a
+            // six-hour live window. Avoid decoding historical backfill days.
+            notifyLive = !i.days.empty() &&
+                file.dayStartMs >= i.days.rbegin()->first - DayMs;
+            for (int h = 0; h < 24; ++h) if (file.sections[h].sealed) d.hours |= 1u << h;
+            d.coarse = file.sections[24].sealed && file.sections[25].sealed;
+            d.fileSize = size; d.fileModified = modified;
+            uint64_t offset = 12 + 1 + id.size() + 8 + 32 + 1 + 4 + 12 + 8 + 4 +
+                              chunks::DaySections * chunks::TableEntryBytes;
+            for (size_t n = 0; n < d.entries.size(); ++n) {
+                const auto &section = file.sections[n];
+                d.entries[n] = {uint32_t(offset), uint32_t(section.payload.size()), section.summaryLength,
+                                section.payload.empty() ? 0u : sentinel::crc32(section.payload.data(), section.payload.size()),
+                                section.stepExponent};
+                offset += section.payload.size();
+            }
+        }
     }
+    if (!servable || !notifyLive || !options_.onDayPublished) return;
+    std::vector<flow::FlowBar> bars;
+    std::vector<int64_t> hours;
+    for (int h = 0; h < 24; ++h) {
+        const auto &section = file.sections[h];
+        if (!section.sealed) continue;
+        const auto hour = file.dayStartMs + h * Hour;
+        hours.push_back(hour);
+        auto decoded = chunks::toBars(chunks::decode(section.payload, Minute, hour, 60, false,
+                                                     uint64_t(1) << section.stepExponent));
+        bars.insert(bars.end(), std::make_move_iterator(decoded.begin()), std::make_move_iterator(decoded.end()));
+    }
+    options_.onDayPublished(id, file.dayStartMs, serial, std::move(bars), std::move(hours));
 }
 fs::path FlowChunkStore::locatorPath(const std::string &id, int64_t day) const {
     return filePath(id, day).string() + ".loc";
@@ -1066,8 +1090,9 @@ FlowChunkStore::Availability FlowChunkStore::sealed(const std::string& id, int64
     return {scanned->first, std::move(scanned->second[n])};
 }
 void FlowChunkStore::changed(const std::string& id, std::optional<int64_t> day) {
-    ++instruments_.at(id).serial;
+    const auto serial = ++instruments_.at(id).serial;
     if (invalidate_) invalidate_(id, day);
+    if (options_.onIndexChange) options_.onIndexChange(id, day, serial);
 }
 void FlowChunkStore::onInvalidation(std::function<void(const std::string&, std::optional<int64_t>)> handler) {
     std::lock_guard lock(mutex_); invalidate_ = std::move(handler);

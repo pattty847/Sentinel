@@ -18,6 +18,11 @@ public:
         std::chrono::milliseconds rescan{60'000};
         bool lowerPriority = true;
         sentinel::metrics::MetricsRegistry *metrics = nullptr; // outlives store
+        // Store-worker notifications. Published bars are decoded before posting
+        // to the model; the model never reads an FLC1 file on its thread.
+        std::function<void(const std::string&, std::optional<int64_t>, uint64_t)> onIndexChange;
+        std::function<void(const std::string&, int64_t, uint64_t,
+                           std::vector<sentinel::flow::FlowBar>, std::vector<int64_t>)> onDayPublished;
         std::function<void(std::stop_token)> afterRecordForTest;
         std::function<void(int64_t)> afterDayForTest;
         std::function<void(int64_t)> beforeDayLoadForTest;

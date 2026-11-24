@@ -34,6 +34,12 @@ struct ModelSink {
   std::function<void(const std::string &product, const std::string &reason)>
       invalidate;
   std::function<void(const Trade &)> trade; // aggressor side
+  // Flow receives the record's running receive maximum in the existing trade
+  // hand-off. Optional; the legacy trade callback remains for other sinks.
+  std::function<void(const Trade &, int64_t)> flowTrade;
+  // Called after every applied live record, including records without trades.
+  // The server implements this with a preallocated atomic; no queued callback.
+  std::function<void(const std::string &, int64_t)> flowReceive;
   // The recorder's exact UTC-day native grid, before any live trade for it.
   std::function<void(const std::string &product, int64_t dayStartMs,
                      const Grid &grid, const nlohmann::json &metadata)> grid;

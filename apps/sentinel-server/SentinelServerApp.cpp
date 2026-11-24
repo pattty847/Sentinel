@@ -155,8 +155,14 @@ sentinel::roller::ModelSink SentinelServerApp::journalModelSink() {
             model.onLiveOrderBookInvalidated(id, reason);
         });
     };
-    sink.trade = [modelPtr](const Trade& trade) {
-        safeInvoke(modelPtr, [trade](ServerDataModel& model) { model.onTrade(trade); });
+    sink.flowTrade = [model = m_serverModel.get(), modelPtr](const Trade& trade, int64_t receiveMax) {
+        model->flowTradePosted(trade.product_id);
+        safeInvoke(modelPtr, [trade, receiveMax](ServerDataModel& model) {
+            model.onFlowTrade(trade, receiveMax);
+        });
+    };
+    sink.flowReceive = [model = m_serverModel.get()](const std::string& product, int64_t receiveMax) {
+        model->flowRecordApplied(product, receiveMax);
     };
     sink.connection = [modelPtr](const std::string& product, bool connected) {
         safeInvoke(modelPtr, [product, connected](ServerDataModel& model) {
@@ -249,6 +255,20 @@ bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
                     chunks.root = m_serverConfig.recording.flowChunkDir;
                     chunks.rules.sealWindowMs = m_serverConfig.flow.sealWindowMs;
                     chunks.metrics = &m_metrics;
+                    QPointer<ServerDataModel> flowModel(m_serverModel.get());
+                    chunks.onIndexChange = [flowModel](const std::string& id, std::optional<int64_t> day,
+                                                       uint64_t serial) {
+                        safeInvoke(flowModel, [id, day, serial](ServerDataModel& model) {
+                            model.onFlowChunkIndexChange(id, day, serial);
+                        });
+                    };
+                    chunks.onDayPublished = [flowModel](const std::string& id, int64_t day, uint64_t serial,
+                            std::vector<sentinel::flow::FlowBar> bars, std::vector<int64_t> hours) {
+                        safeInvoke(flowModel, [id, day, serial, bars = std::move(bars),
+                                               hours = std::move(hours)](ServerDataModel& model) mutable {
+                            model.onFlowChunkDayPublished(id, day, serial, std::move(bars), std::move(hours));
+                        });
+                    };
                     m_flowChunkStore = std::make_unique<recording::FlowChunkStore>(*m_flowStore, std::move(chunks));
                     m_server->attachFlowChunks(*m_flowChunkStore, &m_metrics);
                     m_flowChunkStore->start();
