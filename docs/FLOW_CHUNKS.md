@@ -300,10 +300,11 @@ are complete, `unrecorded` if all are unrecorded, otherwise `partial` (the FHE1 
   4. Encode with section 4 from scratch (the open deltas restart at the first bar).
 - An hour section is written when the hour is sealed; entries 24 and 25 when all 24 hours are; a `trades.big` hour
   with its flow hour. The file is rewritten atomically (temp file, fsync, rename, directory fsync, as `atomicFile`,
-  `servermodel/FlowStore.cpp:471-488`). There is no `.state` sidecar.
-- The store may keep an optional `.flc.loc` cache of exact scan positions, bound to the checksummed day bytes. On
-  restart it validates the saved boundary blocks through RAWL2's ordinal/offset index and checks FlowStore's source
-  identities. A missing or stale cache falls back to the canonical scan; it never makes a section servable.
+  `servermodel/FlowStore.cpp:471-488`). No sidecar is needed to serve or validate a day.
+- `<date>.flc.loc` is an optional, machine-specific position cache with its own whole-file CRC-32, bound to the
+  checksummed day bytes. On a cached restart, acceptance rests on file size and mtime across the scan range and the
+  seal-file prefix hash, not on a recomputed fingerprint. The saved boundary records are validated through RAWL2's
+  ordinal/offset index. A missing or stale cache falls back to the canonical scan; it never makes a section servable.
 - Raw on disk: zstd 1 would shrink a file by 16-38% (section 12) but cost a decompression on every cold read.
 
 ## 6. In-memory FlowChunk

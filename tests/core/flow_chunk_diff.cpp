@@ -1,6 +1,6 @@
 // Offline FLC1 migration evidence. RAWL2/HMC2/FLD1 are read-only; every generated
 // file goes under an explicit scratch root, checked disjoint from all sources.
-// Usage: flow_chunk_diff <raw-root> <hmc-root> <fld-root> <scratch> <symbol> <YYYY-MM-DD>...
+// Usage: flow_chunk_diff <raw-root> <hmc-root> <fld-root> <scratch> <symbol> <YYYY-MM-DD>...|--steady
 // FLD1 has no trade IDs. A legacy day replay must reproduce each differing FLD1
 // bar before its trade-ID membership is asserted; otherwise evidence is flagged
 // unresolved and the command fails. Notables are excluded from comparisons.
@@ -39,7 +39,25 @@ int main(int argc, char **argv) {
         sources.symbols = {symbol}; sources.protectedRoots = {fld}; sources.hourThrough = [](const std::string &) { return INT64_MAX / Day * Day; };
         recording::FlowStore archiveOwner(sources); // never starts/builds FLD1
         recording::FlowChunkStore::Options options; options.root = scratch / "flc"; options.lowerPriority = false;
+        size_t inventoryRefreshes = 0;
+        options.afterArchiveRefreshForTest = [&] { ++inventoryRefreshes; };
         recording::FlowChunkStore store(archiveOwner, options);
+        if (std::string_view(argv[6]) == "--steady") {
+            const auto first = store.runPass();
+            if (first.failed || first.stopped) throw std::runtime_error("initial backfill failed");
+            inventoryRefreshes = 0;
+            const auto start = std::chrono::steady_clock::now();
+            const auto second = store.runPass();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (second.failed || second.stopped) throw std::runtime_error("steady pass failed");
+            size_t days = 0;
+            for (const auto &entry : fs::directory_iterator(scratch / "flc" / "coinbase" / symbol))
+                if (entry.path().extension() == ".flc") ++days;
+            std::cout << "instrument=" << id << " sealed_days=" << days << " steady_inventory_refreshes="
+                      << inventoryRefreshes << " steady_pass_ms=" << elapsed << '\n';
+            return 0;
+        }
         bool unresolved = false;
         for (int a = 6; a < argc; ++a) {
             const auto date = QDate::fromString(argv[a], "yyyy-MM-dd");

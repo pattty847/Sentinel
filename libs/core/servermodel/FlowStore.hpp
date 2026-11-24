@@ -101,6 +101,7 @@ class FlowStore {
     int64_t sealedThroughMs(const std::string &symbol) const;
     // Model-thread journal clock floor; the builder uses it only under the index lock.
     void setLiveRetentionFloor(const std::string &symbol, int64_t hourMs);
+    std::optional<int64_t> liveRetentionFloor(const std::string &symbol) const;
     std::filesystem::path filePath(const std::string &symbol, int64_t dayMs) const;
     const std::filesystem::path &root() const { return options_.root; }
 

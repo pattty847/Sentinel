@@ -656,6 +656,11 @@ void FlowStore::setLiveRetentionFloor(const std::string &symbol, int64_t hourMs)
     std::lock_guard lock(indexMutex_);
     liveRetentionFloor_[symbol] = hourMs;
 }
+std::optional<int64_t> FlowStore::liveRetentionFloor(const std::string &symbol) const {
+    std::lock_guard lock(indexMutex_);
+    const auto it = liveRetentionFloor_.find(symbol);
+    return it == liveRetentionFloor_.end() ? std::nullopt : std::optional<int64_t>(it->second);
+}
 void FlowStore::refreshBuiltThrough(const std::string &symbol) {
     const auto first = firstHour_.find(symbol);
     if (first == firstHour_.end()) return;

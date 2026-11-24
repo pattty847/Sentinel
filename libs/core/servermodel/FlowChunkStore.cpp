@@ -1,7 +1,8 @@
 // Canonical scans use a fresh feed per hour and update M before delivering the
 // seal record's trades. Published bytes are immutable within an epoch. Fence
-// first, persist the epoch, then rebuild and unfence. No lock spans replay or
-// disk I/O; history workers recheck the epoch/fence after their read completes.
+// first, persist the epoch, then rebuild and unfence. The worker uses utility
+// priority and gives the live-retention days of every product a priority lane.
+// No lock spans replay or disk I/O; readers recheck the epoch/fence after I/O.
 #include "FlowChunkStore.hpp"
 #include "RollupStore.hpp"
 #include "PersistenceIo.hpp"
@@ -19,6 +20,17 @@
 #include <cctype>
 #include <nlohmann/json.hpp>
 #include <unordered_set>
+#if defined(__APPLE__)
+#include <pthread.h>
+#include <sys/qos.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/resource.h>
+#endif
 
 namespace recording {
 namespace {
@@ -29,6 +41,15 @@ namespace roller = sentinel::roller;
 constexpr int64_t Minute = 60'000, Hour = 60 * Minute, DayMs = 24 * Hour;
 struct Cancelled {};
 struct HourUnavailable : std::runtime_error { using std::runtime_error::runtime_error; };
+bool setChunkWorkerPriority() {
+#if defined(__APPLE__)
+    return pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0) == 0;
+#elif defined(_WIN32)
+    return SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) != 0;
+#else
+    return setpriority(PRIO_PROCESS, 0, 10) == 0;
+#endif
+}
 void check(std::stop_token stop) { if (stop.stop_requested()) throw Cancelled{}; }
 std::string symbolOf(const std::string &id) {
     if (!id.starts_with("coinbase:")) throw std::invalid_argument("flow chunk instrument");
@@ -210,6 +231,10 @@ FlowChunkStore::FlowChunkStore(FlowStore &sources, Options options) : sources_(s
     }
 }
 FlowChunkStore::~FlowChunkStore() { stop(); }
+FlowStore::Archive FlowChunkStore::sharedArchive(const std::string &symbol, std::stop_token stop) {
+    if (options_.afterArchiveRefreshForTest) options_.afterArchiveRefreshForTest();
+    return sources_.archive(symbol, stop);
+}
 fs::path FlowChunkStore::checked(const fs::path &path) const {
     const auto &o = sources_.options();
     auto roots = o.protectedRoots; roots.push_back(sources_.root());
@@ -324,7 +349,7 @@ void FlowChunkStore::initializeInstrument(const std::string &id, const FlowStore
 void FlowChunkStore::initialize(std::stop_token stop) {
     std::lock_guard pass(passMutex_);
     for (const auto &symbol : sources_.options().symbols) {
-        check(stop); initializeInstrument("coinbase:" + symbol, sources_.archive(symbol, stop));
+        check(stop); initializeInstrument("coinbase:" + symbol, sharedArchive(symbol, stop));
     }
 }
 void FlowChunkStore::publish(const std::string &id, const chunks::DayFile &file,
@@ -366,6 +391,8 @@ void FlowChunkStore::saveLocators(const std::string &id, const chunks::DayFile &
         loc["hours"].push_back({{"cursor", s.cursor}, {"first", s.first}, {"last", s.last},
             {"stamp", s.stamp}, {"prefix", s.prefix}, {"source", int(s.source)}});
     }
+    const auto body = loc.dump();
+    loc["crc"] = sentinel::crc32(body.data(), body.size());
     const auto text = loc.dump();
     write(locatorPath(id, file.dayStartMs), {text.begin(), text.end()});
 }
@@ -374,7 +401,11 @@ std::array<std::optional<FlowChunkStore::SourceCheck>, 24> FlowChunkStore::loadL
     std::array<std::optional<SourceCheck>, 24> out;
     try {
         const auto raw = bytes(checked(locatorPath(id, file.dayStartMs)));
-        const auto loc = nlohmann::json::parse(raw);
+        auto loc = nlohmann::json::parse(raw);
+        const auto crc = loc.at("crc").get<uint32_t>();
+        loc.erase("crc");
+        const auto body = loc.dump();
+        if (crc != sentinel::crc32(body.data(), body.size())) return {};
         const auto encoded = chunks::encodeDayFile(file);
         if (loc.at("version") != 1 || loc.at("instrument") != id || loc.at("day") != file.dayStartMs ||
             loc.at("file_crc") != sentinel::crc32(encoded.data(), encoded.size()) ||
@@ -608,14 +639,14 @@ void FlowChunkStore::buildDay(const std::string &id, int64_t day, const FlowStor
         d.badHours = badHours;
         if (badHours) {
             d.damageFailures = std::min<uint32_t>(previousDamageFailures + 1, 6);
-            d.retryAfter = std::chrono::steady_clock::now() + options_.damageRetry * (1u << (d.damageFailures - 1));
+            d.retryAfter = options_.schedulerNow() + options_.damageRetry * (1u << (d.damageFailures - 1));
         } else { d.damageFailures = 0; d.retryAfter = {}; }
     };
     if (!built) { rememberDamage(); return; }
     compose(file);
     // Refresh the inventory after replay. A new hour file beyond this day's
     // seal range is harmless; a rewrite or insertion within it is not.
-    const auto after = sources_.archive(symbol, stop);
+    const auto after = sharedArchive(symbol, stop);
     if (!after.catalog) throw std::runtime_error("RAWL2 disappeared during chunk build");
     for (int h = 0; after.integrity != archive.integrity && h < 24; ++h) if (file.sections[h].sealed) {
         const auto hour = day + h * Hour;
@@ -657,6 +688,7 @@ bool FlowChunkStore::unchanged(const std::string &id, int64_t day, const FlowSto
     const auto symbol = symbolOf(id);
     auto file = load(id, day);
     if (!file) return false;
+    bool upgraded = false;
     int firstMissing = -1;
     for (int h = 0; h < 24; ++h) {
         check(stop);
@@ -681,6 +713,7 @@ bool FlowChunkStore::unchanged(const std::string &id, int64_t day, const FlowSto
             auto located = locateHour(symbol, hour, *archive.catalog, stop, !saved.sources[h]);
             if (!located || located->prefix != file->sections[h].sourcePrefix) return false;
             saved.sources[h] = std::move(located);
+            upgraded = true;
         }
     }
     if (firstMissing >= 0) {
@@ -689,7 +722,15 @@ bool FlowChunkStore::unchanged(const std::string &id, int64_t day, const FlowSto
         const auto hour = day + firstMissing * Hour;
         if (sealReached(hour + Hour + options_.rules.sealWindowMs, *archive.catalog, stop)) return false;
     }
-    { std::lock_guard lock(mutex_); instruments_.at(id).days.at(day).sources = saved.sources; }
+    { std::lock_guard lock(mutex_);
+      auto &sources = instruments_.at(id).days.at(day).sources;
+      sources = saved.sources; }
+    if (upgraded) {
+        try { saveLocators(id, *file, saved.sources); }
+        catch (const std::exception &e) {
+            sLog_Warning("Flow chunk locator refresh unavailable instrument=" << id << " day=" << day << " error=" << e.what());
+        }
+    }
     return file->grid == gridOf(sources_.gridFor(symbol, day, *archive.catalog, stop));
     } catch (const std::exception &) { check(stop); return false; }
 }
@@ -697,13 +738,12 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
     std::lock_guard pass(passMutex_);
     FlowStore::PassResult result;
     std::map<std::string, FlowStore::Archive> archives;
-    // Initialize every instrument before replaying any of them. A rule change
-    // on BTC must not hold unchanged ETH unavailable throughout BTC's backfill.
+    // Fences for all products become durable before any long replay.
     for (const auto &symbol : sources_.options().symbols) {
         const auto id = "coinbase:" + symbol;
         try {
             check(stop);
-            auto archive = sources_.archive(symbol, stop);
+            auto archive = sharedArchive(symbol, stop);
             initializeInstrument(id, archive);
             archives.emplace(symbol, std::move(archive));
         } catch (const Cancelled &) { result.stopped = true; return result; }
@@ -714,122 +754,139 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
             sLog_Warning("Flow chunk discovery failed instrument=" << id << " error=" << e.what());
         }
     }
-    // Give every instrument its forming day before older backfill. A large
-    // alphabetically earlier archive cannot delay another product's new hour.
-    auto refreshForming = [&] {
-        // A long backfill pass must not hold a newly sealed live hour until
-        // every older day finishes. One older day is the maximum delay.
-        for (auto &[formingSymbol, known] : archives) {
-            check(stop);
-            auto fresh = sources_.archive(formingSymbol, stop);
-            if (fresh.generation == known.generation && fresh.integrity == known.integrity) continue;
-            known = std::move(fresh);
-            const auto formingId = "coinbase:" + formingSymbol;
-            int64_t newest = -1;
-            { std::lock_guard lock(mutex_); auto &instrument = instruments_.at(formingId);
-              for (auto date : known.days) instrument.days.try_emplace(date);
-              if (!instrument.days.empty()) newest = instrument.days.rbegin()->first; }
-            if (newest < 0) continue;
-            try {
-                if (!unchanged(formingId, newest, known, stop)) buildDay(formingId, newest, known, stop, result);
-            } catch (const Cancelled &) { throw; }
-              catch (const std::exception &e) {
-                ++result.failed;
-                if (auto *counter = instruments_.at(formingId).failures) counter->inc();
-                sLog_Warning("Flow chunk forming-day refresh failed instrument=" << formingId
-                             << " day=" << newest << " error=" << e.what());
+    using Attempt = std::tuple<std::string, int64_t, uint64_t>;
+    std::set<Attempt> attempted;
+    auto liveDays = [&](const std::string &symbol, const FlowStore::Archive &archive) {
+        std::vector<int64_t> days;
+        if (archive.days.empty()) return days;
+        int64_t watermark = archive.days.back();
+        if (archive.catalog) for (const auto &file : archive.catalog->files())
+            watermark = std::max(watermark, file.openedNs / 1'000'000);
+        // The model's retention floor is derived from its receive watermark.
+        // Before the model publishes one, the newest file's receive hour gives
+        // a conservative floor (up to one extra hour of priority work).
+        const auto fallback = std::max<int64_t>(0, (watermark - Minute) / Hour * Hour - 6 * Hour);
+        const auto liveFloor = sources_.liveRetentionFloor(symbol);
+        const auto floor = liveFloor.value_or(fallback);
+        const auto now = liveFloor ? sources_.options().nowMs() : watermark;
+        for (auto day : archive.days)
+            if (day <= now && day + DayMs > floor) days.push_back(day);
+        return days;
+    };
+    auto needsWork = [&](const std::string &id, int64_t day, const FlowStore::Archive &archive) {
+        uintmax_t size;
+        fs::file_time_type modified;
+        bool needs;
+        { std::lock_guard lock(mutex_);
+          const auto &i = instruments_.at(id);
+          const auto &d = i.days.at(day);
+          needs = i.integrity != archive.integrity || !d.coarse || d.invalid ||
+              std::binary_search(i.state.pending.begin(), i.state.pending.end(), day);
+          size = d.fileSize; modified = d.fileModified; }
+        if (needs) return true;
+        try {
+            const auto path = checked(filePath(id, day));
+            return size != fs::file_size(path) || modified != fs::last_write_time(path);
+        } catch (const std::exception &) { return true; }
+    };
+    auto process = [&](const std::string &symbol, int64_t day, FlowStore::Archive &archive) {
+        const auto id = "coinbase:" + symbol;
+        if (!attempted.emplace(id, day, archive.generation).second) return;
+        { std::lock_guard lock(mutex_);
+          const auto &d = instruments_.at(id).days.at(day);
+          if ((d.badHours || d.buildFailures) && options_.schedulerNow() < d.retryAfter) return; }
+        bool work = needsWork(id, day, archive);
+        if (!work) return;
+        try {
+            bool build = false;
+            { std::lock_guard lock(mutex_);
+              const auto &i = instruments_.at(id);
+              const auto &d = i.days.at(day);
+              build = i.integrity != archive.integrity || !d.coarse || d.invalid ||
+                  std::binary_search(i.state.pending.begin(), i.state.pending.end(), day); }
+            if (!build) {
+                if (auto file = load(id, day)) publish(id, *file);
+                else build = true;
             }
+            if (build && !unchanged(id, day, archive, stop)) buildDay(id, day, archive, stop, result);
+            { std::lock_guard lock(mutex_);
+              auto &d = instruments_.at(id).days.at(day);
+              if (!d.badHours) { d.buildFailures = 0; d.retryAfter = {}; } }
+        } catch (const Cancelled &) { throw; }
+          catch (const std::exception &e) {
+            if (stop.stop_requested()) throw Cancelled{};
+            ++result.failed;
+            auto &i = instruments_.at(id);
+            if (i.failures) i.failures->inc();
+            { std::lock_guard lock(mutex_);
+              auto &d = i.days.at(day);
+              d.buildFailures = std::min<uint32_t>(d.buildFailures + 1, 6);
+              d.retryAfter = options_.schedulerNow() + options_.damageRetry * (1u << (d.buildFailures - 1)); }
+            sLog_Warning("Flow chunk build failed instrument=" << id << " day=" << day << " error=" << e.what());
         }
     };
-    for (int stage = 0; stage < 2; ++stage) for (auto &[symbol, archive] : archives) {
-        const auto id = "coinbase:" + symbol;
-        try {
+    std::map<std::string, std::vector<int64_t>> priorityDays;
+    auto priority = [&] {
+        for (auto &[symbol, archive] : archives) {
             check(stop);
-            std::vector<int64_t> days;
-            bool sourceRewritten;
-            { std::lock_guard lock(mutex_); auto &i = instruments_.at(id);
-              for (auto day : archive.days) i.days.try_emplace(day);
-              sourceRewritten = i.integrity != archive.integrity;
-              for (const auto &[day, state] : i.days) days.push_back(day); }
-            // Every instrument gets newest-first recovery, including pending
-            // epochs. Failed days stay in the inventory and are retried.
-            uint64_t pendingCount = 0;
-            for (auto day : days) {
-                std::lock_guard lock(mutex_);
-                const auto &i = instruments_.at(id);
-                if (std::binary_search(i.state.pending.begin(), i.state.pending.end(), day) ||
-                    (day != days.back() && (sourceRewritten || !i.days.at(day).coarse))) ++pendingCount;
-            }
-            auto &i = instruments_.at(id);
-            if (i.pending) i.pending->set(double(pendingCount));
-            bool failed = false;
-            for (auto it = days.rbegin(); it != days.rend(); ++it) {
-                if ((stage == 0) != (it == days.rbegin())) continue;
-                check(stop);
-                if (stage == 1) refreshForming();
-                bool needsBuild;
-                bool backingOff;
-                { std::lock_guard lock(mutex_);
-                  const auto &d = i.days.at(*it);
-                  // Pure append of the current durable tail cannot change a
-                  // completed day's already reached seal points.
-                  needsBuild = sourceRewritten || !d.coarse || d.invalid;
-                  backingOff = d.badHours && std::chrono::steady_clock::now() < d.retryAfter; }
-                if (backingOff) continue;
-                // Stat closed days each pass; parse only on change. History
-                // reads independently validate bytes and withdraw corruption.
-                if (!needsBuild) {
-                    bool same = false;
-                    try {
-                        const auto path = checked(filePath(id, *it));
-                        std::lock_guard lock(mutex_);
-                        const auto &d = i.days.at(*it);
-                        same = d.fileSize == fs::file_size(path) && d.fileModified == fs::last_write_time(path);
-                    } catch (const std::exception &) {}
-                    if (!same) {
-                        if (auto file = load(id, *it)) publish(id, *file);
-                        else needsBuild = true;
-                    }
-                }
-                if (!needsBuild) continue;
-                try {
-                    if (unchanged(id, *it, archive, stop)) {
-                        if (pendingCount) --pendingCount;
-                        if (i.pending) i.pending->set(double(pendingCount));
-                        continue;
-                    }
-                    buildDay(id, *it, archive, stop, result);
-                    if (pendingCount) --pendingCount;
-                    if (i.pending) i.pending->set(double(pendingCount));
-                } catch (const Cancelled &) { throw; }
-                  catch (const std::exception &e) {
-                    if (stop.stop_requested()) throw Cancelled{};
-                    ++result.failed; failed = true;
-                    if (i.failures) i.failures->inc();
-                    sLog_Warning("Flow chunk build failed instrument=" << id << " day=" << *it << " error=" << e.what());
-                }
-            }
+            const auto id = "coinbase:" + symbol;
             { std::lock_guard lock(mutex_);
-              if (stage == 1 && !failed) { i.generation = archive.generation; i.integrity = archive.integrity; }
-              uint64_t remaining = 0;
-              for (const auto &[day, d] : i.days)
-                  if (((day != days.back() || d.badHours) && !d.coarse) ||
-                      std::binary_search(i.state.pending.begin(), i.state.pending.end(), day)) ++remaining;
-              if (i.pending) i.pending->set(double(remaining)); }
-
-        } catch (const Cancelled &) { result.stopped = true; break; }
-          catch (const std::exception &e) {
-            if (stop.stop_requested()) { result.stopped = true; break; }
-            ++result.failed;
-            sLog_Warning("Flow chunk pass failed instrument=" << id << " error=" << e.what());
+              for (auto day : archive.days) instruments_.at(id).days.try_emplace(day); }
+            auto days = liveDays(symbol, archive);
+            priorityDays[symbol] = days;
+            for (auto it = days.rbegin(); it != days.rend(); ++it) process(symbol, *it, archive);
         }
+    };
+    auto lastPriorityCheck = options_.schedulerNow();
+    try {
+        priority();
+        // A refresh is needed only ahead of real older work, and no more often
+        // than once per 30 s. Closed days that need nothing cost no inventories.
+        for (auto &[symbol, archive] : archives) {
+            check(stop);
+            const auto id = "coinbase:" + symbol;
+            std::vector<int64_t> days;
+            { std::lock_guard lock(mutex_);
+              for (const auto &[day, _] : instruments_.at(id).days) days.push_back(day); }
+            for (auto it = days.rbegin(); it != days.rend(); ++it) {
+                check(stop);
+                const auto &live = priorityDays.at(symbol);
+                if (std::binary_search(live.begin(), live.end(), *it)) continue;
+                if (!needsWork(id, *it, archive)) continue;
+                if (options_.schedulerNow() - lastPriorityCheck >= std::chrono::seconds(30)) {
+                    lastPriorityCheck = options_.schedulerNow();
+                    for (auto &[freshSymbol, known] : archives) {
+                        check(stop);
+                        try { known = sharedArchive(freshSymbol, stop); }
+                        catch (const std::exception &e) {
+                            ++result.failed;
+                            sLog_Warning("Flow chunk priority refresh failed instrument=" << freshSymbol << " error=" << e.what());
+                        }
+                    }
+                    priority();
+                }
+                process(symbol, *it, archive);
+            }
+        }
+    } catch (const Cancelled &) { result.stopped = true; }
+    for (auto &[symbol, archive] : archives) {
+        const auto id = "coinbase:" + symbol;
+        std::lock_guard lock(mutex_);
+        auto &i = instruments_.at(id);
+        i.generation = archive.generation; i.integrity = archive.integrity;
+        uint64_t remaining = 0;
+        const auto newest = i.days.empty() ? -1 : i.days.rbegin()->first;
+        for (const auto &[day, d] : i.days)
+            if (((day != newest || d.badHours) && !d.coarse) ||
+                std::binary_search(i.state.pending.begin(), i.state.pending.end(), day)) ++remaining;
+        if (i.pending) i.pending->set(double(remaining));
     }
     result.stopped |= stop.stop_requested();
     return result;
 }
 FlowStore::PassResult FlowChunkStore::rebuildDay(const std::string &id, int64_t day, std::stop_token stop) {
     std::lock_guard pass(passMutex_);
-    const auto archive = sources_.archive(symbolOf(id), stop);
+    const auto archive = sharedArchive(symbolOf(id), stop);
     initializeInstrument(id, archive);
     FlowStore::PassResult result;
     try { buildDay(id, day, archive, stop, result); }
@@ -968,7 +1025,7 @@ void FlowChunkStore::stop() { stopSource_.request_stop(); wake(); if (thread_.jo
 void FlowChunkStore::wake() { { std::lock_guard lock(wakeMutex_); woken_ = true; } wakeCv_.notify_all(); }
 void FlowChunkStore::loop(std::stop_token stop) {
     sentinel::logging::setCurrentThreadName("flow-chunks");
-    if (options_.lowerPriority && !lowerThreadPriority()) sLog_Warning("Flow chunk priority unchanged");
+    if (options_.lowerPriority && !setChunkWorkerPriority()) sLog_Warning("Flow chunk utility priority unchanged");
     while (!stop.stop_requested()) {
         try { runPass(stop); } catch (const std::exception &e) { sLog_Error("Flow chunk worker error=" << e.what()); }
         std::unique_lock lock(wakeMutex_);

@@ -27,6 +27,10 @@ public:
         std::function<void(int64_t, const SourceCheck &)> afterLocatedForTest;
         std::function<void()> beforeReadInvalidationForTest;
         std::function<void()> afterCursorRecordForTest;
+        std::function<void()> afterArchiveRefreshForTest;
+        std::function<std::chrono::steady_clock::time_point()> schedulerNow = [] {
+            return std::chrono::steady_clock::now();
+        };
         std::chrono::milliseconds damageRetry{60'000}; // test seam; production backoff base
     };
     struct Payload {
@@ -73,7 +77,7 @@ private:
         struct Entry { uint32_t offset = 0, length = 0, summary = 0, crc = 0; uint8_t step = 0; };
         uint32_t hours = 0; bool coarse = false; bool invalid = false;
         uint64_t indexRevision = 0;
-        uint32_t badHours = 0, damageFailures = 0;
+        uint32_t badHours = 0, damageFailures = 0, buildFailures = 0;
         std::chrono::steady_clock::time_point retryAfter{};
         uintmax_t fileSize = 0;
         std::filesystem::file_time_type fileModified{};
@@ -100,6 +104,7 @@ private:
     std::stop_source stopSource_;
     std::thread thread_;
     std::filesystem::path checked(const std::filesystem::path &) const;
+    FlowStore::Archive sharedArchive(const std::string &, std::stop_token);
     void write(const std::filesystem::path &, const std::vector<uint8_t> &);
     std::optional<sentinel::flow::chunks::DayFile> load(const std::string &, int64_t,
                                                        std::optional<uint64_t> expectedRevision = {});

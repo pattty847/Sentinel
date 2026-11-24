@@ -76,6 +76,16 @@ protected:
         }
     }
     c::DayFile day(FlowChunkStore &store, int64_t start = Epoch) { return c::parseDayFile(readBytes(store.filePath(Id, start))); }
+    void editLocator(const fs::path &path, const std::function<void(nlohmann::json &)> &edit, bool seal = true) {
+        auto loc = nlohmann::json::parse(readBytes(path));
+        loc.erase("crc");
+        edit(loc);
+        if (seal) {
+            const auto body = loc.dump();
+            loc["crc"] = sentinel::crc32(body.data(), body.size());
+        } else loc["crc"] = 0;
+        std::ofstream out(path, std::ios::trunc); out << loc.dump();
+    }
 };
 TEST_F(ChunkStoreTest, SealMembershipAndFirstSealRecord) {
     Journal j(raw); j.snapshot(-Minute);
@@ -271,7 +281,7 @@ TEST_F(ChunkStoreTest, ChangedSourceMovesOnlyItsEpoch) {
     ASSERT_EQ(store.runPass().failed, 0u); EXPECT_NE(store.epoch(Id), btc); EXPECT_EQ(store.epoch("coinbase:ETH-USD"), eth);
 }
 TEST_F(ChunkStoreTest, FailedEpochWriteRetriesTransitionBeforePublishing) {
-    fixture(); FlowStore source(sourceOptions()); auto o = options();
+    fixture(); FlowStore source(sourceOptions()); auto o = options(); o.damageRetry = std::chrono::milliseconds(0);
     bool fail = false;
     o.beforeEpochWriteForTest = [&] { if (std::exchange(fail, false)) throw std::runtime_error("injected epoch write failure"); };
     FlowChunkStore store(source, o); ASSERT_EQ(store.runPass().failed, 0u);
@@ -358,7 +368,8 @@ TEST_F(ChunkStoreTest, AvailabilityDiscardsRangesWhenEpochChangesDuringEnumerati
     EXPECT_FALSE(current.ranges.empty());
 }
 TEST_F(ChunkStoreTest, RemovedArchiveFencesOldSectionsUntilSourcesReturn) {
-    fixture(); FlowStore source(sourceOptions()); FlowChunkStore store(source, options());
+    fixture(); FlowStore source(sourceOptions()); auto o = options(); o.damageRetry = std::chrono::milliseconds(0);
+    FlowChunkStore store(source, o);
     ASSERT_EQ(store.runPass().failed, 0u); const auto epoch = store.epoch(Id);
     const auto original = readBytes(store.filePath(Id, Epoch));
     struct Backup { fs::path path; std::vector<uint8_t> bytes; fs::file_time_type modified; };
@@ -549,7 +560,8 @@ TEST_F(ChunkStoreTest, RestartWithMissingRootRebuildsIdenticalDay) {
     ASSERT_EQ(restarted.runPass().failed, 0u); EXPECT_EQ(readBytes(restarted.filePath(Id, Epoch)), original);
 }
 TEST_F(ChunkStoreTest, RewriteDuringReplayCannotPublishMixedSourceBytes) {
-    fixture(); FlowStore source(sourceOptions()); auto o = options(); bool changed = false;
+    fixture(); FlowStore source(sourceOptions()); auto o = options(); o.damageRetry = std::chrono::milliseconds(0);
+    bool changed = false;
     const auto archive = source.archive("BTC-USD"); const auto path = archive.catalog->files().front().path;
     o.afterRecordForTest = [&](std::stop_token) {
         if (std::exchange(changed, true)) return;
@@ -607,12 +619,15 @@ TEST_F(ChunkStoreTest, FormingDayRunsBeforeBackfillAndBetweenOlderDays) {
     forming.writer.flush();
     FlowStore source(sourceOptions()); auto o = options();
     FlowChunkStore *active = nullptr; std::vector<int64_t> order;
+    auto tick = std::chrono::steady_clock::time_point{};
+    o.schedulerNow = [&] { return tick; };
     bool advanced = false, checked = false;
     o.afterDayForTest = [&](int64_t day) {
         order.push_back(day);
         if (day == Epoch + 2 * Day && !advanced) {
             advanced = true;
             forming.heartbeat(3 * Day + 2 * Hour + 15000); forming.close();
+            tick += std::chrono::seconds(31);
         }
         if (day == Epoch + Day) {
             checked = true;
@@ -647,7 +662,7 @@ TEST_F(ChunkStoreTest, OnlyAffectedDayRetriesFailedEpochWrite) {
     Journal journal(raw); journal.snapshot(-Minute);
     journal.trades(1000, {trade(100, "1", 100000)});
     journal.heartbeat(Hour + 15000); journal.close();
-    FlowStore source(sourceOptions()); auto o = options(); bool fail = false;
+    FlowStore source(sourceOptions()); auto o = options(); o.damageRetry = std::chrono::milliseconds(0); bool fail = false;
     o.beforeEpochWriteForTest = [&] { if (std::exchange(fail, false)) throw std::runtime_error("epoch write"); };
     FlowChunkStore store(source, o); ASSERT_EQ(store.runPass().failed, 0u);
     const auto before = store.epoch(Id);
@@ -789,6 +804,171 @@ TEST_F(ChunkStoreTest, OfflineDiffListsEveryMovedTrade) {
     ASSERT_TRUE(repeated.waitForFinished(60000));
     EXPECT_EQ(repeated.exitCode(), 0) << repeated.readAllStandardError().toStdString();
     EXPECT_NE(repeated.readAllStandardOutput().toStdString().find("differing_bars=1 trades_moved=1"), std::string::npos);
+}
+
+
+TEST_F(ChunkStoreTest, MidnightPrioritySealsBothProductsBeforeOlderBackfill) {
+    fixture(3); fixture(3, "ETH-USD");
+    FlowStore source(sourceOptions());
+    source.setLiveRetentionFloor("BTC-USD", Epoch + 2 * Day + 17 * Hour);
+    source.setLiveRetentionFloor("ETH-USD", Epoch + 2 * Day + 17 * Hour);
+    auto o = options(); FlowChunkStore *active = nullptr; bool sawBackfill = false;
+    o.afterDayForTest = [&](int64_t day) {
+        if (day != Epoch + Day || sawBackfill) return;
+        sawBackfill = true;
+        EXPECT_TRUE(active->read(Id, Minute, Epoch + 2 * Day + 23 * Hour));
+        EXPECT_TRUE(active->read("coinbase:ETH-USD", Minute, Epoch + 2 * Day + 23 * Hour));
+    };
+    FlowChunkStore store(source, o); active = &store;
+    ASSERT_EQ(store.runPass().failed, 0u);
+    EXPECT_TRUE(sawBackfill);
+}
+TEST_F(ChunkStoreTest, SteadyInventoryRefreshCountIsIndependentOfClosedDays) {
+    fixture(12); FlowStore source(sourceOptions());
+    auto o = options(); size_t refreshed = 0;
+    o.afterArchiveRefreshForTest = [&] { ++refreshed; };
+    FlowChunkStore store(source, o); ASSERT_EQ(store.runPass().failed, 0u);
+    refreshed = 0;
+    ASSERT_EQ(store.runPass().failed, 0u);
+    EXPECT_LE(refreshed, source.options().symbols.size());
+}
+TEST_F(ChunkStoreTest, PriorityFailureBacksOffWithinTheSamePass) {
+    fixture(3); fixture(3, "ETH-USD");
+    const auto victim = raw / "BTC-USD" / "2027" / "01" / "03" / "05.rawl2";
+    ASSERT_TRUE(fs::exists(victim)); fs::resize_file(victim, fs::file_size(victim) - 6);
+    FlowStore source(sourceOptions());
+    source.setLiveRetentionFloor("BTC-USD", Epoch + 2 * Day + 17 * Hour);
+    source.setLiveRetentionFloor("ETH-USD", Epoch + 2 * Day + 17 * Hour);
+    auto o = options(); auto tick = std::chrono::steady_clock::time_point{};
+    o.schedulerNow = [&] { return tick; };
+    size_t priorityWrites = 0; FlowChunkStore *active = nullptr; bool checkedOtherProduct = false;
+    o.afterDayForTest = [&](int64_t day) {
+        if (day == Epoch + 2 * Day) ++priorityWrites;
+        if (day == Epoch + Day && !checkedOtherProduct) {
+            checkedOtherProduct = true;
+            EXPECT_TRUE(active->read("coinbase:ETH-USD", Minute, Epoch + 2 * Day + 23 * Hour));
+            // Force a new archive generation while day 2 is still damaged.
+            Journal next(raw); next.snapshot(3 * Day + 1000); next.close();
+            tick += std::chrono::seconds(31);
+        }
+    };
+    FlowChunkStore store(source, o); active = &store;
+    EXPECT_GT(store.runPass().failed, 0u);
+    EXPECT_EQ(priorityWrites, 2u); // one attempted day per instrument, no retry after rotation
+    EXPECT_TRUE(checkedOtherProduct);
+}
+TEST_F(ChunkStoreTest, PriorityRefreshIsRateLimitedToThirtySeconds) {
+    fixture(6); auto sourceConfig = sourceOptions(); sourceConfig.symbols = {"BTC-USD"};
+    FlowStore source(sourceConfig);
+    auto o = options(); auto tick = std::chrono::steady_clock::time_point{};
+    o.schedulerNow = [&] { return tick; };
+    size_t refreshed = 0, builtDays = 0;
+    o.afterArchiveRefreshForTest = [&] { ++refreshed; };
+    o.afterDayForTest = [&](int64_t) { ++builtDays; tick += std::chrono::seconds(10); };
+    FlowChunkStore store(source, o); ASSERT_EQ(store.runPass().failed, 0u);
+    EXPECT_EQ(builtDays, 7u); // six journal days plus the prior-day receive tail
+    // One initial inventory, one post-build inventory per day, and one
+    // priority refresh when the injected clock first reaches 30 seconds.
+    EXPECT_EQ(refreshed, 1u + builtDays + 2u);
+}
+TEST_F(ChunkStoreTest, LocatorRejectsChangedDayFileBinding) {
+    fixture(); FlowStore source(sourceOptions());
+    { FlowChunkStore first(source, options()); ASSERT_EQ(first.runPass().failed, 0u);
+      auto file = day(first); ++file.lateTrades;
+      const auto encoded = c::encodeDayFile(file);
+      std::ofstream out(first.filePath(Id, Epoch), std::ios::binary | std::ios::trunc);
+      out.write(reinterpret_cast<const char *>(encoded.data()), encoded.size()); }
+    auto o = options(); size_t located = 0; o.afterLocateForTest = [&](int64_t) { ++located; };
+    FlowChunkStore restarted(source, o); ASSERT_EQ(restarted.runPass().failed, 0u);
+    EXPECT_GT(located, 0u);
+}
+TEST_F(ChunkStoreTest, LocatorRejectsInvalidSavedBoundaryRecord) {
+    fixture(); FlowStore source(sourceOptions());
+    fs::path loc;
+    { FlowChunkStore first(source, options()); ASSERT_EQ(first.runPass().failed, 0u);
+      loc = first.filePath(Id, Epoch).string() + ".loc"; }
+    editLocator(loc, [](auto &json) { json["hours"][5]["first"]["record"] = UINT32_MAX; });
+    auto o = options(); size_t located = 0; o.afterLocateForTest = [&](int64_t) { ++located; };
+    FlowChunkStore restarted(source, o); ASSERT_EQ(restarted.runPass().failed, 0u);
+    EXPECT_GT(located, 0u);
+}
+TEST_F(ChunkStoreTest, LocatorRejectsHourPrefixMismatch) {
+    fixture(); FlowStore source(sourceOptions());
+    fs::path loc;
+    { FlowChunkStore first(source, options()); ASSERT_EQ(first.runPass().failed, 0u);
+      loc = first.filePath(Id, Epoch).string() + ".loc"; }
+    editLocator(loc, [](nlohmann::json &json) { json["hours"][5]["prefix"] = json["hours"][5]["prefix"].get<uint64_t>() + 1; });
+    auto o = options(); size_t located = 0; o.afterLocateForTest = [&](int64_t) { ++located; };
+    FlowChunkStore restarted(source, o); ASSERT_EQ(restarted.runPass().failed, 0u);
+    EXPECT_GT(located, 0u);
+}
+TEST_F(ChunkStoreTest, LocatorOwnCrcRejectsSinglePositionDigitFlip) {
+    fixture(); FlowStore source(sourceOptions());
+    fs::path loc;
+    { FlowChunkStore first(source, options()); ASSERT_EQ(first.runPass().failed, 0u);
+      loc = first.filePath(Id, Epoch).string() + ".loc"; }
+    // Pick two valid record positions in one boundary block. Without the
+    // locator's own CRC, the modified first position passes boundary checks.
+    auto json = nlohmann::json::parse(readBytes(loc));
+    const auto catalog = source.archive("BTC-USD").catalog;
+    size_t chosen = 24; uint32_t alternate = 0;
+    for (size_t h = 0; h < 24; ++h) {
+        const auto first = json["hours"][h]["first"].get<sentinel::roller::JournalPos>();
+        sentinel::roller::JournalReader reader(*catalog, first);
+        sentinel::roller::JournalRecord a, b;
+        if (reader.next(a) && reader.next(b) && a.pos.block == b.pos.block &&
+            a.pos.run == b.pos.run && a.pos.record < 10 && b.pos.record < 10 &&
+            a.pos.record != b.pos.record) { chosen = h; alternate = b.pos.record; break; }
+    }
+    ASSERT_LT(chosen, 24u);
+    const auto original = json["hours"][chosen]["first"]["record"].get<uint32_t>();
+    auto rawLoc = readBytes(loc);
+    auto at = std::string(rawLoc.begin(), rawLoc.end()).find(R"("first":)");
+    for (size_t h = 0; h < chosen; ++h)
+        at = std::string(rawLoc.begin(), rawLoc.end()).find(R"("first":)", at + 1);
+    ASSERT_NE(at, std::string::npos);
+    at = std::string(rawLoc.begin(), rawLoc.end()).find(R"("record":)", at);
+    ASSERT_NE(at, std::string::npos); at += 9;
+    ASSERT_EQ(rawLoc[at], '0' + original);
+    rawLoc[at] = '0' + alternate;
+    { std::ofstream out(loc, std::ios::binary | std::ios::trunc);
+      out.write(reinterpret_cast<const char *>(rawLoc.data()), rawLoc.size()); }
+    auto o = options(); size_t located = 0; o.afterLocateForTest = [&](int64_t) { ++located; };
+    FlowChunkStore restarted(source, o); ASSERT_EQ(restarted.runPass().failed, 0u);
+    EXPECT_GT(located, 0u);
+}
+TEST_F(ChunkStoreTest, ClosedSealFileUpgradePersistsAcrossSecondRestart) {
+    Journal journal(raw); journal.snapshot(-Minute);
+    journal.trades(1000, {trade(100, "1", 100000)});
+    journal.heartbeat(Hour + 15000); journal.writer.flush();
+    FlowStore source(sourceOptions());
+    { FlowChunkStore first(source, options()); ASSERT_EQ(first.runPass().failed, 0u); }
+    journal.close();
+    auto o = options(); size_t located = 0; o.afterLocateForTest = [&](int64_t) { ++located; };
+    { FlowChunkStore upgraded(source, o); ASSERT_EQ(upgraded.runPass().failed, 0u); EXPECT_GT(located, 0u); }
+    located = 0;
+    { FlowChunkStore second(source, o); ASSERT_EQ(second.runPass().failed, 0u); EXPECT_EQ(located, 0u); }
+}
+TEST_F(ChunkStoreTest, FailedEpochWriteCannotMarkDayPendingInMemory) {
+    fixture();
+    FlowStore source(sourceOptions()); auto o = options(); o.damageRetry = std::chrono::milliseconds(0);
+    bool fail = false; size_t writes = 0;
+    o.beforeEpochWriteForTest = [&] { ++writes; if (fail) throw std::runtime_error("epoch write"); };
+    FlowChunkStore store(source, o); ASSERT_EQ(store.runPass().failed, 0u);
+    const auto before = store.epoch(Id);
+    const auto oldWrites = writes;
+    const auto victim = raw / "BTC-USD" / "2027" / "01" / "01" / "05.rawl2";
+    fs::last_write_time(victim, fs::last_write_time(victim) + std::chrono::seconds(2));
+    fail = true;
+    EXPECT_GT(store.runPass().failed, 0u);
+    EXPECT_FALSE(store.read(Id, Minute, Epoch));
+    EXPECT_GT(store.runPass().failed, 0u);
+    EXPECT_FALSE(store.read(Id, Minute, Epoch));
+    EXPECT_EQ(writes, oldWrites + 2);
+    fail = false;
+    ASSERT_EQ(store.runPass().failed, 0u);
+    EXPECT_NE(store.epoch(Id), before);
+    EXPECT_TRUE(store.read(Id, Minute, Epoch));
 }
 
 }
