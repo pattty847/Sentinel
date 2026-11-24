@@ -20,6 +20,7 @@
 #include <atomic>
 #include <filesystem>
 #include <optional>
+#include <tuple>
 #include <nlohmann/json.hpp>
 #include <QObject>
 #include <QByteArray>
@@ -215,7 +216,7 @@ private:
     struct FlowSeries {
         sentinel::flow::FlowBarBuilder builder;
         std::vector<FlowSlot> bucketSlots;
-        FlowSeries(int64_t tf, const sentinel::flow::FlowScales& scales, bool extendedMinutes = false);
+        FlowSeries(int64_t tf, const sentinel::flow::FlowScales& scales);
         uint64_t capacityDrops = 0;
     };
     struct FlowComposite {
@@ -233,6 +234,7 @@ private:
         std::map<int64_t, FlowComposite> hours; // closed hours; at most 24 per product
         std::optional<std::pair<int64_t, FlowComposite>> formingHour;
         std::map<std::pair<int64_t, int64_t>, FlowComposite> coarse;
+        std::map<int64_t, uint32_t> retiredRevisionByHour; // transferred from sealed RAM minutes
     };
     struct FlowProduct {
         int64_t clock = 0;
@@ -268,6 +270,7 @@ private:
     std::map<std::string, std::map<int64_t, SealedFlowDay>> m_flowSealed;
     std::map<std::string, int64_t> m_flowLatestSealedDay;
     std::map<std::string, uint64_t> m_flowLatestIndexSerial, m_flowEpochFenceSerial;
+    mutable std::set<std::tuple<std::string, int64_t, int64_t>> m_flowComposeWarned;
     bool flowHourSealed(const std::string& symbol, int64_t hour) const;
     std::optional<sentinel::flow::FlowBar> flowSealedMinute(const std::string& symbol, int64_t minute) const;
     bool flowOwnsBucket(const FlowSubscription& sub, int64_t start) const;

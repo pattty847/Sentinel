@@ -446,13 +446,15 @@ public:
     tradeHere = !seeded && undelivered(r.pos);
     if (tradeHere)
       delivered = r.pos;
-    advanceFlowReceive(r);
+    // Initial catch-up only feeds the durable recorder. The model is seeded
+    // at the tip, so it must not see catch-up receive time without its trades.
+    if (tradeHere) advanceFlowReceive(r);
   }
   // After history applied a durable record: a gap-fill record (its trades
   // were delivered) also advances the candle watermark.
   void durableApplied(const JournalRecord &r) {
-    handOffFlowReceive();
     if (tradeHere && !seeded) {
+      handOffFlowReceive();
       sendWatermark(r);
     }
   }

@@ -218,11 +218,13 @@ Revision is **only envelope metadata**, never part of FLB1 content. A forming
 update and close republish can share a live revision. Coverage begins when the server
 receives its first live trade; a bar is complete only if that trade was at or
 before the bucket start and no trade in the bucket was lost or rejected. An
-observed empty minute is covered. An hour neither present in live retention nor
-listed as sealed in that session's availability has `coverage: "building"`.
-Every accepted late
-trade behind the published close watermark increments the revision; multiple
+observed empty minute, including the current forming minute before its first
+trade, is covered. A minute neither retained live nor decoded from a sealed
+hour has `coverage: "building"` when the session owns its bucket.
+Every accepted late trade behind the published close watermark increments the revision; multiple
 late trades can coalesce into one publication with a correspondingly larger revision.
+Coarse revisions retain the contributions of minutes retired after sealing, so
+the revision never decreases when an hour leaves live RAM.
 
 Trades use exchange-time, UTC-aligned half-open buckets and the shared
 `flow::FlowBarBuilder`. Its 4,096-id window protects against reconnect resends;
@@ -252,21 +254,25 @@ turn. A close is republished once even if content did not change.
 The product clock is its monotonic journal receive watermark minus 1,000 ms;
 wall time and quiet/disconnected intervals do not close bars. Publication
 precedes `sealThrough`; accepted trades behind the close increment revisions.
-The roller passes every applied record's running maximum receive time to live
-flow before that record's trades. A trade is excluded when that maximum reaches
-its 1 m bar end plus `flow.seal_window_ms` (default 300 seconds). The bar is
+The roller passes every model-delivered record's running maximum receive time
+to live flow before that record's trades; initial durable catch-up is not
+delivered to the model. A trade is excluded when that maximum reaches its
+1 m bar end plus `flow.seal_window_ms` (default 300 seconds). The bar is
 live-final at the same seal point. Live retains 1 m buckets from `live_from_ms`
-until their hour seals on disk; coarse buckets compose sealed FLC1 minutes and
-unsealed live minutes. An unsealed minute outside observed live coverage, or
-one pruned before this session learned that its hour sealed, has
-`coverage: "building"`.
+until both FLC1 and FLD1 seal their hour; coarse buckets compose decoded sealed
+FLC1 minutes and retained live minutes regardless of the session's availability
+subscription. Availability determines whether the session still owns a bucket.
+An unobserved minute or a sealed hour whose decoded bars have not reached the
+model has `coverage: "building"`. A session without availability never receives
+an empty FLB1 carrier for such a bucket, so the existing GUI keeps its last
+real footprint and CVD column.
 
 The 1 s series keeps the last 30 minutes, and the 1 m series keeps the last
 six hours from the UTC hour of the receive watermark minus 60 seconds. A subscribed
 coarse view keeps its forming composite and the preceding composite until 60
 seconds after close. Fixed slots cap each day/series at 1,802 second buckets
-and 422 minute buckets, including clock/publication slack. Only the
-current and preceding UTC day can be held. Watermark maintenance drops only
+and 422 minute buckets with or without a FlowStore, including clock/publication
+slack. Only the current and preceding UTC day can be held. Watermark maintenance drops only
 already-published, unchanged finals; a stalled publication loop refuses additions
 that would overrun the slots. `sentinel_flow_dropped_trades_total` counts additions
 refused behind the retention watermark, at capacity, for missing grids or by

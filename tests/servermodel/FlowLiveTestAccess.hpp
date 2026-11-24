@@ -17,11 +17,15 @@ struct FlowLiveTestAccess {
   static size_t hourCount(ServerDataModel &m, int64_t day) {
     return m.m_flowProducts.at("BTC-USD").days.at(day).hours.size();
   }
+  static size_t retiredRevisionHours(ServerDataModel& m, int64_t day) {
+    return m.m_flowProducts.at("BTC-USD").days.at(day).retiredRevisionByHour.size();
+  }
   static uint64_t missingGridDrops(ServerDataModel &m) { return m.m_flowMissingGridTrades; }
   static uint64_t totalDrops(ServerDataModel &m) { return m.m_flowDroppedTrades; }
   static uint64_t hourShrinkRefusals(ServerDataModel &m) { return m.m_flowHourShrinkRefusals; }
   static uint64_t lateDrops(ServerDataModel &m) { return m.m_flowLateTrades["BTC-USD"]; }
   static uint64_t sealMismatches(ServerDataModel &m) { return m.m_flowSealMismatches["BTC-USD"]; }
+  static int64_t receiveMax(ServerDataModel &m) { return m.m_flowProducts.at("BTC-USD").receiveMax; }
   static bool sealed(ServerDataModel &m, int64_t hour) { return m.flowHourSealed("BTC-USD", hour); }
   static auto composed(ServerDataModel &m, const FlowSubscription &sub, int64_t start) {
     return m.composeLiveFlowBar(sub, start);
@@ -42,6 +46,11 @@ struct FlowLiveTestAccess {
   }
   static const auto& coarse(ServerDataModel &m, int64_t day, int64_t tf, int64_t start) {
     return m.m_flowProducts.at("BTC-USD").days.at(day).coarse.at({tf, start});
+  }
+  static void discardMinute(ServerDataModel& m, int64_t day, int64_t minute) {
+    auto& series = m.m_flowProducts.at("BTC-USD").days.at(day).series.at(60'000);
+    series.builder.dropBucket(minute);
+    series.bucketSlots[(minute / 60'000) % series.bucketSlots.size()] = {};
   }
 };
 

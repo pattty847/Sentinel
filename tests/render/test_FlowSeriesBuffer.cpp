@@ -58,6 +58,34 @@ TEST(FlowSeriesBuffer, RevisionsCompareOnlyWithinSourceAndCompleteWinsTies) {
     held.complete = true;
     EXPECT_EQ(FlowSeriesBuffer::merge(&held, bar(1, false, Source::Store), 120'000), Decision::Drop);
 }
+TEST(FlowSeriesBuffer, LegacyFormingDayAndFourHourStayFullAcrossHourSeals) {
+    // Today's GUI has no chunk_availability or flow_live_ready subscription.
+    // These are the successive whole-bucket frames asserted by FlowLiveTests.
+    for (const int64_t tf : {14'400'000LL, 86'400'000LL}) {
+        FlowSeriesBuffer client;
+        auto deliver = [&](uint32_t revision, uint32_t count, int64_t volume) {
+            auto record = bar(revision, true, Source::Live, 0, tf);
+            record.bar.count = count;
+            record.bar.baseVolume = record.bar.quoteVolume = volume;
+            auto page = batch(record);
+            EXPECT_TRUE(client.apply(page, 1000 + revision).empty());
+            const auto* series = client.series(tf);
+            EXPECT_TRUE(series->losses.empty());
+            EXPECT_EQ(series->coverage.at(0).status, Status::Live);
+            EXPECT_EQ(series->bars.at(0).bar.count, count);
+            EXPECT_EQ(series->bars.at(0).bar.baseVolume, volume);
+        };
+        deliver(2, 2, 200);  // both early live hours
+        deliver(2, 2, 200);  // first hour seals on disk
+        deliver(2, 2, 200);  // second hour seals on disk
+        deliver(3, 3, 300);  // new open-hour trade must win
+        const auto& held = client.series(tf)->bars.at(0);
+        EXPECT_EQ(held.bar.count, 3u);
+        EXPECT_EQ(held.bar.baseVolume, 300);
+        EXPECT_TRUE(held.complete);
+        EXPECT_EQ(client.sealedThroughMs(), 0); // no FLD1 page or availability handover
+    }
+}
 TEST(FlowSeriesBuffer, FinalLiveDroppedButCrossingCoarseBucketRemainsLive) {
     EXPECT_EQ(FlowSeriesBuffer::merge(nullptr, bar(500, true), 120'000), Decision::Drop);
     EXPECT_EQ(FlowSeriesBuffer::merge(nullptr, bar(500, false), 90'000), Decision::Replace);

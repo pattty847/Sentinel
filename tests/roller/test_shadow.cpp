@@ -3139,19 +3139,35 @@ TEST_F(ShadowTest, JournalTapCarriesExactReceiveMaximumThroughSameSecondAndClock
   writer->append(record(64'000, trades("BUY", "first")));
   writer->append(record(64'001));
   writer->append(record(64'002, trades("SELL", "second")));
-  ASSERT_TRUE(eventually([&] { return modelCount("trade") == 2 && modelCount("flow_receive") >= 3; }));
+  auto recentReceives = [&] {
+    const auto log = modelLog("flow_receive");
+    return std::count_if(log.begin(), log.end(), [](const ModelEvent& event) {
+      return event.receiveMax >= Epoch + 64'000;
+    });
+  };
+  ASSERT_TRUE(eventually([&] { return modelCount("trade") == 2 && recentReceives() >= 3; }));
   const auto first = modelLog("trade");
   ASSERT_EQ(first.size(), 2u);
   EXPECT_EQ(first[0].receiveMax, Epoch + 64'000);
   EXPECT_EQ(first[1].receiveMax, Epoch + 64'002);
   const auto received = modelLog("flow_receive");
-  EXPECT_EQ(received[0].receiveMax, Epoch + 64'000);
-  EXPECT_EQ(received[1].receiveMax, Epoch + 64'001);
-  EXPECT_EQ(received[2].receiveMax, Epoch + 64'002);
+  std::vector<int64_t> current;
+  for (const auto& event : received)
+    if (event.receiveMax >= Epoch + 64'000) current.push_back(event.receiveMax);
+  ASSERT_GE(current.size(), 3u);
+  EXPECT_EQ(current[0], Epoch + 64'000);
+  EXPECT_EQ(current[1], Epoch + 64'001);
+  EXPECT_EQ(current[2], Epoch + 64'002);
   writer->append(record(63'500)); // diagnostic receive-time regression
   writer->append(record(420'000, trades("BUY", "at-seal")));
-  ASSERT_TRUE(eventually([&] { return modelCount("trade") == 3 && modelCount("flow_receive") >= 5; }));
-  EXPECT_EQ(modelLog("flow_receive")[3].receiveMax, Epoch + 64'002);
+  ASSERT_TRUE(eventually([&] { return modelCount("trade") == 3 && recentReceives() >= 5; }));
+  const auto afterStep = modelLog("flow_receive");
+  current.clear();
+  for (const auto& event : afterStep)
+    if (event.receiveMax >= Epoch + 64'000) current.push_back(event.receiveMax);
+  ASSERT_GE(current.size(), 5u);
+  EXPECT_EQ(current[3], Epoch + 64'002);
+  EXPECT_EQ(current[4], Epoch + 420'000);
   EXPECT_EQ(modelLog("trade")[2].receiveMax, Epoch + 420'000);
   shadow.reset(); writer->close();
 }
