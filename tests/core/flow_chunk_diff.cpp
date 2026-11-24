@@ -47,10 +47,12 @@ int main(int argc, char **argv) {
             const auto day = date.startOfDay(QTimeZone::UTC).toMSecsSinceEpoch();
             const auto begin = std::chrono::steady_clock::now();
             const auto result = store.rebuildDay(id, day);
-            if (result.failed || result.built != 24) throw std::runtime_error("day not fully sealable");
             const auto path = store.filePath(id, day);
             const auto encoded = readFile(path);
             const auto built = c::parseDayFile(encoded);
+            if (result.failed || !std::all_of(built.sections.begin(), built.sections.begin() + 24,
+                [](const auto &section) { return section.sealed; }))
+                throw std::runtime_error("day not fully sealable");
             const auto buildMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
             const auto legacy = flow::decodeFlowDay(readFile(fld / symbol / "60000" / (std::string(argv[a]) + ".flb")));
             std::map<int64_t, flow::FlowBar> before, after;
