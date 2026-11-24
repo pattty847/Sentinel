@@ -19,7 +19,7 @@ struct DayFile {
     int64_t dayStartMs = 0;
     FlowGrid grid;
     uint8_t ruleVersion = 1;
-    uint32_t sealWindowMs = 15'000;
+    uint32_t sealWindowMs = 300'000;
     uint32_t lateTrades = 0, rejectedTrades = 0, regressions = 0;
     uint64_t ruleIdentity = 0;      // section 7 rule identity the sections were built under
     std::array<DaySection, DaySections> sections;

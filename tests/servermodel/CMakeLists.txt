@@ -264,3 +264,12 @@ target_link_libraries(test_trading_snapshot_wire PRIVATE sentinel_core GTest::gt
 add_test(NAME TradingSnapshotWireTests COMMAND test_trading_snapshot_wire)
 set_tests_properties(TradingSnapshotWireTests PROPERTIES LABELS "servermodel;trading" TIMEOUT 60)
 add_dependencies(servermodel_tests test_trading_snapshot_wire)
+
+add_executable(test_flow_chunk_store test_flow_chunk_store.cpp)
+target_include_directories(test_flow_chunk_store PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(test_flow_chunk_store PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME FlowChunkStoreTests COMMAND test_flow_chunk_store)
+set_tests_properties(FlowChunkStoreTests PROPERTIES LABELS "servermodel;flow" TIMEOUT 120)
+add_dependencies(servermodel_tests test_flow_chunk_store)
+target_compile_definitions(test_flow_chunk_store PRIVATE FLOW_CHUNK_DIFF_EXE="$<TARGET_FILE:flow_chunk_diff>")
+add_dependencies(test_flow_chunk_store flow_chunk_diff)

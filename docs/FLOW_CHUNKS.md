@@ -1,6 +1,6 @@
 # Flow chunks
 
-**Chunk codecs implemented; serving and storage migration pending.** Flow history today (FLD1 day
+**Chunk codecs and parallel disk store implemented; serving migration pending.** Flow history today (FLD1 day
 files, FHE1 pages, `flow_bar` live messages) is in [MARKETDATA.md](MARKETDATA.md) "Live flow bars" and
 "Flow history". This spec replaces FLD1 and FHE1 and puts flow on heatmap-style chunks. The server
 (plan step 3) and the client (step 5) implement it; step 4 moves the heatmap onto the same envelope.
@@ -8,7 +8,14 @@ Measurements are in section 12. They come from `flow_history_bench --lateness` a
 (`tests/core/flow_history_bench.cpp`). Production byte codecs are in `libs/core/flow/FlowChunkCodec.*`,
 `FlowChunkDecode.cpp`, `FlowDayFile.*`, and `FlowEpoch.*`, with row steps in `FlowRowStep.hpp` and
 single-allocation decoded fields in `FlowChunk.hpp`. Golden bytes and validation tests are in
-`tests/core/test_flow_chunk.cpp`. These libraries add no disk I/O or request handling.
+`tests/core/test_flow_chunk.cpp`. These codec libraries add no disk I/O or request handling. The parallel disk store is
+`servermodel/FlowChunkStore.*`; it shares FlowStore's RAWL2 catalog, inventory, source
+identity primitives and grid lookup. The offline `flow_chunk_diff` tool builds selected
+days into scratch and compares their summary and rows against FLD1 (notables excluded).
+Example: `flow_chunk_diff <raw-l2> <hmc2> <hmc2-flow> <scratch> BTC-USD 2026-11-20`.
+The scratch root must be disjoint from all inputs. Each differing bar lists trade IDs
+added or removed by the canonical scan; a legacy replay must reproduce the FLD1 bar
+before that membership evidence is considered proven.
 
 Decided rules this spec makes exact:
 - RAWL2 is the only truth. Every flow file is a rebuildable index of it.
@@ -293,7 +300,11 @@ are complete, `unrecorded` if all are unrecorded, otherwise `partial` (the FHE1 
   4. Encode with section 4 from scratch (the open deltas restart at the first bar).
 - An hour section is written when the hour is sealed; entries 24 and 25 when all 24 hours are; a `trades.big` hour
   with its flow hour. The file is rewritten atomically (temp file, fsync, rename, directory fsync, as `atomicFile`,
-  `servermodel/FlowStore.cpp:471-488`). There is no `.state` sidecar.
+  `servermodel/FlowStore.cpp:471-488`). No sidecar is needed to serve or validate a day.
+- `<date>.flc.loc` is an optional, machine-specific position cache with its own whole-file CRC-32, bound to the
+  checksummed day bytes. On a cached restart, acceptance rests on file size and mtime across the scan range and the
+  seal-file prefix hash, not on a recomputed fingerprint. The saved boundary records are validated through RAWL2's
+  ordinal/offset index. A missing or stale cache falls back to the canonical scan; it never makes a section servable.
 - Raw on disk: zstd 1 would shrink a file by 16-38% (section 12) but cost a decompression on every cold read.
 
 ## 6. In-memory FlowChunk
@@ -342,7 +353,7 @@ same rule on what live saw, but nothing requires them to equal the sealed bar.
 | Canonical hour scan of hour h | read RAWL2 in that order from the first durable record with receive time >= h - 60 s, with a fresh `JournalFeed` (its trade-id window fills during the lead-in), until the first record with M >= h + 1 h + W |
 | Watermark M(R) | the maximum receive time (`systemNs / 10^6`) over every record from the scan start through record R, all record kinds, R included |
 | Membership | a trade of record R belongs to 1m bar `[s, s + 60 s)` iff its exchange time is in the bar and `M(R) < s + 60 s + W`; equality excludes |
-| W | **15 s** (`flow.seal_window_ms`, written in the day file header) |
+| W | **300 s** (`flow.seal_window_ms`, written in the day file header) |
 
 - An hour's bytes depend only on the archive, the rules and its own scan start, so any pass grouping and any rebuild
   give the same bytes. A pass may share one read across hours when the result is the same.
@@ -377,10 +388,10 @@ Fixtures (step 3 acceptance):
   old-rule day of it (nor `not_modified` for one) under its new epoch, rebuilds every day of it, and resumes after
   a crash mid-way with a new epoch; every other instrument keeps its epoch and serves throughout.
 
-Why W = 15 s: on 4 measured days (3 BTC, 1 ETH, 6.5 M trades) M passed the end of a trade's bar by at most 1.3 s,
-the only regression was 6 ms, and neither 15 s nor 60 s excludes a trade (section 12; a transit-distribution scan,
-not a conformance run). 15 s is the smaller window with ten times the observed maximum as margin and absorbs the
-observed clock offset (-0.14 s). A larger W only delays sealing. Open item 1 re-measures every day before the cutover.
+Why W = 300 s: across 48 days of AVAX, DOGE, PEPE and FARTCOIN, 15 s excluded 476 trades present in FLD1 and 60 s
+still excluded 302. The latest arrived 272 s after its bar ended. Most came from Coinbase resends after reconnects;
+others reflect publication delay (PEPE 2026-10-13 01:15 was about 59.5 s late). Five-minute sealing does not leave a
+history gap because live retains the forming hours for six hours. BTC, ETH and SOL still need the all-days check.
 
 Today's store differs: it reads until receive time passes the end of its whole build run plus 60 s
 (`servermodel/FlowStore.cpp:455`, runs grouped at `:996-1032`), so a late trade's membership depends on how hours
@@ -456,6 +467,7 @@ Transition of one instrument, in this order:
   its key leaving `sealed`) hides it, until its key is sealed again. Fenced days of the moved instrument therefore
   hide until rebuilt; nothing of another instrument does.
 - A lost day file together with changed RAWL2 is not detected (open item 8).
+- Source identity inherits FLD1's path, size and modification-time rules; moving or restoring RAWL2 without preserving modification times changes the fingerprint and advances the affected epoch.
 
 ## 8. Live tail
 
@@ -523,13 +535,13 @@ measurement variants have been removed. The tables below retain the original mea
 
 ### Lateness
 
-A transit-distribution scan, not the canonical hour scan and not seal-conformance evidence: one continuous
+A preliminary four-day transit-distribution scan, not the canonical hour scan and not seal-conformance evidence: one continuous
 `JournalFeed` for the day, deduplicating and ordering as the store builder does. It starts at the last journal file
 opened at least an hour before the day (one to two hours of lead-in; two on these days) and stops when the running
 maximum receive time is an hour past the day. All four scans are complete: no damage, no file-order regression.
 "After bar end" = receive time - end of the trade's 1m bar; exclusions use the running maximum M.
 
-| Day | Trades | Receive - exchange p50 / p99 / p99.9 / max, min | After bar end: 0-100 ms / 0.1-1 s / 1-5 s / >= 5 s | After bar end p99.9 / max (by M) | Excluded at 15 s / 60 s | Regressions | Reconnects |
+| Day | Trades | Receive - exchange p50 / p99 / p99.9 / max, min | After bar end: 0-100 ms / 0.1-1 s / 1-5 s / >= 5 s | After bar end p99.9 / max (by M) | Excluded at 15 s / 60 s (historical candidate windows) | Regressions | Reconnects |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | BTC 2026-11-19 | 1,894,339 | 67 / 393 / 868 / 12,942, -139 ms | 2,021 / 399 / 0 / 0 | 20 / 456 ms | 0 / 0 | 0 | 3 |
 | BTC 2026-11-20 | 2,478,362 | 66 / 889 / 2,404 / 4,215, -58 ms | 2,159 / 698 / 1 / 0 | 7 / 1,278 ms | 0 / 0 | 0 | 8 |
@@ -625,9 +637,9 @@ Not measured: an event should take 15-20 bytes, so 500 a day is about 9 KB.
 
 ## 13. Open items
 
-1. **Lateness on every day.** Four days were measured. Before the cutover, run `--lateness` over every recorded day
-   and product (about a minute per day) and check that no day excludes a trade at 15 s. A conformance run of the
-   canonical hour scan itself is the step 3 builder's job.
+1. **Remaining all-days lateness.** The 2026-10-06 through 2026-11-22 run is complete for AVAX, DOGE, PEPE and
+   FARTCOIN (48 days total). Before cutover, run BTC, ETH and SOL over their recorded days and check the 300 s
+   window. The step 3 builder provides the canonical hour-scan conformance check.
 2. **Big-trade floors** (owner decision: what bubbles show far back). Section 12 proposes floors.
 3. **Days without a recorder grid** (plan question 4). Live drops their trades
    (`sentinel_flow_missing_grid_trades_total`); the store has a journal grid fallback (`dayScales`,

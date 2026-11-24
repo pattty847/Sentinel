@@ -46,6 +46,7 @@ SentinelServerApp::~SentinelServerApp() {
         m_server->stop();
     }
     if (m_serverModel) m_serverModel->attachFlowStore(nullptr);
+    if (m_flowChunkStore) m_flowChunkStore->stop();
     if (m_flowStore) m_flowStore->stop();
     if (m_serverModel) m_serverModel->setReseedHandler({});
 }
@@ -243,12 +244,30 @@ bool SentinelServerApp::startShadow(const std::vector<std::string>& symbols) {
                 m_flowStore = std::make_unique<recording::FlowStore>(std::move(options));
                 m_flowStore->start();
                 m_serverModel->attachFlowStore(m_flowStore.get());
+                try {
+                    recording::FlowChunkStore::Options chunks;
+                    chunks.root = m_serverConfig.recording.flowChunkDir;
+                    chunks.rules.sealWindowMs = m_serverConfig.flow.sealWindowMs;
+                    chunks.metrics = &m_metrics;
+                    m_flowChunkStore = std::make_unique<recording::FlowChunkStore>(*m_flowStore, std::move(chunks));
+                    m_flowChunkStore->start();
+                } catch (const std::exception &e) {
+                    sLog_Error("Flow chunk store unavailable error=" << e.what());
+                }
+
                 auto* wakeTimer = new QTimer(m_serverModel.get());
                 wakeTimer->setInterval(1000);
                 connect(wakeTimer, &QTimer::timeout, m_serverModel.get(),
-                        [model = m_serverModel.get(), products] {
-                            for (const auto& product : products)
+                        [this, model = m_serverModel.get(), roller, products, seen = std::map<std::string, int64_t>{}]() mutable {
+                            for (const auto& product : products) {
                                 model->wakeFlowStoreOnRecorderHour(product);
+                                const auto through = std::max(roller->watermarks(product, "near").hourThroughMs,
+                                                              roller->watermarks(product, "deep").hourThroughMs);
+                                if (seen[product] != through) {
+                                    seen[product] = through;
+                                    if (m_flowChunkStore) m_flowChunkStore->wake();
+                                }
+                            }
                         });
                 wakeTimer->start();
             } catch (const std::exception& e) {

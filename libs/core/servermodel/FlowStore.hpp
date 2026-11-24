@@ -14,7 +14,7 @@
 #include <stop_token>
 #include <thread>
 
-namespace sentinel::roller { class JournalReader; }
+namespace sentinel::roller { class JournalReader; struct JournalPos; }
 namespace recording {
 struct FlowStoreGridValues {
     sentinel::flow::FlowScales scales;
@@ -101,12 +101,37 @@ class FlowStore {
     int64_t sealedThroughMs(const std::string &symbol) const;
     // Model-thread journal clock floor; the builder uses it only under the index lock.
     void setLiveRetentionFloor(const std::string &symbol, int64_t hourMs);
+    std::optional<int64_t> liveRetentionFloor(const std::string &symbol) const;
     std::filesystem::path filePath(const std::string &symbol, int64_t dayMs) const;
     const std::filesystem::path &root() const { return options_.root; }
+
+    // Shared archive service for derived stores. Refresh serializes with FLD1's
+    // pass, retains its invalidations, and never constructs a second catalog.
+    struct Archive {
+        std::shared_ptr<const sentinel::roller::JournalReader> catalog;
+        std::vector<int64_t> days;
+        uint64_t generation = 0, integrity = 0;
+    };
+    Archive archive(const std::string &symbol, std::stop_token stop = {});
+    enum class SourceState { Unknown, Present, ReceiveTailOnly, Absent };
+    SourceState sourceState(const std::string &symbol, int64_t from, int64_t to,
+                            bool sealedEvidence = false, int64_t tailMs = 60'000) const;
+    FlowStoreGridValues gridFor(const std::string &symbol, int64_t day,
+                               const sentinel::roller::JournalReader &catalog, std::stop_token stop = {});
+    const Options &options() const { return options_; }
+    // Same source identity primitives as FLD1; the terminal file always uses
+    // its complete seal block prefix, independent of later append/close state.
+    uint64_t archiveStamp(const std::string &symbol, const sentinel::roller::JournalReader &catalog,
+                          const sentinel::roller::JournalPos &first, const sentinel::roller::JournalPos &last,
+                          std::stop_token stop = {});
+    static uint64_t prefixIdentity(const sentinel::roller::JournalReader &catalog,
+                                  const sentinel::roller::JournalPos &first,
+                                  const sentinel::roller::JournalPos &last, std::stop_token stop = {});
 
   private:
     Options options_;
     std::mutex passMutex_, wakeMutex_;
+    std::timed_mutex archiveMutex_;
     std::condition_variable wakeCv_;
     bool woken_ = false;
     std::chrono::steady_clock::time_point lastWindowWake_{};
@@ -142,8 +167,10 @@ class FlowStore {
     std::map<std::string, int64_t> sourceKnownBeforeDay_; // only days closed when inventoried
     std::shared_ptr<sentinel::roller::JournalReader> catalogFor(const std::string &symbol,
                                                              std::stop_token stop);
-    enum class SourceState { Unknown, Present, ReceiveTailOnly, Absent };
-    SourceState sourceState(const std::string &symbol, int64_t from, int64_t to) const;
+    struct ArchiveChanges { std::set<std::filesystem::path> changed, added; bool structural = false; };
+    std::map<std::string, ArchiveChanges> archiveChanges_; // archiveMutex_
+    std::map<std::string, uint64_t> archiveGenerations_, archiveIntegrity_; // archiveMutex_
+    void refreshArchive(const std::string &symbol, std::stop_token stop);
     std::map<std::string, int64_t> firstHour_; // builder thread only
     std::map<std::pair<std::string, int64_t>, uint64_t> buildFailures_; // builder thread only
     std::stop_source stopSource_;

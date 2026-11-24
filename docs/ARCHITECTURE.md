@@ -63,6 +63,13 @@ Exchange → capture → RAWL2 journal + fan-out → roller → ServerDataModel 
   `exportSeries`/`restoreSeries` move one timeframe's bars between aggregators without emitting; an opt-in, only-rising journal floor (`seedJournalFloor`) drops stale trades while a seeded timeframe has no bar. `roller/CandleRestore` (`rebuildCandles`) rebuilds the newest 30 min of 100 ms and 1 s bars from at most 4 journal files ending at a given record (installed by the serving roller at startup).
 - **SentinelStreamServer** — Serves binary heatmap chunks, raw live tails and related streams to clients over TLS WebSocket. Each client session is owned until explicit teardown, serializes model events on its Asio executor, and enforces bounded event/write backlogs. Live subscriptions accept captured products only; chart lifetimes do not acquire or release upstream feeds.
 
+`FlowChunkStore` builds sealed `.flc` files on a separate utility-priority worker beside the FLD1 `FlowStore`.
+FlowStore owns their shared per-product RAWL2 catalog and inventory, source identity primitives, and recorder-grid
+lookup/fallback. Archive refresh has its own lock; chunk cancellation does not wait for a complete FLD1 replay.
+The chunk store owns only its output files, per-instrument epoch/fences, and availability index. History-worker
+reads validate files and recheck fences/epochs before returning exact section bytes. It has no wire or live-model
+consumer yet. The server stops the chunk worker before FlowStore and the journal roller.
+
 ### Client
 
 ```

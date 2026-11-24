@@ -258,6 +258,7 @@ size_t tableStart(const std::vector<uint8_t>& file) { return size_t(file[6]) | s
 
 TEST(FlowChunkTests, DayFileRoundTripAndValidation) {
     const auto d = sampleDayFile();
+    EXPECT_EQ(d.sealWindowMs, 300000u);
     EXPECT_EQ(d.sections[3].summaryLength, d.sections[3].payload.size()); // no bars: the rows section is empty
     const auto bytes = codec::encodeDayFile(d);
     EXPECT_EQ(codec::parseDayFile(bytes), d);
@@ -671,7 +672,9 @@ TEST(FlowChunkTests, UnsealedDayPreventsEncodingAssembly) {
 }
 
 TEST(FlowEpoch, CanonicalIdentityGoldenValues) {
-    EXPECT_EQ(codec::ruleIdentity({}), 0x04d7071dacc696c0ULL);
+    EXPECT_EQ(codec::ruleIdentity({}), 0x10ef59ab811d3c59ULL);
+    auto oldWindow = codec::RuleValues{}; oldWindow.sealWindowMs = 15000;
+    EXPECT_EQ(codec::ruleIdentity(oldWindow), 0x04d7071dacc696c0ULL);
     EXPECT_EQ(codec::epochOf("flow:coinbase:BTC-USD", {123, 456, {}}), 0xfc34a40d870ac149ULL);
     const auto bytes = codec::encodeEpochFile({123, 456, {}});
     EXPECT_EQ(bytes.size(), 24u);

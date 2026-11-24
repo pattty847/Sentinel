@@ -1,3 +1,5 @@
+// FLD1 replay remains independent of sealed chunk replay. Both derived stores
+// share this archive inventory, catalog, grid fallback and source identities.
 #include "FlowStore.hpp"
 #include "RollupStore.hpp"
 #include "PersistenceIo.hpp"
@@ -113,6 +115,12 @@ uint64_t tailExtent(const roller::JournalFile &file, int64_t cutoff, std::stop_t
         throw NotReady{};
     return reader.result().validBytes;
 }
+Sources fixedSourceIdentity(const fs::path &path, uintmax_t size, fs::file_time_type modified) {
+    return {{"path", path.generic_string()}, {"size", size}, {"mtime", modified.time_since_epoch().count()}};
+}
+Sources fixedSourceIdentity(const fs::path &path) {
+    return fixedSourceIdentity(path, fs::file_size(path), fs::last_write_time(path));
+}
 Sources snapshotSources(const roller::JournalReader &catalog, int64_t cutoff, const std::string &begin,
                         std::stop_token stop) {
     Sources sources = Sources::array();
@@ -124,9 +132,7 @@ Sources snapshotSources(const roller::JournalReader &catalog, int64_t cutoff, co
     for (size_t i = size_t(first - catalog.files().begin()); i < end; ++i) {
         checkStop(stop);
         const auto &file = catalog.files()[i];
-        Sources identity = {{"path", file.path.generic_string()},
-                            {"size", fs::file_size(file.path)},
-                            {"mtime", fs::last_write_time(file.path).time_since_epoch().count()}};
+        Sources identity = fixedSourceIdentity(file.path);
         if (!file.superseded) {
             const auto extent = tailExtent(file, cutoff, stop);
             identity["prefix"] = extent;
@@ -467,7 +473,8 @@ std::vector<flow::FlowBar> buildRun(const FlowStore::Options &options, const std
                             firstReceive > first || lastReceive < end + TradeTail;
     return builder.bars();
 }
-void atomicFile(const fs::path &path, const QByteArray &bytes) {
+} // namespace
+void atomicFlowFile(const fs::path &path, const QByteArray &bytes) {
     QSaveFile f(QString::fromStdString(path.string()));
     f.setDirectWriteFallback(false);
     int error = 0;
@@ -486,7 +493,6 @@ void atomicFile(const fs::path &path, const QByteArray &bytes) {
     if (!sentinel::persistence::syncDirectory(path.parent_path(), error))
         throw std::runtime_error("cannot sync flow directory");
 }
-} // namespace
 
 fs::path flowRootFor(const std::string &configured, const fs::path &hmc2Root, const fs::path &journalRoot,
                      const fs::path &rollupRoot, const std::vector<fs::path> &protectedRoots) {
@@ -650,6 +656,11 @@ void FlowStore::setLiveRetentionFloor(const std::string &symbol, int64_t hourMs)
     std::lock_guard lock(indexMutex_);
     liveRetentionFloor_[symbol] = hourMs;
 }
+std::optional<int64_t> FlowStore::liveRetentionFloor(const std::string &symbol) const {
+    std::lock_guard lock(indexMutex_);
+    const auto it = liveRetentionFloor_.find(symbol);
+    return it == liveRetentionFloor_.end() ? std::nullopt : std::optional<int64_t>(it->second);
+}
 void FlowStore::refreshBuiltThrough(const std::string &symbol) {
     const auto first = firstHour_.find(symbol);
     if (first == firstHour_.end()) return;
@@ -725,9 +736,9 @@ void FlowStore::writeDay(const flow::DayFile &day, uint32_t hours, uint32_t revi
     checkStop(stop);
     if (!ownedPath(path) || !ownedPath(path.string() + ".state"))
         throw std::runtime_error("unsafe flow path");
-    atomicFile(path, bytes);
+    atomicFlowFile(path, bytes);
     // A crash between renames leaves a mismatched digest: readers refuse it and rebuild.
-    atomicFile(path.string() + ".state", completion(bytes, hours, revision, grid, sources));
+    atomicFlowFile(path.string() + ".state", completion(bytes, hours, revision, grid, sources));
 }
 FlowStore::PassResult FlowStore::runPass(std::stop_token stop) {
     std::lock_guard lock(passMutex_);
@@ -789,13 +800,15 @@ std::shared_ptr<roller::JournalReader> FlowStore::catalogFor(const std::string &
     sourceKnownBeforeDay_[symbol] = knownBefore;
     return cached;
 }
-FlowStore::SourceState FlowStore::sourceState(const std::string &symbol, int64_t from, int64_t to) const {
+FlowStore::SourceState FlowStore::sourceState(const std::string &symbol, int64_t from, int64_t to,
+                                              bool sealedEvidence, int64_t tailMs) const {
     const auto day = dayFloor(from);
-    // Never make a terminal claim for today's growing journal (or the future).
-    if (day >= dayFloor(options_.nowMs())) return SourceState::Unknown;
+    // History requests need closed-day inventory. A canonical scan that has
+    // actually reached its seal record can use the same inventory immediately.
+    if (!sealedEvidence && day >= dayFloor(options_.nowMs())) return SourceState::Unknown;
     std::lock_guard lock(indexMutex_);
     const auto known = sourceDays_.find(symbol);
-    if (known == sourceDays_.end() || day >= sourceKnownBeforeDay_.at(symbol)) return SourceState::Unknown;
+    if (known == sourceDays_.end() || (!sealedEvidence && day >= sourceKnownBeforeDay_.at(symbol))) return SourceState::Unknown;
     if (const auto first = known->second.find(day); first != known->second.end()) {
         // On the first journal day, hours ending at or before the first segment opens
         // are unrecorded. An earlier day's segment still permits warmup replay.
@@ -807,11 +820,12 @@ FlowStore::SourceState FlowStore::sourceState(const std::string &symbol, int64_t
     // Trades use exchange time. The next day's first segment can hold late
     // trades for a window ending near midnight, within the replay's receive tail.
     const auto next = known->second.find(day + Day);
-    return next == known->second.end() || next->second > to + TradeTail ?
+    return next == known->second.end() || next->second > to + tailMs ?
         SourceState::Absent : SourceState::ReceiveTailOnly;
 }
-void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, PassResult &result) {
-    const auto through = options_.hourThrough(symbol) / Hour * Hour;
+void FlowStore::refreshArchive(const std::string &symbol, std::stop_token stop) {
+    // Preserve the pre-inventory midnight boundary used by FLD1. An inventory
+    // started before midnight must not claim that day closed after it finishes.
     const auto knownBefore = dayFloor(options_.nowMs());
     std::map<fs::path, FileIdentity> currentFiles;
     try { currentFiles = inventory(symbol, stop); }
@@ -826,7 +840,11 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
     }
     std::vector<fs::path> changed;
     std::set<fs::path> added;
-    bool structuralChanged = false;
+    bool structuralChanged = false, rewritten = false;
+    fs::path tail;
+    { std::lock_guard lock(catalogMutex_);
+      if (catalogs_.contains(symbol) && catalogs_.at(symbol) && !catalogs_.at(symbol)->files().empty())
+          tail = catalogs_.at(symbol)->files().back().path; }
     auto &prior = journalInventory_[symbol];
     for (const auto &[path, identity] : currentFiles) {
         const auto it = prior.find(path);
@@ -834,15 +852,23 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
             changed.push_back(path);
             added.insert(path);
             structuralChanged = true;
-        } else if (it->second != identity)
+        } else if (it->second != identity) {
             changed.push_back(path);
+            rewritten |= path != tail || identity.size <= it->second.size;
+        }
     }
     for (const auto &[path, _] : prior)
         if (!currentFiles.contains(path)) {
             changed.push_back(path);
             structuralChanged = true;
         }
-    prior = currentFiles;
+    auto &dirty = archiveChanges_[symbol];
+    dirty.changed.insert(changed.begin(), changed.end());
+    dirty.added.insert(added.begin(), added.end());
+    dirty.structural |= structuralChanged;
+    if (!changed.empty()) ++archiveGenerations_[symbol];
+    if (structuralChanged || rewritten) ++archiveIntegrity_[symbol];
+    prior = std::move(currentFiles);
     if (structuralChanged) {
         std::lock_guard catalogLock(catalogMutex_);
         catalogs_.erase(symbol);
@@ -850,13 +876,110 @@ void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, Pass
         sourceDays_.erase(symbol);
         sourceKnownBeforeDay_.erase(symbol);
     }
+    try { catalogFor(symbol, stop); } catch (const roller::NoJournalFiles &) {}
+    std::lock_guard lock(indexMutex_);
+    if (sourceDays_.contains(symbol)) sourceKnownBeforeDay_[symbol] = knownBefore;
+}
+FlowStore::Archive FlowStore::archive(const std::string &symbol, std::stop_token stop) {
+    std::unique_lock lockArchive(archiveMutex_, std::defer_lock);
+    while (!lockArchive.try_lock_for(std::chrono::milliseconds(50))) checkStop(stop);
+    refreshArchive(symbol, stop);
+    Archive result;
+    try { result.catalog = catalogFor(symbol, stop); } catch (const roller::NoJournalFiles &) {}
+    result.generation = archiveGenerations_[symbol];
+    result.integrity = archiveIntegrity_[symbol];
+    std::lock_guard lock(indexMutex_);
+    if (sourceDays_.contains(symbol)) {
+        for (const auto &[day, first] : sourceDays_.at(symbol)) {
+            result.days.push_back(day);
+            // A next-day receive tail may own trades from the previous UTC
+            // day through its last minute's seal (up to one hour of W).
+            if (day >= Day && first < day + 2 * Hour) result.days.push_back(day - Day);
+        }
+        std::sort(result.days.begin(), result.days.end());
+        result.days.erase(std::unique(result.days.begin(), result.days.end()), result.days.end());
+    }
+    return result;
+}
+FlowStoreGridValues FlowStore::gridFor(const std::string &symbol, int64_t day,
+                                       const roller::JournalReader &catalog, std::stop_token stop) {
+    const auto grids = hmcDayPaths(options_, symbol, stop);
+    return dayScales(options_, symbol, day, grids.contains(day) ? grids.at(day) : fs::path{}, catalog, stop);
+}
+uint64_t FlowStore::archiveStamp(const std::string &symbol, const roller::JournalReader &catalog,
+    const roller::JournalPos &first, const roller::JournalPos &last, std::stop_token stop) {
+    std::unique_lock lock(archiveMutex_, std::defer_lock);
+    while (!lock.try_lock_for(std::chrono::milliseconds(50))) checkStop(stop);
+    const auto begin = sourcePath(catalog, first), end = sourcePath(catalog, last);
+    Sources sources = Sources::array();
+    bool active = false;
+    for (const auto &file : catalog.files()) {
+        if (file.path.generic_string() == begin) active = true;
+        if (!active) continue;
+        checkStop(stop);
+        const auto &identity = journalInventory_.at(symbol).at(file.path);
+        sources.push_back(fixedSourceIdentity(file.path, identity.size, identity.modified));
+        if (file.path.generic_string() == end) {
+            const auto hash = fingerprint(sources);
+            uint64_t result = 0;
+            for (unsigned i = 0; i < 8; ++i) result |= uint64_t(hash[i]) << (8 * i);
+            return result;
+        }
+    }
+    throw std::runtime_error("flow archive range disappeared");
+}
+uint64_t FlowStore::prefixIdentity(const roller::JournalReader &catalog, const roller::JournalPos &first,
+                                   const roller::JournalPos &last, std::stop_token stop) {
+    const auto begin = sourcePath(catalog, first), end = sourcePath(catalog, last);
+    Sources sources = Sources::array();
+    bool active = false;
+    for (const auto &file : catalog.files()) {
+        if (file.path.generic_string() == begin) active = true;
+        if (!active) continue;
+        checkStop(stop);
+        Sources identity = fixedSourceIdentity(file.path);
+        if (file.path.generic_string() == end) {
+            sentinel::capture::RecordReader reader(QString::fromStdString(file.path.string()), true, last.block);
+            sentinel::capture::Record record;
+            bool found = false;
+            while (reader.next(record)) {
+                checkStop(stop);
+                if (reader.result().recordOrdinal > last.block) break;
+                if (reader.result().recordOrdinal == last.block && reader.result().recordIndex == last.record) found = true;
+            }
+            if (!found) throw std::runtime_error("flow seal cursor unavailable");
+            const auto &blocks = reader.result().index;
+            const auto sealed = std::find_if(blocks.begin(), blocks.end(), [&](const auto &b) { return b.ordinal == last.block; });
+            if (sealed == blocks.end()) throw std::runtime_error("flow seal block unavailable");
+            // validBytes includes IDX1 at EOF. BlockIndex is the validated
+            // extent; exclude the closing index so closing a tail is stable.
+            const auto extent = sealed->offset + 48 /* RAWL2 BLK1 header bytes */ + sealed->compressedBytes;
+            identity.erase("size"); identity.erase("mtime");
+            identity["prefix"] = extent;
+            identity["hash"] = hashPrefix(file.path, extent, stop);
+            sources.push_back(std::move(identity));
+            const auto hash = fingerprint(sources);
+            uint64_t result = 0;
+            for (unsigned i = 0; i < 8; ++i) result |= uint64_t(hash[i]) << (8 * i);
+            return result;
+        }
+        sources.push_back(std::move(identity));
+    }
+    throw std::runtime_error("flow seal source missing");
+}
+void FlowStore::passSymbol(const std::string &symbol, std::stop_token stop, PassResult &result) {
+    const auto through = options_.hourThrough(symbol) / Hour * Hour;
+    std::unique_lock archiveLock(archiveMutex_);
+    refreshArchive(symbol, stop);
+    auto dirty = std::exchange(archiveChanges_[symbol], {});
+    const auto &changed = dirty.changed;
+    const auto &added = dirty.added;
+    const bool structuralChanged = dirty.structural;
+    const auto currentFiles = journalInventory_[symbol];
     std::shared_ptr<roller::JournalReader> catalog;
     try { catalog = catalogFor(symbol, stop); }
     catch (const roller::NoJournalFiles &) { return; }
-    {
-        std::lock_guard lock(indexMutex_);
-        sourceKnownBeforeDay_[symbol] = knownBefore;
-    }
+    archiveLock.unlock();
     if (through <= 0) return;
     auto getCatalog = [&]() -> roller::JournalReader & { return *catalog; };
     if (!firstHour_.contains(symbol) || structuralChanged) {

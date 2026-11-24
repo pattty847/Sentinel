@@ -84,6 +84,7 @@ struct ServerRecordingConfig {
     // Derived journal-built 1m flow bars; empty: "<roller_shadow.dir>-flow".
     // Must be disjoint from both the HMC2 and RAWL2 trees.
     std::string flowDir;
+    std::string flowChunkDir; // Empty: <roller_shadow.dir>-flc; disjoint from FLD1.
     double priceScale = 100.0;        // price units per 1.0 quote (0.01 increment)
     double sizeFloor = 1e-6;
     double codesPerOctave = 819.0;
@@ -101,7 +102,12 @@ struct ServerRecordingConfig {
     std::string source;
 };
 
+struct ServerFlowConfig {
+    uint32_t sealWindowMs = 300000; // canonical receive watermark; [0, 3600000]
+};
+
 struct ServerConfig {
+    ServerFlowConfig flow;
     // Client-side wire presence: absent capabilities must not appear as defaults.
     std::set<std::string> advertisedFields;
     bool wasAdvertised(const std::string& key) const { return advertisedFields.contains(key); }
