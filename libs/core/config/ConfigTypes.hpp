@@ -103,7 +103,7 @@ struct ServerRecordingConfig {
 };
 
 struct ServerFlowConfig {
-    uint32_t sealWindowMs = 15000; // canonical receive watermark; [0, 3600000]
+    uint32_t sealWindowMs = 300000; // canonical receive watermark; [0, 3600000]
 };
 
 struct ServerConfig {

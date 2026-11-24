@@ -11,7 +11,7 @@ struct EpochState {
 
 struct RuleValues {
     uint8_t builderVersion = 1;
-    uint32_t sealWindowMs = 15000;
+    uint32_t sealWindowMs = 300000;
     uint8_t scaleVersion = 1;
     uint64_t bigFloorQuote = 0;
     uint16_t summaryVersion = 1, rowsVersion = 1, bigVersion = 1;

@@ -39,7 +39,9 @@ protected:
         return o;
     }
     FlowChunkStore::Options options() {
-        FlowChunkStore::Options o; o.root = root; o.lowerPriority = false; o.metrics = &metrics; return o;
+        FlowChunkStore::Options o; o.root = root; o.lowerPriority = false; o.metrics = &metrics;
+        o.rules.sealWindowMs = 15000; // These synthetic journals place their seal records at W = 15 s.
+        return o;
     }
     void fixture(int days = 1, const std::string &symbol = "BTC-USD") {
         Journal j(raw, symbol);
@@ -128,6 +130,7 @@ TEST_F(ChunkStoreTest, ReorderedRunsStartAtFirstEligibleRecordInReaderOrder) {
     EXPECT_EQ(bars.front().count, 2u); // last-opened-before-warmup loses "first"
 }
 TEST_F(ChunkStoreTest, FiveMinuteSealWindowIncludesTheLeadInAndSealsAtEquality) {
+    EXPECT_EQ(FlowChunkStore::Options{}.rules.sealWindowMs, 300000u);
     Journal journal(raw); journal.snapshot(-Minute);
     journal.trades(Minute + 299999, {trade(100, "1", 100000)});
     journal.trades(Minute + 300000, {trade(200, "2", 100001)});
@@ -381,7 +384,7 @@ TEST_F(ChunkStoreTest, DefaultRootWithTrailingSlashIsSiblingOfHmc) {
 }
 TEST_F(ChunkStoreTest, ConfigFlatWrappedDefaultsAndInvalidWindow) {
     ServerConfig cfg;
-    EXPECT_TRUE(cfg.recording.flowChunkDir.empty()); EXPECT_EQ(cfg.flow.sealWindowMs, 15000u);
+    EXPECT_TRUE(cfg.recording.flowChunkDir.empty()); EXPECT_EQ(cfg.flow.sealWindowMs, 300000u);
     const auto path = base / "config.yaml";
     { std::ofstream f(path); f << "flow:\n  seal_window_ms: 25000\nrecording:\n  flow_chunk_dir: " << root.string() << "\n"; }
     ASSERT_TRUE(ConfigLoader::loadServerConfig(path.string(), &cfg));
@@ -527,8 +530,8 @@ TEST_F(ChunkStoreTest, StartupPublishesUnchangedInstrumentBeforeAnyOtherReplay) 
 TEST_F(ChunkStoreTest, OfflineDiffListsEveryMovedTrade) {
     Journal j(raw); j.snapshot(-Minute);
     j.trades(1000, {trade(100, "1", 100000)});
-    j.trades(Minute + 15000, {trade(200, "2", 100001)});
-    j.heartbeat(Day + Minute + 1); j.close();
+    j.trades(Minute + 300000, {trade(200, "2", 100001)});
+    j.heartbeat(Day + 300000); j.close();
     FlowStore source(sourceOptions()); ASSERT_EQ(source.runPass().failed, 0u);
     QProcess process;
     process.start(FLOW_CHUNK_DIFF_EXE, {QString::fromStdString(raw.string()), QString::fromStdString(hmc.string()),
