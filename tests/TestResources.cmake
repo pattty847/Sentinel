@@ -14,7 +14,7 @@ set(_sentinel_gpu_tests
     TradeBubbleGpuTests)
 set(_sentinel_server_tests
     CaptureApplicationTests ServerStartupTests LabOutputGuardTests
-    RecordingServerStopTests HeatmapChunkWireTests ShadowRollerTests
+    RecordingServerStopTests HeatmapChunkWireTests FlowChunkWireTests ShadowRollerTests
     ServerFeedAdmissionTests BacktestCoreTests
     ResearchUiTests)
 set(_sentinel_integration_tests

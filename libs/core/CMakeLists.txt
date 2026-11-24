@@ -81,6 +81,8 @@ add_library(sentinel_core
     servermodel/RecordingChunks.cpp
     servermodel/RecordingChunks.hpp
     servermodel/ChunkService.cpp
+    protocol/ChunkFrame.cpp
+    servermodel/FlowChunkService.cpp
     servermodel/FlowChunkStore.cpp
     servermodel/FlowStore.cpp
     servermodel/FlowStore.hpp

@@ -58,6 +58,9 @@ enum class MessageType {
     SliceBatch,
     HeatmapChunkRequest,  // JSON request; replies are binary SHE1/SHC1 frames
     HeatmapAvailability,
+    ChunkRequest,
+    ChunkAvailability,
+    ChunkAvailabilitySubscribe,
     CandleHistoryRequest,
     CandleHistoryChunk,
     CandleBarUpdate,
@@ -94,6 +97,9 @@ inline std::string toString(MessageType t) {
         case MessageType::Snapshot: return "snapshot";
         case MessageType::SliceBatch: return "slice_batch";
         case MessageType::HeatmapChunkRequest: return "heatmap_chunk_request";
+        case MessageType::ChunkRequest: return "chunk_request";
+        case MessageType::ChunkAvailability: return "chunk_availability";
+        case MessageType::ChunkAvailabilitySubscribe: return "chunk_availability_subscribe";
         case MessageType::HeatmapAvailability: return "heatmap_availability";
         case MessageType::CandleHistoryRequest: return "candle_history_request";
         case MessageType::CandleHistoryChunk: return "candle_history_chunk";
@@ -130,6 +136,9 @@ inline MessageType fromString(const std::string& s) {
     if (s == "snapshot") return MessageType::Snapshot;
     if (s == "slice_batch") return MessageType::SliceBatch;
     if (s == "heatmap_chunk_request") return MessageType::HeatmapChunkRequest;
+    if (s == "chunk_request") return MessageType::ChunkRequest;
+    if (s == "chunk_availability") return MessageType::ChunkAvailability;
+    if (s == "chunk_availability_subscribe") return MessageType::ChunkAvailabilitySubscribe;
     if (s == "heatmap_availability") return MessageType::HeatmapAvailability;
     if (s == "candle_history_request") return MessageType::CandleHistoryRequest;
     if (s == "candle_history_chunk") return MessageType::CandleHistoryChunk;
