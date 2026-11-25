@@ -27,6 +27,31 @@ namespace flow = sentinel::flow;
 using namespace flow_fixture;
 using recording::FlowStore;
 namespace {
+TEST(FlowGrid, FallbackStopsAtNextDayLeadIn) {
+    for (const int64_t offset : {24 * Hour + 2000, 24 * Hour + 2001, 3 * 24 * Hour}) {
+        SCOPED_TRACE(offset);
+        QTemporaryDir temp; const fs::path base = temp.path().toStdString();
+        const auto raw = base / "raw", hmc = base / "hmc";
+        fs::create_directory(raw); fs::create_directory(hmc);
+        Journal journal(raw, "ETH-USD", "0.00000001", "2999", "3001");
+        journal.trades(1000, {trade(100, "first", 3000, "BUY", "ETH-USD")});
+        if (offset > 24 * Hour + 2001) journal.heartbeat(24 * Hour + 2001);
+        journal.snapshot(offset); journal.close();
+        FlowStore::Options o; o.root = base / "fld"; o.journalRoot = raw; o.hmc2Root = hmc;
+        o.symbols = {"ETH-USD"}; o.hourThrough = [](const std::string&) { return Epoch + 2 * Hour; };
+        size_t records = 0;
+        o.afterRecordForTest = [&](std::stop_token) { ++records; };
+        FlowStore store(o); const auto archive = store.archive("ETH-USD"); ASSERT_TRUE(archive.catalog);
+        if (offset == 24 * Hour + 2000) {
+            EXPECT_EQ(store.gridFor("ETH-USD", Epoch, *archive.catalog).scales.rowTickUnits, 20);
+            EXPECT_EQ(records, 2u);
+        } else {
+            EXPECT_THROW(store.gridFor("ETH-USD", Epoch, *archive.catalog), std::runtime_error);
+            EXPECT_EQ(records, 1u); // neither the out-of-window record nor the later snapshot is applied
+        }
+    }
+}
+
 TEST(FlowGrid, FallbackEqualsRecorderForEveryFixtureDay) {
     QTemporaryDir temp; const fs::path base = temp.path().toStdString();
     const auto raw = base / "raw", hmc = base / "hmc";

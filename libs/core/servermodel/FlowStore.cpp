@@ -411,9 +411,12 @@ FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::stri
         };
         while (!ready && reader.next(input)) {
             checkStop(stop);
-            // Like the roller, a first journal day waits for the first usable
-            // book even if it arrives in the next day's lead-in. The finite
-            // catalog and stop token bound this search; no trade price is used.
+            // Roller.cpp's normal Coinbase loop can wait indefinitely without
+            // a recorder. Bound fallback discovery to the next day's lateness
+            // lead-in (the recorder's default, also used by the roller dry run).
+            // Within this prefix the anchor and first usable snapshot are
+            // identical; beyond it fail rather than borrow a later day's grid.
+            if (input.record.time.systemNs / 1'000'000 > day + Day + RecorderConfig{}.latenessMs) break;
             if (const auto fixed = roller::priceIndependentGrid(input.metadata)) {
                 grid = *fixed;
                 metadata = std::make_shared<const nlohmann::json>(input.metadata);
