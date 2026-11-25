@@ -53,6 +53,25 @@ void fixture(const fs::path& root,int seconds=245,bool seal=true) {
 }
 RollOptions options(const fs::path& raw,const fs::path& out) { return {raw,out,"BTC-USD",Epoch,Epoch+240'000}; }
 }
+TEST(Roller, PriceIndependentGridSharesMetadataOverridesAndValidation) {
+    auto meta = metadata()["product_metadata"];
+    meta["quote_increment"] = "0.25"; meta["base_increment"] = "0.1";
+    for (const auto overrides : {json::object(), json{{"near_tick",1.1},{"deep_tick",7.1},{"size_floor",0.5}}}) {
+        const auto fixed = priceIndependentGrid(meta, overrides); ASSERT_TRUE(fixed);
+        for (const auto price : {10., 3000., 100000.}) {
+            const auto derived = deriveGrid(meta, price, overrides);
+            EXPECT_EQ(fixed->priceScale, derived.priceScale);
+            EXPECT_EQ(fixed->nearTick, derived.nearTick);
+            EXPECT_EQ(fixed->deepTick, derived.deepTick);
+            EXPECT_EQ(fixed->sizeFloor, derived.sizeFloor);
+        }
+    }
+    EXPECT_THROW(priceIndependentGrid(meta, {{"deep_tick",-1}}), std::runtime_error);
+    meta["product_id"] = "ETH-USD"; EXPECT_FALSE(priceIndependentGrid(meta));
+    meta["product_id"] = "BTC-USD"; meta["base_increment"] = "bad";
+    EXPECT_THROW(priceIndependentGrid(meta), std::runtime_error);
+}
+
 TEST(Roller, GridsAndClamping) {
     struct Case {const char* p;double price;const char* quote;double scale,near,deep;};
     for(const auto& c:std::vector<Case>{{"BTC-USD",100000,"0.01",100,1,5},{"ETH-USD",4000,"0.01",100,.5,2},

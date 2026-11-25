@@ -384,11 +384,6 @@ FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::stri
         grid.sizeFloor = header->sizeScale.floor;
         values.configHash = header->configHash;
         values.hasHmc2 = true;
-    } else if (symbol == "BTC-USD" && metadata) {
-        // deriveGrid's BTC override is price independent ($1/$5). A positive
-        // reference only satisfies its input validation; all scales and the
-        // size floor still come from the journal's actual product metadata.
-        grid = roller::deriveGrid(*metadata, 1.0);
     } else {
         checkStop(stop);
         const auto start = catalog.anchor(day, stop);
@@ -408,6 +403,7 @@ FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::stri
                 }
             if (bid > 0 && std::isfinite(ask)) {
                 grid = roller::deriveGrid(input.metadata, std::midpoint(bid, ask));
+                metadata = std::make_shared<const nlohmann::json>(input.metadata);
                 ready = true;
             }
         };
@@ -416,7 +412,11 @@ FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::stri
             // Like the roller, a first journal day waits for the first usable
             // book even if it arrives in the next day's lead-in. The finite
             // catalog and stop token bound this search; no trade price is used.
-            feed.apply(input);
+            if (const auto fixed = roller::priceIndependentGrid(input.metadata)) {
+                grid = *fixed;
+                metadata = std::make_shared<const nlohmann::json>(input.metadata);
+                ready = true;
+            } else feed.apply(input);
             if (options.afterRecordForTest)
                 options.afterRecordForTest(stop);
         }
