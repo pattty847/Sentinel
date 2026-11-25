@@ -439,6 +439,14 @@ qt_add_resources(sentinel_gui_lib sentinel_svg_resources
         ${SENTINEL_SVG_FILES}
 )
 
+# App icon: main.cpp sets it as the window and Dock icon (the GUI is not a macOS bundle).
+qt_add_resources(sentinel_gui_lib sentinel_brand_resources
+    PREFIX "/brand"
+    BASE "${CMAKE_SOURCE_DIR}/resources/brand"
+    FILES
+        "${CMAKE_SOURCE_DIR}/resources/brand/sentinel-app-icon.png"
+)
+
 qt_add_resources(sentinel_gui_lib sentinel_ui_fonts
     PREFIX "/"
     FILES

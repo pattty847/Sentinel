@@ -5,6 +5,7 @@ This version modularizes startup logic for maintainability and clarity.
 */
 #include "MainWindowGpu.h"
 #include <QApplication>
+#include <QIcon>
 #include <QMetaType>
 #include <QQmlEngine>
 #include <QtQml/qqml.h>
@@ -158,6 +159,15 @@ int main(int argc, char *argv[])
     // Register resources embedded in the static GUI library.
     Q_INIT_RESOURCE(sentinel_svg_resources);
     Q_INIT_RESOURCE(sentinel_ui_fonts);
+    Q_INIT_RESOURCE(sentinel_brand_resources);
+
+    // The GUI runs as a bare executable, so the Dock and window icon come from here, not a bundle.
+    const QIcon appIcon(QStringLiteral(":/brand/sentinel-app-icon.png"));
+    if (appIcon.availableSizes().isEmpty()) {
+        sLog_Warning("App icon missing from resources: path=:/brand/sentinel-app-icon.png");
+    } else {
+        QApplication::setWindowIcon(appIcon);
+    }
 
     // Initialize and apply theme
     ThemeManager& themeManager = ThemeManager::instance();
