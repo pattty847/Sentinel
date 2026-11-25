@@ -21,8 +21,8 @@ struct FlowLiveTestAccess {
     return m.m_flowProducts.at("BTC-USD").days.at(day).retiredRevisionByMinute.size();
   }
   static uint64_t missingGridDrops(ServerDataModel &m) { return m.m_flowMissingGridTrades; }
-  static size_t heldBytes(ServerDataModel &m) { return m.m_flowProducts.at("BTC-USD").heldBytes; }
-  static size_t heldTrades(ServerDataModel &m) { return m.m_flowProducts.at("BTC-USD").heldTrades.size(); }
+  static size_t heldBytes(ServerDataModel &m, const std::string &symbol = "BTC-USD") { return m.m_flowProducts.at(symbol).heldBytes; }
+  static size_t heldTrades(ServerDataModel &m, const std::string &symbol = "BTC-USD") { return m.m_flowProducts.at(symbol).heldTrades.size(); }
   static void expireHeld(ServerDataModel &m) {
     for (auto &held : m.m_flowProducts.at("BTC-USD").heldTrades) held.expires = {};
     m.publishFlow();

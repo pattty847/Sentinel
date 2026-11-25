@@ -66,9 +66,16 @@ TEST(FlowGrid, FallbackEqualsRecorderForEveryFixtureDay) {
         Journal journal(raw, p.symbol, "0.00000001", p.bid, p.ask, p.quote);
         for (int d = 0; d < 2; ++d) {
             const auto offset = d * 24 * Hour;
+            if (std::string(p.symbol) == "ETH-USD") {
+                journal.bid = d ? "5999" : "2999"; journal.ask = d ? "6001" : "3001";
+            }
             journal.snapshot(offset - 2 * Hour);
             journal.heartbeat(offset - Minute); // newest pre-midnight segment has no snapshot
             journal.trades(offset + 1000, {trade(offset + 100, "day" + std::to_string(d), std::stod(p.bid), "BUY", p.symbol)});
+            if (std::string(p.symbol) == "ETH-USD") {
+                journal.bid = d ? "19999" : "9999"; journal.ask = d ? "20001" : "10001";
+                journal.reconnect(offset + 2000); // first in-day snapshot crosses a tick rung
+            }
             journal.heartbeat(offset + 2 * Minute);
         }
         journal.close();
@@ -85,6 +92,12 @@ TEST(FlowGrid, FallbackEqualsRecorderForEveryFixtureDay) {
             reader.visit(p.symbol, "near", Minute, day, day + Minute,
                 [&](const auto &r) { header = r.header; }, control);
             ASSERT_TRUE(header) << p.symbol << ' ' << day;
+            if (std::string(p.symbol) == "ETH-USD") {
+                // Midnight uses the last pre-day snapshot, not the reconnect's
+                // first in-day snapshot; both days deliberately differ.
+                EXPECT_EQ(fallback.scales.rowTickUnits, d ? 50 : 20);
+                EXPECT_NE(fallback.scales.rowTickUnits, d ? 200 : 100);
+            }
             EXPECT_EQ(fallback.scales.rowTickUnits, header->rowTickUnits);
             EXPECT_EQ(fallback.scales.priceScale, header->priceScale);
             EXPECT_EQ(fallback.sizeFloor, header->sizeScale.floor); ++compared;

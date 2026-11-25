@@ -373,24 +373,31 @@ TEST_F(FlowLive, MidnightReconnectAndRestartHoldMatchesSealedMinute) {
   namespace ff = flow_fixture;
   namespace r = sentinel::roller;
   namespace c = sentinel::flow::chunks;
+  for (const std::string symbol : {"BTC-USD", "ETH-USD"})
   for (const auto reconnect : {-2000, 2000}) for (const bool restart : {false, true}) {
-    SCOPED_TRACE("reconnect=" + std::to_string(reconnect) + " restart=" + std::to_string(restart));
+    SCOPED_TRACE(symbol + " reconnect=" + std::to_string(reconnect) + " restart=" + std::to_string(restart));
     QTemporaryDir temp; const auto root = std::filesystem::path(temp.path().toStdString());
     const auto raw = root / "raw", hmc = root / "hmc";
     std::filesystem::create_directory(raw); std::filesystem::create_directory(hmc);
-    ff::Journal journal(raw); journal.snapshot(-ff::Minute);
+    auto meta = metadata(); meta["product_id"] = symbol;
+    const double before = symbol == "ETH-USD" ? 3000 : 100000;
+    const double after = symbol == "ETH-USD" ? 10000 : 100000;
+    ff::Journal journal(raw, symbol, "0.00000001", std::to_string(before - 1), std::to_string(before + 1));
+    journal.snapshot(-ff::Minute);
+    journal.bid = std::to_string(after - 1); journal.ask = std::to_string(after + 1);
     if (reconnect < 0) journal.reconnect(reconnect);
-    journal.trades(100, {ff::trade(50, "midnight-1", 100000)});
-    journal.trades(900, {ff::trade(800, "midnight-2", 100001)});
+    journal.trades(100, {ff::trade(50, "midnight-1", before, "BUY", symbol)});
+    journal.trades(900, {ff::trade(800, "midnight-2", before + 1, "BUY", symbol)});
     if (reconnect > 0) journal.reconnect(reconnect);
-    journal.trades(3000, {ff::trade(2500, "after-reconnect", 100002)});
+    journal.trades(3000, {ff::trade(2500, "after-reconnect", after + 2, "BUY", symbol)});
     journal.heartbeat(5000);
     journal.heartbeat(ff::Hour + config.flow.sealWindowMs); journal.close();
 
-    ServerDataModel live(config); FlowLiveTestAccess::stopTimer(live);
-    if (!restart) live.onFlowGrid("BTC-USD", ff::Epoch - 86'400'000,
-        r::deriveGrid(metadata(), 100000), metadata());
-    r::JournalReader reader(raw, "BTC-USD"); r::JournalFeed feed("BTC-USD");
+    auto liveConfig = config; liveConfig.rollerShadow.products = {symbol};
+    ServerDataModel live(liveConfig); FlowLiveTestAccess::stopTimer(live);
+    if (!restart) live.onFlowGrid(symbol, ff::Epoch - 86'400'000,
+        r::deriveGrid(meta, before), meta);
+    r::JournalReader reader(raw, symbol); r::JournalFeed feed(symbol);
     int64_t maximum = INT64_MIN;
     feed.onTrade = [&](const Trade &t) {
       live.flowTradePosted(t.product_id); live.onFlowTrade(t, maximum);
@@ -399,40 +406,42 @@ TEST_F(FlowLive, MidnightReconnectAndRestartHoldMatchesSealedMinute) {
     r::JournalRecord record;
     while (reader.next(record)) {
       maximum = std::max(maximum, record.record.time.systemNs / 1'000'000);
-      feed.apply(record); live.flowRecordApplied("BTC-USD", maximum);
+      feed.apply(record); live.flowRecordApplied(symbol, maximum);
       if (!deliveredGrid && maximum >= ff::Epoch + 5000) {
-        EXPECT_EQ(FlowLiveTestAccess::heldTrades(live), 3u);
+        EXPECT_EQ(FlowLiveTestAccess::heldTrades(live, symbol), 3u);
         EXPECT_TRUE(std::filesystem::is_empty(hmc)); // restart has no new-day grid on disk
         // Deliver the real roller callback after the provisional trades, as at
         // rollover while the previous day's durable recorder is draining.
-        r::RollOptions options{raw, hmc, "BTC-USD", ff::Epoch, ff::Epoch + ff::Minute};
+        r::RollOptions options{raw, hmc, symbol, ff::Epoch, ff::Epoch + ff::Minute};
         options.onGrid = [&](int64_t day, const r::Grid &g, const Json &meta) {
-          live.onFlowGrid("BTC-USD", day, g, meta);
+          live.onFlowGrid(symbol, day, g, meta);
         };
         r::roll(options); deliveredGrid = true;
       }
       FlowLiveTestAccess::tick(live);
     }
     ASSERT_TRUE(deliveredGrid);
-    EXPECT_EQ(FlowLiveTestAccess::heldBytes(live), 0u);
+    EXPECT_EQ(FlowLiveTestAccess::heldBytes(live, symbol), 0u);
     EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(live), 0u);
-    auto liveBar = FlowLiveTestAccess::series(live, "BTC-USD", ff::Epoch, ff::Minute).builder.snapshotBar(ff::Epoch);
+    auto liveBar = FlowLiveTestAccess::series(live, symbol, ff::Epoch, ff::Minute).builder.snapshotBar(ff::Epoch);
     ASSERT_TRUE(liveBar); EXPECT_EQ(liveBar->count, 3u); liveBar->notable.clear();
+    EXPECT_DOUBLE_EQ(liveBar->nativeTick, r::deriveGrid(meta, reconnect < 0 ? after : before).nearTick);
+    if (symbol == "ETH-USD") EXPECT_NE(r::deriveGrid(meta, before).nearTick, r::deriveGrid(meta, after).nearTick);
     recording::FlowStore::Options o; o.journalRoot = raw; o.hmc2Root = hmc; o.root = root / "fld";
-    o.symbols = {"BTC-USD"}; o.lowerPriority = false;
+    o.symbols = {symbol}; o.lowerPriority = false;
     o.hourThrough = [](const std::string&) { return ff::Epoch + ff::Hour; };
     recording::FlowStore source(o);
     recording::FlowChunkStore::Options co; co.root = root / "flc"; co.lowerPriority = false;
     co.rules.sealWindowMs = config.flow.sealWindowMs;
     recording::FlowChunkStore store(source, co);
-    const auto archive = source.archive("BTC-USD"); ASSERT_TRUE(archive.catalog);
-    const auto grid = source.gridFor("BTC-USD", ff::Epoch, *archive.catalog);
-    const auto sealed = store.buildHour("BTC-USD", ff::Epoch, grid, *archive.catalog);
+    const auto archive = source.archive(symbol); ASSERT_TRUE(archive.catalog);
+    const auto grid = source.gridFor(symbol, ff::Epoch, *archive.catalog);
+    const auto sealed = store.buildHour(symbol, ff::Epoch, grid, *archive.catalog);
     ASSERT_TRUE(sealed.section.sealed);
     const auto bars = c::toBars(c::decode(sealed.section.payload, ff::Minute, ff::Epoch, 60, false,
         uint64_t(1) << sealed.section.stepExponent));
     ASSERT_EQ(bars.size(), 1u); EXPECT_EQ(*liveBar, bars.front());
-    std::cout << "midnight reconnect_ms=" << reconnect << " restart=" << restart
+    std::cout << "midnight symbol=" << symbol << " reconnect_ms=" << reconnect << " restart=" << restart
               << " held=3 dropped=0 live_equals_sealed=1\n";
   }
 }
