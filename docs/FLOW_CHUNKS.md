@@ -438,6 +438,8 @@ its epoch; every other instrument keeps its epoch, byte cache and held chunks.
   file header records the identity it was built under. `FlowEpoch.cpp::ruleIdentity` serializes the current
   tuple as little-endian u8 builder version, u32 W, u8 scale version, u64 big-trade floor, then u16 payload
   versions for summary, rows and big trades, in that order.
+- The corrected journal grid fallback needs no rule-identity change: a day whose grid differs passes through
+  `FlowChunkStore::transition()`, and the archive audit's 12 sealed no-HMC2 days remain byte-equal.
 - epoch = FNV-1a 64 of (domain name, rule identity, counter).
 - `<flow_root>/<venue>/<symbol>/epoch` holds the instrument's u64 counter, u64 rule identity, u32 count of pending
   days, i64 day starts, u32 CRC-32; it is always replaced atomically (temp file, fsync, rename, directory fsync).

@@ -4,6 +4,7 @@
 #include "servermodel/FlowChunkService.hpp"
 #include "roller/fixtures/FlowJournal.hpp"
 #include "roller/JournalReader.hpp"
+#include "roller/Roller.hpp"
 #include "flow/FlowCompose.hpp"
 #include "ConfigLoader.hpp"
 #include "Crc32.hpp"
@@ -275,6 +276,36 @@ TEST_F(ChunkStoreTest, CorruptOrLostFileRebuildsIdenticallyWithoutEpochChange) {
     fs::remove(path); EXPECT_FALSE(store.read(Id, Minute, Epoch));
     ASSERT_EQ(store.runPass().failed, 0u); EXPECT_EQ(readBytes(path), original); EXPECT_EQ(store.epoch(Id), epoch);
 }
+TEST_F(ChunkStoreTest, GridValidationPreservesBytesOrTransitionsEpochWithoutRuleChange) {
+    for (const double tick : {1.0, 2.0}) {
+        SCOPED_TRACE(tick);
+        fs::remove_all(raw); fs::remove_all(root); fs::remove_all(hmc);
+        fs::create_directory(raw); fs::create_directory(hmc);
+        fixture(); FlowStore source(sourceOptions());
+        std::vector<uint8_t> original; uint64_t oldEpoch, identity;
+        {
+            FlowChunkStore initial(source, options());
+            ASSERT_EQ(initial.runPass().failed, 0u);
+            original = readBytes(initial.filePath(Id, Epoch));
+            oldEpoch = initial.epoch(Id); identity = day(initial).ruleIdentity;
+        }
+        sentinel::roller::RollOptions roll{raw, hmc, "BTC-USD", Epoch, Epoch + Minute};
+        roll.overrides = {{"near_tick", tick}};
+        sentinel::roller::roll(roll);
+        FlowChunkStore store(source, options()); // restart validates every sealed day
+        ASSERT_EQ(store.runPass().failed, 0u);
+        EXPECT_EQ(day(store).ruleIdentity, identity);
+        EXPECT_EQ(day(store).grid.rowTickUnits, int64_t(tick * 100));
+        if (tick == 1) {
+            EXPECT_EQ(store.epoch(Id), oldEpoch);
+            EXPECT_EQ(readBytes(store.filePath(Id, Epoch)), original);
+        } else {
+            EXPECT_NE(store.epoch(Id), oldEpoch);
+            EXPECT_NE(readBytes(store.filePath(Id, Epoch)), original);
+        }
+    }
+}
+
 TEST_F(ChunkStoreTest, ChangedSourceMovesOnlyItsEpoch) {
     fixture(); fixture(1, "ETH-USD"); FlowStore source(sourceOptions()); FlowChunkStore store(source, options());
     ASSERT_EQ(store.runPass().failed, 0u); const auto btc = store.epoch(Id), eth = store.epoch("coinbase:ETH-USD");
