@@ -573,6 +573,32 @@ TEST_F(ChunkStoreTest, FirstBackfillReportsEveryDiscoveredDayUntilChecked) {
     ASSERT_EQ(restarted.runPass().failed, 0u); EXPECT_TRUE(pending(0));
 }
 
+TEST_F(ChunkStoreTest, PendingDaysClearsAcrossMidPassRefreshWithGrowingTail) {
+    for (const bool grow : {false, true}) {
+        fs::remove_all(raw); fs::remove_all(root); fs::remove_all(base / "fld"); fs::create_directory(raw);
+        sentinel::metrics::MetricsRegistry local;
+        fixture(6);
+        Journal live(raw); live.heartbeat(6 * Day + 2 * Hour); live.writer.flush();
+        auto sc = sourceOptions(); sc.symbols = {"BTC-USD"};
+        FlowStore source(sc);
+        auto o = options(); o.metrics = &local;
+        auto tick = std::chrono::steady_clock::time_point{};
+        o.schedulerNow = [&] { return tick; };
+        int n = 0; size_t refreshed = 0;
+        o.afterArchiveRefreshForTest = [&] { ++refreshed; };
+        o.afterDayForTest = [&](int64_t) {
+            tick += std::chrono::seconds(10);
+            if (grow) { live.heartbeat(6 * Day + 2 * Hour + 1000 * ++n); live.writer.flush(); }
+        };
+        FlowChunkStore store(source, o);
+        for (int pass = 0; pass < 3; ++pass) {
+            SCOPED_TRACE(testing::Message() << "grow=" << grow << " pass=" << pass);
+            EXPECT_EQ(store.runPass().failed, 0u);
+            EXPECT_NE(local.render().find("sentinel_flow_chunk_pending_days{instrument=\"coinbase:BTC-USD\"} 0\n"), std::string::npos);
+        }
+        EXPECT_GE(refreshed, 4u); // initial inventories plus the timed mid-pass refresh
+    }
+}
 TEST_F(ChunkStoreTest, MissingGridRetriesWithExponentialBackoffDespiteAbsentFile) {
     Journal journal(raw, "ETH-USD");
     journal.trades(3 * Hour + 1000, {trade(3 * Hour + 100, "first", 100000, "BUY", "ETH-USD")});

@@ -813,7 +813,7 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
     const auto checkedArchives = archives; // later priority refreshes cannot certify earlier day checks
     using Attempt = std::tuple<std::string, int64_t, uint64_t>;
     std::set<Attempt> attempted;
-    std::set<std::pair<std::string, int64_t>> failedThisPass;
+    std::set<std::pair<std::string, int64_t>> failedThisPass, checkedThisPass;
     auto liveDays = [&](const std::string &symbol, const FlowStore::Archive &archive) {
         std::vector<int64_t> days;
         if (archive.days.empty()) return days;
@@ -857,7 +857,7 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
         bool work = needsWork(id, day, archive);
         if (!work) {
             std::lock_guard lock(mutex_); auto &i = instruments_.at(id);
-            i.validationPending.erase(day); updatePending(i); return;
+            i.validationPending.erase(day); updatePending(i); checkedThisPass.emplace(id, day); return;
         }
         try {
             bool build = false;
@@ -877,6 +877,7 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
               if (!d.badHours) {
                   d.buildFailures = 0; d.retryAfter = {};
                   instruments_.at(id).validationPending.erase(day);
+                  checkedThisPass.emplace(id, day);
               }
               updatePending(instruments_.at(id)); }
         } catch (const Cancelled &) { throw; }
@@ -903,6 +904,7 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
               for (auto day : archive.days) {
                   const auto [it, inserted] = i.days.try_emplace(day);
                   if (inserted || (i.integrity != archive.integrity &&
+                      !checkedThisPass.contains({id, day}) &&
                       !attempted.contains(Attempt{id, day, archive.generation}))) i.validationPending.insert(day);
               }
               updatePending(i); }
@@ -926,7 +928,12 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
                 check(stop);
                 const auto &live = priorityDays.at(symbol);
                 if (std::binary_search(live.begin(), live.end(), *it)) continue;
-                if (!needsWork(id, *it, archive)) continue;
+                if (!needsWork(id, *it, archive)) {
+                    std::lock_guard lock(mutex_); auto &i = instruments_.at(id);
+                    i.validationPending.erase(*it); updatePending(i);
+                    checkedThisPass.emplace(id, *it);
+                    continue;
+                }
                 if (options_.schedulerNow() - lastPriorityCheck >= std::chrono::seconds(30)) {
                     lastPriorityCheck = options_.schedulerNow();
                     for (auto &[freshSymbol, known] : archives) {
