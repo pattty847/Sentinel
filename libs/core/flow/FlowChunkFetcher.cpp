@@ -206,7 +206,10 @@ void FlowChunkFetcher::received(quint64 id, w::ReplyPtr reply) {
     burst_.bytes += reply->wireBytes; burst_.rtt += options_.nowMs() - r->second.start;
     d.attempts = 0; d.due = 0;
     if (previous && previous->hash != f.contentHash) emit chunkRevised(key);
-    emit chunkStored(key); finish(key); schedule();
+    emit chunkStored(key); finish(key);
+    // A newly decoded allocation replaces the cold estimate. Rebudget padding
+    // immediately, even when the chart has not panned since requesting it.
+    replan();
 }
 void FlowChunkFetcher::failed(w::Failure f) {
     std::vector<Key> keys;

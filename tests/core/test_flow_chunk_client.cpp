@@ -255,6 +255,17 @@ TEST_F(FlowFetch, SummaryPaddingBudgetsTheRowsBodiesItActuallyRetains) {
     EXPECT_EQ(fetch->stats().wanted,6u); // two visible + four 8 MiB padding bodies
     EXPECT_TRUE(transport.requests.empty());
 }
+TEST_F(FlowFetch, NewDecodedSizeRebudgetsPaddingWithoutAnotherWant) {
+    bool decoded = false;
+    fetch.reset(); create([&](const auto& k) { return decoded && k == key(11) ? 32ull << 20 : 1ull; });
+    online(available(20)); fetch->want(1,view(10,11,1)); drain();
+    ASSERT_EQ(fetch->stats().wanted,7u);
+    const auto request = transport.requests.front();
+    ASSERT_NE(std::find(request.keys.begin(),request.keys.end(),key(11)),request.keys.end());
+    decoded = true; // transport decoding replaces this padding key's cold estimate
+    transport.received(request.id,body(key(11))); drain();
+    EXPECT_EQ(fetch->stats().wanted,2u); // visible + the now-known 32 MiB padding key
+}
 
 struct FlowChunkClientTest : testing::Test {
     int argc=1; char name[16]="flow-client"; char* argv[2]={name,nullptr}; QCoreApplication app{argc,argv};
