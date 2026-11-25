@@ -438,6 +438,8 @@ its epoch; every other instrument keeps its epoch, byte cache and held chunks.
   file header records the identity it was built under. `FlowEpoch.cpp::ruleIdentity` serializes the current
   tuple as little-endian u8 builder version, u32 W, u8 scale version, u64 big-trade floor, then u16 payload
   versions for summary, rows and big trades, in that order.
+- The corrected journal grid fallback needs no rule-identity change: a day whose grid differs passes through
+  `FlowChunkStore::transition()`, and the archive audit's 12 sealed no-HMC2 days remain byte-equal.
 - epoch = FNV-1a 64 of (domain name, rule identity, counter).
 - `<flow_root>/<venue>/<symbol>/epoch` holds the instrument's u64 counter, u64 rule identity, u32 count of pending
   days, i64 day starts, u32 CRC-32; it is always replaced atomically (temp file, fsync, rename, directory fsync).
@@ -652,9 +654,20 @@ Not measured: an event should take 15-20 bytes, so 500 a day is about 9 KB.
    FARTCOIN (48 days total). Before cutover, run BTC, ETH and SOL over their recorded days and check the 300 s
    window. The step 3 builder provides the canonical hour-scan conformance check.
 2. **Big-trade floors** (owner decision: what bubbles show far back). Section 12 proposes floors.
-3. **Days without a recorder grid** (plan question 4). Live drops their trades
-   (`sentinel_flow_missing_grid_trades_total`); the store has a journal grid fallback (`dayScales`,
-   `servermodel/FlowStore.cpp:342-412`). Live needs the same before chunks replace FHE1.
+3. **Days without a recorder grid.** Live holds early trades for the authoritative roller callback
+   (4 MiB charged storage, 8,192 trades and 120 s per product); expiry or overflow is counted in
+   `sentinel_flow_missing_grid_trades_total` and marks the minute incomplete. Sealed lookup still prefers
+   the day's HMC2 near grid. Its journal fallback uses the roller's latest snapshot at/before midnight,
+   then the first later two-sided snapshot through next midnight plus the recorder's 2 s lateness tail.
+   The normal Coinbase roller can scan farther while it has no grid (`Roller.cpp:660-661,715-716`);
+   the fallback deliberately refuses that unbounded search. Within the accepted prefix it uses the same
+   anchor and first usable snapshot; HMC2 remains authoritative even when its grid was found later.
+   BTC's fixed $1/$5 rule derives
+   exactly from product metadata without a snapshot. No usable deterministic grid is a build failure,
+   retried with the same 60 s to 32 min exponential per-day backoff as other build failures.
+   `flow_grid_check <raw-l2> <hmc2> <symbol> [<flc-root>]` audits fallback equality read-only; the optional
+   FLC root also checks sealed days without HMC2. Non-BTC days with no usable snapshot inside that bounded prefix remain
+   unavailable pending an owner decision; no trade-price grid is invented.
 4. **Server memory** (plan question 5): profile the ~877 MB before step 3 adds the sealed-frame cache.
 5. **Startup gap.** After a restart live holds only buckets since its first live trade; earlier unsealed hours are
    `building` until sealed. Startup replay of the open hour (plan step 6) closes it.

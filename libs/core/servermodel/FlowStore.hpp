@@ -47,6 +47,7 @@ class FlowStore {
         bool lowerPriority = true;
         // Cancellation-aware synchronization seam, called on the builder after a record.
         std::function<void(std::stop_token)> afterRecordForTest;
+        std::function<void()> afterAnchorRecordForTest;
         std::function<void(const std::filesystem::path &)> beforeCommitForTest;
         std::function<void()> afterCatalogConstructForTest;
         std::function<void()> afterWakeForTest;
@@ -118,6 +119,9 @@ class FlowStore {
     SourceState sourceState(const std::string &symbol, int64_t from, int64_t to,
                             bool sealedEvidence = false, int64_t tailMs = 60'000) const;
     FlowStoreGridValues gridFor(const std::string &symbol, int64_t day,
+                               const sentinel::roller::JournalReader &catalog, std::stop_token stop = {});
+    // Read-only conformance/audit entry: the same fallback, without consulting HMC2.
+    static FlowStoreGridValues journalGridFor(const std::string &symbol, int64_t day,
                                const sentinel::roller::JournalReader &catalog, std::stop_token stop = {});
     const Options &options() const { return options_; }
     // Same source identity primitives as FLD1; the terminal file always uses

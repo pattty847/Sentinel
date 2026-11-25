@@ -1,6 +1,7 @@
 #pragma once
 #include "servermodel/BookRecorder.hpp"
 #include <nlohmann/json.hpp>
+#include <optional>
 
 namespace sentinel::roller {
 struct Grid {
@@ -14,6 +15,10 @@ struct Grid {
 // snapshot in the day. Nearest 1-2-5 step (arithmetic distance; ties upward).
 // Near and deep share the derived tick unless overridden; BTC retains $1/$5.
 Grid deriveGrid(const nlohmann::json& metadata, double referencePrice,
+                const nlohmann::json& overrides = nlohmann::json::object());
+// The same overrides and metadata validation as deriveGrid; absent when a
+// snapshot reference price is required. Product-specific policy lives here only.
+std::optional<Grid> priceIndependentGrid(const nlohmann::json& metadata,
                 const nlohmann::json& overrides = nlohmann::json::object());
 // Fixed 0..1 grid: scale 1000, near .001, deep .01, size floor .01;
 // no rounding, relative windows, reference mid or Coinbase overrides.

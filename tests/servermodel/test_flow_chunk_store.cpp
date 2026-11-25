@@ -4,6 +4,7 @@
 #include "servermodel/FlowChunkService.hpp"
 #include "roller/fixtures/FlowJournal.hpp"
 #include "roller/JournalReader.hpp"
+#include "roller/Roller.hpp"
 #include "flow/FlowCompose.hpp"
 #include "ConfigLoader.hpp"
 #include "Crc32.hpp"
@@ -275,6 +276,36 @@ TEST_F(ChunkStoreTest, CorruptOrLostFileRebuildsIdenticallyWithoutEpochChange) {
     fs::remove(path); EXPECT_FALSE(store.read(Id, Minute, Epoch));
     ASSERT_EQ(store.runPass().failed, 0u); EXPECT_EQ(readBytes(path), original); EXPECT_EQ(store.epoch(Id), epoch);
 }
+TEST_F(ChunkStoreTest, GridValidationPreservesBytesOrTransitionsEpochWithoutRuleChange) {
+    for (const double tick : {1.0, 2.0}) {
+        SCOPED_TRACE(tick);
+        fs::remove_all(raw); fs::remove_all(root); fs::remove_all(hmc);
+        fs::create_directory(raw); fs::create_directory(hmc);
+        fixture(); FlowStore source(sourceOptions());
+        std::vector<uint8_t> original; uint64_t oldEpoch, identity;
+        {
+            FlowChunkStore initial(source, options());
+            ASSERT_EQ(initial.runPass().failed, 0u);
+            original = readBytes(initial.filePath(Id, Epoch));
+            oldEpoch = initial.epoch(Id); identity = day(initial).ruleIdentity;
+        }
+        sentinel::roller::RollOptions roll{raw, hmc, "BTC-USD", Epoch, Epoch + Minute};
+        roll.overrides = {{"near_tick", tick}};
+        sentinel::roller::roll(roll);
+        FlowChunkStore store(source, options()); // restart validates every sealed day
+        ASSERT_EQ(store.runPass().failed, 0u);
+        EXPECT_EQ(day(store).ruleIdentity, identity);
+        EXPECT_EQ(day(store).grid.rowTickUnits, int64_t(tick * 100));
+        if (tick == 1) {
+            EXPECT_EQ(store.epoch(Id), oldEpoch);
+            EXPECT_EQ(readBytes(store.filePath(Id, Epoch)), original);
+        } else {
+            EXPECT_NE(store.epoch(Id), oldEpoch);
+            EXPECT_NE(readBytes(store.filePath(Id, Epoch)), original);
+        }
+    }
+}
+
 TEST_F(ChunkStoreTest, ChangedSourceMovesOnlyItsEpoch) {
     fixture(); fixture(1, "ETH-USD"); FlowStore source(sourceOptions()); FlowChunkStore store(source, options());
     ASSERT_EQ(store.runPass().failed, 0u); const auto btc = store.epoch(Id), eth = store.epoch("coinbase:ETH-USD");
@@ -554,6 +585,93 @@ TEST_F(ChunkStoreTest, SteadyPassOverClosedDaysFeedsNoTrades) {
     const auto rendered = metrics.render();
     EXPECT_NE(rendered.find("sentinel_flow_chunk_pending_days{instrument=\"coinbase:BTC-USD\"} 0"), std::string::npos);
     std::cout << "steady_pass_days=3 feed_records=" << replayed << " wall_ms=" << ms << '\n';
+}
+TEST_F(ChunkStoreTest, FirstBackfillReportsEveryDiscoveredDayUntilChecked) {
+    fixture(3); FlowStore source(sourceOptions());
+    const auto discovered = source.archive("BTC-USD").days.size();
+    ASSERT_GT(discovered, 3u);
+    auto pending = [&](size_t count) {
+        return metrics.render().find("sentinel_flow_chunk_pending_days{instrument=\"coinbase:BTC-USD\"} " +
+            std::to_string(count) + "\n") != std::string::npos;
+    };
+    FlowChunkStore store(source, options());
+    EXPECT_FALSE(fs::exists(root / "coinbase" / "BTC-USD" / "epoch"));
+    store.initialize(); EXPECT_TRUE(pending(discovered));
+    ASSERT_EQ(store.runPass().failed, 0u); EXPECT_TRUE(pending(0));
+    // A restart must count validation even though the files and epoch exist.
+    FlowChunkStore restarted(source, options());
+    restarted.initialize(); EXPECT_TRUE(pending(discovered));
+    ASSERT_EQ(restarted.runPass().failed, 0u); EXPECT_TRUE(pending(0));
+}
+
+TEST_F(ChunkStoreTest, PendingDaysClearsAcrossMidPassRefreshWithGrowingTail) {
+    for (const bool grow : {false, true}) {
+        fs::remove_all(raw); fs::remove_all(root); fs::remove_all(base / "fld"); fs::create_directory(raw);
+        sentinel::metrics::MetricsRegistry local;
+        fixture(6);
+        Journal live(raw); live.heartbeat(6 * Day + 2 * Hour); live.writer.flush();
+        auto sc = sourceOptions(); sc.symbols = {"BTC-USD"};
+        FlowStore source(sc);
+        auto o = options(); o.metrics = &local;
+        auto tick = std::chrono::steady_clock::time_point{};
+        o.schedulerNow = [&] { return tick; };
+        int n = 0; size_t refreshed = 0;
+        o.afterArchiveRefreshForTest = [&] { ++refreshed; };
+        o.afterDayForTest = [&](int64_t) {
+            tick += std::chrono::seconds(10);
+            if (grow) { live.heartbeat(6 * Day + 2 * Hour + 1000 * ++n); live.writer.flush(); }
+        };
+        FlowChunkStore store(source, o);
+        for (int pass = 0; pass < 3; ++pass) {
+            SCOPED_TRACE(testing::Message() << "grow=" << grow << " pass=" << pass);
+            EXPECT_EQ(store.runPass().failed, 0u);
+            EXPECT_NE(local.render().find("sentinel_flow_chunk_pending_days{instrument=\"coinbase:BTC-USD\"} 0\n"), std::string::npos);
+        }
+        EXPECT_GE(refreshed, 4u); // initial inventories plus the timed mid-pass refresh
+    }
+}
+TEST_F(ChunkStoreTest, MissingGridRetriesWithExponentialBackoffDespiteAbsentFile) {
+    Journal journal(raw, "ETH-USD");
+    journal.trades(3 * Hour + 1000, {trade(3 * Hour + 100, "first", 100000, "BUY", "ETH-USD")});
+    journal.heartbeat(4 * Hour + 15000); journal.close(); // no snapshot anywhere
+    auto sourceConfig = sourceOptions(); size_t gridRecords = 0;
+    sourceConfig.afterRecordForTest = [&](std::stop_token) { ++gridRecords; };
+    FlowStore source(sourceConfig); auto o = options();
+    auto now = std::chrono::steady_clock::time_point{};
+    o.schedulerNow = [&] { return now; };
+    FlowChunkStore store(source, o);
+    EXPECT_EQ(store.runPass().failed, 1u); ASSERT_GT(gridRecords, 0u);
+    const auto first = gridRecords;
+    now += std::chrono::seconds(59); EXPECT_EQ(store.runPass().failed, 0u); EXPECT_EQ(gridRecords, first);
+    now += std::chrono::seconds(1); EXPECT_EQ(store.runPass().failed, 1u); EXPECT_GT(gridRecords, first);
+    const auto second = gridRecords;
+    now += std::chrono::seconds(60); EXPECT_EQ(store.runPass().failed, 0u); EXPECT_EQ(gridRecords, second);
+    now += std::chrono::seconds(59); EXPECT_EQ(store.runPass().failed, 0u); EXPECT_EQ(gridRecords, second);
+    now += std::chrono::seconds(1); EXPECT_EQ(store.runPass().failed, 1u); EXPECT_GT(gridRecords, second);
+    EXPECT_FALSE(fs::exists(store.filePath("coinbase:ETH-USD", Epoch)));
+}
+TEST_F(ChunkStoreTest, FirstBtcDayWithoutAnyBookSnapshotSealsFromExactMetadataGrid) {
+    Journal journal(raw);
+    journal.trades(3 * Hour + 1000, {trade(3 * Hour + 100, "first", 100000)});
+    journal.heartbeat(Day + 15000); journal.close();
+    FlowStore source(sourceOptions()); FlowChunkStore store(source, options());
+    ASSERT_EQ(store.runPass().failed, 0u);
+    const auto file = day(store);
+    EXPECT_EQ(file.grid.rowTickUnits, 100); EXPECT_EQ(file.grid.priceScale, 100);
+    EXPECT_TRUE(file.sections[24].sealed); EXPECT_TRUE(file.sections[25].sealed);
+    const auto bars = c::toBars(c::decode(file.sections[3].payload, Minute, Epoch + 3 * Hour, 60, false));
+    ASSERT_EQ(bars.size(), 1u); EXPECT_EQ(bars.front().count, 1u);
+}
+TEST_F(ChunkStoreTest, FirstSnapshotInFollowingDayLeadInSealsEarlierTrades) {
+    Journal journal(raw, "ETH-USD", "0.00000001", "2999", "3001");
+    journal.trades(3 * Hour + 1000, {trade(3 * Hour + 100, "first", 3000, "BUY", "ETH-USD")});
+    journal.snapshot(Day + 1000); journal.heartbeat(Day + 15000); journal.close();
+    FlowStore source(sourceOptions()); FlowChunkStore store(source, options());
+    ASSERT_EQ(store.runPass().failed, 0u);
+    const auto file = c::parseDayFile(readBytes(store.filePath("coinbase:ETH-USD", Epoch)));
+    EXPECT_TRUE(file.sections[24].sealed); EXPECT_TRUE(file.sections[25].sealed);
+    const auto bars = c::toBars(c::decode(file.sections[3].payload, Minute, Epoch + 3 * Hour, 60, false));
+    ASSERT_EQ(bars.size(), 1u); EXPECT_EQ(bars.front().count, 1u);
 }
 TEST_F(ChunkStoreTest, RestartWithMissingRootRebuildsIdenticalDay) {
     fixture(); FlowStore source(sourceOptions()); std::vector<uint8_t> original;

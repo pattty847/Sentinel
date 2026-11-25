@@ -1,3 +1,6 @@
+// Live flow holds trades across the provisional-tap/durable-grid ordering gap.
+// Grid holds are bounded on the model thread; the ordinary trade path does no
+// grid I/O, clock read, or hold allocation. Admission lateness is saved at arrival.
 #include "TradeOverlayPublisher.hpp"
 #include "ServerDataModel.hpp"
 #include "FlowStoreLag.hpp"
@@ -413,7 +416,7 @@ void ServerDataModel::registerMetrics(sentinel::metrics::MetricsRegistry& r) {
                 [this]() -> Value { return double(m_flowDroppedTrades); });
     r.counterFn("sentinel_flow_dropped_buckets_total", "Published flow buckets retired from live retention.", {},
                 [this]() -> Value { return double(m_flowDroppedBuckets); });
-    r.counterFn("sentinel_flow_missing_grid_trades_total", "Flow trades dropped because the UTC day has no grid.", {},
+    r.counterFn("sentinel_flow_missing_grid_trades_total", "Flow trades dropped when the day-grid hold overflows or expires.", {},
                 [this]() -> Value { return double(m_flowMissingGridTrades); });
     r.counterFn("sentinel_flow_hour_shrink_refusals_total", "Closed flow hour recompositions refused because source minutes were lost.", {},
                 [this]() -> Value { return double(m_flowHourShrinkRefusals); });
@@ -963,9 +966,18 @@ void ServerDataModel::onFlowGrid(const std::string& symbol, int64_t dayStartMs,
         product.days.emplace(dayStartMs, std::move(day));
         product.scratch.id.reserve(128);
         product.days.erase(product.days.begin(), product.days.lower_bound(dayStartMs - 86'400'000));
+        expireGridTrades(symbol, product);
+        size_t heldReplayed = 0;
+        for (auto it = product.heldTrades.begin(); it != product.heldTrades.end();) {
+            if (it->exchangeMs / 86'400'000 * 86'400'000 != dayStartMs) { ++it; continue; }
+            addFlowTrade(it->trade, it->exchangeMs, it->lateMinute);
+            product.heldBytes -= it->bytes;
+            it = product.heldTrades.erase(it);
+            ++heldReplayed;
+        }
         sLog_Data("Flow grid ready: symbol=" << symbol << " day=" << dayStartMs
             << " rowTickUnits=" << scales.rowTickUnits << " priceScale=" << scales.priceScale
-            << " baseScale=" << scales.baseScale);
+            << " baseScale=" << scales.baseScale << " held_replayed=" << heldReplayed);
     } catch (const std::exception& e) {
         sLog_Warning("Flow grid refused: symbol=" << symbol << " day=" << dayStartMs
             << " error=" << e.what());
@@ -1359,37 +1371,61 @@ void ServerDataModel::onFlowAvailabilityChanged(const std::string& symbol) {
     }
 }
 
-void ServerDataModel::addFlowTrade(const Trade& trade, int64_t ms) {
+void ServerDataModel::markFlowLoss(FlowProduct& product, int64_t ms) {
+    const auto minuteStart = ms / 60'000 * 60'000, dayStart = ms / 86'400'000 * 86'400'000;
+    if (product.lossyMinutes.insert(minuteStart).second) {
+        product.newLossyMinutes.insert(minuteStart);
+        if (const auto day = product.days.find(dayStart); day != product.days.end())
+            for (auto& [tf, series] : day->second.series) {
+                auto& slot = series.bucketSlots[(ms / tf) % series.bucketSlots.size()];
+                if (slot.start == ms / tf * tf) slot.dirty = true;
+            }
+    }
+}
+void ServerDataModel::dropGridTrade(const std::string& symbol, FlowProduct& product, int64_t ms) {
+    ++m_flowDroppedTrades; ++m_flowMissingGridTrades;
+    markFlowLoss(product, ms);
+    const auto now = std::chrono::steady_clock::now();
+    if (!product.lastGridWarning || now - *product.lastGridWarning >= std::chrono::minutes(1)) {
+        product.lastGridWarning = now;
+        sLog_Warning("Flow trade dropped: symbol=" << symbol << " day=" << ms / 86'400'000 * 86'400'000
+            << " reason=missing_grid hold_bytes=" << product.heldBytes << " hold_trades=" << product.heldTrades.size());
+    }
+}
+void ServerDataModel::expireGridTrades(const std::string& symbol, FlowProduct& product) {
+    if (product.heldTrades.empty()) return;
+    const auto now = std::chrono::steady_clock::now();
+    while (!product.heldTrades.empty() && product.heldTrades.front().expires <= now) {
+        const auto& held = product.heldTrades.front();
+        dropGridTrade(symbol, product, held.exchangeMs);
+        product.heldBytes -= held.bytes; product.heldTrades.pop_front();
+    }
+}
+void ServerDataModel::addFlowTrade(const Trade& trade, int64_t ms, std::optional<bool> heldLate) {
     if (ms < 0) return;
     auto& product = m_flowProducts[trade.product_id];
-    const bool lateMinute = product.receiveMax >=
-        ms / 60'000 * 60'000 + 60'000 + m_serverConfig.flow.sealWindowMs;
-    if (lateMinute)
-        ++m_flowLateTrades[trade.product_id];
+    const bool lateMinute = heldLate.value_or(product.receiveMax >=
+        ms / 60'000 * 60'000 + 60'000 + m_serverConfig.flow.sealWindowMs);
     if (product.firstLiveMs < 0) product.firstLiveMs = ms;
-    const int64_t minuteStart = ms / 60'000 * 60'000;
     const int64_t dayStart = ms / 86'400'000 * 86'400'000;
-    const auto markLoss = [&] {
-        if (product.lossyMinutes.insert(minuteStart).second) {
-            product.newLossyMinutes.insert(minuteStart);
-            if (const auto day = product.days.find(dayStart); day != product.days.end())
-                for (auto& [tf, series] : day->second.series) {
-                    auto& slot = series.bucketSlots[(ms / tf) % series.bucketSlots.size()];
-                    if (slot.start == ms / tf * tf) slot.dirty = true;
-                }
-        }
-    };
+    const auto markLoss = [&] { markFlowLoss(product, ms); };
     const auto day = product.days.find(dayStart);
     if (day == product.days.end()) {
-        ++m_flowDroppedTrades;
-        ++m_flowMissingGridTrades;
-        markLoss();
-        if (product.missingGridWarnedDays.insert(dayStart).second) {
-            sLog_Warning("Flow trade dropped: symbol=" << trade.product_id
-                << " day=" << dayStart << " reason=missing_grid");
+        expireGridTrades(trade.product_id, product);
+        // Reject oversized inputs before copying either string. The conservative
+        // charge includes deque/allocator overhead per admitted element.
+        const auto charge = sizeof(FlowProduct::HeldTrade) + trade.trade_id.size() + trade.product_id.size() + 64;
+        if (charge > kFlowGridHoldBytes - product.heldBytes || product.heldTrades.size() >= kFlowGridHoldTrades) {
+            dropGridTrade(trade.product_id, product, ms); return;
         }
+        product.heldTrades.push_back({trade, ms, lateMinute, charge,
+            std::chrono::steady_clock::now() + kFlowGridHoldTime});
+        product.heldBytes += charge;
         return;
     }
+    // Classify only once the grid is available: a lost hold is missing-grid,
+    // while a released hold keeps its original admission lateness.
+    if (lateMinute) ++m_flowLateTrades[trade.product_id];
     auto& input = product.scratch;
     input.id = trade.trade_id;
     input.exchangeMs = ms; input.price = trade.price; input.size = trade.size;
@@ -1656,6 +1692,7 @@ void ServerDataModel::publishCoarse(const std::string& symbol, FlowProduct& prod
 void ServerDataModel::publishFlow() {
     std::erase_if(m_flowSubscriptions, [](const auto& s) { return !s->active.load(); });
     for (auto& [symbol, product] : m_flowProducts) {
+        expireGridTrades(symbol, product);
         if (const auto state = m_flowReceiveStates.find(symbol); state != m_flowReceiveStates.end()) {
             const auto receive = state->second.maximum.load(std::memory_order_acquire);
             if (state->second.pendingTrades.load(std::memory_order_acquire) == 0 &&

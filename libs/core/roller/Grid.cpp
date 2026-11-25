@@ -32,26 +32,16 @@ double scaleFor(std::string text) {
     if (places > 15) throw std::runtime_error("quote increment exceeds binary64 price grid precision");
     return std::pow(10.0, double(places));
 }
-}
-Grid deriveGrid(const nlohmann::json& metadata, double price, const nlohmann::json& overrides) {
-    if (!std::isfinite(price) || price <= 0) throw std::runtime_error("grid needs a positive reference price");
+Grid gridForTicks(const nlohmann::json& metadata, double near, double deep, const nlohmann::json& overrides) {
     const auto quoteText = metadata.at("quote_increment").get<std::string>();
     const auto quote = decimal(quoteText);
-    const auto base = decimal(metadata.at("base_increment").get<std::string>());
-    const auto target = price * 0.0001;
-    const auto decade = std::pow(10.0, std::floor(std::log10(target)));
-    double tick = decade;
-    for (double m : {2.,5.,10.}) if (std::abs(m * decade - target) <= std::abs(tick - target)) tick = m * decade;
-    // Keep a native-increment multiple, including non power-of-ten increments.
-    tick = std::ceil(std::max(tick, quote) / quote - 1e-9) * quote;
-    Grid grid{scaleFor(quoteText),tick,next125(next125(tick)),base};
-    if (metadata.at("product_id") == "BTC-USD") { grid.nearTick = 1; grid.deepTick = 5; }
+    Grid grid{scaleFor(quoteText), near, deep, decimal(metadata.at("base_increment").get<std::string>())};
     grid.priceScale = overrides.value("price_scale", grid.priceScale);
     grid.nearTick = overrides.value("near_tick", grid.nearTick);
     grid.deepTick = overrides.value("deep_tick", grid.deepTick);
     grid.sizeFloor = overrides.value("size_floor", grid.sizeFloor);
     if (!std::isfinite(grid.priceScale) || grid.priceScale < scaleFor(quoteText) ||
-        !std::isfinite(grid.sizeFloor) || grid.sizeFloor <= 0 || price * grid.priceScale >= 0x1p53)
+        !std::isfinite(grid.sizeFloor) || grid.sizeFloor <= 0)
         throw std::runtime_error("unrepresentable product grid");
     for (auto* t : {&grid.nearTick, &grid.deepTick}) {
         if (!std::isfinite(*t) || *t <= 0) throw std::runtime_error("invalid tick override");
@@ -60,6 +50,28 @@ Grid deriveGrid(const nlohmann::json& metadata, double price, const nlohmann::js
         if (units < 1 || units >= 0x1p53 || std::abs(units - std::round(units)) > 1e-6)
             throw std::runtime_error("tick is not representable in price units");
     }
+    return grid;
+}
+}
+std::optional<Grid> priceIndependentGrid(const nlohmann::json& metadata, const nlohmann::json& overrides) {
+    if (metadata.at("product_id") != "BTC-USD") return {};
+    return gridForTicks(metadata, 1, 5, overrides);
+}
+Grid deriveGrid(const nlohmann::json& metadata, double price, const nlohmann::json& overrides) {
+    if (!std::isfinite(price) || price <= 0) throw std::runtime_error("grid needs a positive reference price");
+    auto fixed = priceIndependentGrid(metadata, overrides);
+    Grid grid;
+    if (fixed) grid = *fixed;
+    else {
+        const auto quote = decimal(metadata.at("quote_increment").get<std::string>());
+        const auto target = price * 0.0001;
+        const auto decade = std::pow(10.0, std::floor(std::log10(target)));
+        double tick = decade;
+        for (double m : {2.,5.,10.}) if (std::abs(m * decade - target) <= std::abs(tick - target)) tick = m * decade;
+        tick = std::ceil(std::max(tick, quote) / quote - 1e-9) * quote;
+        grid = gridForTicks(metadata, tick, next125(next125(tick)), overrides);
+    }
+    if (price * grid.priceScale >= 0x1p53) throw std::runtime_error("unrepresentable product grid");
     return grid;
 }
 recording::RecorderConfig Grid::config(const std::filesystem::path& root) const {

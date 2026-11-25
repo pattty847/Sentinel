@@ -5,6 +5,7 @@
 #include "roller/fixtures/FlowJournal.hpp"
 #include "roller/JournalFeed.hpp"
 #include "roller/JournalReader.hpp"
+#include "roller/Roller.hpp"
 #include "servermodel/Hmc2Store.hpp"
 #include "Crc32.hpp"
 #include "FlowLiveTestAccess.hpp"
@@ -26,6 +27,85 @@ namespace flow = sentinel::flow;
 using namespace flow_fixture;
 using recording::FlowStore;
 namespace {
+TEST(FlowGrid, FallbackStopsAtNextDayLeadIn) {
+    for (const int64_t offset : {24 * Hour + 2000, 24 * Hour + 2001, 3 * 24 * Hour}) {
+        SCOPED_TRACE(offset);
+        QTemporaryDir temp; const fs::path base = temp.path().toStdString();
+        const auto raw = base / "raw", hmc = base / "hmc";
+        fs::create_directory(raw); fs::create_directory(hmc);
+        Journal journal(raw, "ETH-USD", "0.00000001", "2999", "3001");
+        journal.trades(1000, {trade(100, "first", 3000, "BUY", "ETH-USD")});
+        if (offset > 24 * Hour + 2001) journal.heartbeat(24 * Hour + 2001);
+        journal.snapshot(offset); journal.close();
+        FlowStore::Options o; o.root = base / "fld"; o.journalRoot = raw; o.hmc2Root = hmc;
+        o.symbols = {"ETH-USD"}; o.hourThrough = [](const std::string&) { return Epoch + 2 * Hour; };
+        size_t records = 0;
+        o.afterRecordForTest = [&](std::stop_token) { ++records; };
+        FlowStore store(o); const auto archive = store.archive("ETH-USD"); ASSERT_TRUE(archive.catalog);
+        if (offset == 24 * Hour + 2000) {
+            EXPECT_EQ(store.gridFor("ETH-USD", Epoch, *archive.catalog).scales.rowTickUnits, 20);
+            EXPECT_EQ(records, 2u);
+        } else {
+            EXPECT_THROW(store.gridFor("ETH-USD", Epoch, *archive.catalog), std::runtime_error);
+            EXPECT_EQ(records, 1u); // neither the out-of-window record nor the later snapshot is applied
+        }
+    }
+}
+
+TEST(FlowGrid, FallbackEqualsRecorderForEveryFixtureDay) {
+    QTemporaryDir temp; const fs::path base = temp.path().toStdString();
+    const auto raw = base / "raw", hmc = base / "hmc";
+    fs::create_directory(raw); fs::create_directory(hmc);
+    struct Product { const char *symbol, *bid, *ask, *quote; };
+    const Product products[] = {{"BTC-USD", "99999", "100001", "0.01"},
+        {"ETH-USD", "2999", "3001", "0.01"}, {"SOL-USD", "149", "151", "0.01"},
+        {"AVAX-USD", "29", "31", "0.01"}, {"DOGE-USD", "0.19", "0.21", "0.00001"},
+        {"FARTCOIN-USD", "0.99", "1.01", "0.0001"}, {"PEPE-USD", "0.000009", "0.000011", "0.00000001"}};
+    size_t compared = 0;
+    for (const auto &p : products) {
+        Journal journal(raw, p.symbol, "0.00000001", p.bid, p.ask, p.quote);
+        for (int d = 0; d < 2; ++d) {
+            const auto offset = d * 24 * Hour;
+            if (std::string(p.symbol) == "ETH-USD") {
+                journal.bid = d ? "5999" : "2999"; journal.ask = d ? "6001" : "3001";
+            }
+            journal.snapshot(offset - 2 * Hour);
+            journal.heartbeat(offset - Minute); // newest pre-midnight segment has no snapshot
+            journal.trades(offset + 1000, {trade(offset + 100, "day" + std::to_string(d), std::stod(p.bid), "BUY", p.symbol)});
+            if (std::string(p.symbol) == "ETH-USD") {
+                journal.bid = d ? "19999" : "9999"; journal.ask = d ? "20001" : "10001";
+                journal.reconnect(offset + 2000); // first in-day snapshot crosses a tick rung
+            }
+            journal.heartbeat(offset + 2 * Minute);
+        }
+        journal.close();
+        sentinel::roller::JournalReader catalog(raw, p.symbol);
+        std::stop_source cancelled; cancelled.request_stop();
+        EXPECT_THROW(catalog.anchor(Epoch, cancelled.get_token()), std::runtime_error);
+        for (int d = 0; d < 2; ++d) {
+            const auto day = Epoch + d * 24 * Hour;
+            sentinel::roller::RollOptions roll{raw, hmc, p.symbol, day, day + Minute};
+            sentinel::roller::roll(roll);
+            const auto fallback = FlowStore::journalGridFor(p.symbol, day, catalog);
+            recording::Hmc2Reader reader(hmc); recording::ReadControl control;
+            std::optional<recording::Hmc2Header> header;
+            reader.visit(p.symbol, "near", Minute, day, day + Minute,
+                [&](const auto &r) { header = r.header; }, control);
+            ASSERT_TRUE(header) << p.symbol << ' ' << day;
+            if (std::string(p.symbol) == "ETH-USD") {
+                // Midnight uses the last pre-day snapshot, not the reconnect's
+                // first in-day snapshot; both days deliberately differ.
+                EXPECT_EQ(fallback.scales.rowTickUnits, d ? 50 : 20);
+                EXPECT_NE(fallback.scales.rowTickUnits, d ? 200 : 100);
+            }
+            EXPECT_EQ(fallback.scales.rowTickUnits, header->rowTickUnits);
+            EXPECT_EQ(fallback.scales.priceScale, header->priceScale);
+            EXPECT_EQ(fallback.sizeFloor, header->sizeScale.floor); ++compared;
+        }
+    }
+    EXPECT_EQ(compared, 14u);
+}
+
 class FlowStoreTest : public testing::Test {
   protected:
     QTemporaryDir temp;
@@ -384,6 +464,21 @@ TEST_F(FlowStoreTest, RefusesRollupAndProtectedRootOverlap) {
         EXPECT_THROW(FlowStore{std::move(o)}, std::invalid_argument);
     }
 }
+TEST_F(FlowStoreTest, StopDuringGridAnchorDoesNotCountBuildFailure) {
+    Journal j(journal, "ETH-USD", "0.00000001", "2999", "3001");
+    j.snapshot(-1000); j.heartbeat(-500);
+    j.trades(1000, {trade(100, "first", 3000, "BUY", "ETH-USD")});
+    j.heartbeat(2 * Hour + Minute); j.close();
+    auto o = options(); o.symbols = {"ETH-USD"};
+    std::stop_source stop; size_t anchorRecords = 0;
+    o.afterAnchorRecordForTest = [&] { ++anchorRecords; stop.request_stop(); };
+    FlowStore store(o);
+    const auto result = store.runPass(stop.get_token());
+    EXPECT_EQ(anchorRecords, 1u);
+    EXPECT_TRUE(result.stopped); EXPECT_EQ(result.failed, 0u); EXPECT_EQ(result.built, 0u);
+    EXPECT_FALSE(fs::exists(store.filePath("ETH-USD", Epoch)));
+}
+
 TEST_F(FlowStoreTest, BuildsNewestHourFirstAndStopJoinsDuringReplay) {
     fixture();
     recordedGrid("BTC-USD", 100, 50, 100000);

@@ -121,8 +121,9 @@ scrape. VictoriaMetrics adds `job` and `instance` to every series.
 | `sentinel_flow_live_seal_mismatch_total` | counter | instrument | Live-final 1 m bars held at disk seal that differ from the decoded sealed bar. |
 | `sentinel_flow_receive_regressions_total` | counter | instrument | Receive times below the prior running maximum in newly sealed hour scans, including warmup. Diagnostic only. |
 | `sentinel_flow_chunk_hours_sealed_total` | counter | instrument | Hour sections first sealed in this process; retries and restarts do not count stored sections again. |
-| `sentinel_flow_chunk_build_failures_total` | counter | instrument | Failed chunk day builds, retried on the next pass; see `Flow chunk build failed`. |
-| `sentinel_flow_chunk_pending_days` | gauge | instrument | Days awaiting a build or epoch validation. No scrape-time disk access or builder mutex. |
+| `sentinel_flow_chunk_build_failures_total` | counter | instrument | Failed chunk day builds, including grid lookup; retries back off per day from 60 s to 32 min. See `Flow chunk build failed`. |
+| `sentinel_flow_chunk_pending_days` | gauge | instrument | Discovered days awaiting build or validation, including the first backfill without an epoch file and restart validation. Counts down as work completes; failed days stay pending. A checked forming day awaiting its next durable seal is caught up. No scrape-time disk access or builder mutex. |
+| `sentinel_flow_missing_grid_trades_total` | counter | - | Live trades dropped when the bounded day-grid hold overflows or expires; held and later applied trades do not increment it. Affected minutes are incomplete. |
 | `sentinel_flow_chunk_cache_hits_total` | counter | - | Finished SCK1 frame cache hits, including matching-hash replies. |
 | `sentinel_flow_chunk_cache_misses_total` | counter | - | Servable keys absent from the finished-frame cache. |
 | `sentinel_flow_chunk_cache_bytes` | gauge | - | Encoded frame bytes held by the LRU; excludes history jobs and socket queues. Atomic, no scrape-time locking. |

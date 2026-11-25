@@ -218,10 +218,12 @@ bool JournalReader::next(JournalRecord& out) {
     if (start_) throw std::runtime_error("journal position beyond durable prefix");
     return false;
 }
-std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs) const {
+std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs, std::stop_token stop,
+                                                std::function<void()> afterRecordForTest) const {
     // File opening times can regress. Walk journal order backwards, never binary
     // search wall time; then choose the last qualifying snapshot in that segment.
     for (auto f = files_->rbegin(); f != files_->rend(); ++f) {
+        if (stop.stop_requested()) throw std::runtime_error("journal anchor cancelled");
         const bool kalshi = f->venue == Venue::Kalshi;
         const auto isSnapshot = [&](const capture::Record& r) {
             if (!kalshi) return snapshot(r, product_);
@@ -238,8 +240,11 @@ std::optional<JournalPos> JournalReader::anchor(int64_t receiveMs) const {
             });
         capture::Record r;
         std::optional<JournalPos> found;
-        while (reader.next(r)) if (r.time.systemNs / 1'000'000 <= receiveMs && isSnapshot(r)) {
-            found = JournalPos{product_, f->run, reader.result().recordOrdinal, reader.result().recordIndex};
+        while (reader.next(r)) {
+            if (afterRecordForTest) afterRecordForTest();
+            if (stop.stop_requested()) throw std::runtime_error("journal anchor cancelled");
+            if (r.time.systemNs / 1'000'000 <= receiveMs && isSnapshot(r))
+                found = JournalPos{product_, f->run, reader.result().recordOrdinal, reader.result().recordIndex};
         }
         anchorDecoded_ += reader.result().decodedRecords;
         if (found) return found;

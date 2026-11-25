@@ -21,6 +21,15 @@ struct FlowLiveTestAccess {
     return m.m_flowProducts.at("BTC-USD").days.at(day).retiredRevisionByMinute.size();
   }
   static uint64_t missingGridDrops(ServerDataModel &m) { return m.m_flowMissingGridTrades; }
+  static size_t heldBytes(ServerDataModel &m, const std::string &symbol = "BTC-USD") { return m.m_flowProducts.at(symbol).heldBytes; }
+  static size_t heldTrades(ServerDataModel &m, const std::string &symbol = "BTC-USD") { return m.m_flowProducts.at(symbol).heldTrades.size(); }
+  static void expireHeld(ServerDataModel &m) {
+    for (auto &held : m.m_flowProducts.at("BTC-USD").heldTrades) held.expires = {};
+    m.publishFlow();
+  }
+  static void add(ServerDataModel &m, const Trade &trade) {
+    m.addFlowTrade(trade, std::chrono::duration_cast<std::chrono::milliseconds>(trade.timestamp.time_since_epoch()).count());
+  }
   static uint64_t totalDrops(ServerDataModel &m) { return m.m_flowDroppedTrades; }
   static uint64_t hourShrinkRefusals(ServerDataModel &m) { return m.m_flowHourShrinkRefusals; }
   static uint64_t lateDrops(ServerDataModel &m) { return m.m_flowLateTrades["BTC-USD"]; }

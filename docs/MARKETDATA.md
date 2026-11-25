@@ -235,6 +235,14 @@ Trades use exchange-time, UTC-aligned half-open buckets and the shared
 unknown aggressor side contributes to total volume/count only. The native grid
 is supplied by the recorder for that UTC day, with decimal base-increment
 precision and a quote-volume scale of 100,000,000. The existing TPO/VP tape remains.
+At midnight or restart, provisional trades can arrive before the durable roller's
+day-grid callback. The model holds them until that authoritative grid arrives;
+it never uses the preceding day's grid. Each product's hold is capped at 4 MiB
+of charged storage, 8,192 trades and 120 seconds of monotonic time. Admission
+lateness is captured at arrival, so waiting for a grid cannot make an on-time
+trade late. Overflow and expiry increment `sentinel_flow_missing_grid_trades_total`,
+mark the affected minutes incomplete and warn at most once per product per minute.
+The ordinary path adds no hold allocations or grid I/O.
 The live model starts at the first live trade after process start. It builds
 only 1 s and 1 m bars from trades. Each emitted coarse live bucket composes
 its sealed minutes from the flow chunk store and its unsealed minutes from
