@@ -63,7 +63,7 @@ private:
     Stats stats_;
     bool online_ = false, scheduled_ = false;
     std::optional<std::vector<std::string>> subscribed_;
-    struct Burst { uint64_t requested = 0, hits = 0, bytes = 0; int64_t rtt = 0, lastLog = -1000; } burst_;
+    struct Burst { uint64_t requested = 0, hits = 0, bytes = 0; int64_t chunkReplyRttSum = 0, lastLog = -1000; } burst_;
     size_t estimate(const Key&) const;
     void schedule();
     void replan(bool countCacheHits = true);

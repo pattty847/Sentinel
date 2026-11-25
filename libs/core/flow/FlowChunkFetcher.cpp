@@ -206,7 +206,7 @@ void FlowChunkFetcher::received(quint64 id, w::ReplyPtr reply) {
     } else if (f.kind == w::Kind::Chunk && reply->body && reply->body->key == f.key && reply->body->epoch == f.epoch) {
         cache_.put(key, reply->body, f.epoch, f.contentHash); ++stats_.bodies;
     } else { failed({id, key, "malformed", "invalid decoded chunk or not_modified without held body"}); return; }
-    burst_.bytes += reply->wireBytes; burst_.rtt += options_.nowMs() - r->second.start;
+    burst_.bytes += reply->wireBytes; burst_.chunkReplyRttSum += options_.nowMs() - r->second.start;
     d.attempts = 0; d.due = 0;
     if (previous && previous->hash != f.contentHash) emit chunkRevised(key);
     emit chunkStored(key); finish(key);
@@ -251,7 +251,7 @@ void FlowChunkFetcher::probe() {
     const auto now = options_.nowMs();
     if (now - burst_.lastLog < 1000) return;
     sLog_Probe("flow.chunks.fetch", "wanted=" << stats_.wanted << " requested=" << burst_.requested
-        << " cached=" << burst_.hits << " bytes=" << burst_.bytes << " rttMs=" << burst_.rtt);
+        << " cached=" << burst_.hits << " bytes=" << burst_.bytes << " chunkReplyRttSumMs=" << burst_.chunkReplyRttSum);
     burst_ = {0, 0, 0, 0, now};
 }
 }
