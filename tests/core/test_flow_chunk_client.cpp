@@ -164,6 +164,7 @@ TEST_F(FlowFetch, WaitsForFirstAvailabilityDeduplicatesAndCapsFlight) {
     answer(transport.requests[1]); ASSERT_EQ(transport.requests.size(),3u); answer(transport.requests[2]);
     EXPECT_EQ(fetch->stats().requested,20u); EXPECT_EQ(cache.stats().entries,20u);
     EXPECT_EQ(fetch->stats().inFlightChunks,0u);
+    EXPECT_EQ(fetch->stats().cacheHits,0u); // arrival-time rebudgeting is not a cache hit
 }
 TEST_F(FlowFetch, EstimatedBytesBindBeforeChunkCountAndVisibleSurvivesPaddingCap) {
     fetch.reset(); create([](const auto&){return 3ull<<20;}); online(available(20));

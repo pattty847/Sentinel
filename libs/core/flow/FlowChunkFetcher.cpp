@@ -65,7 +65,7 @@ bool FlowChunkFetcher::current(const Key& key) const {
     const auto a = availability_.find(key.instrument);
     return e && !e->hidden && a != availability_.end() && e->epoch == a->second.epoch(key);
 }
-void FlowChunkFetcher::replan() {
+void FlowChunkFetcher::replan(bool countCacheHits) {
     for (auto& [key, d] : demands_) d.wanted = false;
     std::set<Key> wanted;
     for (const auto& [chart, view] : charts_) {
@@ -89,7 +89,10 @@ void FlowChunkFetcher::replan() {
                 d.tier = item.tier; d.order = item.order;
             }
             d.wanted = true; wanted.insert(item.key);
-            if (current(item.key)) { cache_.read(item.key); ++stats_.cacheHits; ++burst_.hits; }
+            if (current(item.key)) {
+                cache_.read(item.key);
+                if (countCacheHits) { ++stats_.cacheHits; ++burst_.hits; }
+            }
         }
     }
     stats_.wanted = wanted.size(); cache_.wanted(std::move(wanted));
@@ -209,7 +212,7 @@ void FlowChunkFetcher::received(quint64 id, w::ReplyPtr reply) {
     emit chunkStored(key); finish(key);
     // A newly decoded allocation replaces the cold estimate. Rebudget padding
     // immediately, even when the chart has not panned since requesting it.
-    replan();
+    replan(false);
 }
 void FlowChunkFetcher::failed(w::Failure f) {
     std::vector<Key> keys;

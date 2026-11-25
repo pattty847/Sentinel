@@ -66,7 +66,7 @@ private:
     struct Burst { uint64_t requested = 0, hits = 0, bytes = 0; int64_t rtt = 0, lastLog = -1000; } burst_;
     size_t estimate(const Key&) const;
     void schedule();
-    void replan();
+    void replan(bool countCacheHits = true);
     void subscribe(bool force = false);
     void down();
     void onAvailability(protocol::chunks::Availability);
