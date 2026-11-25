@@ -47,7 +47,10 @@ void ClientTransport::attach(SentinelStreamClient& c) {
 void ClientTransport::retire(quint64 id, std::optional<Key> key) {
     if (!id) { for (const auto& [wire, p] : pending_) if (client_) client_->forgetChunks(wire); pending_.clear(); return; }
     const auto it = pending_.find(id); if (it == pending_.end()) return;
-    if (!key || !std::erase(it->second.keys, *key) || it->second.keys.empty()) pending_.erase(it);
+    const auto found = key ? std::find(it->second.keys.begin(), it->second.keys.end(), *key) : it->second.keys.end();
+    const bool matched = found != it->second.keys.end();
+    if (matched) it->second.keys.erase(found);
+    if (!matched || it->second.keys.empty()) pending_.erase(it);
 }
 quint64 ClientTransport::request(const Key& key, std::vector<int64_t> starts,
                                 std::vector<std::optional<uint64_t>> hashes) {

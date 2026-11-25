@@ -263,6 +263,8 @@ struct FlowChunkClientTest : testing::Test {
         for(const auto& text:client.m_writeQueue) out.push_back(nlohmann::json::parse(text)); client.m_writeQueue.clear(); return out;
     }
     void reconnectSubscription() { client.resendChunkSubscription(); }
+    void saturate() { client.m_decodeBacklogFrames=client.kMaxDecodeBacklogFrames; client.m_decodeRefusals=2; }
+    void unsaturate() { client.m_decodeBacklogFrames=0; }
     void postDecode(std::function<void()> fn) { net::post(*client.m_decodePool,std::move(fn)); }
     void receiveJson(const nlohmann::json& j) { client.handleMessage(j.dump()); }
 };
@@ -360,4 +362,18 @@ TEST_F(FlowFetch, LateUnavailableCannotHideStaleBodyBeforeDeadlineTimerRuns) {
     EXPECT_TRUE(cache.read(key())); EXPECT_TRUE(cache.inspect(key())->stale);
     EXPECT_EQ(fetch->stats().inFlightChunks,0u); now+=100;fetch->pump();drain();
     EXPECT_NE(transport.requests.back().id,request.id);
+}
+
+TEST_F(FlowChunkClientTest, DuplicateStartsEachKeepTheirCorrelatedReply) {
+    const auto id=client.requestChunks(key(),{T,T});
+    const auto bytes=heatmap::encodeChunkEnvelope(id,w::encode(body(key())->frame));
+    receive(bytes); receive(bytes); flush();
+    EXPECT_EQ(seen.size(),2u); EXPECT_TRUE(errors.empty());
+}
+TEST_F(FlowChunkClientTest, FlowChunkBacklogRefusalIsIndependentOfHeatmapRefusalsAndCountsEachDrop) {
+    const auto id=client.requestChunks(key(),{T});
+    const auto bytes=heatmap::encodeChunkEnvelope(id,w::encode(body(key())->frame));
+    saturate(); receive(bytes); receive(bytes); unsaturate(); flush();
+    ASSERT_EQ(errors.size(),1u); EXPECT_EQ(errors[0].requestId,id); EXPECT_EQ(errors[0].code,"client_overloaded");
+    EXPECT_EQ(client.chunkRejectedCount(),2u);
 }

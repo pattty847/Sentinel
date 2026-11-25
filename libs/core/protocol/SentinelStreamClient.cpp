@@ -484,6 +484,9 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
     const bool tradeFrame = bytes >= 4 && std::equal(frame->begin(), frame->begin() + 4, "TRD1");
     const bool flowFrame = flowLive || (bytes >= 4 && std::equal(frame->begin(), frame->begin() + 4, "FHE1"));
     const auto flowRequest = m_flowHistoryRequest.load();
+    const auto chunkRequest = peekEnvelopeRequestId(*frame);
+    const bool sharedChunk = m_chunkRequests.contains(chunkRequest) ||
+        (bytes >= 18 && std::equal(frame->begin() + 14, frame->begin() + 18, "SCK1"));
     // Refusals run inline, with at most one notification per reason until the
     // decoder makes progress. A flood must not create a second unbounded queue
     // of rejection tasks or queued Qt signals while the decoder is stalled.
@@ -507,14 +510,14 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
                                      flowDrop->bucketStartMs);
             }
         }
-        const auto mask = tradeFrame ? reason << 4 : flowFrame ? reason << 2 : reason;
+        if (sharedChunk || (!chunkRequest && !flowFrame && !tradeFrame)) ++m_chunkRejected;
+        const auto mask = sharedChunk ? reason << 6 : tradeFrame ? reason << 4 : flowFrame ? reason << 2 : reason;
         if (m_decodeRefusals & mask) return;
         m_decodeRefusals |= mask;
         sLog_Warning("Stream frame refused: bytes=" << bytes << " reason=" << message);
         if (flowFrame || tradeFrame) return;
-        const auto id = peekEnvelopeRequestId(*frame);
-        if (!id || m_chunkRequests.contains(id)) {
-            ++m_chunkRejected;
+        const auto id = chunkRequest;
+        if (sharedChunk || !id) {
             emit chunkFailed({id, {}, QString::fromLatin1(code), QString::fromLatin1(message)});
             if (id) { m_chunkRequests.erase(id); return; }
         }

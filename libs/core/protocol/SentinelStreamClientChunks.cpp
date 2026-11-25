@@ -69,8 +69,10 @@ void SentinelStreamClient::decodeChunkMessage(const std::vector<uint8_t>& bytes,
         const auto it = m_chunkRequests.find(id);
         if (it == m_chunkRequests.end()) return;
         const auto& f = reply->frame;
-        const auto erased = std::erase(it->second, w::requestKey(f.key));
-        if (!erased || it->second.empty()) m_chunkRequests.erase(it);
+        const auto key = std::find(it->second.begin(), it->second.end(), w::requestKey(f.key));
+        const bool matched = key != it->second.end();
+        if (matched) it->second.erase(key);
+        if (!matched || it->second.empty()) m_chunkRequests.erase(it);
         if (f.kind == w::Kind::Error)
             emit chunkFailed({id, w::requestKey(f.key), QString::fromLatin1(heatmap::chunkErrorName(f.error)),
                               QString::fromStdString(f.message)});
