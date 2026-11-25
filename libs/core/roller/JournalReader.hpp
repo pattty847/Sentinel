@@ -82,7 +82,7 @@ public:
     // Observational only; recovery does not read it. Anchor scans do not count.
     uint64_t damaged() const { return damaged_; }
     // Latest snapshot <= receive time, including earlier hours/runs for warmup.
-    std::optional<JournalPos> anchor(int64_t receiveMs) const;
+    std::optional<JournalPos> anchor(int64_t receiveMs, std::stop_token stop = {}) const;
 private:
     void selectStart();
     std::string product_;

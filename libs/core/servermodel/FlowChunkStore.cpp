@@ -225,12 +225,22 @@ FlowChunkStore::FlowChunkStore(FlowStore &sources, Options options) : sources_(s
         const sentinel::metrics::Labels labels{{"instrument", "coinbase:" + symbol}};
         i.late = &m.counter("sentinel_flow_late_trades_total", "Trades excluded when an hour first seals in this process.", labels);
         i.regressions = &m.counter("sentinel_flow_receive_regressions_total", "Receive regressions when an hour first seals in this process.", labels);
-        i.failures = &m.counter("sentinel_flow_chunk_build_failures_total", "Failed chunk day builds, retried next pass.", labels);
+        i.failures = &m.counter("sentinel_flow_chunk_build_failures_total", "Failed chunk day builds, retried with per-day backoff.", labels);
         i.hours = &m.counter("sentinel_flow_chunk_hours_sealed_total", "Hour sections first sealed in this process.", labels);
-        i.pending = &m.gauge("sentinel_flow_chunk_pending_days", "Days waiting for build or epoch validation.", labels);
+        i.pending = &m.gauge("sentinel_flow_chunk_pending_days", "Discovered days waiting for build or validation.", labels);
     }
 }
 FlowChunkStore::~FlowChunkStore() { stop(); }
+void FlowChunkStore::updatePending(Instrument &i) {
+    if (!i.pending) return;
+    uint64_t remaining = 0;
+    const auto newest = i.days.empty() ? -1 : i.days.rbegin()->first;
+    for (const auto &[day, d] : i.days)
+        if (i.validationPending.contains(day) || d.buildFailures ||
+            ((day != newest || d.badHours) && !d.coarse) ||
+            std::binary_search(i.state.pending.begin(), i.state.pending.end(), day)) ++remaining;
+    i.pending->set(double(remaining));
+}
 FlowStore::Archive FlowChunkStore::sharedArchive(const std::string &symbol, std::stop_token stop) {
     if (options_.afterArchiveRefreshForTest) options_.afterArchiveRefreshForTest();
     return sources_.archive(symbol, stop);
@@ -279,7 +289,16 @@ std::optional<chunks::DayFile> FlowChunkStore::load(const std::string &id, int64
         bool log = false;
         { std::lock_guard lock(mutex_); auto &d = instruments_.at(id).days[day];
           if (!expectedRevision || d.indexRevision == *expectedRevision) {
-              log = d.hours != 0; const auto next = d.indexRevision + 1; d = {0, false, true}; d.indexRevision = next; changed(id, day);
+              log = d.hours != 0;
+              // Withdrawing unreadable bytes must not reset the scheduler's
+              // retry history (a grid-less day has no file on every attempt).
+              const auto next = d.indexRevision + 1;
+              const auto buildFailures = d.buildFailures, damageFailures = d.damageFailures, badHours = d.badHours;
+              const auto retryAfter = d.retryAfter;
+              d = {0, false, true}; d.indexRevision = next;
+              d.buildFailures = buildFailures; d.damageFailures = damageFailures;
+              d.badHours = badHours; d.retryAfter = retryAfter;
+              changed(id, day);
           } }
         if (log) sLog_Warning("Flow chunk withdrawn instrument=" << id << " day=" << day << " error=" << e.what());
         if (log) wake();
@@ -340,7 +359,8 @@ void FlowChunkStore::initializeInstrument(const std::string &id, const FlowStore
     write(directory / "epoch", chunks::encodeEpochFile(next));
     { std::lock_guard lock(mutex_); auto &i = instruments_.at(id); i.state = next; i.initialized = true;
       i.oldestSourceDay = archive.days.empty() ? INT64_MAX : archive.days.front(); changed(id, {});
-      for (auto day : days) i.days.try_emplace(day); }
+      for (auto day : days) { i.days.try_emplace(day); i.validationPending.insert(day); }
+      updatePending(i); }
     for (auto day : days) if (auto file = load(id, day)) {
         publish(id, *file);
         auto locators = loadLocators(id, *file);
@@ -835,7 +855,10 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
           const auto &d = instruments_.at(id).days.at(day);
           if ((d.badHours || d.buildFailures) && options_.schedulerNow() < d.retryAfter) { incomplete.insert(id); return; } }
         bool work = needsWork(id, day, archive);
-        if (!work) return;
+        if (!work) {
+            std::lock_guard lock(mutex_); auto &i = instruments_.at(id);
+            i.validationPending.erase(day); updatePending(i); return;
+        }
         try {
             bool build = false;
             { std::lock_guard lock(mutex_);
@@ -851,7 +874,11 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
             { std::lock_guard lock(mutex_);
               auto &d = instruments_.at(id).days.at(day);
               if (d.badHours) { failedThisPass.emplace(id, day); incomplete.insert(id); }
-              if (!d.badHours) { d.buildFailures = 0; d.retryAfter = {}; } }
+              if (!d.badHours) {
+                  d.buildFailures = 0; d.retryAfter = {};
+                  instruments_.at(id).validationPending.erase(day);
+              }
+              updatePending(instruments_.at(id)); }
         } catch (const Cancelled &) { throw; }
           catch (const std::exception &e) {
             if (stop.stop_requested()) throw Cancelled{};
@@ -872,7 +899,13 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
             check(stop);
             const auto id = "coinbase:" + symbol;
             { std::lock_guard lock(mutex_);
-              for (auto day : archive.days) instruments_.at(id).days.try_emplace(day); }
+              auto &i = instruments_.at(id);
+              for (auto day : archive.days) {
+                  const auto [it, inserted] = i.days.try_emplace(day);
+                  if (inserted || (i.integrity != archive.integrity &&
+                      !attempted.contains(Attempt{id, day, archive.generation}))) i.validationPending.insert(day);
+              }
+              updatePending(i); }
             auto days = liveDays(symbol, archive);
             priorityDays[symbol] = days;
             for (auto it = days.rbegin(); it != days.rend(); ++it) process(symbol, *it, archive);
@@ -922,12 +955,7 @@ FlowStore::PassResult FlowChunkStore::runPass(std::stop_token stop) {
             const auto& checked = checkedArchives.at(symbol);
             i.generation = checked.generation; i.integrity = checked.integrity;
         }
-        uint64_t remaining = 0;
-        const auto newest = i.days.empty() ? -1 : i.days.rbegin()->first;
-        for (const auto &[day, d] : i.days)
-            if (((day != newest || d.badHours) && !d.coarse) ||
-                std::binary_search(i.state.pending.begin(), i.state.pending.end(), day)) ++remaining;
-        if (i.pending) i.pending->set(double(remaining));
+        updatePending(i);
     }
     result.stopped |= stop.stop_requested();
     return result;

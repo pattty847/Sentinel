@@ -555,6 +555,67 @@ TEST_F(ChunkStoreTest, SteadyPassOverClosedDaysFeedsNoTrades) {
     EXPECT_NE(rendered.find("sentinel_flow_chunk_pending_days{instrument=\"coinbase:BTC-USD\"} 0"), std::string::npos);
     std::cout << "steady_pass_days=3 feed_records=" << replayed << " wall_ms=" << ms << '\n';
 }
+TEST_F(ChunkStoreTest, FirstBackfillReportsEveryDiscoveredDayUntilChecked) {
+    fixture(3); FlowStore source(sourceOptions());
+    const auto discovered = source.archive("BTC-USD").days.size();
+    ASSERT_GT(discovered, 3u);
+    auto pending = [&](size_t count) {
+        return metrics.render().find("sentinel_flow_chunk_pending_days{instrument=\"coinbase:BTC-USD\"} " +
+            std::to_string(count) + "\n") != std::string::npos;
+    };
+    FlowChunkStore store(source, options());
+    EXPECT_FALSE(fs::exists(root / "coinbase" / "BTC-USD" / "epoch"));
+    store.initialize(); EXPECT_TRUE(pending(discovered));
+    ASSERT_EQ(store.runPass().failed, 0u); EXPECT_TRUE(pending(0));
+    // A restart must count validation even though the files and epoch exist.
+    FlowChunkStore restarted(source, options());
+    restarted.initialize(); EXPECT_TRUE(pending(discovered));
+    ASSERT_EQ(restarted.runPass().failed, 0u); EXPECT_TRUE(pending(0));
+}
+
+TEST_F(ChunkStoreTest, MissingGridRetriesWithExponentialBackoffDespiteAbsentFile) {
+    Journal journal(raw, "ETH-USD");
+    journal.trades(3 * Hour + 1000, {trade(3 * Hour + 100, "first", 100000, "BUY", "ETH-USD")});
+    journal.heartbeat(4 * Hour + 15000); journal.close(); // no snapshot anywhere
+    auto sourceConfig = sourceOptions(); size_t gridRecords = 0;
+    sourceConfig.afterRecordForTest = [&](std::stop_token) { ++gridRecords; };
+    FlowStore source(sourceConfig); auto o = options();
+    auto now = std::chrono::steady_clock::time_point{};
+    o.schedulerNow = [&] { return now; };
+    FlowChunkStore store(source, o);
+    EXPECT_EQ(store.runPass().failed, 1u); ASSERT_GT(gridRecords, 0u);
+    const auto first = gridRecords;
+    now += std::chrono::seconds(59); EXPECT_EQ(store.runPass().failed, 0u); EXPECT_EQ(gridRecords, first);
+    now += std::chrono::seconds(1); EXPECT_EQ(store.runPass().failed, 1u); EXPECT_GT(gridRecords, first);
+    const auto second = gridRecords;
+    now += std::chrono::seconds(60); EXPECT_EQ(store.runPass().failed, 0u); EXPECT_EQ(gridRecords, second);
+    now += std::chrono::seconds(59); EXPECT_EQ(store.runPass().failed, 0u); EXPECT_EQ(gridRecords, second);
+    now += std::chrono::seconds(1); EXPECT_EQ(store.runPass().failed, 1u); EXPECT_GT(gridRecords, second);
+    EXPECT_FALSE(fs::exists(store.filePath("coinbase:ETH-USD", Epoch)));
+}
+TEST_F(ChunkStoreTest, FirstBtcDayWithoutAnyBookSnapshotSealsFromExactMetadataGrid) {
+    Journal journal(raw);
+    journal.trades(3 * Hour + 1000, {trade(3 * Hour + 100, "first", 100000)});
+    journal.heartbeat(Day + 15000); journal.close();
+    FlowStore source(sourceOptions()); FlowChunkStore store(source, options());
+    ASSERT_EQ(store.runPass().failed, 0u);
+    const auto file = day(store);
+    EXPECT_EQ(file.grid.rowTickUnits, 100); EXPECT_EQ(file.grid.priceScale, 100);
+    EXPECT_TRUE(file.sections[24].sealed); EXPECT_TRUE(file.sections[25].sealed);
+    const auto bars = c::toBars(c::decode(file.sections[3].payload, Minute, Epoch + 3 * Hour, 60, false));
+    ASSERT_EQ(bars.size(), 1u); EXPECT_EQ(bars.front().count, 1u);
+}
+TEST_F(ChunkStoreTest, FirstSnapshotInFollowingDayLeadInSealsEarlierTrades) {
+    Journal journal(raw, "ETH-USD", "0.00000001", "2999", "3001");
+    journal.trades(3 * Hour + 1000, {trade(3 * Hour + 100, "first", 3000, "BUY", "ETH-USD")});
+    journal.snapshot(Day + 1000); journal.heartbeat(Day + 15000); journal.close();
+    FlowStore source(sourceOptions()); FlowChunkStore store(source, options());
+    ASSERT_EQ(store.runPass().failed, 0u);
+    const auto file = c::parseDayFile(readBytes(store.filePath("coinbase:ETH-USD", Epoch)));
+    EXPECT_TRUE(file.sections[24].sealed); EXPECT_TRUE(file.sections[25].sealed);
+    const auto bars = c::toBars(c::decode(file.sections[3].payload, Minute, Epoch + 3 * Hour, 60, false));
+    ASSERT_EQ(bars.size(), 1u); EXPECT_EQ(bars.front().count, 1u);
+}
 TEST_F(ChunkStoreTest, RestartWithMissingRootRebuildsIdenticalDay) {
     fixture(); FlowStore source(sourceOptions()); std::vector<uint8_t> original;
     { FlowChunkStore store(source, options()); ASSERT_EQ(store.runPass().failed, 0u); original = readBytes(store.filePath(Id, Epoch)); }

@@ -121,6 +121,7 @@ private:
     struct Instrument {
         sentinel::flow::chunks::EpochState state;
         std::map<int64_t, Day> days;
+        std::set<int64_t> validationPending; // discovered work, including a cold first backfill
         bool initialized = false;
         uint64_t serial = 0;
         int64_t oldestSourceDay = INT64_MAX;
@@ -134,6 +135,7 @@ private:
     mutable std::mutex mutex_;
     std::function<void(const std::string&, std::optional<int64_t>)> invalidate_;
     void changed(const std::string&, std::optional<int64_t> day); // mutex held
+    void updatePending(Instrument&); // mutex held; never performs I/O
     std::optional<Stamp> stampLocked(const std::string&, int64_t, int64_t) const;
     std::optional<std::pair<uint64_t, std::array<std::vector<Range>, 3>>> scanLevels(const std::string&);
     std::mutex passMutex_, wakeMutex_;

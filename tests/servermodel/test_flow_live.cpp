@@ -369,6 +369,74 @@ TEST_F(FlowLive, RollOptionsGridCallbackInitializesLiveBuilder) {
   EXPECT_EQ(bars.front().priceScale, 100);
 }
 
+TEST_F(FlowLive, MidnightReconnectAndRestartHoldMatchesSealedMinute) {
+  namespace ff = flow_fixture;
+  namespace r = sentinel::roller;
+  namespace c = sentinel::flow::chunks;
+  for (const auto reconnect : {-2000, 2000}) for (const bool restart : {false, true}) {
+    SCOPED_TRACE("reconnect=" + std::to_string(reconnect) + " restart=" + std::to_string(restart));
+    QTemporaryDir temp; const auto root = std::filesystem::path(temp.path().toStdString());
+    const auto raw = root / "raw", hmc = root / "hmc";
+    std::filesystem::create_directory(raw); std::filesystem::create_directory(hmc);
+    ff::Journal journal(raw); journal.snapshot(-ff::Minute);
+    if (reconnect < 0) journal.reconnect(reconnect);
+    journal.trades(100, {ff::trade(50, "midnight-1", 100000)});
+    journal.trades(900, {ff::trade(800, "midnight-2", 100001)});
+    if (reconnect > 0) journal.reconnect(reconnect);
+    journal.trades(3000, {ff::trade(2500, "after-reconnect", 100002)});
+    journal.heartbeat(5000);
+    journal.heartbeat(ff::Hour + config.flow.sealWindowMs); journal.close();
+
+    ServerDataModel live(config); FlowLiveTestAccess::stopTimer(live);
+    if (!restart) live.onFlowGrid("BTC-USD", ff::Epoch - 86'400'000,
+        r::deriveGrid(metadata(), 100000), metadata());
+    r::JournalReader reader(raw, "BTC-USD"); r::JournalFeed feed("BTC-USD");
+    int64_t maximum = INT64_MIN;
+    feed.onTrade = [&](const Trade &t) {
+      live.flowTradePosted(t.product_id); live.onFlowTrade(t, maximum);
+    };
+    bool deliveredGrid = false;
+    r::JournalRecord record;
+    while (reader.next(record)) {
+      maximum = std::max(maximum, record.record.time.systemNs / 1'000'000);
+      feed.apply(record); live.flowRecordApplied("BTC-USD", maximum);
+      if (!deliveredGrid && maximum >= ff::Epoch + 5000) {
+        EXPECT_EQ(FlowLiveTestAccess::heldTrades(live), 3u);
+        EXPECT_TRUE(std::filesystem::is_empty(hmc)); // restart has no new-day grid on disk
+        // Deliver the real roller callback after the provisional trades, as at
+        // rollover while the previous day's durable recorder is draining.
+        r::RollOptions options{raw, hmc, "BTC-USD", ff::Epoch, ff::Epoch + ff::Minute};
+        options.onGrid = [&](int64_t day, const r::Grid &g, const Json &meta) {
+          live.onFlowGrid("BTC-USD", day, g, meta);
+        };
+        r::roll(options); deliveredGrid = true;
+      }
+      FlowLiveTestAccess::tick(live);
+    }
+    ASSERT_TRUE(deliveredGrid);
+    EXPECT_EQ(FlowLiveTestAccess::heldBytes(live), 0u);
+    EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(live), 0u);
+    auto liveBar = FlowLiveTestAccess::series(live, "BTC-USD", ff::Epoch, ff::Minute).builder.snapshotBar(ff::Epoch);
+    ASSERT_TRUE(liveBar); EXPECT_EQ(liveBar->count, 3u); liveBar->notable.clear();
+    recording::FlowStore::Options o; o.journalRoot = raw; o.hmc2Root = hmc; o.root = root / "fld";
+    o.symbols = {"BTC-USD"}; o.lowerPriority = false;
+    o.hourThrough = [](const std::string&) { return ff::Epoch + ff::Hour; };
+    recording::FlowStore source(o);
+    recording::FlowChunkStore::Options co; co.root = root / "flc"; co.lowerPriority = false;
+    co.rules.sealWindowMs = config.flow.sealWindowMs;
+    recording::FlowChunkStore store(source, co);
+    const auto archive = source.archive("BTC-USD"); ASSERT_TRUE(archive.catalog);
+    const auto grid = source.gridFor("BTC-USD", ff::Epoch, *archive.catalog);
+    const auto sealed = store.buildHour("BTC-USD", ff::Epoch, grid, *archive.catalog);
+    ASSERT_TRUE(sealed.section.sealed);
+    const auto bars = c::toBars(c::decode(sealed.section.payload, ff::Minute, ff::Epoch, 60, false,
+        uint64_t(1) << sealed.section.stepExponent));
+    ASSERT_EQ(bars.size(), 1u); EXPECT_EQ(*liveBar, bars.front());
+    std::cout << "midnight reconnect_ms=" << reconnect << " restart=" << restart
+              << " held=3 dropped=0 live_equals_sealed=1\n";
+  }
+}
+
 TEST_F(FlowLive, MidHourSubscribeComposesMinutesAndMarksMissingCoverage) {
   model->onTrade(trade(Day + 10 * 60'000, "ten"));
   tick(Day + 10 * 60'000 + 1000);
@@ -466,15 +534,47 @@ TEST_F(FlowLive, EmptyBuildingCarrierIsSentOnlyToAvailabilityAwareSession) {
   EXPECT_EQ(sentinel::flow::decodeFlowBar(bytes(*built)).count, 0u);
 }
 
-TEST_F(FlowLive, MissingGridTradeIsCounted) {
+TEST_F(FlowLive, MissingGridTradeIsHeldUntilAuthoritativeGrid) {
   ServerDataModel bare(config);
   FlowLiveTestAccess::stopTimer(bare);
   bare.onTrade(trade(Day + 1000, "no-grid"));
-  EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(bare), 1u);
-  EXPECT_EQ(FlowLiveTestAccess::totalDrops(bare), 1u);
+  EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(bare), 0u);
+  EXPECT_EQ(FlowLiveTestAccess::totalDrops(bare), 0u);
+  EXPECT_EQ(FlowLiveTestAccess::heldTrades(bare), 1u);
   grid(bare);
   bare.onTrade(trade(Day + 2000, "grid"));
-  EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(bare), 1u);
+  EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(bare), 0u);
+  EXPECT_EQ(FlowLiveTestAccess::heldBytes(bare), 0u);
+  EXPECT_EQ(FlowLiveTestAccess::series(bare, "BTC-USD", Day, 60000).builder.bars().front().count, 2u);
+}
+
+TEST_F(FlowLive, MissingGridHoldIsBoundedByBytesCountAndTime) {
+  ServerDataModel bare(config); FlowLiveTestAccess::stopTimer(bare);
+  auto large = trade(Day, std::string(1024 * 1024, 'x'));
+  for (int n = 0; n < 8; ++n) FlowLiveTestAccess::add(bare, large);
+  EXPECT_LT(FlowLiveTestAccess::heldBytes(bare), 4u * 1024 * 1024);
+  EXPECT_EQ(FlowLiveTestAccess::heldTrades(bare), 3u);
+  EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(bare), 5u);
+  FlowLiveTestAccess::expireHeld(bare);
+  EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(bare), 8u);
+  EXPECT_EQ(FlowLiveTestAccess::heldBytes(bare), 0u);
+  for (int n = 0; n < 8200; ++n) FlowLiveTestAccess::add(bare, trade(Day, std::to_string(n)));
+  EXPECT_EQ(FlowLiveTestAccess::heldTrades(bare), 8192u);
+  EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(bare), 16u);
+  FlowLiveTestAccess::expireHeld(bare);
+  EXPECT_EQ(FlowLiveTestAccess::heldTrades(bare), 0u);
+}
+
+TEST_F(FlowLive, HeldAdmissionUsesArrivalWatermarkAndCountsLateOnlyOnce) {
+  ServerDataModel bare(config); FlowLiveTestAccess::stopTimer(bare);
+  bare.flowTradePosted("BTC-USD"); bare.onFlowTrade(trade(Day + 100, "on-time"), Day + 200);
+  bare.flowTradePosted("BTC-USD");
+  bare.onFlowTrade(trade(Day + 200, "late"), Day + 60000 + config.flow.sealWindowMs);
+  grid(bare);
+  const auto bars = FlowLiveTestAccess::series(bare, "BTC-USD", Day, 60000).builder.bars();
+  ASSERT_EQ(bars.size(), 1u); EXPECT_EQ(bars.front().count, 1u);
+  EXPECT_EQ(FlowLiveTestAccess::lateDrops(bare), 1u);
+  EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(bare), 0u);
 }
 
 TEST_F(FlowLive, GridCanChangeBeforeTradesButNotAfterwards) {
@@ -624,6 +724,7 @@ TEST_F(FlowLive, MissingGridDropMarksLaterHourIncomplete) {
   ServerDataModel bare(config);
   FlowLiveTestAccess::stopTimer(bare);
   bare.onTrade(trade(Day, "missing"));
+  FlowLiveTestAccess::expireHeld(bare);
   grid(bare);
   std::vector<Json> seen;
   auto sub = std::make_shared<FlowSubscription>();

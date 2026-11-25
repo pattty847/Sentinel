@@ -3,6 +3,8 @@
 // Restore each symbol's FLD1 watermark when its roller writer first publishes
 // a watermark, including while another symbol's serial pass is running.
 // Seeding validates files and sources without grid discovery or trade replay.
+// HMC2 remains authoritative. Missing grids use the roller's snapshot anchor;
+// BTC's fixed $1 near grid can be recovered exactly from product metadata alone.
 #include "FlowStore.hpp"
 #include "RollupStore.hpp"
 #include "PersistenceIo.hpp"
@@ -350,6 +352,7 @@ uint32_t revisionHint(const fs::path &path) {
 FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::string &symbol, int64_t day,
                              const fs::path &hmcPath, const roller::JournalReader &catalog,
                              std::stop_token stop) {
+    checkStop(stop);
     std::shared_ptr<const nlohmann::json> metadata;
     for (const auto &file : catalog.files()) {
         if (file.openedNs / 1'000'000 <= day || !metadata)
@@ -381,11 +384,15 @@ FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::stri
         grid.sizeFloor = header->sizeScale.floor;
         values.configHash = header->configHash;
         values.hasHmc2 = true;
+    } else if (symbol == "BTC-USD" && metadata) {
+        // deriveGrid's BTC override is price independent ($1/$5). A positive
+        // reference only satisfies its input validation; all scales and the
+        // size floor still come from the journal's actual product metadata.
+        grid = roller::deriveGrid(*metadata, 1.0);
     } else {
-        sLog_Warning("Flow grid using journal fallback symbol=" << symbol << " day=" << day);
-        const auto start = firstDurable(catalog, day, stop);
-        if (!start)
-            throw std::runtime_error("flow grid fallback has no journal record");
+        checkStop(stop);
+        const auto start = catalog.anchor(day, stop);
+        checkStop(stop);
         roller::JournalReader reader(catalog, start);
         roller::JournalFeed feed(symbol);
         roller::JournalRecord input;
@@ -406,8 +413,9 @@ FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::stri
         };
         while (!ready && reader.next(input)) {
             checkStop(stop);
-            if (input.record.time.systemNs / 1'000'000 >= day + Day)
-                break;
+            // Like the roller, a first journal day waits for the first usable
+            // book even if it arrives in the next day's lead-in. The finite
+            // catalog and stop token bound this search; no trade price is used.
             feed.apply(input);
             if (options.afterRecordForTest)
                 options.afterRecordForTest(stop);
@@ -1034,6 +1042,10 @@ FlowStoreGridValues FlowStore::gridFor(const std::string &symbol, int64_t day,
                                        const roller::JournalReader &catalog, std::stop_token stop) {
     const auto grids = hmcDayPaths(options_, symbol, stop);
     return dayScales(options_, symbol, day, grids.contains(day) ? grids.at(day) : fs::path{}, catalog, stop);
+}
+FlowStoreGridValues FlowStore::journalGridFor(const std::string &symbol, int64_t day,
+                                               const roller::JournalReader &catalog, std::stop_token stop) {
+    return dayScales(Options{}, symbol, day, {}, catalog, stop);
 }
 uint64_t FlowStore::archiveStamp(const std::string &symbol, const roller::JournalReader &catalog,
     const roller::JournalPos &first, const roller::JournalPos &last, std::stop_token stop) {

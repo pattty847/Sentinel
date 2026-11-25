@@ -119,6 +119,9 @@ class FlowStore {
                             bool sealedEvidence = false, int64_t tailMs = 60'000) const;
     FlowStoreGridValues gridFor(const std::string &symbol, int64_t day,
                                const sentinel::roller::JournalReader &catalog, std::stop_token stop = {});
+    // Read-only conformance/audit entry: the same fallback, without consulting HMC2.
+    static FlowStoreGridValues journalGridFor(const std::string &symbol, int64_t day,
+                               const sentinel::roller::JournalReader &catalog, std::stop_token stop = {});
     const Options &options() const { return options_; }
     // Same source identity primitives as FLD1; the terminal file always uses
     // its complete seal block prefix, independent of later append/close state.

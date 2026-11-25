@@ -13,6 +13,7 @@
 #include <unordered_set>
 #include <vector>
 #include <deque>
+#include <chrono>
 #include <shared_mutex>
 #include <mutex>
 #include <string>
@@ -241,7 +242,18 @@ private:
         int64_t receiveMax = INT64_MIN;
         int64_t lastLagWarningClock = INT64_MIN;
         int64_t firstLiveMs = -1;
-        std::set<int64_t> missingGridWarnedDays;
+        struct HeldTrade {
+            Trade trade;
+            int64_t exchangeMs;
+            bool lateMinute;
+            size_t bytes;
+            std::chrono::steady_clock::time_point expires;
+        };
+        // Only the rollover/restart gap allocates here. Charge container overhead
+        // as well as both strings; a count ceiling also bounds deque bookkeeping.
+        std::deque<HeldTrade> heldTrades;
+        size_t heldBytes = 0;
+        std::optional<std::chrono::steady_clock::time_point> lastGridWarning;
         std::set<int64_t> lossyMinutes; // accepted series cannot prove these minutes
         std::set<int64_t> newLossyMinutes;
         std::map<int64_t, FlowDay> days;
@@ -283,7 +295,12 @@ private:
     int64_t flowMinuteRetainedFrom(const std::string& symbol, int64_t clock) const;
     void updateFlowRetentionFloor(const std::string& symbol, int64_t clock);
     void pruneFlowSeries(const std::string& symbol, int64_t clock, int64_t tf, FlowSeries& series);
-    void addFlowTrade(const Trade& trade, int64_t exchangeMs);
+    static constexpr size_t kFlowGridHoldBytes = 4 * 1024 * 1024, kFlowGridHoldTrades = 8192;
+    static constexpr auto kFlowGridHoldTime = std::chrono::seconds(120);
+    void addFlowTrade(const Trade& trade, int64_t exchangeMs, std::optional<bool> heldLate = {});
+    void markFlowLoss(FlowProduct& product, int64_t exchangeMs);
+    void dropGridTrade(const std::string& symbol, FlowProduct& product, int64_t exchangeMs);
+    void expireGridTrades(const std::string& symbol, FlowProduct& product);
     void publishFlow();
     void publishFlowSeries(const std::string& symbol, FlowProduct& product,
                            int64_t tf, FlowSeries& series);

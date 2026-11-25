@@ -67,6 +67,9 @@ set_tests_properties(PriceDisplayUnitTests PROPERTIES LABELS "core")
 add_executable(flow_chunk_diff EXCLUDE_FROM_ALL flow_chunk_diff.cpp)
 target_link_libraries(flow_chunk_diff PRIVATE sentinel_core)
 
+add_executable(flow_grid_check EXCLUDE_FROM_ALL flow_grid_check.cpp)
+target_link_libraries(flow_grid_check PRIVATE sentinel_core)
+
 add_executable(test_chunk_frame test_chunk_frame.cpp)
 target_link_libraries(test_chunk_frame PRIVATE sentinel_core GTest::gtest_main)
 add_test(NAME ChunkFrameTests COMMAND test_chunk_frame)
