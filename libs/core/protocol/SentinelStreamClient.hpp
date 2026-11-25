@@ -19,6 +19,7 @@
 #include <QVector>
 #include "SentinelStreamProtocol.hpp"
 #include "ChunkWire.hpp"
+#include "ChunkReply.hpp"
 #include <boost/asio/thread_pool.hpp>
 #include <map>
 #include <mutex>
@@ -42,6 +43,7 @@ using tcp = net::ip::tcp;
 
 class SentinelStreamClient : public QObject {
     friend struct FlowWireClientTest;
+    friend struct FlowChunkClientTest;
     friend struct FlowDataSourceTest;
     friend struct TradeOverlayWireTest;
     friend struct CandleDataSourceTest;
@@ -128,6 +130,12 @@ public:
                                  const std::vector<int64_t>& starts, const std::vector<uint64_t>& haveHash = {});
     quint64 subscribeHeatmapLive(const std::string& symbol, const std::vector<std::string>& sources, int64_t sinceMs);
     void unsubscribeHeatmapLive(const std::string& symbol);
+    // Thread-safe: ids + bookkeeping are synchronized, writes are strand-owned.
+    quint64 requestChunks(const protocol::chunks::Key& key, const std::vector<int64_t>& starts,
+                          const std::vector<std::optional<uint64_t>>& haveHash = {});
+    void forgetChunks(quint64 request);
+    void subscribeChunkAvailability(const std::vector<std::string>& instruments);
+    uint64_t chunkRejectedCount() const { return m_chunkRejected.load(); }
     void requestFlowHistory(quint64 req, const std::string& symbol, int64_t timeframeMs,
                             int64_t endTimeMs, int limit);
     void requestTradeHistory(quint64 req, const std::string& symbol, int64_t startMs, int64_t endMs);
@@ -196,6 +204,9 @@ signals:
     void heatmapChunkFailed(const SentinelStreamClient::HeatmapChunkError& error);
     // Sent on subscribe and whenever it changes. Refused on a wire-version mismatch.
     void heatmapAvailabilityReceived(const protocol::chunkwire::Availability& availability);
+    void chunkAvailabilityReceived(protocol::chunks::Availability availability);
+    void chunkReceived(quint64 requestId, protocol::chunks::ReplyPtr reply);
+    void chunkFailed(protocol::chunks::Failure failure);
     void candleHistoryReceived(const QString &symbol, int64_t timeframeMs, int64_t startTimeMs, int64_t endTimeMs,
                                const QVector<CandleBar> &candles);
     void candleHistoryFailed(const QString& symbol);
@@ -237,6 +248,8 @@ private:
                              std::optional<FlowDropInfo> flowDrop = {});
     void decodeBinaryMessage(const std::vector<uint8_t>& frame, quint64 epoch, bool flowLive = false, quint64 flowRequest = 0);
     bool acceptChunkOrder(const heatmap::ChunkFrame& frame);
+    void decodeChunkMessage(const std::vector<uint8_t>& frame, quint64 epoch);
+    void resendChunkSubscription(); // strand only
     void handleServerConfigMessage(const nlohmann::json& msg);
     void handleSnapshotMessage(const nlohmann::json& msg);
     void handleL2UpdateMessage(const nlohmann::json& msg);
@@ -304,6 +317,9 @@ private:
     // Signal consumers must use queued connections (never reenter under this lock).
     struct ChunkOrder { bool sealed = false; uint64_t revision = 0; int64_t committedThroughMs = 0; };
     std::mutex m_chunkOrderMutex;
+    std::map<quint64, std::vector<protocol::chunks::Key>> m_chunkRequests; // same mutex
+    std::atomic<uint64_t> m_chunkRejected{0};
+    std::string m_chunkSubscription; // strand only, retained across reconnect
     bool m_acceptChunkFrames = true; // guarded by m_chunkOrderMutex
     // Decoder dependency also lets tests pause an in-progress decode deterministically.
     std::function<heatmap::ChunkEnvelope(std::span<const uint8_t>)> m_chunkDecoder = heatmap::decodeChunkEnvelope;

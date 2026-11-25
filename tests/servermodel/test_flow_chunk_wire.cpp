@@ -3,6 +3,11 @@
 #define SENTINEL_FLOW_CHUNK_TEST
 #include "protocol/SentinelStreamServer.cpp"
 #include "roller/fixtures/FlowJournal.hpp"
+#include "protocol/SentinelStreamClient.hpp"
+#include "protocol/ChunkClientTransport.hpp"
+#include "flow/FlowChunkFetcher.hpp"
+#include "flow/FlowChunkCodec.hpp"
+#include <QEvent>
 #include <QCoreApplication>
 #include <QTemporaryDir>
 #include <QScopeGuard>
@@ -24,6 +29,9 @@ struct FlowChunkWireTest {
         net::post(s.ws_.get_executor(), [&] { f(s); done.set_value(); });
         ASSERT_EQ(done.get_future().wait_for(5s), std::future_status::ready);
     }
+    static void sink(Session& s, std::function<void(std::string,bool)> fn) {
+        on(s,[&](auto& v) { v.chunkWriteForTest_=std::move(fn); });
+    }
     static void request(Session& s, const Json& j) { on(s, [&](auto& v) { v.handleFlowChunkRequest(j); }); }
     static void subscribe(Session& s, const Json& j) { on(s, [&](auto& v) { v.handleFlowAvailabilitySubscribe(j); }); }
     static void poll(Session& s, bool advance = false) {
@@ -42,6 +50,19 @@ struct FlowChunkWireTest {
         const auto until = std::chrono::steady_clock::now()+5s;
         while (s.m_pendingHistoryTasks.load() && std::chrono::steady_clock::now() < until) std::this_thread::yield();
         EXPECT_EQ(s.m_pendingHistoryTasks.load(), 0u); on(session, [](auto&) {});
+    }
+};
+struct FlowChunkClientTest {
+    static void receive(SentinelStreamClient& c, const std::string& bytes, bool binary) {
+        if (binary) c.handleBinaryMessage(std::make_shared<std::vector<uint8_t>>(bytes.begin(),bytes.end()));
+        else c.handleMessage(bytes);
+    }
+    static std::vector<Json> writes(SentinelStreamClient& c, bool subscription = false) {
+        c.m_ioc.restart(); c.m_ioc.poll();
+        if (subscription) c.resendChunkSubscription();
+        std::vector<Json> out;
+        for (const auto& s : c.m_writeQueue) out.push_back(Json::parse(s));
+        c.m_writeQueue.clear(); return out;
     }
 };
 namespace {
@@ -67,12 +88,20 @@ protected:
     std::vector<Json> text;
     std::thread::id readThread;
     std::function<void()> beforeEpochWrite;
+    virtual int64_t fixtureThrough() const { return Epoch+Day; }
+    virtual bool fillDays() const { return false; }
     void SetUp() override {
         fs::create_directories(raw); fs::create_directories(hmc);
-        Journal j(raw); j.snapshot(-Minute); j.trades(1000, {trade(100,"1",100000)}); j.heartbeat(Hour+15000); j.close();
+        Journal j(raw); j.snapshot(-Minute); j.trades(1000, {trade(100,"1",100000)}); j.heartbeat(Hour+15000);
+        if (fillDays()) for (int64_t h=1; Epoch+h*Hour<fixtureThrough(); ++h) {
+            if (h % 24 == 0) j.snapshot(h*Hour+16000);
+            j.trades(h*Hour+20000, {trade(h*Hour+100, std::to_string(h+1), 100000+h)});
+            j.heartbeat((h+1)*Hour+15000);
+        }
+        j.close();
         recording::FlowStore::Options o; o.root=base/"fld"; o.hmc2Root=hmc; o.journalRoot=raw;
-        o.hourThrough=[](const std::string&) { return Epoch+Day; };
-        o.symbols={"BTC-USD"}; o.lowerPriority=false; o.nowMs=[] { return Epoch+Day; };
+        o.hourThrough=[this](const std::string&) { return fixtureThrough(); };
+        o.symbols={"BTC-USD"}; o.lowerPriority=false; o.nowMs=[this] { return fixtureThrough()+(fillDays()?Hour:0); };
         source=std::make_unique<recording::FlowStore>(o);
         recording::FlowChunkStore::Options c; c.root=base/"flc"; c.lowerPriority=false; c.rules.sealWindowMs=15000;
         c.afterSectionReadForTest=[&] { readThread=std::this_thread::get_id(); };
@@ -208,5 +237,64 @@ TEST_F(FlowChunkWire, AvailabilitySubscribeNewSealEpochAndCoalescing) {
     FlowChunkWireTest::poll(*session,true); FlowChunkWireTest::drain(*server,*session); EXPECT_EQ(text.size(),3u);
     FlowChunkWireTest::subscribe(*session,{{"instruments",Json::array()}});
     FlowChunkWireTest::poll(*session,true); FlowChunkWireTest::drain(*server,*session); EXPECT_EQ(text.size(),3u);
+}
+}
+
+namespace {
+class FlowChunkEndToEnd : public FlowChunkWire {
+    int64_t fixtureThrough() const override {
+        return heatmap::chunkStartOf(heatmap::kDayMs,Epoch)+16*heatmap::kDayMs;
+    }
+    bool fillDays() const override { return true; }
+};
+TEST_F(FlowChunkEndToEnd, ClientFetcherDecodesBothChannelsAtEveryStoredLevel) {
+    namespace fc = sentinel::flow;
+    namespace codec = sentinel::flow::chunks;
+    SentinelStreamClient client("127.0.0.1","1");
+    protocol::chunks::ClientTransport transport(client);
+    fc::FlowChunkCache cache;
+    fc::FlowChunkFetcher fetch(cache,transport);
+    FlowChunkWireTest::sink(*session,[&](std::string bytes,bool binary) { FlowChunkClientTest::receive(client,bytes,binary); });
+    auto cleanup=qScopeGuard([&] { FlowChunkWireTest::drain(*server,*session);
+        FlowChunkWireTest::sink(*session,[](auto,bool) {}); });
+    client.connected();
+    for (int turn=0;turn<10;++turn) QCoreApplication::sendPostedEvents(nullptr,QEvent::MetaCall);
+    // Fetch each channel independently, so a cached rows body cannot mask a
+    // missing summary wire path. Several sealed days/hours come from RAWL2.
+    for (const auto* channel : {"flow.summary","flow.rows"}) for (auto level : heatmap::kChunkLevels) {
+        fetch.hostChanged();
+        const auto start=heatmap::chunkStartOf(level,Epoch);
+        ASSERT_TRUE(fetch.want(1,{Id,channel,level,start,start+heatmap::chunkSpanMs(level),0}));
+        const auto until=std::chrono::steady_clock::now()+10s;
+        bool subscription=true;
+        const protocol::chunks::Key wanted{Id,channel,level,std::string_view(channel)=="flow.rows"?1u:0u,start};
+        do {
+            for (int turn=0;turn<10;++turn) QCoreApplication::sendPostedEvents(nullptr,QEvent::MetaCall);
+            for (const auto& j : FlowChunkClientTest::writes(client,subscription)) {
+                if (j.at("type")=="chunk_request") FlowChunkWireTest::request(*session,j);
+                else FlowChunkWireTest::subscribe(*session,j);
+            }
+            subscription=false;
+            QCoreApplication::processEvents();
+            for (int turn=0;turn<10;++turn) QCoreApplication::sendPostedEvents(nullptr,QEvent::MetaCall);
+            std::this_thread::yield();
+        } while ((!cache.read(wanted) || fetch.stats().inFlightChunks) && std::chrono::steady_clock::now()<until);
+        ASSERT_TRUE(cache.read(wanted)) << channel << " level=" << level;
+        // Check every delivered chunk, including padding, against store bytes.
+        const auto snapshot=fetch.availability(Id); ASSERT_TRUE(snapshot);
+        const auto plan=fc::planFlowChunks({Id,channel,level,start,start+heatmap::chunkSpanMs(level),0},*snapshot,fc::flowChunkEstimate);
+        ASSERT_FALSE(plan.empty());
+        for (const auto& item : plan) {
+            const auto held=cache.read(item.key); ASSERT_TRUE(held);
+            auto payload=store->read(Id,item.key.levelMs,item.key.startMs); ASSERT_TRUE(payload);
+            auto storedKey=item.key;
+            storedKey.priceStep=storedKey.channel=="flow.rows" ? uint64_t(1)<<payload->stepExponent : 0;
+            const auto bytes=std::span(payload->bytes).first(storedKey.channel=="flow.rows" ? payload->bytes.size() : payload->summaryLength);
+            auto expected=codec::decode(bytes,storedKey,uint16_t(heatmap::chunkSpanMs(storedKey.levelMs)/storedKey.levelMs),payload->epoch);
+            EXPECT_EQ(codec::toData(*held),codec::toData(expected)); EXPECT_EQ(held->epoch,expected.epoch);
+        }
+        fetch.release(1);
+    }
+    EXPECT_EQ(client.chunkRejectedCount(),0u);
 }
 }
