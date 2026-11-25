@@ -82,13 +82,14 @@ private:
     QString m_flowSymbol;
     int64_t m_flowTimeframeMs = 0, m_flowFrom = 0, m_flowTo = 0, m_flowAnchor = -1;
     quint64 m_flowSubscription = 0, m_flowGeneration = 0;
-    bool m_flowConfigReady = false, m_flowAvailabilityReady = false, m_flowReplayReady = false, m_flowRows = false;
+    bool m_flowConfigReady = false, m_flowAvailabilityReady = false, m_flowRows = false;
     int m_flowPan = 0, m_flowRetryMs = 100;
     bool m_flowComposing = false, m_flowDirty = false;
     struct FlowWork;
     std::shared_ptr<FlowWork> m_flowWork;
     // Only retirement metadata survives selection changes; live bars are reset.
     std::map<std::pair<QString, int64_t>, std::shared_ptr<FlowWork>> m_flowOwnership;
+    std::deque<std::pair<QString, int64_t>> m_flowOwnershipOrder;
     void processBookSnapshotDeadlines(qint64 nowMs);
     void onL2UpdateReceivedAt(const QString& productId, const std::vector<BookLevelUpdate>& updates,
                               double tickSize, quint64 deliveryGeneration, qint64 nowMs,

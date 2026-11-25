@@ -1,6 +1,7 @@
 #include "FlowChunkView.hpp"
 #include "heatmap/ChartSurface.hpp"
 #include "FlowCompose.hpp"
+#include "servermodel/Hmc2Store.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
 namespace sentinel::flow {
@@ -71,8 +72,20 @@ FlowViewBucket sealedBucket(Parts& parts, int64_t tf) {
     return out;
 }
 }
-void FlowChunkView::resetLive() { live_.clear(); }
+FlowChunkWant paddedFlowView(FlowChunkWant want) {
+    const auto tf = want.timeframeMs;
+    if (tf < 1000 || want.fromMs < 0 || want.toMs <= want.fromMs || want.toMs > INT64_MAX - tf) return want;
+    const auto to = (want.toMs - 1) / tf * tf + tf;
+    const auto count = (to - want.fromMs / tf * tf) / tf;
+    const auto pad = std::min(count, std::max<int64_t>(0, (heatmap::kMaxChartSurfaceBars - count) / 2)) * tf;
+    want.fromMs = std::max<int64_t>(tf >= 60000 ? recording::kHmc2MinMs : 0, want.fromMs / tf * tf - pad);
+    want.toMs = to + std::min(pad, (INT64_MAX - tf - to) / tf * tf);
+    want.fromMs = std::max(want.fromMs, want.toMs - int64_t(heatmap::kMaxChartSurfaceBars) * tf);
+    return want;
+}
+void FlowChunkView::resetLive() { live_.clear(); prefix_ = {}; }
 void FlowChunkView::retention(int64_t from) {
+    if (from > liveFromMs_ && prefix_.through > liveFromMs_) prefix_ = {};
     liveFromMs_ = std::max(liveFromMs_, from);
     std::erase_if(live_, [&](const auto& p) {
         return p.second.value && p.first + p.second.value->bar.timeframeMs <= liveFromMs_;
@@ -88,6 +101,7 @@ void FlowChunkView::live(FlowViewBar incoming, Status status) {
         if (incoming.revision < old.revision ||
             (incoming.revision == old.revision && old.complete && !incoming.complete)) return;
     }
+    if (start < prefix_.through) prefix_ = {};
     live_[start] = {status, std::move(incoming)};
     // One-second flow is RAM only; a quiet source still has a hard bucket cap.
     while (live_.size() > 1802) live_.erase(live_.begin());
@@ -105,6 +119,12 @@ FlowViewSnapshot FlowChunkView::compose(FlowChunkCache& cache, const FlowChunkWa
     // One-second history does not exist. Its cumulative baseline is explicitly
     // the retained RAM window; do not scan a month of missing seconds.
     if (tf == 1000 && !live_.empty()) scanFrom = std::max(scanFrom, std::min(from, live_.begin()->first));
+    const auto generation = cache.generation();
+    const bool reuse = anchor >= 0 && prefix_.instrument == want.instrument && prefix_.anchor == anchor &&
+        prefix_.tf == tf && prefix_.generation == generation && prefix_.through <= from;
+    out.anchorMs = anchor; out.prefixThroughMs = from; out.loadedFromMs = reuse ? prefix_.loaded : scanFrom;
+    out.prefixDelta = reuse ? prefix_.delta : 0; out.prefixComplete = !reuse || prefix_.complete;
+    if (reuse) scanFrom = prefix_.through;
     auto scan = want; scan.fromMs = scanFrom; scan.toMs = to;
     std::map<int64_t, Parts> parts;
     for (const auto& item : planFlowChunks(scan, availability, flowChunkEstimate, 0)) {
@@ -113,8 +133,6 @@ FlowViewSnapshot FlowChunkView::compose(FlowChunkCache& cache, const FlowChunkWa
     // Availability lists sealed chunks, not the journal's recorded extent.
     // In newest-first recovery an older missing hour is still building. Only
     // explicit chunk coverage proves unrecorded; oldest sealed is not that proof.
-    out.anchorMs = anchor; out.prefixThroughMs = from; out.loadedFromMs = scanFrom;
-    out.prefixComplete = true;
     for (auto time = scanFrom; time < to; time += tf) {
         FlowViewBucket bucket;
         const auto p = parts.find(time);
@@ -139,6 +157,8 @@ FlowViewSnapshot FlowChunkView::compose(FlowChunkCache& cache, const FlowChunkWa
                 out.prefixDelta += double(bucket.value->bar.delta) / bucket.value->bar.baseScale;
         } else out.buckets.emplace(time, std::move(bucket));
     }
+    if (anchor >= 0) prefix_ = {want.instrument, anchor, tf, from, out.loadedFromMs,
+                                generation, out.prefixDelta, out.prefixComplete};
     return out;
 }
 }

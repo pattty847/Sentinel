@@ -26,6 +26,7 @@ void FlowChunkCache::put(const Key& key, Body body, uint64_t epoch, uint64_t has
         bytes_ -= it->second.value.body->storageBytes;
         lru_.erase(it->second.lru); entries_.erase(it);
     }
+    ++generation_;
     lru_.push_front(key); bytes_ += body->storageBytes;
     entries_.emplace(key, Node{{std::move(body), epoch, hash, false, false}, lru_.begin()}); evict();
 }
@@ -33,27 +34,31 @@ bool FlowChunkCache::confirm(const Key& key, uint64_t hash, uint64_t epoch) {
     std::lock_guard lock(mutex_);
     const auto it = entries_.find(key);
     if (it == entries_.end() || it->second.value.hash != hash) return false;
+    ++generation_;
     auto& e = it->second.value; e.epoch = epoch; e.stale = e.hidden = false;
     return true;
 }
 bool FlowChunkCache::hide(const Key& key) {
     std::lock_guard lock(mutex_); const auto it = entries_.find(key);
     if (it == entries_.end() || it->second.value.hidden) return false;
-    it->second.value.hidden = true; return true;
+    ++generation_; it->second.value.hidden = true; return true;
 }
 std::vector<FlowChunkCache::Key> FlowChunkCache::apply(const protocol::chunks::Availability& a) {
     std::lock_guard lock(mutex_); std::vector<Key> hidden;
     for (auto& [key, node] : entries_) {
         if (key.instrument != a.instrument) continue;
-        auto& e = node.value; e.stale = e.epoch != a.epoch(key);
-        if (!a.contains(key) && !e.hidden) { e.hidden = true; hidden.push_back(key); }
+        auto& e = node.value;
+        if (e.stale != (e.epoch != a.epoch(key))) ++generation_;
+        e.stale = e.epoch != a.epoch(key);
+        if (!a.contains(key) && !e.hidden) { e.hidden = true; ++generation_; hidden.push_back(key); }
         // Returning to sealed requires a fresh response before unhiding.
     }
     return hidden;
 }
 void FlowChunkCache::wanted(std::set<Key> keys) { std::lock_guard lock(mutex_); wanted_ = std::move(keys); evict(); }
-void FlowChunkCache::clear() { std::lock_guard lock(mutex_); entries_.clear(); lru_.clear(); bytes_ = 0; }
+void FlowChunkCache::clear() { std::lock_guard lock(mutex_); entries_.clear(); lru_.clear(); bytes_ = 0; ++generation_; }
 void FlowChunkCache::setBudget(size_t bytes) { std::lock_guard lock(mutex_); budget_ = bytes; evict(); }
+uint64_t FlowChunkCache::generation() const { std::lock_guard lock(mutex_); return generation_; }
 FlowChunkCache::Stats FlowChunkCache::stats() const {
     std::lock_guard lock(mutex_); size_t wanted = 0;
     for (const auto& [key, node] : entries_) if (wanted_.contains(key)) wanted += node.value.body->storageBytes;
@@ -63,7 +68,7 @@ void FlowChunkCache::evict() {
     for (auto it = lru_.end(); bytes_ > budget_ && it != lru_.begin();) {
         --it; if (wanted_.contains(*it)) continue;
         const auto entry = entries_.find(*it); bytes_ -= entry->second.value.body->storageBytes;
-        entries_.erase(entry); it = lru_.erase(it);
+        entries_.erase(entry); it = lru_.erase(it); ++generation_;
     }
 }
 }

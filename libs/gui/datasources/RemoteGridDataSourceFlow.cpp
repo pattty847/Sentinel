@@ -41,7 +41,7 @@ void RemoteGridDataSource::initializeFlow() {
             &RemoteGridDataSource::onFlowBarsReceived, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::flowLiveFailed, this, [this](quint64 sub, const QString& message) {
         if (!sub || sub != m_flowSubscription) return;
-        m_flowSubscription = 0; m_flowReplayReady = false;
+        m_flowSubscription = 0;
         sLog_Warning("Flow live refused symbol=" << m_flowSymbol << " retryMs=" << m_flowRetryMs << " reason=" << message);
         m_flowTimer.start(m_flowRetryMs); m_flowRetryMs = std::min(5000, m_flowRetryMs * 2);
     }, Qt::QueuedConnection);
@@ -51,7 +51,7 @@ void RemoteGridDataSource::initializeFlow() {
             // A replay may have lost a whole bucket. Restart its complete replay,
             // with the same bounded retry policy; no legacy history repair path.
             m_client.unsubscribeFlowLive(sub);
-            m_flowSubscription = 0; m_flowReplayReady = false;
+            m_flowSubscription = 0;
             m_flowTimer.start(m_flowRetryMs);
             m_flowRetryMs = std::min(5000, m_flowRetryMs * 2);
         }, Qt::QueuedConnection);
@@ -75,7 +75,11 @@ void RemoteGridDataSource::initializeFlow() {
     connect(&fetch, &f::FlowChunkFetcher::chunkHidden, this, changed, Qt::QueuedConnection);
     connect(&fetch, &f::FlowChunkFetcher::chunkRevised, this, changed, Qt::QueuedConnection);
     connect(&fetch, &f::FlowChunkFetcher::storeCleared, this, [this] {
-        m_flowBuffer.clear(); m_flowSummary.clear(); m_flowViewTimer.start();
+        const auto symbol = m_flowSymbol;
+        const auto tf = m_flowTimeframeMs, from = m_flowFrom, to = m_flowTo, anchor = m_flowAnchor;
+        const auto rows = m_flowRows;
+        unsubscribeFlowLive(); m_flowOwnership.clear(); m_flowOwnershipOrder.clear();
+        subscribeFlowLive(symbol, tf); setFlowViewport(symbol, tf, from, to, anchor, rows);
     }, Qt::QueuedConnection);
 }
 void RemoteGridDataSource::subscribeFlowLive(const QString& symbol, int64_t tf) {
@@ -84,7 +88,13 @@ void RemoteGridDataSource::subscribeFlowLive(const QString& symbol, int64_t tf) 
     if (!m_connectionActive || !m_flowConfigReady || symbol.isEmpty() ||
         (tf != 1000 && (tf < 60000 || tf > 86400000 || tf % 60000 || 86400000 % tf)) || !flowPermitted(symbol)) return;
     m_flowSymbol = symbol; m_flowTimeframeMs = tf; m_flowRetryMs = 100;
-    auto& held = m_flowOwnership[{symbol, tf}];
+    const auto key = std::pair{symbol, tf};
+    std::erase(m_flowOwnershipOrder, key);
+    m_flowOwnershipOrder.push_back(key);
+    while (m_flowOwnershipOrder.size() > 32) {
+        m_flowOwnership.erase(m_flowOwnershipOrder.front()); m_flowOwnershipOrder.pop_front();
+    }
+    auto& held = m_flowOwnership[key];
     if (!held) held = std::make_shared<FlowWork>();
     m_flowWork = held;
     // One-second flow stays RAM-only and needs no sealed availability.
@@ -95,7 +105,6 @@ void RemoteGridDataSource::startFlowLive() {
         (m_flowTimeframeMs != 1000 && !m_flowAvailabilityReady) || m_flowTimer.isActive() || !flowPermitted(m_flowSymbol)) return;
     const auto work = m_flowWork;
     m_flowChunks->queued([work](auto&) { work->rows.resetLive(); work->summary.resetLive(); });
-    m_flowReplayReady = m_flowTimeframeMs == 1000;
     m_flowSubscription = m_client.subscribeFlowLive(m_flowSymbol.toStdString(), m_flowTimeframeMs);
     m_flowViewTimer.start();
 }
@@ -104,7 +113,7 @@ void RemoteGridDataSource::unsubscribeFlowLive() {
     ++m_flowGeneration;
     m_flowSubscription = 0; m_flowSymbol.clear(); m_flowTimeframeMs = 0;
     m_flowFrom = m_flowTo = 0; m_flowPan = 0; m_flowAnchor = -1;
-    m_flowAvailabilityReady = m_flowReplayReady = false;
+    m_flowAvailabilityReady = false;
     m_flowTimer.stop(); m_flowViewTimer.stop();
     m_flowBuffer.clear(); m_flowSummary.clear(); m_flowProbe.reset();
     const auto work = std::exchange(m_flowWork, {});
@@ -143,7 +152,7 @@ void RemoteGridDataSource::refreshFlowView() {
             work->wantGeneration = generation;
             fetch.want(1, want);
             if (anchor >= 0 && anchor < want.fromMs) {
-                auto prefix = want; prefix.channel = "flow.summary"; prefix.fromMs = anchor; prefix.toMs = want.fromMs;
+                auto prefix = want; prefix.channel = "flow.summary"; prefix.fromMs = anchor; prefix.toMs = want.fromMs; prefix.padding = false;
                 fetch.want(2, prefix);
             } else fetch.release(2);
         }
@@ -151,15 +160,15 @@ void RemoteGridDataSource::refreshFlowView() {
         auto availability = heldAvailability.value_or(w::Availability{});
         availability.instrument = want.instrument;
         work->rows.retention(availability.liveFromMs); work->summary.retention(availability.liveFromMs);
-        auto picture = rows ? work->rows.compose(*cache, want, availability) : f::FlowViewSnapshot{};
-        want.channel = "flow.summary";
-        auto summary = work->summary.compose(*cache, want, availability, anchor);
+        auto composed = f::paddedFlowView(want);
+        auto picture = rows ? work->rows.compose(*cache, composed, availability) : f::FlowViewSnapshot{};
+        composed.channel = "flow.summary";
+        auto summary = work->summary.compose(*cache, composed, availability, anchor);
         QMetaObject::invokeMethod(this, [this, generation, symbol, tf = want.timeframeMs,
-                                        available = heldAvailability.has_value(), picture = std::move(picture), summary = std::move(summary)]() mutable {
+                                        picture = std::move(picture), summary = std::move(summary)]() mutable {
             m_flowComposing = false;
             if (m_flowDirty) m_flowViewTimer.start();
             if (generation != m_flowGeneration) return;
-            if (available) { m_flowAvailabilityReady = true; startFlowLive(); }
             m_flowBuffer.replace(symbol, tf, std::move(picture));
             m_flowSummary.replace(symbol, tf, std::move(summary));
             if (m_flowProbe.on())
@@ -174,7 +183,7 @@ void RemoteGridDataSource::onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr
     if (!batch || !m_flowWork || !m_flowSubscription || batch->id != m_flowSubscription) return;
     const auto work = m_flowWork;
     if (batch->replayReady) {
-        m_flowReplayReady = true; m_flowRetryMs = 100;
+        m_flowRetryMs = 100;
         m_flowChunks->queued([work, from = batch->liveFromMs](auto&) {
             work->rows.retention(from); work->summary.retention(from);
         });

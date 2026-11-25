@@ -1032,9 +1032,9 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
     // Sub-second charts consume 1 s flow; there is no sub-second flow protocol.
     const int64_t flowTf = std::max<int64_t>(1000, tfMs);
     m_dataSource->subscribeFlowLive(ready ? symbol : QString{}, flowTf);
-    if (ready) m_dataSource->setFlowViewport(symbol, flowTf,
-        renderer->view()->getVisibleTimeStart(), renderer->view()->getVisibleTimeEnd(),
-        renderer->agentPort().cvdHistoryAnchor(renderer->view()->getVisibleTimeStart(), flowTf),
+    const auto [flowFrom, flowTo] = renderer->agentPort().flowViewWindow();
+    if (ready) m_dataSource->setFlowViewport(symbol, flowTf, flowFrom, flowTo,
+        renderer->agentPort().cvdHistoryAnchor(flowFrom, flowTf),
         renderer->layers()->footprintEnabled());
 }
 

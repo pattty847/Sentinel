@@ -8,6 +8,7 @@ struct FlowChunkWant {
     std::string instrument, channel;
     int64_t timeframeMs = 0, fromMs = 0, toMs = 0;
     int pan = 0; // negative older, positive newer
+    bool padding = true; // anchor prefixes need only their exact interval
 };
 struct PlannedFlowChunk {
     protocol::chunks::Key key;

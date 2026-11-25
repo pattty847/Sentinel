@@ -210,7 +210,7 @@ TEST_F(FlowFetch, ByteLruPinsWantedAndSymbolSwitchBackUsesCache) {
     online(available(3)); fetch->want(1,view(0,1)); drain(); answer(transport.requests[0]);
     const auto before=transport.requests.size();
     auto eth=view(); eth.instrument="coinbase:ETH-USD"; fetch->want(1,eth); drain();
-    fetch->want(1,view(0,1)); drain(); EXPECT_EQ(transport.requests.size(),before);
+    fetch->want(1,view(0,1)); transport.availability(available(3)); drain(); EXPECT_EQ(transport.requests.size(),before);
     cache.setBudget(1); EXPECT_EQ(cache.stats().entries,3u); // padding is wanted too
     fetch->release(1); drain(); EXPECT_EQ(cache.stats().entries,0u);
     const auto a=body(key()), b=body(key(1)), cbody=body(key(2));
@@ -662,4 +662,30 @@ TEST(FlowChunkView, SealedEmptySlotWithdrawsLiveAndViewportIsBounded) {
     const auto bounded = state.compose(cache, want, available(200));
     EXPECT_EQ(bounded.buckets.size(), size_t(heatmap::kMaxChartSurfaceBars));
     EXPECT_EQ(bounded.buckets.begin()->first, want.toMs-int64_t(heatmap::kMaxChartSurfaceBars)*M);
+}
+TEST_F(FlowFetch, PrefixWantNeverPadsItsInterval) {
+    auto want = view(4, 5, -1, "flow.summary"); want.padding = false;
+    fetch->want(2, want); online(available(24));
+    ASSERT_EQ(transport.requests.size(), 1u);
+    EXPECT_EQ(transport.requests.front().keys, std::vector<w::Key>{key(4, "flow.summary")});
+}
+TEST(FlowChunkView, DrawnPaddingPreservesLeftBucketWithinSurfaceCap) {
+    f::FlowChunkCache cache; f::FlowChunkView state;
+    auto chunk = body(key()); cache.put(key(), chunk->body, 1, chunk->frame.contentHash);
+    auto want = view(); want.fromMs += 5*M;
+    const auto padded = f::paddedFlowView(want);
+    EXPECT_LT(padded.fromMs, want.fromMs);
+    EXPECT_TRUE(state.compose(cache, padded, available()).buckets.at(T).value);
+    const auto bounded = f::paddedFlowView(view(0, 200));
+    EXPECT_EQ((bounded.toMs-bounded.fromMs)/M, heatmap::kMaxChartSurfaceBars);
+}
+TEST(FlowChunkView, RunningPrefixInvalidatesWhenAChunkChanges) {
+    f::FlowChunkCache cache; f::FlowChunkView state;
+    for (int h=0; h<6; ++h) { const auto r=body(key(h)); cache.put(key(h), r->body, 1, r->frame.contentHash); }
+    const auto first=state.compose(cache,view(2,3,0,"flow.summary",H),available(6),T);
+    const auto pan=state.compose(cache,view(3,4,0,"flow.summary",H),available(6),T);
+    EXPECT_EQ(first.prefixDelta,2); EXPECT_EQ(pan.prefixDelta,3);
+    cache.hide(key(0));
+    const auto hidden=state.compose(cache,view(3,4,0,"flow.summary",H),available(6),T);
+    EXPECT_EQ(hidden.prefixDelta,2); EXPECT_FALSE(hidden.prefixComplete);
 }

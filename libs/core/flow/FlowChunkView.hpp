@@ -24,6 +24,8 @@ struct FlowViewSnapshot {
     double prefixDelta = 0;
     bool prefixComplete = false;
 };
+// One screen on each side of the drawn range, sharing the chart surface cap.
+FlowChunkWant paddedFlowView(FlowChunkWant);
 class FlowChunkView {
 public:
     void resetLive();
@@ -37,5 +39,14 @@ private:
     // live window, including if a later epoch temporarily fences the chunk.
     std::map<int64_t, int64_t> retired_;
     int64_t liveFromMs_ = 0;
+    // Scalar running prefix only: no second history body or retained prefix bars.
+    struct Prefix {
+        std::string instrument;
+        int64_t anchor = -1, tf = 0, through = 0, loaded = 0;
+        uint64_t generation = 0;
+        double delta = 0;
+        bool complete = false;
+    } prefix_;
+
 };
 }

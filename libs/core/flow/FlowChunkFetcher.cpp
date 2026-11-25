@@ -54,6 +54,7 @@ void FlowChunkFetcher::subscribe(bool force) {
     for (const auto& [id, view] : charts_) ids.insert(view.instrument);
     const std::vector<std::string> instruments(ids.begin(), ids.end());
     if (!force && subscribed_ == instruments) return;
+    std::erase_if(availability_, [&](const auto& entry) { return !ids.contains(entry.first); });
     transport_.subscribe(instruments); subscribed_ = instruments;
 }
 void FlowChunkFetcher::schedule() {
@@ -81,7 +82,7 @@ void FlowChunkFetcher::replan(bool countCacheHits) {
         };
         // Apply the same substitution before budgeting padding: a retained rows
         // allocation can be substantially larger than a summary allocation.
-        const auto plan = planFlowChunks(view, a->second, [&](const Key& k) { return estimate(heldKey(k)); });
+        const auto plan = planFlowChunks(view, a->second, [&](const Key& k) { return estimate(heldKey(k)); }, view.padding ? PaddingBytes : 0);
         for (auto item : plan) {
             item.key = heldKey(item.key);
             auto& d = demands_[item.key];

@@ -161,7 +161,6 @@ struct FlowDataSourceTest : testing::Test {
     }
     void hideFirst() { source.m_flowChunks->cache().hide({"coinbase:BTC-USD", "flow.rows", M, 1, T}); }
     quint64 sub() const { return source.m_flowSubscription; }
-    bool replayReady() const { return source.m_flowReplayReady; }
     int retry() const { return source.m_flowRetryMs; }
     int delay() const { return source.m_flowTimer.remainingTime(); }
     void retryNow() { source.m_flowTimer.stop(); source.startFlowLive(); settle(); }
@@ -174,6 +173,21 @@ struct FlowDataSourceTest : testing::Test {
         auto b = std::make_shared<Client::FlowBatch>(); b->id = sub(); b->replayReady = true; b->liveFromMs = T;
         client().flowBarsReceived(b); settle();
     }
+    size_t ownershipSize() const { return source.m_flowOwnership.size(); }
+    void hostChanged() { source.m_flowChunks->queued([](auto& fetch) { fetch.hostChanged(); }); settle(); }
+    void receive(const Json& message) {
+        client().handleMessage(message.dump());
+        std::promise<void> done;
+        net::post(*client().m_decodePool, [&] { done.set_value(); });
+        done.get_future().wait(); settle();
+    }
+    void checkDestructionOrder() {
+        auto owned = std::make_unique<RemoteGridDataSource>("127.0.0.1", "1");
+        bool serviceGone = false;
+        QObject::connect(&owned->m_flowChunks->fetcher(), &QObject::destroyed, [&] { serviceGone = true; });
+        QObject::connect(owned->streamClient(), &QObject::destroyed, [&] { EXPECT_TRUE(serviceGone); });
+        owned.reset(); EXPECT_TRUE(serviceGone);
+    }
 };
 TEST_F(FlowDataSourceTest, AvailabilityPrecedesLiveAndReadyEndsReplay) {
     ready(); select();
@@ -182,8 +196,8 @@ TEST_F(FlowDataSourceTest, AvailabilityPrecedesLiveAndReadyEndsReplay) {
     for (const auto& j : before) EXPECT_EQ(j.at("type"), "chunk_availability_subscribe");
     EXPECT_EQ(sub(), 0u);
     available();
-    EXPECT_NE(sub(), 0u); EXPECT_FALSE(replayReady());
-    live(sub(), 9); barrier(); EXPECT_TRUE(replayReady());
+    EXPECT_NE(sub(), 0u);
+    live(sub(), 9); barrier(); EXPECT_EQ(retry(), 100);
     ASSERT_NE(source.flowBuffer().series(M), nullptr);
     EXPECT_EQ(source.flowBuffer().series(M)->bars.at(T).revision, 9u);
 }
@@ -203,19 +217,19 @@ TEST_F(FlowDataSourceTest, RefusalBackoffAndResubscribeResetLiveRevisions) {
 TEST_F(FlowDataSourceTest, WarmPanAndSymbolTimeframeRoundTripNeverRefetch) {
     ready(); warm(); warm("ETH-USD"); select(); available(); requests();
     for (const auto tf : {M, 5*M, H, 4*H, D}) {
-        select("BTC-USD", tf, T, T+D);
+        select("BTC-USD", tf, T, T+D); available();
         ASSERT_NE(source.flowBuffer().series(tf), nullptr);
         EXPECT_EQ(source.flowBuffer().series(tf)->bars.size(), size_t(tf < H ? 24 : D/tf));
         for (const auto& j : requests()) EXPECT_NE(j.at("type"), "chunk_request");
     }
     select("ETH-USD"); available("ETH-USD");
     for (const auto& j : requests()) EXPECT_NE(j.at("type"), "chunk_request");
-    select();
+    select(); available();
     for (const auto& j : requests()) EXPECT_NE(j.at("type"), "chunk_request");
     source.setFlowViewport("BTC-USD", M, T+H, T+2*H, -1, true); settle();
     for (const auto& j : requests()) EXPECT_NE(j.at("type"), "chunk_request");
-    EXPECT_EQ(source.flowBuffer().series(M)->bars.begin()->first, T+H);
-    EXPECT_EQ(source.flowBuffer().series(M)->coverage.size(), 60u);
+    EXPECT_EQ(source.flowBuffer().series(M)->bars.begin()->first, T);
+    EXPECT_EQ(source.flowBuffer().series(M)->coverage.size(), 180u);
 }
 TEST_F(FlowDataSourceTest, OneSecondIsLiveOnlyAndDisconnectClearsSelection) {
     ready(); select("BTC-USD", 1000, T, T+1000);
@@ -297,3 +311,51 @@ TEST_F(FlowDataSourceTest, SwitchingAwayAndBackCannotReviveASealedPreview) {
     EXPECT_FALSE(series->bars.contains(T));
     EXPECT_EQ(series->coverage.at(T).status, Status::Building);
 }
+
+TEST(FlowSeriesBuffer, StoreBeatsLiveAndRevisionsCompareOnlyWithinSource) {
+    FlowSeriesBuffer buffer;
+    buffer.apply(batch(bar(99)), 0);
+    buffer.apply(batch(bar(1, false, Source::Store)), 0);
+    buffer.apply(batch(bar(UINT32_MAX, true)), 0);
+    EXPECT_EQ(buffer.series(M)->bars.at(M).source, Source::Store);
+    buffer.apply(batch(bar(1, true, Source::Store)), 0);
+    buffer.apply(batch(bar(1, false, Source::Store)), 0);
+    buffer.apply(batch(bar(0, false, Source::Store)), 0);
+    EXPECT_TRUE(buffer.series(M)->bars.at(M).complete);
+    buffer.apply(batch(bar(2, false, Source::Store)), 0);
+    EXPECT_FALSE(buffer.series(M)->bars.at(M).complete);
+}
+TEST_F(FlowDataSourceTest, RoundTripWaitsForFreshAvailabilityBeforeLive) {
+    ready(); warm(); select(); available(); const auto old = sub(); requests();
+    select("ETH-USD"); available("ETH-USD", 0); select();
+    EXPECT_EQ(sub(), 0u);
+    for (const auto& request : requests())
+        if (request.at("type") == "flow_live_subscribe") EXPECT_EQ(request.at("symbol"), "ETH-USD");
+    available(); EXPECT_NE(sub(), 0u); EXPECT_NE(sub(), old);
+}
+TEST_F(FlowDataSourceTest, DrawnMarginKeepsBarsLeftOfTheRequestedWindow) {
+    ready(); warm(); select("BTC-USD", M, T+5*M, T+H); available();
+    const auto* series = source.flowBuffer().series(M); ASSERT_NE(series, nullptr);
+    EXPECT_TRUE(series->bars.contains(T));
+    EXPECT_TRUE(source.flowBuffer(true).series(M)->bars.contains(T));
+    EXPECT_LE(series->coverage.size(), FlowSeriesBuffer::kMaxBuckets);
+}
+TEST_F(FlowDataSourceTest, DisconnectReconnectAndDroppedFrameReplayResetRevisions) {
+    ready(); select(); available("BTC-USD", 0); const auto old = sub(); live(old, 99);
+    client().disconnected(); settle(); ready(); select(); EXPECT_EQ(sub(), 0u);
+    available("BTC-USD", 0); const auto connected = sub(); EXPECT_NE(old, connected);
+    live(old, 100, 9); live(connected, 1, 2); barrier();
+    EXPECT_EQ(source.flowBuffer().series(M)->bars.at(T).bar.delta, 2);
+    client().flowLiveDropped(connected, "BTC-USD", M, T); settle();
+    EXPECT_EQ(sub(), 0u); EXPECT_EQ(retry(), 200); retryNow();
+    EXPECT_TRUE(source.flowBuffer().series(M)->bars.empty());
+    live(connected, 100, 9); live(sub(), 1, 3); barrier();
+    EXPECT_EQ(source.flowBuffer().series(M)->bars.at(T).bar.delta, 3);
+}
+TEST_F(FlowDataSourceTest, OwnershipMetadataIsBoundedAndHostScoped) {
+    ready();
+    for (int i=0; i<40; ++i) select(QString("TEST%1-USD").arg(i));
+    EXPECT_EQ(ownershipSize(), 32u);
+    hostChanged(); EXPECT_EQ(ownershipSize(), 1u); EXPECT_EQ(sub(), 0u);
+}
+TEST_F(FlowDataSourceTest, DestructionJoinsServiceBeforeStreamClient) { checkDestructionOrder(); }
