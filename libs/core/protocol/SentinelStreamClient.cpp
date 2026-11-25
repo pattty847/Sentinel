@@ -193,6 +193,9 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<HeatmapChunkPtr>("SentinelStreamClient::HeatmapChunkPtr");
     qRegisterMetaType<HeatmapChunkError>("SentinelStreamClient::HeatmapChunkError");
     qRegisterMetaType<protocol::chunkwire::Availability>("protocol::chunkwire::Availability");
+    qRegisterMetaType<protocol::chunks::ReplyPtr>();
+    qRegisterMetaType<protocol::chunks::Failure>();
+    qRegisterMetaType<protocol::chunks::Availability>();
     m_decodePool = std::make_unique<net::thread_pool>(1);
 }
 
@@ -222,6 +225,7 @@ void SentinelStreamClient::connectToServer() {
         m_acceptChunkFrames = true;
         m_decodeRefusals = 0;
         m_chunkOrder.clear();
+        m_chunkRequests.clear();
     }
     m_ioc.restart();
     m_isConnected = false;
@@ -325,6 +329,7 @@ void SentinelStreamClient::failConnection(const QString& reason) {
         ++m_connectionEpoch;
         m_acceptChunkFrames = false;
         m_chunkOrder.clear();
+        m_chunkRequests.clear();
     }
     {
         std::lock_guard lock(m_bookDeliveryMutex);
@@ -343,6 +348,7 @@ void SentinelStreamClient::disconnectFromServer() {
         ++m_connectionEpoch;
         m_acceptChunkFrames = false;
         m_chunkOrder.clear();
+        m_chunkRequests.clear();
     }
     if (m_running) {
         sLog_Data("SentinelStreamClient disconnecting: host=" << m_host << " port=" << m_port
@@ -478,6 +484,9 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
     const bool tradeFrame = bytes >= 4 && std::equal(frame->begin(), frame->begin() + 4, "TRD1");
     const bool flowFrame = flowLive || (bytes >= 4 && std::equal(frame->begin(), frame->begin() + 4, "FHE1"));
     const auto flowRequest = m_flowHistoryRequest.load();
+    const auto chunkRequest = peekEnvelopeRequestId(*frame);
+    const bool sharedChunk = m_chunkRequests.contains(chunkRequest) ||
+        (bytes >= 18 && std::equal(frame->begin() + 14, frame->begin() + 18, "SCK1"));
     // Refusals run inline, with at most one notification per reason until the
     // decoder makes progress. A flood must not create a second unbounded queue
     // of rejection tasks or queued Qt signals while the decoder is stalled.
@@ -501,12 +510,18 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
                                      flowDrop->bucketStartMs);
             }
         }
-        const auto mask = tradeFrame ? reason << 4 : flowFrame ? reason << 2 : reason;
+        if (sharedChunk) ++m_chunkRejected;
+        const auto mask = sharedChunk ? reason << 6 : tradeFrame ? reason << 4 : flowFrame ? reason << 2 : reason;
         if (m_decodeRefusals & mask) return;
         m_decodeRefusals |= mask;
         sLog_Warning("Stream frame refused: bytes=" << bytes << " reason=" << message);
         if (flowFrame || tradeFrame) return;
-        emit heatmapChunkFailed({peekEnvelopeRequestId(*frame), {}, QString::fromLatin1(code),
+        const auto id = chunkRequest;
+        if (sharedChunk) {
+            emit chunkFailed({id, {}, QString::fromLatin1(code), QString::fromLatin1(message)});
+            m_chunkRequests.erase(id); return;
+        }
+        emit heatmapChunkFailed({id, {}, QString::fromLatin1(code),
                                  QString::fromLatin1(message)});
     };
     if (bytes < 14) { // SHE1 + u16 version + u64 request id
@@ -567,6 +582,13 @@ void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame
         }
         return;
     }
+    bool sharedChunk = false;
+    {
+        std::lock_guard lock(m_chunkOrderMutex);
+        const bool sck = frame.size() >= 18 && std::equal(frame.begin() + 14, frame.begin() + 18, "SCK1");
+        sharedChunk = sck || m_chunkRequests.contains(peekEnvelopeRequestId(frame));
+    }
+    if (sharedChunk) { decodeChunkMessage(frame, epoch); return; }
     heatmap::ChunkEnvelope envelope;
     try {
         // Validates every length and count before allocating (ChunkCodec).
@@ -819,6 +841,7 @@ void SentinelStreamClient::onHandshake(boost::beast::error_code ec) {
     boost::beast::get_lowest_layer(*m_ws).expires_never();
     // Drain pre-handshake messages here, before notifying subscribers. Posting
     // another drain after connected() races a subscription's own write kick.
+    resendChunkSubscription();
     doWrite();
     emit connected();
     
@@ -887,6 +910,17 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
     try {
         const auto msg = nlohmann::json::parse(msgStr);
         const std::string typeStr = msg.value("type", "unknown");
+        if (typeStr == "chunk_availability") {
+            try { emit chunkAvailabilityReceived(protocol::chunks::parseAvailability(msg)); }
+            catch (const std::exception& e) {
+                ++m_chunkRejected;
+                static sentinel::log_throttle::Site warning;
+                uint32_t suppressed = 0;
+                if (warning.admit(2000, sentinel::log_throttle::nowMs(), suppressed))
+                    sLog_Warning("Chunk availability rejected: " << e.what());
+            }
+            return;
+        }
         const auto type = protocol::fromString(typeStr);
 
         switch (type) {

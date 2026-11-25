@@ -55,6 +55,7 @@ struct FlowChunkKey {
     int64_t levelMs = 0;
     uint64_t priceStep = 1;
     int64_t startMs = 0;
+    auto operator<=>(const FlowChunkKey&) const = default;
 };
 struct FlowChunk {
     FlowChunkKey key;

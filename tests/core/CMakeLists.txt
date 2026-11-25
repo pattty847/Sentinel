@@ -71,3 +71,8 @@ add_executable(test_chunk_frame test_chunk_frame.cpp)
 target_link_libraries(test_chunk_frame PRIVATE sentinel_core GTest::gtest_main)
 add_test(NAME ChunkFrameTests COMMAND test_chunk_frame)
 set_tests_properties(ChunkFrameTests PROPERTIES LABELS "core;flow")
+
+add_executable(test_flow_chunk_client test_flow_chunk_client.cpp)
+target_link_libraries(test_flow_chunk_client PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+add_test(NAME FlowChunkClientTests COMMAND test_flow_chunk_client)
+set_tests_properties(FlowChunkClientTests PROPERTIES LABELS "core;flow" TIMEOUT 60)
