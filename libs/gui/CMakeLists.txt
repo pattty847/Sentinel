@@ -49,6 +49,7 @@ set(GRID_CORE_SOURCES
     datasources/RemoteGridDataSource.hpp
     datasources/RemoteGridDataSource.cpp
     datasources/RemoteGridDataSourceFlow.cpp
+    datasources/RemoteGridDataSourceSeconds.cpp
     datasources/FlowSeriesBuffer.hpp
     datasources/FlowSeriesBuffer.cpp
     datasources/FlowTimingProbe.hpp

@@ -159,3 +159,39 @@ TEST_F(FlowWireClientTest, LostReplayBarrierReportsCorrelatedRetry) {
     QCoreApplication::sendPostedEvents(&client, QEvent::MetaCall);
     EXPECT_EQ(failed, 17u);
 }
+
+namespace {
+Bytes secondFrame(uint64_t id = 19, int64_t tf = 1000) {
+    auto bar = sample(); bar.timeframeMs = tf;
+    const auto bytes = sentinel::flow::encodeFlowBar(bar);
+    Json header{{"type","flow_history_chunk"},{"schema_version",1},{"req",id},
+        {"symbol","BTC-USD"},{"timeframe_ms",tf},{"status","complete"},
+        {"oldest_ms",60000},{"sealed_through_ms",60000+tf},
+        {"ranges",Json::array({Json{{"from_ms",60000},{"to_ms",60000+tf},{"status","complete"}}})},
+        {"bars",Json::array({metadata()})}};
+    const auto json=header.dump(); Bytes out{'F','H','E','1'};
+    const auto length=[&](size_t n) { for(unsigned i=0;i<4;++i) out.push_back(uint8_t(n>>(8*i))); };
+    length(json.size()); out.insert(out.end(),json.begin(),json.end());
+    length(bytes.size()); out.insert(out.end(),bytes.begin(),bytes.end());
+    return out;
+}
+}
+TEST(FlowWireClient, SecondHistoryDecodesOnlyOneSecondAndRejectsBrokenFraming) {
+    const auto frame=secondFrame(); const auto page=protocol::clientparse::parseFlowSeconds(frame);
+    EXPECT_TRUE(page.secondHistory); EXPECT_EQ(page.timeframeMs,1000); EXPECT_EQ(page.id,19u);
+    ASSERT_EQ(page.bars.size(),1u); EXPECT_EQ(page.bars[0].bar.delta,2);
+    EXPECT_THROW(protocol::clientparse::parseFlowSeconds(secondFrame(19,60000)),std::exception);
+    auto broken=frame; broken.pop_back();
+    EXPECT_THROW(protocol::clientparse::parseFlowSeconds(broken),std::exception);
+    broken=frame; broken.push_back(0);
+    EXPECT_THROW(protocol::clientparse::parseFlowSeconds(broken),std::exception);
+}
+TEST_F(FlowWireClientTest, SecondHistoryRequestIsFixedToOneSecondAndRepliesAreCorrelated) {
+    std::vector<Client::FlowBatchPtr> seen;
+    QObject::connect(&client,&Client::flowBarsReceived,&client,[&](auto b){seen.push_back(b);},Qt::QueuedConnection);
+    client.requestFlowSeconds(19,"BTC-USD",60000,512);
+    const auto sent=requests(); ASSERT_EQ(sent.size(),1u);
+    EXPECT_EQ(sent[0].at("type"),"flow_history_request"); EXPECT_EQ(sent[0].at("timeframe_ms"),1000);
+    receive(secondFrame(18)); receive(secondFrame(19)); drain();
+    ASSERT_EQ(seen.size(),1u); EXPECT_EQ(seen[0]->id,19u);
+}

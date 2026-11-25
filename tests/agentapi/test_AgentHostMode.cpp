@@ -288,7 +288,7 @@ TEST(AgentHostModeSources, NoNativeFormatQSettingsInTheGui) {
 TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
     // The legacy heatmap requests (heatmap history, recording view and history) went in S8a.
     const QSet<QString> guarded{"subscribe", "requestCandleHistory",
-                                "requestTpoHistory", "subscribeFlowLive", "requestTradeHistory",
+                                "requestTpoHistory", "subscribeFlowLive", "requestFlowSeconds", "requestTradeHistory",
                                 "sendTradeCommand", "sendAlgoCommand"};
     // Connection management, releases, cancels and the local generation lookup:
     // they name no new symbol to the server or carry no request.
@@ -300,6 +300,9 @@ TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
     QFile flow(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/datasources/RemoteGridDataSourceFlow.cpp");
     ASSERT_TRUE(flow.open(QIODevice::ReadOnly));
     text += QString::fromUtf8(flow.readAll());
+    QFile seconds(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/datasources/RemoteGridDataSourceSeconds.cpp");
+    ASSERT_TRUE(seconds.open(QIODevice::ReadOnly));
+    text += QString::fromUtf8(seconds.readAll());
 
     const QRegularExpression definition(R"(^[\w:<>&\* ]*\bRemoteGridDataSource::(\w+)\s*\()",
                                         QRegularExpression::MultilineOption);

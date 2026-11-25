@@ -3,12 +3,13 @@
 using Source = SentinelStreamClient::FlowSource;
 using Status = SentinelStreamClient::FlowStatus;
 
-void FlowSeriesBuffer::apply(const Batch& batch, int64_t) {
+void FlowSeriesBuffer::apply(const Batch& batch, int64_t, int64_t from, int64_t to) {
     if (batch.replayReady || batch.timeframeMs <= 0) return;
     if (!m_symbol.isEmpty() && batch.symbol != m_symbol) clear();
     m_symbol = batch.symbol;
     auto& s = m_series[batch.timeframeMs];
     for (const auto& in : batch.bars) {
+        if (in.bar.startMs < from || in.bar.startMs >= to) continue;
         const auto held = s.bars.find(in.bar.startMs);
         if (held != s.bars.end()) {
             const auto& old = held->second;
@@ -20,7 +21,10 @@ void FlowSeriesBuffer::apply(const Batch& batch, int64_t) {
         s.coverage[in.bar.startMs] = {in.bar.startMs, in.bar.startMs + batch.timeframeMs,
                                     in.complete ? Status::Complete : Status::Live};
     }
-    for (const auto& range : batch.ranges) s.coverage[range.fromMs] = range;
+    for (auto range : batch.ranges) {
+        range.fromMs = std::max(range.fromMs, from); range.toMs = std::min(range.toMs, to);
+        if (range.fromMs < range.toMs) s.coverage[range.fromMs] = range;
+    }
     while (s.bars.size() > kMaxBuckets) s.bars.erase(s.bars.begin());
     while (s.coverage.size() > kMaxBuckets) s.coverage.erase(s.coverage.begin());
 }
@@ -34,6 +38,14 @@ void FlowSeriesBuffer::setCoverage(const QString& symbol, int64_t tf, const Rang
     auto& coverage = m_series[tf].coverage;
     coverage[range.fromMs] = range;
     while (coverage.size() > kMaxBuckets) coverage.erase(coverage.begin());
+}
+void FlowSeriesBuffer::retain(int64_t tf, int64_t from, int64_t to) {
+    const auto it = m_series.find(tf); if (it == m_series.end()) return;
+    std::erase_if(it->second.bars, [&](const auto& p) { return p.first < from || p.first >= to; });
+    std::erase_if(it->second.coverage, [&](const auto& p) { return p.second.toMs <= from || p.second.fromMs >= to; });
+    for (auto& [time, range] : it->second.coverage) {
+        range.fromMs = std::max(range.fromMs, from); range.toMs = std::min(range.toMs, to);
+    }
 }
 void FlowSeriesBuffer::clear() { m_symbol.clear(); m_series.clear(); }
 size_t FlowSeriesBuffer::approxBarBytes(const Record& record) {

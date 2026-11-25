@@ -471,7 +471,8 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
     if (!m_acceptChunkFrames) return;
     const size_t bytes = frame->size();
     const bool tradeFrame = bytes >= 4 && std::equal(frame->begin(), frame->begin() + 4, "TRD1");
-    const bool flowFrame = flowLive;
+    const bool secondFrame = bytes >= 4 && std::equal(frame->begin(), frame->begin() + 4, "FHE1");
+    const bool flowFrame = flowLive || secondFrame;
     const auto chunkRequest = peekEnvelopeRequestId(*frame);
     const bool sharedChunk = m_chunkRequests.contains(chunkRequest) ||
         (bytes >= 18 && std::equal(frame->begin() + 14, frame->begin() + 18, "SCK1"));
@@ -479,6 +480,7 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
     // decoder makes progress. A flood must not create a second unbounded queue
     // of rejection tasks or queued Qt signals while the decoder is stalled.
     const auto refuse = [&](unsigned reason, const char* code, const char* message) {
+        if (secondFrame) emit flowSecondsFailed(m_flowSecondsRequest.load(), QString::fromLatin1(message));
         if (tradeFrame)
             emit tradeHistoryFailed(m_tradeHistoryRequest.load(), QString::fromLatin1(message));
         if (flowLive && flowDrop && flowDrop->sub && flowDrop->symbol.isEmpty())
@@ -547,23 +549,26 @@ void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame
         }
         return;
     }
-    if (flowLive) {
+    const bool secondFrame = frame.size() >= 4 && std::equal(frame.begin(), frame.begin() + 4, "FHE1");
+    if (flowLive || secondFrame) {
         try {
             // flow.timing only: no clock read while the probe is off.
             static const bool timed = sentinel::logging::probeEnabled("flow.timing");
             const auto started = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-            auto batch = protocol::clientparse::parseFlowLive(nlohmann::json::parse(frame));
+            auto batch = secondFrame ? protocol::clientparse::parseFlowSeconds(frame) :
+                                       protocol::clientparse::parseFlowLive(nlohmann::json::parse(frame));
             if (timed) {
                 batch.wireBytes = frame.size();
                 batch.decodeMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
             }
             std::lock_guard lock(m_chunkOrderMutex);
-            if (epoch == m_connectionEpoch.load())
+            if (epoch == m_connectionEpoch.load() && (!secondFrame || batch.id == m_flowSecondsRequest.load()))
                 emit flowBarsReceived(std::make_shared<const FlowBatch>(std::move(batch)));
         } catch (const std::exception& e) {
             std::lock_guard lock(m_chunkOrderMutex);
             if (epoch != m_connectionEpoch.load()) return;
             sLog_Warning("Flow frame rejected: bytes=" << frame.size() << " error=" << e.what());
+            if (secondFrame) emit flowSecondsFailed(m_flowSecondsRequest.load(), QString::fromUtf8(e.what()));
         }
         return;
     }
@@ -645,6 +650,21 @@ void SentinelStreamClient::requestTradeHistory(quint64 req, const std::string& s
     m_tradeHistoryRequest.store(req);
     const nlohmann::json message = {{"type", "trade_history_request"}, {"req", req},
         {"symbol", symbol}, {"start_ms", startMs}, {"end_ms", endMs}};
+    net::post(m_strand, [this, payload = message.dump()]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) doWrite();
+    });
+}
+
+void SentinelStreamClient::requestFlowSeconds(quint64 req, const std::string& symbol, int64_t endTimeMs, int limit) {
+    if (!req || symbol.empty() || endTimeMs < 0 ||
+        endTimeMs > INT64_MAX - 1000 || limit < 1 || limit > 512) {
+        emit flowSecondsFailed(req, QStringLiteral("invalid second history arguments"));
+        return;
+    }
+    m_flowSecondsRequest.store(req);
+    const nlohmann::json message = {{"type", "flow_history_request"}, {"req", req}, {"symbol", symbol},
+        {"timeframe_ms", 1000}, {"end_time_ms", endTimeMs}, {"limit", limit}};
     net::post(m_strand, [this, payload = message.dump()]() mutable {
         m_writeQueue.push_back(std::move(payload));
         if (m_isConnected && m_writeQueue.size() == 1) doWrite();
@@ -958,6 +978,9 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 handlePnlSnapshotMessage(msg);
                 return;
             case protocol::MessageType::Error:
+                if (msg.value("context", "") == "flow_history_request") {
+                    emit flowSecondsFailed(msg.value("req", uint64_t(0)), QString::fromStdString(msg.value("message", "")));
+                }
                 if (msg.value("context", "") == "flow_live_subscribe") {
                     emit flowLiveFailed(msg.value("sub", uint64_t(0)), QString::fromStdString(msg.value("message", "")));
                     return;

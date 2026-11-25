@@ -161,6 +161,18 @@ struct FlowDataSourceTest : testing::Test {
     }
     void hideFirst() { source.m_flowChunks->cache().hide({"coinbase:BTC-USD", "flow.rows", M, 1, T}); }
     quint64 sub() const { return source.m_flowSubscription; }
+    std::optional<f::FlowSecondHistory::Request> secondFlight() const { return source.m_flowSeconds.flight(); }
+    void now(int64_t time) { source.m_candleClockOffsetMs = time-QDateTime::currentMSecsSinceEpoch(); }
+    void secondPage() {
+        const auto request = secondFlight(); ASSERT_TRUE(request);
+        auto b = std::make_shared<Client::FlowBatch>();
+        b->secondHistory = true; b->id = request->id; b->symbol = "BTC-USD"; b->timeframeMs = 1000;
+        b->oldestMs = request->fromMs;
+        b->ranges.push_back({request->fromMs, request->toMs, Status::Complete});
+        for (auto time=request->fromMs; time<request->toMs; time+=1000)
+            b->bars.push_back({candle(time,1000),1,true,Source::Store});
+        client().flowBarsReceived(b); settle();
+    }
     int retry() const { return source.m_flowRetryMs; }
     int delay() const { return source.m_flowTimer.remainingTime(); }
     void retryNow() { source.m_flowTimer.stop(); source.startFlowLive(); settle(); }
@@ -231,10 +243,14 @@ TEST_F(FlowDataSourceTest, WarmPanAndSymbolTimeframeRoundTripNeverRefetch) {
     EXPECT_EQ(source.flowBuffer().series(M)->bars.begin()->first, T);
     EXPECT_EQ(source.flowBuffer().series(M)->coverage.size(), 180u);
 }
-TEST_F(FlowDataSourceTest, OneSecondIsLiveOnlyAndDisconnectClearsSelection) {
-    ready(); select("BTC-USD", 1000, T, T+1000);
+TEST_F(FlowDataSourceTest, OneSecondHistoryNeverUsesChunksAndDisconnectClearsSelection) {
+    ready(); now(T+1000); select("BTC-USD", 1000, T, T+1000);
     const auto sent = requests();
-    ASSERT_EQ(sent.size(), 1u); EXPECT_EQ(sent[0].at("type"), "flow_live_subscribe");
+    ASSERT_EQ(sent.size(), 2u);
+    EXPECT_EQ(sent[0].at("type"), "flow_live_subscribe");
+    EXPECT_EQ(sent[1].at("type"), "flow_history_request");
+    EXPECT_EQ(sent[1].at("timeframe_ms"), 1000);
+    EXPECT_LT(sent[1].at("end_time_ms").get<int64_t>(), T+1000);
     live(sub(), 1, 3, 1000);
     ASSERT_NE(source.flowBuffer().series(1000), nullptr);
     EXPECT_EQ(source.flowBuffer().series(1000)->bars.at(T).bar.delta, 3);
@@ -359,3 +375,52 @@ TEST_F(FlowDataSourceTest, OwnershipMetadataIsBoundedAndHostScoped) {
     hostChanged(); EXPECT_EQ(ownershipSize(), 1u); EXPECT_EQ(sub(), 0u);
 }
 TEST_F(FlowDataSourceTest, DestructionJoinsServiceBeforeStreamClient) { checkDestructionOrder(); }
+
+TEST_F(FlowDataSourceTest, CvdSecondBarsRespectCapAndLabelActualLoadedTime) {
+    ready(); now(T+20*H); select("BTC-USD", 1000, T+12*H, T+15*H);
+    source.setFlowViewport("BTC-USD",1000,T+12*H,T+15*H,T,true); settle();
+    for (int i=0; i<40 && secondFlight(); ++i) secondPage();
+    EXPECT_FALSE(secondFlight());
+    const auto* series=source.flowBuffer().series(1000); ASSERT_NE(series,nullptr);
+    ASSERT_EQ(series->bars.size(),FlowSeriesBuffer::kMaxBuckets);
+    EXPECT_EQ(series->bars.begin()->first,T+15*H-int64_t(FlowSeriesBuffer::kMaxBuckets)*1000);
+    auto out=std::make_unique<chart::CvdSnapshot>(); MappingFrameContext frame;
+    frame.activeTimeframeMs=1000; frame.raster.valid=true;
+    frame.raster.drawnStartMs=T+12*H; frame.raster.drawnEndMs=T+15*H;
+    chart::CvdFeed::build(*out,*series,frame,chart::CvdReset::UtcDay,4);
+    EXPECT_STREQ(out->label.data(),"CVD since 12:43 loaded");
+    EXPECT_TRUE(out->totals[0].valid); EXPECT_EQ(out->totals[0].delta,1);
+}
+TEST_F(FlowDataSourceTest, ColdSecondReplayRejectsPreviousSelectionAndDuplicatePages) {
+    ready(); now(T+H); select("BTC-USD",1000,T,T+1000);
+    const auto first=secondFlight(); ASSERT_TRUE(first);
+    select("ETH-USD",1000,T,T+1000); select("BTC-USD",1000,T,T+1000);
+    ASSERT_TRUE(secondFlight()); EXPECT_NE(secondFlight()->id,first->id);
+    auto stale=std::make_shared<Client::FlowBatch>(); stale->id=first->id;
+    stale->secondHistory=true; stale->symbol="BTC-USD"; stale->timeframeMs=1000;
+    stale->bars.push_back({candle(T,1000,99),1,true,Source::Store});
+    client().flowBarsReceived(stale); settle(); EXPECT_TRUE(source.flowBuffer().symbol().isEmpty());
+    secondPage(); EXPECT_FALSE(secondFlight());
+    EXPECT_EQ(source.flowBuffer().series(1000)->bars.at(T).bar.delta,1);
+    client().flowBarsReceived(stale); settle();
+    EXPECT_EQ(source.flowBuffer().series(1000)->bars.at(T).bar.delta,1);
+}
+TEST_F(FlowDataSourceTest, WireLiveBarReachesFootprintBinning) {
+    ready(); select(); available("BTC-USD",0);
+    const auto bytes=f::encodeFlowBar(candle(T,M,7));
+    receive(Json{{"type","flow_bar"},{"schema_version",1},{"sub",sub()},
+        {"symbol","BTC-USD"},{"timeframe_ms",M},{"bucket_start_ms",T},{"revision",1},
+        {"complete",true},{"source","live"},{"price_scale",1},{"row_tick_units",1},
+        {"encoding","FLB1/base64"},{"bar",QByteArray(reinterpret_cast<const char*>(bytes.data()),bytes.size()).toBase64().toStdString()}});
+    const auto* series=source.flowBuffer().series(M); ASSERT_NE(series,nullptr);
+    ASSERT_TRUE(series->bars.contains(T));
+    MappingFrameContext frame; frame.activeTimeframeMs=M; frame.viewportValid=true;
+    frame.surfaceBounds={0,0,200,180}; frame.surfaceDpr=1;
+    auto& r=frame.raster; r.valid=true; r.dpr=1; r.tick=1; r.tfMs=M;
+    r.rowPx=r.rowPxF=18; r.colPx=r.colPxF=100; r.drawnStartMs=T; r.drawnEndMs=T+M;
+    r.drawnMinPrice=95; r.drawnMaxPrice=105; r.topF=1890; r.topRowIndex=1890; r.heightDev=180; r.widthDev=200;
+    auto out=std::make_unique<chart::FlowSnapshot>();
+    ASSERT_TRUE(chart::FlowFeed::bin(*out,*series,frame));
+    ASSERT_EQ(out->barCount,1); ASSERT_EQ(out->cellCount,1);
+    EXPECT_EQ(out->bars[0].delta,7); EXPECT_EQ(out->cells[0].askVol,7);
+}

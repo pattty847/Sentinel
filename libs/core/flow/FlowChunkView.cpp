@@ -116,12 +116,12 @@ FlowViewSnapshot FlowChunkView::compose(FlowChunkCache& cache, const FlowChunkWa
     const auto to = (want.toMs - 1) / tf * tf + tf;
     const auto from = std::max(want.fromMs / tf * tf, to - int64_t(heatmap::kMaxChartSurfaceBars) * tf);
     auto scanFrom = anchor >= 0 ? std::min(from, (anchor + tf - 1) / tf * tf) : from;
-    // One-second history does not exist. Its cumulative baseline is explicitly
-    // the retained RAM window; do not scan a month of missing seconds.
+    // This compositor has no second chunks. The separate one-second history
+    // adapter owns journal replay; here only the live RAM window is available.
     if (tf == 1000 && !live_.empty()) scanFrom = std::max(scanFrom, std::min(from, live_.begin()->first));
     const auto generation = cache.generation();
     const bool reuse = anchor >= 0 && prefix_.instrument == want.instrument && prefix_.anchor == anchor &&
-        prefix_.tf == tf && prefix_.generation == generation && prefix_.through <= from;
+        prefix_.tf == tf && prefix_.generation == generation && prefix_.through >= anchor && prefix_.through <= from;
     out.anchorMs = anchor; out.prefixThroughMs = from; out.loadedFromMs = reuse ? prefix_.loaded : scanFrom;
     out.prefixDelta = reuse ? prefix_.delta : 0; out.prefixComplete = !reuse || prefix_.complete;
     if (reuse) scanFrom = prefix_.through;

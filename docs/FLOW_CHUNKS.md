@@ -1,8 +1,8 @@
 # Flow chunks
 
-**Chunk codecs, parallel disk store, sealed flow serving, live seal/replay, client fetcher and footprint/CVD/footer integration implemented. Server FHE1/FLD1 removal remains pending.**
+**Chunk codecs, parallel disk store, sealed flow serving, live seal/replay, client fetcher and footprint/CVD/footer integration implemented. One-second FHE1 fallback and server FHE1/FLD1 removal remain pending.**
 The client reads sealed history through SCK1 chunks and provisional bars through `flow_bar` replay/live messages.
-[MARKETDATA.md](MARKETDATA.md) documents the client and the legacy server-only history endpoint.
+[MARKETDATA.md](MARKETDATA.md) documents the client and the temporary one-second history endpoint.
 This spec replaces FLD1 and FHE1; step 4 also moves the heatmap onto the shared envelope.
 Measurements are in section 12. They come from `flow_history_bench --lateness` and `--columnar`
 (`tests/core/flow_history_bench.cpp`). Production byte codecs are in `libs/core/flow/FlowChunkCodec.*`,
@@ -504,7 +504,7 @@ flow bars"): revision as envelope metadata, higher revision wins, at equal revis
    and rebuilds them from the replay.
 5. The client replaces a live bucket with the sealed chunk once it holds one covering it, whatever the live
    bucket's revision or finality.
-6. 1 s subscriptions are unchanged (RAM only, no chunks).
+6. 1 s subscriptions use RAM, with bounded RAWL2 replay for history; there are no 1 s chunks. The client temporarily uses FHE1 second pages until server live replay supplies that history.
 
 ## 9. Client fetch
 

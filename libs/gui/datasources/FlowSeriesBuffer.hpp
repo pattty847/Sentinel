@@ -5,8 +5,8 @@
 #include <map>
 
 // GUI-owned, bounded composed viewport, replaced atomically after worker composition.
-// Immutable historical bodies live only in FlowChunkClient's cache. apply() is the
-// bounded live/synthetic source adapter used by non-remote feeds; it never fetches.
+// Sealed historical bodies live only in FlowChunkClient's cache. apply() also
+// merges the bounded one-second RAM/journal fallback and synthetic feeds; it never fetches.
 class FlowSeriesBuffer {
 public:
     using Record = SentinelStreamClient::FlowRecord;
@@ -19,11 +19,12 @@ public:
         std::map<int64_t, Record> bars;
         std::map<int64_t, Range> coverage;
     };
-    void apply(const Batch&, int64_t nowMs);
+    void apply(const Batch&, int64_t nowMs, int64_t from = 0, int64_t to = INT64_MAX);
     void setCoverage(const QString&, int64_t tf, const Range&);
     const Series* series(int64_t tf) const;
     const QString& symbol() const { return m_symbol; }
     void clear();
+    void retain(int64_t tf, int64_t from, int64_t to);
     void replace(const QString&, int64_t, sentinel::flow::FlowViewSnapshot);
     // Approximate heap held, from sizes and capacities (client.mem probe). Map nodes
     // count their value plus kMapNodeOverheadBytes; string heap is not counted.

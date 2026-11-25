@@ -25,11 +25,15 @@ f::chunks::Status status(SentinelStreamClient::FlowStatus value) {
 }
 }
 RemoteGridDataSource::~RemoteGridDataSource() {
-    m_flowTimer.stop(); m_flowViewTimer.stop();
+    m_flowTimer.stop(); m_flowViewTimer.stop(); m_flowSecondsTimer.stop();
     m_flowChunks.reset();
 }
 void RemoteGridDataSource::initializeFlow() {
     m_flowClock.start();
+    m_flowSecondsTimer.setSingleShot(true);
+    connect(&m_flowSecondsTimer, &QTimer::timeout, this, &RemoteGridDataSource::requestNextFlowSecondPage);
+    connect(&m_client, &SentinelStreamClient::flowSecondsFailed, this,
+            &RemoteGridDataSource::failFlowSeconds, Qt::QueuedConnection);
     m_flowChunks = std::make_unique<f::FlowChunkClient>([this](QObject* parent) {
         return new w::ClientTransport(m_client, parent);
     });
@@ -97,7 +101,7 @@ void RemoteGridDataSource::subscribeFlowLive(const QString& symbol, int64_t tf) 
     auto& held = m_flowOwnership[key];
     if (!held) held = std::make_shared<FlowWork>();
     m_flowWork = held;
-    // One-second flow stays RAM-only and needs no sealed availability.
+    // One-second replay uses its separate history path, never sealed chunks.
     if (tf == 1000) startFlowLive();
 }
 void RemoteGridDataSource::startFlowLive() {
@@ -105,6 +109,7 @@ void RemoteGridDataSource::startFlowLive() {
         (m_flowTimeframeMs != 1000 && !m_flowAvailabilityReady) || m_flowTimer.isActive() || !flowPermitted(m_flowSymbol)) return;
     const auto work = m_flowWork;
     m_flowChunks->queued([work](auto&) { work->rows.resetLive(); work->summary.resetLive(); });
+    if (m_flowTimeframeMs == 1000) { m_flowSeconds.reset(); m_flowBuffer.clear(); m_flowSummary.clear(); }
     m_flowSubscription = m_client.subscribeFlowLive(m_flowSymbol.toStdString(), m_flowTimeframeMs);
     m_flowViewTimer.start();
 }
@@ -114,8 +119,8 @@ void RemoteGridDataSource::unsubscribeFlowLive() {
     m_flowSubscription = 0; m_flowSymbol.clear(); m_flowTimeframeMs = 0;
     m_flowFrom = m_flowTo = 0; m_flowPan = 0; m_flowAnchor = -1;
     m_flowAvailabilityReady = false;
-    m_flowTimer.stop(); m_flowViewTimer.stop();
-    m_flowBuffer.clear(); m_flowSummary.clear(); m_flowProbe.reset();
+    m_flowTimer.stop(); m_flowViewTimer.stop(); m_flowSecondsTimer.stop();
+    m_flowBuffer.clear(); m_flowSummary.clear(); m_flowProbe.reset(); m_flowSeconds.reset();
     const auto work = std::exchange(m_flowWork, {});
     m_flowChunks->queued([work](auto& fetch) {
         if (work) { work->rows.resetLive(); work->summary.resetLive(); }
@@ -137,6 +142,7 @@ void RemoteGridDataSource::setFlowViewport(const QString& symbol, int64_t tf, in
 }
 void RemoteGridDataSource::refreshFlowView() {
     if (!m_flowWork || m_flowTo <= m_flowFrom || !flowPermitted(m_flowSymbol)) return;
+    if (m_flowTimeframeMs == 1000) { requestNextFlowSecondPage(); return; }
     if (m_flowComposing) { m_flowDirty = true; return; }
     m_flowComposing = true; m_flowDirty = false;
     const auto work = m_flowWork;
@@ -180,7 +186,17 @@ void RemoteGridDataSource::refreshFlowView() {
     });
 }
 void RemoteGridDataSource::onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr batch) {
+    if (batch && batch->secondHistory) { onFlowSeconds(batch); return; }
     if (!batch || !m_flowWork || !m_flowSubscription || batch->id != m_flowSubscription) return;
+    if (m_flowTimeframeMs == 1000) {
+        if (batch->replayReady) m_flowRetryMs = 100;
+        else if (batch->symbol == m_flowSymbol && batch->timeframeMs == 1000) {
+            m_flowBuffer.apply(*batch, candleNow(), m_flowSeconds.from(), m_flowSeconds.to());
+            m_flowBuffer.retain(1000, m_flowSeconds.from(), m_flowSeconds.to());
+            publishFlowSeconds();
+        }
+        return;
+    }
     const auto work = m_flowWork;
     if (batch->replayReady) {
         m_flowRetryMs = 100;

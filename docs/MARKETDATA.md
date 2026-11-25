@@ -309,7 +309,7 @@ and FLB1/base64/JSON encoding never run there. Flow uses the existing bounded
 
 ### Flow history
 
-This is the legacy **server-only** FHE1/FLD1 endpoint, retained until the server cutover. The GUI no longer requests or decodes it. Its sealed history uses [Flow chunk fetching](#flow-chunk-fetching); 1 s flow is live RAM only.
+This is the legacy FHE1/FLD1 endpoint, retained until the server cutover. The GUI uses it only for one-second RAM/journal replay; minute-and-higher sealed history uses [Flow chunk fetching](#flow-chunk-fetching). The temporary client decoder rejects every timeframe except 1000 ms.
 
 `{"type":"flow_history_request","req":9,"symbol":"BTC-USD","timeframe_ms":60000,
 "end_time_ms":1798765500000,"limit":512}` requests the newest page ending at the
@@ -474,8 +474,8 @@ The GUI first establishes the instrument's chunk availability, then subscribes l
 that selection's live buckets and rebuilds them from replay; the FIFO-decoded `flow_live_ready` ends replay.
 Higher live revision wins, with completeness winning ties. Refused subscriptions retry after 100 ms, doubling
 to 5 s; successful replay resets the backoff. A dropped live frame restarts replay rather than querying the
-retired FHE1 endpoint. Subscription IDs and selection generations fence stale replies/publications.
-1 s subscriptions remain RAM-only; sub-second chart selections request 1 s flow.
+minute-and-higher FHE1 endpoint. Subscription IDs and selection generations fence stale replies/publications.
+1 s subscriptions are supplemented by bounded FHE1 history pages from server RAM/journal replay; sub-second chart selections request 1 s flow.
 
 ## Heatmap history transport
 
@@ -735,14 +735,14 @@ Busy, decode overload and deadlines follow the heatmap's exponential 100 ms..5 s
 The view forwards symbol, timeframe, half-open visible range, last pan direction, and CVD reset anchor on each change.
 A zero-delay GUI timer coalesces changes; at most one composition is outstanding and a newer selection fences its
 publication. `FlowChunkView` composes on `flow-chunks`, using `flow.rows` for footprint and `flow.summary` for
-CVD/footer. The GUI's `FlowSeriesBuffer` retains just the composed viewport (at most 8,194 buckets), not historical
+CVD/footer. The GUI's `FlowSeriesBuffer` retains the drawn range plus one screen of margin per side (at most 8,194 buckets), not historical
 pages or its own padding cache. The fetcher's padded immutable bodies survive pans and symbol/timeframe switches.
 
 `cvdHistoryAnchor` remains UTC midnight or the configured TPO session open for the earliest visible bucket;
-visible-reset mode supplies no earlier anchor. A separate summary want covers anchor-to-view. Composition folds
+visible-reset mode supplies no earlier anchor. A separate summary want covers anchor-to-view without padding. Composition caches and extends a running scalar prefix, invalidated by cache changes or relevant live changes, and folds
 that prefix into a scalar cumulative delta plus its loaded-start metadata; prefix bars are not retained in the GUI.
 Thus overlapping CVD values keep their baseline across pans within a reset period. Weekly/monthly TPO anchors
-remain supported. One-second CVD can only accumulate the retained RAM window and labels its actual loaded start.
+remain supported. One-second CVD accumulates its retained RAM/journal replay window (at most 8,194 seconds) and labels its actual loaded start. The temporary `requestFlowSeconds` transport always sends `timeframe_ms=1000`; it cannot request coarser history. `FlowSecondHistory` permits one 512-second page in flight, waits 30 s for cold replay, retries failures at 100 ms..5 s, halves oversized pages, and never requests the live bucket or future seconds. Selection/replay resets reject prior request IDs.
 `flow.timing` reports view-to-visible-fill latency (`sinceLastChangeMs`, `sinceFirstChangeMs`) with `source=cache`,
 `fetch` or `live`, and counts sealed/live bars, including immediate cache hits. Feed build timings remain separate.
 

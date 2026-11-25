@@ -191,16 +191,22 @@ replace the forming bar's previous value.
 `utcDay` and `tpoSession` sum loaded bars from their reset boundary, including bars
 outside the viewport. `tpoSession` uses the configured `tpo.tpoSessionType` and
 resets at its session open; accumulation continues until the next open, including
-outside session hours. Only these two modes, while the strip or footer is enabled, extend
-flow requests and retention to the earliest visible flow bar's reset boundary,
-within the existing 8,194-bar limit. Panning or zooming inside a fully loaded reset
-period preserves its baseline. Until history reaches the boundary, or when the
-cap excludes it, the label says “CVD since HH:MM loaded” (with a date across
-days); the time and date use the display zone (UTC or Local), while the reset
-boundary stays UTC-defined. Complete coverage of earlier empty buckets counts as
-loaded. Each visible
-reset period tracks its own loaded start; any truncated period makes the label explicit.
-With both strip and footer disabled, or in `visible` mode, CVD keeps the usual viewport history window.
+outside session hours. Only these two modes, while the strip or footer is enabled, request summary chunks
+from the earliest drawn bucket's reset boundary. The prefix has no fetch padding;
+it is folded into a cached scalar cumulative sum, rather than retained as GUI bars.
+The composed drawn window includes a screen of margin on each side, within the
+8,194-bucket surface limit. Panning inside a fully loaded reset period preserves
+its baseline. Until history reaches the boundary, the label says “CVD since HH:MM
+loaded” (with a date across days); display time uses UTC or Local while reset
+boundaries stay UTC-defined. Complete coverage of earlier empty buckets counts as
+loaded. Each visible reset period tracks its own loaded start.
+
+One-second flow (also used by subsecond charts) temporarily reads bounded FHE1
+pages backed by server RAM and journal replay. Its retained window, including the
+reset prefix and drawing margin, is capped at 8,194 seconds; a truncated prefix
+labels the actual loaded start. Requests never include the live bucket or future
+seconds. With both strip and footer disabled, or in `visible` mode, no extra CVD
+prefix is requested.
 
 The removed `none` value is rejected by both API routes; QML writes leave the
 current value unchanged. A persisted `none` is normalized to `visible` on load,

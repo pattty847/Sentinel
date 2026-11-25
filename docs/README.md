@@ -22,7 +22,7 @@ This index itself is maintained.
 | [docs/AGENT_API.md](AGENT_API.md) | GUI Agent API |
 | [docs/RAW_CAPTURE.md](RAW_CAPTURE.md) | Raw capture formats and operation |
 | [docs/ROLLER.md](ROLLER.md) | Journal roller operation and storage |
-| [docs/FLOW_CHUNKS.md](FLOW_CHUNKS.md) | Flow chunk key, envelope, formats, day grids, seal and fetch rules (server store, serving, live seal/replay and footprint/CVD/footer client integrated; server legacy removal pending) |
+| [docs/FLOW_CHUNKS.md](FLOW_CHUNKS.md) | Flow chunk key, envelope, formats, day grids, seal and fetch rules (server store, serving, live seal/replay and footprint/CVD/footer client integrated; one-second fallback and server legacy removal pending) |
 | [docs/SENTINEL_STREAM_CLIENT.md](SENTINEL_STREAM_CLIENT.md) | Client streaming behavior |
 | [docs/WINDOWS_GPU_TESTS.md](WINDOWS_GPU_TESTS.md) | Windows native GPU setup and verification |
 | [docs/RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) | Release verification |

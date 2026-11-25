@@ -4,6 +4,7 @@
 #include "CandleBackfillState.hpp"
 #include "flow/FlowChunkClient.hpp"
 #include "FlowTimingProbe.hpp"
+#include "flow/FlowSecondHistory.hpp"
 #include <QElapsedTimer>
 #include "../models/MarketHealth.hpp"
 #include <QDateTime>
@@ -72,6 +73,12 @@ private:
     friend struct CandleDataSourceTest;
     friend struct FlowDataSourceTest;
     void initializeFlow();
+    void requestNextFlowSecondPage();
+    void onFlowSeconds(SentinelStreamClient::FlowBatchPtr);
+    void failFlowSeconds(quint64, const QString&);
+    void publishFlowSeconds();
+    sentinel::flow::FlowSecondHistory m_flowSeconds;
+    QTimer m_flowSecondsTimer;
     void startFlowLive();
     void refreshFlowView();
     void onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr batch);

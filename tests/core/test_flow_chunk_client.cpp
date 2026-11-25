@@ -689,3 +689,36 @@ TEST(FlowChunkView, RunningPrefixInvalidatesWhenAChunkChanges) {
     const auto hidden=state.compose(cache,view(3,4,0,"flow.summary",H),available(6),T);
     EXPECT_EQ(hidden.prefixDelta,2); EXPECT_FALSE(hidden.prefixComplete);
 }
+
+#include "flow/FlowSecondHistory.hpp"
+TEST(FlowSecondHistory, ColdSecondReplayWaitsThirtySecondsAndAcceptsLateReplyOnce) {
+    f::FlowSecondHistory history; history.window(0,10000,-1);
+    const auto request=history.next(20000); ASSERT_TRUE(request);
+    EXPECT_EQ(history.wakeAt(20000),50000);
+    EXPECT_FALSE(history.next(25000)); EXPECT_TRUE(history.matches(request->id));
+    EXPECT_FALSE(history.next(50000));
+    EXPECT_TRUE(history.matches(request->id)); history.accepted(50001,false);
+    EXPECT_FALSE(history.matches(request->id)); EXPECT_FALSE(history.next(50002));
+}
+TEST(FlowSecondHistory, CapLiveEdgeRetriesAndTimeoutAreBounded) {
+    f::FlowSecondHistory history; history.window(T,T+24*H,T);
+    EXPECT_EQ(history.to()-history.from(),int64_t(heatmap::kMaxChartSurfaceBars)*1000);
+    history.reset(); history.window(T,T+H,-1);
+    auto request=history.next(T+5000); ASSERT_TRUE(request);
+    EXPECT_EQ(request->toMs,T+5000); EXPECT_LT(request->fromMs,request->toMs);
+    history.failed(T+5000); EXPECT_FALSE(history.next(T+5099));
+    request=history.next(T+5100); ASSERT_TRUE(request);
+    const auto old=request->id;
+    EXPECT_FALSE(history.next(T+35100));
+    request=history.next(T+35300); ASSERT_TRUE(request); EXPECT_NE(request->id,old);
+    history.failed(T+35300,true); EXPECT_FALSE(history.next(T+35699));
+    request=history.next(T+35700); ASSERT_TRUE(request);
+    EXPECT_LE(request->toMs-request->fromMs,256000);
+}
+TEST(FlowChunkView, RunningPrefixNeverIncludesMarginBeforeItsResetAnchor) {
+    f::FlowChunkCache cache; f::FlowChunkView state;
+    for (int h=23; h<27; ++h) { const auto r=body(key(h)); cache.put(key(h),r->body,1,r->frame.contentHash); }
+    state.compose(cache,view(23,25,0,"flow.summary",H),available(27),T+D);
+    const auto pan=state.compose(cache,view(25,27,0,"flow.summary",H),available(27),T+D);
+    EXPECT_EQ(pan.prefixDelta,1);
+}
