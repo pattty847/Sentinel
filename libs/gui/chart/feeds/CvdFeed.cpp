@@ -109,7 +109,7 @@ void CvdFeed::bind(ChartViewController& view, const PublishedFrame& published,
 }
 void CvdFeed::bindSource(IGridDataSource& source) {
     disconnect(sourceConnection_);
-    buffer_.bind(source);
+    buffer_.bind(source, true);
     sourceConnection_ = connect(&source, &IGridDataSource::flowBarsReceived, this, &CvdFeed::receive);
     publish();
 }
@@ -182,6 +182,14 @@ void CvdFeed::build(CvdSnapshot& out, const FlowSeriesBuffer::Series& source,
         return;
     }
     int64_t period = std::numeric_limits<int64_t>::min(), from = 0;
+    if (source.anchorMs >= 0 && source.prefixThroughMs > source.anchorMs) {
+        const auto prefixPeriod = cvdResetBoundary(source.prefixThroughMs - 1, reset, sessionType);
+        if (prefixPeriod == source.anchorMs) {
+            period = prefixPeriod;
+            from = source.loadedFromMs;
+            out.series.push(source.prefixThroughMs - 1, source.prefixDelta, period, false, from);
+        }
+    }
     for (const auto& [time, record] : source.bars) {
         const auto& bar = record.bar;
         if (bar.baseScale <= 0 || bar.timeframeMs != out.timeframeMs) continue;

@@ -185,7 +185,6 @@ SentinelStreamClient::SentinelStreamClient(const std::string& host, const std::s
     qRegisterMetaType<std::vector<OrderBookLevel>>("OrderBookLevelVector");
     qRegisterMetaType<FlowBatchPtr>("SentinelStreamClient::FlowBatchPtr");
     qRegisterMetaType<TradeHistoryPtr>("SentinelStreamClient::TradeHistoryPtr");
-    qRegisterMetaType<FlowFailure>("SentinelStreamClient::FlowFailure");
     qRegisterMetaType<TpoSlice>("TpoSlice");
     qRegisterMetaType<CandleBar>("CandleBar");
     qRegisterMetaType<QVector<CandleBar>>("QVector<CandleBar>");
@@ -464,16 +463,6 @@ quint64 peekEnvelopeRequestId(const std::vector<uint8_t>& frame) {
     for (int i = 0; i < 8; ++i) id |= quint64(frame[6 + i]) << (8 * i);
     return id;
 }
-SentinelStreamClient::FlowFailure classifyFlowHistoryError(const QString& message) {
-    using Failure = SentinelStreamClient::FlowFailure;
-    if (message.contains(QStringLiteral("flow history frame exceeds 15 MiB cap; reduce limit")))
-        return Failure::Oversized;
-    if (message.contains(QStringLiteral("1s journal replay busy")) ||
-        message.contains(QStringLiteral("history worker queue is full")) ||
-        message.contains(QStringLiteral("one flow history job is already in flight")))
-        return Failure::Retryable;
-    return Failure::Fatal;
-}
 } // namespace
 
 void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8_t>> frame, bool flowLive,
@@ -482,8 +471,7 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
     if (!m_acceptChunkFrames) return;
     const size_t bytes = frame->size();
     const bool tradeFrame = bytes >= 4 && std::equal(frame->begin(), frame->begin() + 4, "TRD1");
-    const bool flowFrame = flowLive || (bytes >= 4 && std::equal(frame->begin(), frame->begin() + 4, "FHE1"));
-    const auto flowRequest = m_flowHistoryRequest.load();
+    const bool flowFrame = flowLive;
     const auto chunkRequest = peekEnvelopeRequestId(*frame);
     const bool sharedChunk = m_chunkRequests.contains(chunkRequest) ||
         (bytes >= 18 && std::equal(frame->begin() + 14, frame->begin() + 18, "SCK1"));
@@ -491,12 +479,10 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
     // decoder makes progress. A flood must not create a second unbounded queue
     // of rejection tasks or queued Qt signals while the decoder is stalled.
     const auto refuse = [&](unsigned reason, const char* code, const char* message) {
-        // Only one flow page is in flight. Always release that flight even if
-        // heatmap/live refusals were already coalesced during this backlog.
-        if (flowFrame && !flowLive)
-            emit flowHistoryFailed(flowRequest, QString::fromLatin1(message), FlowFailure::Retryable);
         if (tradeFrame)
             emit tradeHistoryFailed(m_tradeHistoryRequest.load(), QString::fromLatin1(message));
+        if (flowLive && flowDrop && flowDrop->sub && flowDrop->symbol.isEmpty())
+            emit flowLiveFailed(flowDrop->sub, QString::fromLatin1(message)); // lost replay barrier
         if (flowLive && reason == 2 && flowDrop && flowDrop->sub && !flowDrop->symbol.isEmpty() &&
             protocol::clientparse::validFlowTimeframe(flowDrop->timeframeMs) &&
             flowDrop->bucketStartMs >= 0 && flowDrop->bucketStartMs % flowDrop->timeframeMs == 0) {
@@ -518,6 +504,7 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
         if (flowFrame || tradeFrame) return;
         const auto id = chunkRequest;
         if (sharedChunk) {
+            if (!id) return; // An uncorrelated refusal cannot retire other requests.
             emit chunkFailed({id, {}, QString::fromLatin1(code), QString::fromLatin1(message)});
             m_chunkRequests.erase(id); return;
         }
@@ -536,8 +523,8 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
     ++m_decodeBacklogFrames;
     m_decodeBacklogBytes.fetch_add(bytes);
     // Decoding a deep hour takes milliseconds; keep it off the network thread.
-    net::post(*m_decodePool, [this, frame = std::move(frame), epoch = m_connectionEpoch.load(), flowLive, flowRequest] {
-        if (epoch == m_connectionEpoch.load()) decodeBinaryMessage(*frame, epoch, flowLive, flowRequest);
+    net::post(*m_decodePool, [this, frame = std::move(frame), epoch = m_connectionEpoch.load(), flowLive] {
+        if (epoch == m_connectionEpoch.load()) decodeBinaryMessage(*frame, epoch, flowLive);
         std::lock_guard lock(m_chunkOrderMutex);
         --m_decodeBacklogFrames;
         m_decodeBacklogBytes.fetch_sub(frame->size());
@@ -545,7 +532,7 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
     });
 }
 
-void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame, quint64 epoch, bool flowLive, quint64 flowRequest) {
+void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame, quint64 epoch, bool flowLive) {
     if (frame.size() >= 4 && std::equal(frame.begin(), frame.begin() + 4, "TRD1")) {
         try {
             auto page = protocol::tradewire::decode(frame);
@@ -560,13 +547,12 @@ void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame
         }
         return;
     }
-    if (flowLive || (frame.size() >= 4 && std::equal(frame.begin(), frame.begin() + 4, "FHE1"))) {
+    if (flowLive) {
         try {
             // flow.timing only: no clock read while the probe is off.
             static const bool timed = sentinel::logging::probeEnabled("flow.timing");
             const auto started = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-            auto batch = flowLive ? protocol::clientparse::parseFlowLive(nlohmann::json::parse(frame))
-                                  : protocol::clientparse::parseFlowHistory(frame);
+            auto batch = protocol::clientparse::parseFlowLive(nlohmann::json::parse(frame));
             if (timed) {
                 batch.wireBytes = frame.size();
                 batch.decodeMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
@@ -578,7 +564,6 @@ void SentinelStreamClient::decodeBinaryMessage(const std::vector<uint8_t>& frame
             std::lock_guard lock(m_chunkOrderMutex);
             if (epoch != m_connectionEpoch.load()) return;
             sLog_Warning("Flow frame rejected: bytes=" << frame.size() << " error=" << e.what());
-            if (!flowLive) emit flowHistoryFailed(flowRequest, QString::fromUtf8(e.what()), FlowFailure::Fatal);
         }
         return;
     }
@@ -648,22 +633,6 @@ bool SentinelStreamClient::acceptChunkOrder(const heatmap::ChunkFrame& frame) {
     if (m_chunkOrder.size() >= kMaxChunkOrderKeys) m_chunkOrder.clear(); // bounded; ordering restarts
     m_chunkOrder.emplace(key, incoming);
     return true;
-}
-
-void SentinelStreamClient::requestFlowHistory(quint64 req, const std::string& symbol, int64_t timeframeMs,
-                                             int64_t endTimeMs, int limit) {
-    if (symbol.empty() || !protocol::clientparse::validFlowTimeframe(timeframeMs) || endTimeMs < 0 ||
-        endTimeMs > INT64_MAX - timeframeMs || limit < 1 || limit > 512) {
-        emit flowHistoryFailed(req, QStringLiteral("invalid flow history arguments"), FlowFailure::Fatal);
-        return;
-    }
-    m_flowHistoryRequest.store(req);
-    const nlohmann::json message = {{"type", "flow_history_request"}, {"req", req}, {"symbol", symbol},
-        {"timeframe_ms", timeframeMs}, {"end_time_ms", endTimeMs}, {"limit", limit}};
-    net::post(m_strand, [this, payload = message.dump()]() mutable {
-        m_writeQueue.push_back(std::move(payload));
-        if (m_isConnected && m_writeQueue.size() == 1) doWrite();
-    });
 }
 
 void SentinelStreamClient::requestTradeHistory(quint64 req, const std::string& symbol,
@@ -921,6 +890,13 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
             }
             return;
         }
+        if (typeStr == "flow_live_ready") {
+            // The replay barrier shares the live decoder FIFO, so it cannot
+            // overtake a preceding flow_bar still being decoded.
+            handleBinaryMessage(std::make_shared<std::vector<uint8_t>>(msgStr.begin(), msgStr.end()), true,
+                FlowDropInfo{msg.value("sub", uint64_t(0)), {}, 0, 0});
+            return;
+        }
         const auto type = protocol::fromString(typeStr);
 
         switch (type) {
@@ -982,10 +958,9 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 handlePnlSnapshotMessage(msg);
                 return;
             case protocol::MessageType::Error:
-                if (msg.value("context", "") == "flow_history_request") {
-                    const auto message = QString::fromStdString(msg.value("message", ""));
-                    emit flowHistoryFailed(msg.value("req", uint64_t(0)), message,
-                                           classifyFlowHistoryError(message));
+                if (msg.value("context", "") == "flow_live_subscribe") {
+                    emit flowLiveFailed(msg.value("sub", uint64_t(0)), QString::fromStdString(msg.value("message", "")));
+                    return;
                 }
                 if (msg.value("context", "") == "subscribe" &&
                     (msg.value("code", "") == "connection_cap" || msg.value("code", "") == "invalid_product" ||

@@ -597,7 +597,7 @@ MappingFrameContext widestFrame(double shiftBars) {
 FlowSeriesBuffer retainedWidest() {
     FlowSeriesBuffer buffer;
     FlowSeriesBuffer::Batch batch;
-    batch.symbol = "BTC-USD"; batch.timeframeMs = 60000; batch.history = true;
+    batch.symbol = "BTC-USD"; batch.timeframeMs = 60000;
     for (const auto& [start, record] : widestSeries().bars) {
         auto& next = batch.bars.emplace_back(record); next.complete = true;
         next.source = SentinelStreamClient::FlowSource::Store;

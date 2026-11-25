@@ -333,6 +333,7 @@ struct FlowChunkClientTest : testing::Test {
         });
         client.m_ioc.poll(); QObject::disconnect(stop);
     }
+    void connectedState(bool online) { client.m_isConnected = online; }
     void saturate(unsigned refusals=2) { client.m_decodeBacklogFrames=client.kMaxDecodeBacklogFrames; client.m_decodeRefusals=refusals; }
     void unsaturate() { client.m_decodeBacklogFrames=0; }
     void postDecode(std::function<void()> fn) { net::post(*client.m_decodePool,std::move(fn)); }
@@ -469,4 +470,196 @@ TEST_F(FlowChunkClientTest, FlowChunkBacklogRefusalIsIndependentOfHeatmapRefusal
     saturate(); receive(bytes); receive(bytes); unsaturate(); flush();
     ASSERT_EQ(errors.size(),1u); EXPECT_EQ(errors[0].requestId,id); EXPECT_EQ(errors[0].code,"client_overloaded");
     EXPECT_EQ(client.chunkRejectedCount(),2u);
+}
+
+TEST_F(FlowFetch, StaleOrHiddenRowsDoNotCaptureSummaryDemand) {
+    for (const bool hidden : {false, true}) {
+        fetch->release(1); cache.clear(); transport.requests.clear();
+        const auto rows = body(key());
+        cache.put(key(), rows->body, 1, rows->frame.contentHash);
+        online(available(1, 2));
+        if (hidden) cache.hide(key());
+        EXPECT_FALSE(cache.read(key(0, "flow.summary")));
+        fetch->want(1, view(0, 1, 0, "flow.summary")); drain();
+        ASSERT_EQ(transport.requests.size(), 1u);
+        EXPECT_EQ(transport.requests.back().keys.front(), key(0, "flow.summary"));
+        EXPECT_FALSE(transport.requests.back().hashes.front());
+        answer(transport.requests.back(), 2);
+        EXPECT_TRUE(cache.read(key(0, "flow.summary")));
+    }
+}
+TEST_F(FlowFetch, UnavailableRowsDoNotBlockSummaryAndSummaryWantRetriesItsOwnFailure) {
+    online(); fetch->want(1, view()); drain();
+    transport.failed({transport.requests.back().id, key(), "unavailable", "rows unavailable"}); drain();
+    fetch->want(1, view(0, 1, 0, "flow.summary")); drain();
+    ASSERT_EQ(transport.requests.size(), 2u);
+    EXPECT_EQ(transport.requests.back().keys.front(), key(0, "flow.summary"));
+    transport.failed({transport.requests.back().id, key(0, "flow.summary"), "build_failed", "retry on want"}); drain();
+    fetch->want(1, view(0, 1, 0, "flow.summary")); drain();
+    ASSERT_EQ(transport.requests.size(), 3u);
+    answer(transport.requests.back());
+    EXPECT_TRUE(cache.read(key(0, "flow.summary")));
+}
+TEST_F(FlowChunkClientTest, ZeroIdSckBacklogRefusalKeepsOtherRequestsPending) {
+    w::ClientTransport transport(client);
+    std::vector<quint64> delivered;
+    QObject::connect(&transport, &w::Transport::received, &app,
+        [&](quint64 id, w::ReplyPtr) { delivered.push_back(id); }, Qt::QueuedConnection);
+    client.connected(); drain();
+    const auto local = transport.request(key(), {T}, {});
+    const auto sent = writes(); ASSERT_EQ(sent.size(), 1u);
+    auto uncorrelated = heatmap::encodeChunkEnvelope(1, w::encode(body(key())->frame));
+    std::fill(uncorrelated.begin() + 6, uncorrelated.begin() + 14, 0);
+    saturate(0); receive(std::move(uncorrelated)); unsaturate(); flush();
+    EXPECT_TRUE(errors.empty());
+    receive(heatmap::encodeChunkEnvelope(sent[0].at("req").get<uint64_t>(), w::encode(body(key())->frame)));
+    flush(); EXPECT_EQ(delivered, (std::vector<quint64>{local}));
+}
+
+TEST_F(FlowChunkClientTest, AdapterFetchesWhetherAttachedBeforeOrAfterConnection) {
+    for (const bool alreadyConnected : {false, true}) {
+        connectedState(alreadyConnected);
+        w::ClientTransport transport(client);
+        f::FlowChunkCache cache;
+        f::FlowChunkFetcher fetch(cache, transport);
+        fetch.want(1, view());
+        if (!alreadyConnected) { connectedState(true); client.connected(); }
+        drain(); client.chunkAvailabilityReceived(available()); drain();
+        EXPECT_EQ(fetch.stats().inFlightChunks, 1u);
+        connectedState(false);
+    }
+}
+TEST_F(FlowChunkClientTest, ServiceDestructionRetiresRequestsWhileClientStillLives) {
+    connectedState(true);
+    {
+        f::FlowChunkClient service([&](QObject* parent) { return new w::ClientTransport(client, parent); });
+        service.queued([](auto& fetch) { fetch.want(1, view()); });
+        std::promise<void> seeded;
+        service.queued([&](auto&) { seeded.set_value(); });
+        seeded.get_future().wait();
+        client.chunkAvailabilityReceived(available());
+        // Adapter and fetcher each receive a queued hop; drain through both.
+        for (int turn = 0; turn < 3; ++turn) {
+            std::promise<void> pumped;
+            service.queued([&](auto& fetch) { fetch.pump(); pumped.set_value(); });
+            pumped.get_future().wait();
+        }
+    }
+    // Teardown joins the flow thread before the stream client's members can die.
+    connectedState(false);
+    auto sent = writes();
+    std::erase_if(sent, [](const auto& j) { return j.at("type") != "chunk_request"; });
+    ASSERT_EQ(sent.size(), 1u);
+    receive(heatmap::encodeChunkEnvelope(sent[0].at("req").get<uint64_t>(), w::encode(body(key())->frame)));
+    flush(); EXPECT_TRUE(seen.empty());
+    connectedState(false);
+}
+
+#include "flow/FlowChunkView.hpp"
+#include "heatmap/ChartSurface.hpp"
+#include "flow/FlowCompose.hpp"
+TEST(FlowChunkView, ComposesRowsAndSummaryAtEveryChartTimeframe) {
+    for (const auto tf : {M, 5*M, H, 4*H, D}) for (const auto channel : {"flow.rows", "flow.summary"}) {
+        f::FlowChunkCache cache;
+        auto a = available(24);
+        std::vector<f::FlowBar> input;
+        for (int hour = 0; hour < 24; ++hour) {
+            const auto r = body(key(hour, channel));
+            cache.put(key(hour, channel), r->body, 1, r->frame.contentHash);
+            auto rows = c::toBars(*body(key(hour))->body);
+            if (std::string_view(channel) == "flow.summary") {
+                rows[0].rows.clear(); rows[0].maxRowVol = 0;
+            }
+            input.push_back(rows[0]);
+        }
+        f::FlowChunkView viewState;
+        const auto result = viewState.compose(cache, view(0, 24, 0, channel, tf), a);
+        EXPECT_EQ(result.buckets.size(), size_t(D/tf));
+        for (const auto& [time, bucket] : result.buckets) {
+            EXPECT_EQ(bucket.status, c::Status::Complete);
+            std::vector<f::FlowBar> bars;
+            for (const auto& bar : input) if (bar.startMs >= time && bar.startMs < time+tf) bars.push_back(bar);
+            if (bars.empty()) EXPECT_FALSE(bucket.value);
+            else {
+                ASSERT_TRUE(bucket.value);
+                EXPECT_EQ(bucket.value->bar, f::composeFlowBars(bars, tf));
+                EXPECT_TRUE(bucket.value->sealed);
+            }
+        }
+    }
+}
+TEST(FlowChunkView, SealedReplacesAnyLiveRevisionAndNeverReturnsToLive) {
+    f::FlowChunkCache cache; f::FlowChunkView state;
+    auto live = c::toBars(*body(key(), 1, 200)->body).front();
+    state.live({live, UINT32_MAX, true, false}, c::Status::Complete);
+    auto want = view(); want.toMs = T+M;
+    auto a = available();
+    EXPECT_EQ(state.compose(cache, want, a).buckets.at(T).value->bar.close, 200);
+    const auto sealed = body(key()); cache.put(key(), sealed->body, 1, sealed->frame.contentHash);
+    EXPECT_EQ(state.compose(cache, want, a).buckets.at(T).value->bar.close, 100);
+    cache.hide(key());
+    state.live({live, UINT32_MAX, true, false}, c::Status::Complete);
+    const auto fenced = state.compose(cache, want, a);
+    EXPECT_FALSE(fenced.buckets.at(T).value);
+    EXPECT_EQ(fenced.buckets.at(T).status, c::Status::Building);
+}
+TEST(FlowChunkView, ReplayResetAndRetentionWithdrawPreviewWithoutInventingHistory) {
+    f::FlowChunkCache cache; f::FlowChunkView state;
+    auto live = c::toBars(*body(key())->body).front();
+    auto want = view(); want.toMs = T+M;
+    auto a = available(0); a.liveFromMs = T;
+    state.live({live, 99, true, false}, c::Status::Complete);
+    state.resetLive();
+    EXPECT_FALSE(state.compose(cache, want, a).buckets.at(T).value);
+    live.close = 101;
+    state.live({live, 1, true, false}, c::Status::Complete);
+    EXPECT_EQ(state.compose(cache, want, a).buckets.at(T).value->bar.close, 101);
+    state.retention(T+H);
+    a.liveFromMs = T+H;
+    // The recorded range precedes live retention, but its hour has not sealed.
+    a.channels.at("flow.rows").levels[0].oldestMs = T-H;
+    const auto expired = state.compose(cache, want, a);
+    EXPECT_FALSE(expired.buckets.at(T).value);
+    EXPECT_EQ(expired.buckets.at(T).status, c::Status::Building);
+}
+TEST(FlowChunkView, SummaryAnchorSurvivesPanWithoutRetainingPrefixBars) {
+    f::FlowChunkCache cache; f::FlowChunkView state;
+    auto a = available(6);
+    for (int h = 0; h < 6; ++h) {
+        const auto r = body(key(h, "flow.summary"));
+        cache.put(key(h, "flow.summary"), r->body, 1, r->frame.contentHash);
+    }
+    const auto first = state.compose(cache, view(2, 4, 0, "flow.summary", H), a, T);
+    const auto pan = state.compose(cache, view(3, 5, 1, "flow.summary", H), a, T);
+    ASSERT_EQ(first.buckets.size(), 2u); ASSERT_EQ(pan.buckets.size(), 2u);
+    EXPECT_EQ(first.prefixDelta, 2); EXPECT_EQ(pan.prefixDelta, 3);
+    EXPECT_TRUE(first.prefixComplete); EXPECT_TRUE(pan.prefixComplete);
+    EXPECT_EQ(first.prefixDelta + first.buckets.at(T+2*H).value->bar.delta, pan.prefixDelta);
+}
+TEST(FlowChunkView, MissingOlderHourIsBuildingDuringNewestFirstRecovery) {
+    f::FlowChunkCache cache; f::FlowChunkView state;
+    auto a = available(0); a.liveFromMs = T+6*H;
+    for (auto& [channel, values] : a.channels) {
+        values.levels[0].sealed = {{T+H, T+2*H}};
+        values.levels[0].oldestMs = values.levels[0].latestMs = T+H;
+    }
+    auto want = view(); want.toMs = T+M;
+    const auto snapshot = state.compose(cache, want, a);
+    EXPECT_EQ(snapshot.buckets.at(T).status, c::Status::Building);
+    EXPECT_FALSE(snapshot.buckets.at(T).value);
+}
+TEST(FlowChunkView, SealedEmptySlotWithdrawsLiveAndViewportIsBounded) {
+    f::FlowChunkCache cache; f::FlowChunkView state;
+    auto preview = c::toBars(*body(key())->body).front(); preview.startMs += M;
+    state.live({preview, UINT32_MAX, true, false}, c::Status::Complete);
+    const auto chunk = body(key()); cache.put(key(), chunk->body, 1, chunk->frame.contentHash);
+    auto want = view(); want.fromMs += M; want.toMs = want.fromMs+M;
+    const auto empty = state.compose(cache, want, available());
+    ASSERT_EQ(empty.buckets.size(), 1u);
+    EXPECT_FALSE(empty.buckets.begin()->second.value);
+    EXPECT_EQ(empty.buckets.begin()->second.status, c::Status::Complete);
+    want = view(0, 200);
+    const auto bounded = state.compose(cache, want, available(200));
+    EXPECT_EQ(bounded.buckets.size(), size_t(heatmap::kMaxChartSurfaceBars));
+    EXPECT_EQ(bounded.buckets.begin()->first, want.toMs-int64_t(heatmap::kMaxChartSurfaceBars)*M);
 }

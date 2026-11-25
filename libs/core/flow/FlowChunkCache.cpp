@@ -6,7 +6,7 @@ FlowChunkCache::Body FlowChunkCache::read(const Key& key) {
     if (key.channel == "flow.summary") {
         auto rows = key; rows.channel = "flow.rows"; rows.priceStep = 1;
         const auto row = entries_.find(rows);
-        if (row != entries_.end() && !row->second.value.hidden &&
+        if (row != entries_.end() && !row->second.value.hidden && !row->second.value.stale &&
             (it == entries_.end() || it->second.value.hidden ||
              (it->second.value.stale && !row->second.value.stale))) it = row;
     }

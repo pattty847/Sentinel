@@ -288,7 +288,7 @@ TEST(AgentHostModeSources, NoNativeFormatQSettingsInTheGui) {
 TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
     // The legacy heatmap requests (heatmap history, recording view and history) went in S8a.
     const QSet<QString> guarded{"subscribe", "requestCandleHistory",
-                                "requestTpoHistory", "subscribeFlowLive", "requestFlowHistory", "requestTradeHistory",
+                                "requestTpoHistory", "subscribeFlowLive", "requestTradeHistory",
                                 "sendTradeCommand", "sendAlgoCommand"};
     // Connection management, releases, cancels and the local generation lookup:
     // they name no new symbol to the server or carry no request.
@@ -296,7 +296,10 @@ TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
                                "unsubscribeFlowLive", "setCandleDeliveryGeneration", "bookDeliveryGeneration"};
     QFile file(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/datasources/RemoteGridDataSource.cpp");
     ASSERT_TRUE(file.open(QIODevice::ReadOnly));
-    const QString text = QString::fromUtf8(file.readAll());
+    QString text = QString::fromUtf8(file.readAll());
+    QFile flow(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/datasources/RemoteGridDataSourceFlow.cpp");
+    ASSERT_TRUE(flow.open(QIODevice::ReadOnly));
+    text += QString::fromUtf8(flow.readAll());
 
     const QRegularExpression definition(R"(^[\w:<>&\* ]*\bRemoteGridDataSource::(\w+)\s*\()",
                                         QRegularExpression::MultilineOption);
@@ -316,7 +319,7 @@ TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
             if (guarded.contains(name)) {
                 seen << name;
                 // Either the policy directly (trade/algo) or the symbol helper that wraps it.
-                const int guard = body.indexOf(QRegularExpression(R"(AgentHostMode::|\bsymbolPermitted\s*\()"));
+                const int guard = body.indexOf(QRegularExpression(R"(AgentHostMode::|\b(?:symbolPermitted|flowPermitted)\s*\()"));
                 EXPECT_TRUE(guard >= 0 && guard < m.capturedStart())
                     << qPrintable(defs[i].captured(1)) << " sends " << qPrintable(name) << " without the agent-host guard before it";
             } else if (!exempt.contains(name)) {
@@ -332,6 +335,18 @@ TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
     const int helperEnd = text.indexOf("\n}\n", helper);
     EXPECT_TRUE(text.mid(helper, helperEnd - helper).contains("AgentHostMode::symbolAllowed"))
         << "symbolPermitted must call AgentHostMode::symbolAllowed";
+
+    // Flow chunk requests leave asynchronously through the core service. Guard
+    // the GUI handoff before queuing a want, as well as the direct live sender.
+    const int flowHelper = text.indexOf("bool flowPermitted(");
+    ASSERT_GE(flowHelper, 0);
+    EXPECT_TRUE(text.mid(flowHelper, text.indexOf("\n}\n", flowHelper) - flowHelper)
+                    .contains("AgentHostMode::symbolAllowed"));
+    const int flowView = text.indexOf("void RemoteGridDataSource::refreshFlowView()");
+    ASSERT_GE(flowView, 0);
+    const auto flowBody = text.mid(flowView, text.indexOf("void RemoteGridDataSource::onFlowBarsReceived", flowView) - flowView);
+    ASSERT_GE(flowBody.indexOf("flowPermitted("), 0);
+    EXPECT_LT(flowBody.indexOf("flowPermitted("), flowBody.indexOf("m_flowChunks->queued("));
 
     // Nobody else may reach the trade/algo senders; callers go through m_dataSource->.
     const QRegularExpression tradeSend(R"((\w+)\s*(\.|->)\s*(sendTradeCommand|sendAlgoCommand)\s*\()");

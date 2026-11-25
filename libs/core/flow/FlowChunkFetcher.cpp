@@ -71,11 +71,11 @@ void FlowChunkFetcher::replan(bool countCacheHits) {
     for (const auto& [chart, view] : charts_) {
         const auto a = availability_.find(view.instrument); if (a == availability_.end()) continue;
         const auto heldKey = [this, &a](Key key) {
-            // A held rows body also supplies summary. Revalidate it with its own
-            // channel/hash; a rows hash must never be sent for a summary key.
+            // Only current rows substitute for summary demand. A stale or hidden
+            // rows entry must not force the smaller summary to revalidate rows.
             if (key.channel == "flow.summary") {
                 auto rows = key; rows.channel = "flow.rows"; rows.priceStep = 1;
-                if (cache_.inspect(rows) && a->second.contains(rows)) return rows;
+                if (current(rows) && !unavailable_.contains(rows) && a->second.contains(rows)) return rows;
             }
             return key;
         };

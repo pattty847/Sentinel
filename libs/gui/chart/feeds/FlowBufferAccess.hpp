@@ -7,7 +7,7 @@ namespace chart {
 // synthetic sources use the same merge policy in a local fallback buffer.
 class FlowBufferAccess {
 public:
-    void bind(IGridDataSource&);
+    void bind(IGridDataSource&, bool summary = false);
     void clear() { fallback_.clear(); }
     void receive(const FlowSeriesBuffer::Batch&);
     const FlowSeriesBuffer::Series* series(const QString& symbol, int64_t timeframe) const;

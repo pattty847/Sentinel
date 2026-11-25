@@ -48,11 +48,9 @@ set(GRID_CORE_SOURCES
     datasources/IGridDataSource.hpp
     datasources/RemoteGridDataSource.hpp
     datasources/RemoteGridDataSource.cpp
+    datasources/RemoteGridDataSourceFlow.cpp
     datasources/FlowSeriesBuffer.hpp
     datasources/FlowSeriesBuffer.cpp
-    datasources/FlowBackfillState.hpp
-    datasources/FlowBackfillState.cpp
-    datasources/FlowFillTracker.hpp
     datasources/FlowTimingProbe.hpp
     datasources/FlowTimingProbe.cpp
     datasources/CandleSeriesBuffer.hpp

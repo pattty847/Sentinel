@@ -251,6 +251,9 @@ MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
             connect(renderer->layers(), &chart::LayerVisibility::cvdHistoryChanged, this, [this]() {
                 requestCandleHistoryForSymbol(m_currentSymbol);
             }, Qt::QueuedConnection);
+            connect(renderer->layers(), &chart::LayerVisibility::layerVisibilityChanged, this, [this]() {
+                requestCandleHistoryForSymbol(m_currentSymbol);
+            }, Qt::QueuedConnection);
             connect(renderer->view(), &chart::ChartViewQml::viewportChanged, this, [this]() {
                 requestCandleHistoryForSymbol(m_currentSymbol);
             });
@@ -1029,9 +1032,10 @@ void MainWindowGPU::requestCandleHistoryForSymbol(const QString& symbol) {
     // Sub-second charts consume 1 s flow; there is no sub-second flow protocol.
     const int64_t flowTf = std::max<int64_t>(1000, tfMs);
     m_dataSource->subscribeFlowLive(ready ? symbol : QString{}, flowTf);
-    if (ready) m_dataSource->requestFlowHistory(symbol, flowTf,
+    if (ready) m_dataSource->setFlowViewport(symbol, flowTf,
         renderer->view()->getVisibleTimeStart(), renderer->view()->getVisibleTimeEnd(),
-        renderer->agentPort().cvdHistoryAnchor(renderer->view()->getVisibleTimeStart(), flowTf));
+        renderer->agentPort().cvdHistoryAnchor(renderer->view()->getVisibleTimeStart(), flowTf),
+        renderer->layers()->footprintEnabled());
 }
 
 void MainWindowGPU::closeEvent(QCloseEvent* event) {

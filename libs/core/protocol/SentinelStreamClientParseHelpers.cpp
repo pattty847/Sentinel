@@ -192,12 +192,11 @@ Client::FlowStatus flowStatus(const Json& value) {
     if (s == "refused") return Client::FlowStatus::Refused;
     throw std::runtime_error("invalid flow status");
 }
-Client::FlowBatch flowHeader(const Json& j, bool history) {
+Client::FlowBatch flowHeader(const Json& j) {
     requireFlow(j.at("schema_version") == 1, "unsupported flow schema");
-    requireFlow(j.at("type") == (history ? "flow_history_chunk" : "flow_bar"), "invalid flow type");
+    requireFlow(j.at("type") == "flow_bar", "invalid flow type");
     Client::FlowBatch out;
-    out.history = history;
-    out.id = flowUnsigned(j, history ? "req" : "sub");
+    out.id = flowUnsigned(j, "sub");
     out.symbol = QString::fromStdString(j.at("symbol").get<std::string>());
     out.timeframeMs = flowUnsigned(j, "timeframe_ms", INT64_MAX);
     requireFlow(!out.symbol.isEmpty() && out.symbol.size() <= 256, "invalid flow symbol");
@@ -217,17 +216,18 @@ Client::FlowRecord flowRecord(const Json& meta, std::span<const uint8_t> bytes, 
                 "flow envelope/bar mismatch");
     return out;
 }
-uint32_t flowLength(std::span<const uint8_t> frame, size_t& pos) {
-    requireFlow(pos <= frame.size() && frame.size() - pos >= 4, "truncated flow length");
-    uint32_t n = 0;
-    for (unsigned i = 0; i < 4; ++i) n |= uint32_t(frame[pos++]) << (8 * i);
-    requireFlow(n <= frame.size() - pos, "truncated flow payload");
-    return n;
-}
 } // namespace
 
 SentinelStreamClient::FlowBatch parseFlowLive(const nlohmann::json& msg) {
-    auto out = flowHeader(msg, false);
+    if (msg.at("type") == "flow_live_ready") {
+        Client::FlowBatch out;
+        out.id = flowUnsigned(msg, "sub");
+        out.liveFromMs = flowUnsigned(msg, "live_from_ms", INT64_MAX);
+        flowUnsigned(msg, "buckets", UINT32_MAX);
+        out.replayReady = true;
+        return out;
+    }
+    auto out = flowHeader(msg);
     requireFlow(msg.at("encoding") == "FLB1/base64" && msg.at("source") == "live", "invalid live flow encoding/source");
     const auto encoded = msg.at("bar").get<std::string>();
     requireFlow(encoded.size() <= protocol::SentinelProtocol::kFlowHistoryMaxFrameBytes, "live flow too large");
@@ -241,49 +241,11 @@ SentinelStreamClient::FlowBatch parseFlowLive(const nlohmann::json& msg) {
     requireFlow(flowUnsigned(msg, "price_scale", INT64_MAX) == uint64_t(record.bar.priceScale) &&
                 flowUnsigned(msg, "row_tick_units", INT64_MAX) ==
                     uint64_t(std::llround(tickUnits)), "flow grid mismatch");
+    const auto status = msg.contains("coverage") ? flowStatus(msg.at("coverage")) :
+        record.complete ? Client::FlowStatus::Complete : Client::FlowStatus::Partial;
+    out.ranges.push_back({record.bar.startMs, record.bar.startMs + out.timeframeMs, status});
     out.bars.push_back(std::move(record));
     return out;
 }
 
-SentinelStreamClient::FlowBatch parseFlowHistory(std::span<const uint8_t> frame) {
-    requireFlow(frame.size() >= 8 && frame.size() <= protocol::SentinelProtocol::kFlowHistoryMaxFrameBytes,
-                "invalid flow frame size");
-    requireFlow(std::equal(frame.begin(), frame.begin() + 4, "FHE1"), "invalid flow magic");
-    size_t pos = 4;
-    const auto length = flowLength(frame, pos);
-    const auto header = Json::parse(frame.begin() + pos, frame.begin() + pos + length);
-    pos += length;
-    auto out = flowHeader(header, true);
-    out.status = flowStatus(header.at("status"));
-    out.oldestMs = flowUnsigned(header, "oldest_ms", INT64_MAX);
-    out.sealedThroughMs = flowUnsigned(header, "sealed_through_ms", INT64_MAX);
-    out.error = QString::fromStdString(header.value("error", ""));
-    const auto& ranges = header.at("ranges");
-    const auto& bars = header.at("bars");
-    requireFlow(ranges.is_array() && ranges.size() <= 512 && bars.is_array() && bars.size() <= 512,
-                "invalid flow entry count");
-    for (const auto& r : ranges) {
-        Client::FlowRange range;
-        range.fromMs = flowUnsigned(r, "from_ms", INT64_MAX);
-        range.toMs = flowUnsigned(r, "to_ms", INT64_MAX);
-        range.status = flowStatus(r.at("status"));
-        range.priceScale = r.contains("price_scale") ? flowUnsigned(r, "price_scale", INT64_MAX) : 0;
-        range.rowTickUnits = r.contains("row_tick_units") ? flowUnsigned(r, "row_tick_units", INT64_MAX) : 0;
-        requireFlow(range.toMs > range.fromMs && (out.ranges.empty() || out.ranges.back().toMs <= range.fromMs),
-                    "invalid flow range order");
-        out.ranges.push_back(range);
-    }
-    for (const auto& meta : bars) {
-        const auto n = flowLength(frame, pos);
-        auto record = flowRecord(meta, frame.subspan(pos, n), out.timeframeMs);
-        pos += n;
-        requireFlow(out.bars.empty() || out.bars.back().bar.startMs < record.bar.startMs, "invalid flow bar order");
-        requireFlow(record.source != Client::FlowSource::Store ||
-                    record.bar.startMs + out.timeframeMs <= out.sealedThroughMs, "unsealed store bar");
-        out.bars.push_back(std::move(record));
-    }
-    requireFlow(pos == frame.size(), "trailing flow bytes");
-    requireFlow(out.status != Client::FlowStatus::Refused || out.bars.empty(), "refused flow has bars");
-    return out;
-}
 } // namespace protocol::clientparse

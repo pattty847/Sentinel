@@ -28,9 +28,9 @@ public:
 
     virtual void subscribe(const QString& symbol) = 0;
     virtual void unsubscribe(const QString& symbol) = 0;
-    // Flow is optional for datasources without this stream. History arguments
-    // describe the visible half-open window; the remote source adds prefetch.
-    virtual void requestFlowHistory(const QString&, int64_t, int64_t, int64_t, int64_t = -1) {}
+    // Flow is optional. The visible half-open window, reset anchor and rows flag
+    // describe consumer demand; the chunk planner owns levels and prefetch.
+    virtual void setFlowViewport(const QString&, int64_t, int64_t, int64_t, int64_t = -1, bool = false) {}
     virtual void requestTradeHistory(const QString&, int64_t, int64_t, quint64) {}
     virtual void subscribeFlowLive(const QString&, int64_t) {}
     virtual void unsubscribeFlowLive() {}

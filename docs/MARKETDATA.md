@@ -309,6 +309,8 @@ and FLB1/base64/JSON encoding never run there. Flow uses the existing bounded
 
 ### Flow history
 
+This is the legacy **server-only** FHE1/FLD1 endpoint, retained until the server cutover. The GUI no longer requests or decodes it. Its sealed history uses [Flow chunk fetching](#flow-chunk-fetching); 1 s flow is live RAM only.
+
 `{"type":"flow_history_request","req":9,"symbol":"BTC-USD","timeframe_ms":60000,
 "end_time_ms":1798765500000,"limit":512}` requests the newest page ending at the
 UTC bucket containing `end_time_ms` (inclusive). All fields are required; `req`
@@ -459,22 +461,21 @@ a store generation can replace it. Only one
 replay runs server-wide at a time. A concurrent replay gets a `busy` error;
 session close or server stop cancels an active replay per record.
 
-### Client merge of flow bars
+### Client ownership of flow bars
 
-Key bars by `(symbol, timeframe_ms, bucket_start_ms)`. A final sealed
-`source: "store"` bar replaces a `source: "live"` bar regardless of revision;
-live never replaces store. Compare revisions only within the same source: the
-higher store generation wins over an older store generation (at equal generation,
-complete wins over incomplete), and the higher
-live revision wins over an older live revision. At equal live revision,
-`complete: true` wins; otherwise apply live updates in stream order. The
-history chunk's `sealed_through_ms` replaces the client's prior watermark for
-that symbol. Drop a later live `flow_bar` only when its bucket end
-(`bucket_start_ms + timeframe_ms`) is at or before that watermark. A coarse
-bucket crossing the boundary remains live and accepts later live updates. Range
-status stays separate: show `building` as not built even if a provisional bar
-exists.
-No client disk cache is required.
+For each `(instrument, timeframe, bucket)`, a held sealed chunk covering the whole bucket owns the value,
+regardless of any live revision or completeness. Coarse timeframes compose the planner's disjoint sealed
+constituents with `composeFlowBars`. A covered empty slot withdraws an old live value too. A retired preview
+cannot return if its chunk is subsequently fenced. Otherwise a retained live bucket supplies the preview;
+a missing bucket is `building`, and explicit chunk coverage marks a proven absent slot `unrecorded`.
+The oldest sealed key is not proof of the oldest recording during newest-first recovery. Live buckets ending at or before `live_from_ms` are discarded.
+
+The GUI first establishes the instrument's chunk availability, then subscribes live. Each subscribe drops
+that selection's live buckets and rebuilds them from replay; the FIFO-decoded `flow_live_ready` ends replay.
+Higher live revision wins, with completeness winning ties. Refused subscriptions retry after 100 ms, doubling
+to 5 s; successful replay resets the backoff. A dropped live frame restarts replay rather than querying the
+retired FHE1 endpoint. Subscription IDs and selection generations fence stale replies/publications.
+1 s subscriptions remain RAM-only; sub-second chart selections request 1 s flow.
 
 ## Heatmap history transport
 
@@ -709,7 +710,7 @@ Requests and availability are JSON text frames; chunk replies are binary WebSock
 
 ### Flow chunk wire
 
-Sealed flow history is also available from the parallel `.flc` store. FHE1/FLD1 and live `flow_bar` remain unchanged. The shared codec in `protocol/ChunkFrame.*` dispatches SHE1's inner magic to SHC1 or SCK1; the heatmap stays on SHC1. Full byte layout and hash rules are in [FLOW_CHUNKS.md](FLOW_CHUNKS.md#3-envelope-and-availability).
+The GUI reads sealed flow history from the `.flc` store. FHE1/FLD1 remains on the server until its cutover; the client has no legacy history path. The shared codec in `protocol/ChunkFrame.*` dispatches SHE1's inner magic to SHC1 or SCK1; the heatmap stays on SHC1. Full byte layout and hash rules are in [FLOW_CHUNKS.md](FLOW_CHUNKS.md#3-envelope-and-availability).
 
 - **Request:** `{"type":"chunk_request","req":<u64>,"instrument":"coinbase:BTC-USD","channel":"flow.rows","level_ms":60000,"price_step":1,"starts":[<i64>...],"have_hash":["<16 hex>"|""...]}`. Instruments are venue-qualified, validated by `validateInstrumentId`, at most 72 bytes. Channels are `flow.summary` and `flow.rows`; levels are 60000, 3600000 and 86400000. Summary requests use step 0, rows requests step 1; row replies carry the stored power-of-two step. Starts number 1..64 and must align to the level's hour/day/16-day span within the supported recording timestamp range. Optional `have_hash` must parallel starts; an empty entry means no held content (a sixteen-zero string is a real hash).
 - **Replies:** one binary SHE1/SCK1 response per valid requested start, in request order: chunk (1), not_modified (3), or error (4). The unchanged SHE1 envelope carries `req`. A matching current content hash returns not_modified with the current epoch and sealed fields. Unsealed, pending, fenced or invalid content returns unavailable. If a day is republished while a reply is in a history worker or awaiting admission, the server retries that start once against the current generation; an available key gets its current frame, a fenced key gets unavailable, and a key that keeps changing gets busy. Only session closure drops an unfinished reply. Malformed requests receive one invalid_request with the readable request id (otherwise 0) and start 0. Error codes match SHC1: invalid_request, unavailable, busy, build_failed.
@@ -723,13 +724,27 @@ Sealed flow history is also available from the parallel `.flc` store. FHE1/FLD1 
 
 ### Flow chunk fetching
 
-`sentinel::flow::FlowChunkClient` owns one `flow-chunks` event-loop thread, one `FlowChunkFetcher` and one thread-safe `FlowChunkCache` per process. Core provides the service but the application does not construct it yet. Create it with a `protocol::chunks::ClientTransport` factory before connecting the stream client; the client must outlive the service. Charts connect fetcher notifications with `Qt::QueuedConnection`, then use `service.queued(...)` to call `want(chartId, FlowChunkWant)` or `release(chartId)`. A want fully replaces that chart's prior instrument, channel, timeframe, visible half-open range and pan direction. Invalid wants and a ninth distinct instrument return false without replacing the old want. Consumers read `cache().read(key)` from any thread and receive `chunkStored`, `chunkRevised`, `chunkHidden`, `availabilityChanged` and `storeCleared` notifications.
+`sentinel::flow::FlowChunkClient` owns one `flow-chunks` event-loop thread, one `FlowChunkFetcher` and one thread-safe `FlowChunkCache` per process. `RemoteGridDataSource` constructs it beside the stream connection, with a `protocol::chunks::ClientTransport` factory before `connectToServer`, and explicitly destroys/joins it before the stream client. The adapter also seeds an already-connected client. Charts connect fetcher notifications with `Qt::QueuedConnection`, then use `service.queued(...)` to call `want(chartId, FlowChunkWant)` or `release(chartId)`. A want fully replaces that chart's prior instrument, channel, timeframe, visible half-open range and pan direction. Invalid wants and a ninth distinct instrument return false without replacing the old want. Consumers read `cache().read(key)` from any thread and receive `chunkStored`, `chunkRevised`, `chunkHidden`, `availabilityChanged` and `storeCleared` notifications.
 
 The planner selects the coarsest stored level dividing the timeframe, falling back through holes to finer sealed runs. It rounds to whole chunks, pads two screens on either side and four toward the pan, and stops padding at the first key that would exceed 32 MiB estimated per chart; farther padding is dropped even if cheaper, and visible keys are never capped. Ordering is visible newest first, then nearest chunks on the pan side, then the other side. Only advertised sealed keys are requested, after the first availability for that instrument. The scheduler deduplicates across charts and batches adjacent keys of the same instrument/channel/level, with at most eight chunks and 8 MiB estimated in flight. Cold decoded estimates are 64 KiB per minute-level rows chunk, 320 KiB per hour-level rows chunk and 1280 KiB per day-level rows chunk; summary uses 75 bytes per slot plus 1024 bytes. Held chunks use their actual single-allocation size. As with heatmap, admission estimates saturate at the whole in-flight budget so one larger body can progress; cache accounting uses its actual allocation.
 
-The cache defaults to 256 MiB, evicts the least recently read unwanted body by bytes, retains every chart's wanted keys under pressure, and survives symbol/timeframe changes. Request keys keep rows step 1; the immutable decoded body retains its actual stored step. Held rows can satisfy summary demand without another body or allocation. Cache entry metadata owns the confirmed epoch/hash: a different advertised epoch marks a held body stale but readable and revalidates it with its hash when wanted. `not_modified` confirms that entry without reallocating the body (the body's original epoch is immutable); changed content replaces it and emits a revision. A key leaving sealed or answering unavailable is hidden. Resealing triggers revalidation before it becomes readable again. An unavailable response waits for an observed reseal or epoch change, with no edge polling.
+The cache defaults to 256 MiB, evicts the least recently read unwanted body by bytes, retains every chart's wanted keys under pressure, and survives symbol/timeframe changes. Request keys keep rows step 1; the immutable decoded body retains its actual stored step. Only a current, visible rows entry can satisfy summary demand without another body or allocation; stale or unavailable rows cannot redirect a summary revalidation to the larger rows request. Cache entry metadata owns the confirmed epoch/hash: a different advertised epoch marks a held body stale but readable and revalidates it with its hash when wanted. `not_modified` confirms that entry without reallocating the body (the body's original epoch is immutable); changed content replaces it and emits a revision. A key leaving sealed or answering unavailable is hidden. Resealing triggers revalidation before it becomes readable again. An unavailable response waits for an observed reseal or epoch change, with no edge polling.
 
 Busy, decode overload and deadlines follow the heatmap's exponential 100 ms..5 s backoff and 30 s admission deadline, without extending deadlines on partial replies. Late replies are ignored. Disconnect retires requests but retains cache and chart interests; reconnect waits for fresh availability and restores subscriptions. A host replacement clears cache and fences old adapter ids. `flow.chunks.fetch` reports wanted/requested/cache-hit counts, wire bytes and `chunkReplyRttSumMs` (the sum of admission-to-reply latency across successful chunk replies, including `not_modified`) after a fetch burst, throttled to one line per second. The sealed-flow scheduler currently lives beside the heatmap scheduler; the shared SCK1 key, availability and transport types are ready for the heatmap migration, which should consolidate scheduling/admission policy when its open/live behavior moves.
+
+The view forwards symbol, timeframe, half-open visible range, last pan direction, and CVD reset anchor on each change.
+A zero-delay GUI timer coalesces changes; at most one composition is outstanding and a newer selection fences its
+publication. `FlowChunkView` composes on `flow-chunks`, using `flow.rows` for footprint and `flow.summary` for
+CVD/footer. The GUI's `FlowSeriesBuffer` retains just the composed viewport (at most 8,194 buckets), not historical
+pages or its own padding cache. The fetcher's padded immutable bodies survive pans and symbol/timeframe switches.
+
+`cvdHistoryAnchor` remains UTC midnight or the configured TPO session open for the earliest visible bucket;
+visible-reset mode supplies no earlier anchor. A separate summary want covers anchor-to-view. Composition folds
+that prefix into a scalar cumulative delta plus its loaded-start metadata; prefix bars are not retained in the GUI.
+Thus overlapping CVD values keep their baseline across pans within a reset period. Weekly/monthly TPO anchors
+remain supported. One-second CVD can only accumulate the retained RAM window and labels its actual loaded start.
+`flow.timing` reports view-to-visible-fill latency (`sinceLastChangeMs`, `sinceFirstChangeMs`) with `source=cache`,
+`fetch` or `live`, and counts sealed/live bars, including immediate cache hits. Feed build timings remain separate.
 
 ### Raw heatmap live tail (S5L-a)
 
@@ -877,7 +892,7 @@ automatically yet.
 
 ## Independent trade-overlay publication
 
-Footprint cells consume `flow_bar` and `flow_history_chunk`; there is no separate
+Footprint cells consume sealed `flow.rows` chunks and `flow_bar` previews; there is no separate
 footprint publisher, config, slice or history wire family. TPO and volume profile
 run independently of `heatmap_slice` callbacks.
 A session timer dispatches at most one overlay job per second, with one job in

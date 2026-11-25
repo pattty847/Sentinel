@@ -1,9 +1,9 @@
 # Flow chunks
 
-**Chunk codecs, parallel disk store, sealed flow serving, live seal/replay and client chunk core implemented; view migration pending.** Flow history today (FLD1 day
-files, FHE1 pages, `flow_bar` live messages) is in [MARKETDATA.md](MARKETDATA.md) "Live flow bars" and
-"Flow history". This spec replaces FLD1 and FHE1 and puts flow on heatmap-style chunks. The server
-(plan step 3) and the client (step 5) implement it; step 4 moves the heatmap onto the same envelope.
+**Chunk codecs, parallel disk store, sealed flow serving, live seal/replay, client fetcher and footprint/CVD/footer integration implemented. Server FHE1/FLD1 removal remains pending.**
+The client reads sealed history through SCK1 chunks and provisional bars through `flow_bar` replay/live messages.
+[MARKETDATA.md](MARKETDATA.md) documents the client and the legacy server-only history endpoint.
+This spec replaces FLD1 and FHE1; step 4 also moves the heatmap onto the shared envelope.
 Measurements are in section 12. They come from `flow_history_bench --lateness` and `--columnar`
 (`tests/core/flow_history_bench.cpp`). Production byte codecs are in `libs/core/flow/FlowChunkCodec.*`,
 `FlowChunkDecode.cpp`, `FlowDayFile.*`, and `FlowEpoch.*`, with row steps in `FlowRowStep.hpp` and

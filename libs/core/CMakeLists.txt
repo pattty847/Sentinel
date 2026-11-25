@@ -8,6 +8,7 @@ add_library(sentinel_core
     flow/FlowChunkFetcher.cpp
     flow/FlowChunkFetcher.hpp
     flow/FlowChunkClient.cpp
+    flow/FlowChunkView.cpp
     protocol/ChunkClientWire.cpp
     protocol/ChunkClientTransport.cpp
     protocol/ChunkClientTransport.hpp
