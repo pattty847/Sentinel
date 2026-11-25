@@ -34,6 +34,7 @@ struct FlowChunkWireTest {
     }
     static void request(Session& s, const Json& j) { on(s, [&](auto& v) { v.handleFlowChunkRequest(j); }); }
     static void subscribe(Session& s, const Json& j) { on(s, [&](auto& v) { v.handleFlowAvailabilitySubscribe(j); }); }
+    static void startAvailabilityTimer(Session& s) { on(s, [](auto& v) { v.armAvailabilityTimer(); }); }
     static void poll(Session& s, bool advance = false) {
         on(s, [&](auto& v) {
             for (auto& [id, state] : v.flowAvailability_) {
@@ -255,6 +256,9 @@ TEST_F(FlowChunkEndToEnd, ClientFetcherDecodesBothChannelsAtEveryStoredLevel) {
     fc::FlowChunkCache cache;
     fc::FlowChunkFetcher fetch(cache,transport);
     FlowChunkWireTest::sink(*session,[&](std::string bytes,bool binary) { FlowChunkClientTest::receive(client,bytes,binary); });
+    // The no-socket fixture bypasses handshake, which normally arms this timer.
+    // Replacements inside the one-second coalescing window need its retry.
+    FlowChunkWireTest::startAvailabilityTimer(*session);
     auto cleanup=qScopeGuard([&] { FlowChunkWireTest::drain(*server,*session);
         FlowChunkWireTest::sink(*session,[](auto,bool) {}); });
     client.connected();
