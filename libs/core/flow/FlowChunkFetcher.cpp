@@ -70,14 +70,20 @@ void FlowChunkFetcher::replan() {
     std::set<Key> wanted;
     for (const auto& [chart, view] : charts_) {
         const auto a = availability_.find(view.instrument); if (a == availability_.end()) continue;
-        const auto plan = planFlowChunks(view, a->second, [this](const Key& k) { return estimate(k); });
-        for (auto item : plan) {
+        const auto heldKey = [this, &a](Key key) {
             // A held rows body also supplies summary. Revalidate it with its own
             // channel/hash; a rows hash must never be sent for a summary key.
-            if (item.key.channel == "flow.summary") {
-                auto rows = item.key; rows.channel = "flow.rows"; rows.priceStep = 1;
-                if (cache_.inspect(rows) && a->second.contains(rows)) item.key = rows;
+            if (key.channel == "flow.summary") {
+                auto rows = key; rows.channel = "flow.rows"; rows.priceStep = 1;
+                if (cache_.inspect(rows) && a->second.contains(rows)) return rows;
             }
+            return key;
+        };
+        // Apply the same substitution before budgeting padding: a retained rows
+        // allocation can be substantially larger than a summary allocation.
+        const auto plan = planFlowChunks(view, a->second, [&](const Key& k) { return estimate(heldKey(k)); });
+        for (auto item : plan) {
+            item.key = heldKey(item.key);
             auto& d = demands_[item.key];
             if (!d.wanted || std::tie(item.tier, item.order) < std::tie(d.tier, d.order)) {
                 d.tier = item.tier; d.order = item.order;

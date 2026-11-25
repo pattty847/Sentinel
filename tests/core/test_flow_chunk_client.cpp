@@ -245,6 +245,16 @@ TEST_F(FlowFetch, RowsAtStoredStepSatisfySummaryWithoutAnotherRequest) {
     fetch->want(1,view(0,1,0,"flow.summary")); drain(); EXPECT_EQ(transport.requests.size(),1u);
     EXPECT_EQ(cache.read(key(0,"flow.summary")),cache.read(key()));
 }
+TEST_F(FlowFetch, SummaryPaddingBudgetsTheRowsBodiesItActuallyRetains) {
+    fetch.reset(); create([](const auto& k) { return k.channel == "flow.rows" ? 8ull << 20 : 1ull; });
+    for (int hour = 0; hour < 20; ++hour) {
+        const auto r = body(key(hour));
+        cache.put(key(hour), r->body, 1, r->frame.contentHash);
+    }
+    online(available(20)); fetch->want(1,view(10,12,1,"flow.summary")); drain();
+    EXPECT_EQ(fetch->stats().wanted,6u); // two visible + four 8 MiB padding bodies
+    EXPECT_TRUE(transport.requests.empty());
+}
 
 struct FlowChunkClientTest : testing::Test {
     int argc=1; char name[16]="flow-client"; char* argv[2]={name,nullptr}; QCoreApplication app{argc,argv};
