@@ -318,7 +318,7 @@ struct FlowChunkClientTest : testing::Test {
         });
         client.m_ioc.poll(); QObject::disconnect(stop);
     }
-    void saturate() { client.m_decodeBacklogFrames=client.kMaxDecodeBacklogFrames; client.m_decodeRefusals=2; }
+    void saturate(unsigned refusals=2) { client.m_decodeBacklogFrames=client.kMaxDecodeBacklogFrames; client.m_decodeRefusals=refusals; }
     void unsaturate() { client.m_decodeBacklogFrames=0; }
     void postDecode(std::function<void()> fn) { net::post(*client.m_decodePool,std::move(fn)); }
     void receiveJson(const nlohmann::json& j) { client.handleMessage(j.dump()); }
@@ -430,6 +430,23 @@ TEST_F(FlowChunkClientTest, DuplicateStartsEachKeepTheirCorrelatedReply) {
     const auto bytes=heatmap::encodeChunkEnvelope(id,w::encode(body(key())->frame));
     receive(bytes); receive(bytes); flush();
     EXPECT_EQ(seen.size(),2u); EXPECT_TRUE(errors.empty());
+}
+TEST_F(FlowChunkClientTest, UncorrelatedRefusalsDoNotCancelPendingFlowChunks) {
+    w::ClientTransport transport(client);
+    std::vector<quint64> delivered;
+    int heatmapErrors=0;
+    QObject::connect(&transport,&w::Transport::received,&app,[&](quint64 id,w::ReplyPtr) { delivered.push_back(id); },Qt::QueuedConnection);
+    QObject::connect(&client,&SentinelStreamClient::heatmapChunkFailed,&app,[&](const auto&) { ++heatmapErrors; },Qt::QueuedConnection);
+    client.connected(); drain();
+    const auto first=transport.request(key(),{T},{});
+    const auto second=transport.request(key(1),{T+H},{});
+    const auto sent=writes(); ASSERT_EQ(sent.size(),2u);
+    receive({0}); // Too short to identify a channel or request.
+    saturate(0); receive(std::vector<uint8_t>(18,0)); unsaturate(); flush();
+    EXPECT_EQ(heatmapErrors,2); EXPECT_TRUE(errors.empty()); EXPECT_EQ(client.chunkRejectedCount(),0u);
+    receive(heatmap::encodeChunkEnvelope(sent[0].at("req").get<uint64_t>(),w::encode(body(key())->frame)));
+    receive(heatmap::encodeChunkEnvelope(sent[1].at("req").get<uint64_t>(),w::encode(body(key(1))->frame)));
+    flush(); EXPECT_EQ(delivered,(std::vector<quint64>{first,second}));
 }
 TEST_F(FlowChunkClientTest, FlowChunkBacklogRefusalIsIndependentOfHeatmapRefusalsAndCountsEachDrop) {
     const auto id=client.requestChunks(key(),{T});

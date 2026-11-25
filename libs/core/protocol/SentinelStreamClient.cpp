@@ -510,16 +510,16 @@ void SentinelStreamClient::handleBinaryMessage(std::shared_ptr<std::vector<uint8
                                      flowDrop->bucketStartMs);
             }
         }
-        if (sharedChunk || (!chunkRequest && !flowFrame && !tradeFrame)) ++m_chunkRejected;
+        if (sharedChunk) ++m_chunkRejected;
         const auto mask = sharedChunk ? reason << 6 : tradeFrame ? reason << 4 : flowFrame ? reason << 2 : reason;
         if (m_decodeRefusals & mask) return;
         m_decodeRefusals |= mask;
         sLog_Warning("Stream frame refused: bytes=" << bytes << " reason=" << message);
         if (flowFrame || tradeFrame) return;
         const auto id = chunkRequest;
-        if (sharedChunk || !id) {
+        if (sharedChunk) {
             emit chunkFailed({id, {}, QString::fromLatin1(code), QString::fromLatin1(message)});
-            if (id) { m_chunkRequests.erase(id); return; }
+            m_chunkRequests.erase(id); return;
         }
         emit heatmapChunkFailed({id, {}, QString::fromLatin1(code),
                                  QString::fromLatin1(message)});
