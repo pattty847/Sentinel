@@ -267,6 +267,7 @@ TEST_F(FlowChunkEndToEnd, ClientFetcherDecodesBothChannelsAtEveryStoredLevel) {
         ASSERT_TRUE(fetch.want(1,{Id,channel,level,start,start+heatmap::chunkSpanMs(level),0}));
         const auto until=std::chrono::steady_clock::now()+10s;
         bool subscription=true;
+        bool complete=false;
         const protocol::chunks::Key wanted{Id,channel,level,std::string_view(channel)=="flow.rows"?1u:0u,start};
         do {
             for (int turn=0;turn<10;++turn) QCoreApplication::sendPostedEvents(nullptr,QEvent::MetaCall);
@@ -277,15 +278,19 @@ TEST_F(FlowChunkEndToEnd, ClientFetcherDecodesBothChannelsAtEveryStoredLevel) {
             subscription=false;
             QCoreApplication::processEvents();
             for (int turn=0;turn<10;++turn) QCoreApplication::sendPostedEvents(nullptr,QEvent::MetaCall);
+            if (const auto snapshot=fetch.availability(Id)) {
+                const auto plan=fc::planFlowChunks({Id,channel,level,start,start+heatmap::chunkSpanMs(level),0},*snapshot,fc::flowChunkEstimate);
+                complete=!plan.empty() && std::all_of(plan.begin(),plan.end(),[&](const auto& item) { return bool(cache.read(item.key)); });
+            }
             std::this_thread::yield();
-        } while ((!cache.read(wanted) || fetch.stats().inFlightChunks) && std::chrono::steady_clock::now()<until);
+        } while ((!complete || fetch.stats().inFlightChunks) && std::chrono::steady_clock::now()<until);
         ASSERT_TRUE(cache.read(wanted)) << channel << " level=" << level;
         // Check every delivered chunk, including padding, against store bytes.
         const auto snapshot=fetch.availability(Id); ASSERT_TRUE(snapshot);
         const auto plan=fc::planFlowChunks({Id,channel,level,start,start+heatmap::chunkSpanMs(level),0},*snapshot,fc::flowChunkEstimate);
         ASSERT_FALSE(plan.empty());
         for (const auto& item : plan) {
-            const auto held=cache.read(item.key); ASSERT_TRUE(held);
+            const auto held=cache.read(item.key); ASSERT_TRUE(held) << item.key.channel << " level=" << item.key.levelMs << " start=" << item.key.startMs;
             auto payload=store->read(Id,item.key.levelMs,item.key.startMs); ASSERT_TRUE(payload);
             auto storedKey=item.key;
             storedKey.priceStep=storedKey.channel=="flow.rows" ? uint64_t(1)<<payload->stepExponent : 0;
