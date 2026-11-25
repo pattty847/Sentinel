@@ -223,12 +223,14 @@ TEST_F(FlowFetch, BusyDeadlineAndReconnectRequireFreshAvailability) {
     // A reply is late even if the timer event has not been delivered yet.
     transport.received(lost.id,body(key())); drain(); EXPECT_FALSE(cache.read(key()));
     EXPECT_EQ(fetch->stats().inFlightChunks,0u);
+    const auto subscriptionsBeforeReconnect=transport.subscriptions.size();
     transport.disconnected(); drain(); transport.connected(); drain();
+    ASSERT_EQ(transport.subscriptions.size(),subscriptionsBeforeReconnect+1);
+    EXPECT_EQ(transport.subscriptions.back(),std::vector<std::string>{Id});
     EXPECT_EQ(transport.requests.back().id,lost.id); EXPECT_FALSE(fetch->availability(Id));
     transport.availability(available()); drain(); EXPECT_NE(transport.requests.back().id,lost.id);
     transport.received(lost.id,body(key())); drain(); EXPECT_FALSE(cache.read(key()));
     answer(transport.requests.back()); EXPECT_TRUE(cache.read(key()));
-    EXPECT_GE(transport.subscriptions.size(),2u); EXPECT_EQ(transport.subscriptions.back(),std::vector<std::string>{Id});
 }
 TEST_F(FlowFetch, RejectsMismatchAndIgnoresPreEpochReply) {
     online(); fetch->want(1,view()); drain();
@@ -284,7 +286,21 @@ struct FlowChunkClientTest : testing::Test {
         client.m_ioc.restart(); client.m_ioc.poll(); std::vector<nlohmann::json> out;
         for(const auto& text:client.m_writeQueue) out.push_back(nlohmann::json::parse(text)); client.m_writeQueue.clear(); return out;
     }
-    void reconnectSubscription() { client.resendChunkSubscription(); }
+    void handshake() {
+        // Exercise the real handshake completion on its strand. Hold writes and
+        // stop at connected() so this fixture never starts socket I/O.
+        const auto stop=QObject::connect(&client,&SentinelStreamClient::connected,&app,[&] {
+            client.m_running=false;
+        },Qt::DirectConnection);
+        client.m_ioc.restart();
+        net::post(client.m_strand,[&] {
+            client.m_ws=std::make_unique<SentinelStreamClient::WebSocket>(client.m_strand,client.m_sslCtx);
+            client.m_running=true; client.m_writeInFlight=true;
+            client.onHandshake({});
+            client.m_isConnected=false; client.m_writeInFlight=false;
+        });
+        client.m_ioc.poll(); QObject::disconnect(stop);
+    }
     void saturate() { client.m_decodeBacklogFrames=client.kMaxDecodeBacklogFrames; client.m_decodeRefusals=2; }
     void unsaturate() { client.m_decodeBacklogFrames=0; }
     void postDecode(std::function<void()> fn) { net::post(*client.m_decodePool,std::move(fn)); }
@@ -293,10 +309,11 @@ struct FlowChunkClientTest : testing::Test {
 TEST_F(FlowChunkClientTest, RealClientWritesAcceptedRequestsAndResendsReplacementSubscription) {
     client.requestChunks(key(),{T},{uint64_t(0)}); auto sent=writes(); ASSERT_EQ(sent.size(),1u);
     protocol::flowchunks::Request parsed; EXPECT_FALSE(protocol::flowchunks::parseRequest(sent[0],parsed)); EXPECT_EQ(parsed.have[0],0u);
-    client.subscribeChunkAvailability({Id}); writes(); reconnectSubscription(); sent=writes();
+    client.subscribeChunkAvailability({Id}); writes(); handshake(); sent=writes();
     ASSERT_EQ(sent.size(),1u); std::vector<std::string> ids;
     EXPECT_FALSE(protocol::flowchunks::parseSubscribe(sent[0],ids)); EXPECT_EQ(ids,std::vector<std::string>{Id});
-    client.subscribeChunkAvailability({}); writes(); reconnectSubscription(); sent=writes(); EXPECT_TRUE(sent[0]["instruments"].empty());
+    client.subscribeChunkAvailability({}); writes(); handshake(); sent=writes();
+    ASSERT_EQ(sent.size(),1u); EXPECT_TRUE(sent[0]["instruments"].empty());
 }
 TEST_F(FlowChunkClientTest, DecodeIsOffCallerThreadAndMalformedOrMismatchedFramesAreCounted) {
     std::promise<std::thread::id> decodedOn;
