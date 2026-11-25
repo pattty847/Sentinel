@@ -47,6 +47,7 @@ class FlowStore {
         bool lowerPriority = true;
         // Cancellation-aware synchronization seam, called on the builder after a record.
         std::function<void(std::stop_token)> afterRecordForTest;
+        std::function<void()> afterAnchorRecordForTest;
         std::function<void(const std::filesystem::path &)> beforeCommitForTest;
         std::function<void()> afterCatalogConstructForTest;
         std::function<void()> afterWakeForTest;

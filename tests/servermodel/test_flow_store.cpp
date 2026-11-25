@@ -426,6 +426,21 @@ TEST_F(FlowStoreTest, RefusesRollupAndProtectedRootOverlap) {
         EXPECT_THROW(FlowStore{std::move(o)}, std::invalid_argument);
     }
 }
+TEST_F(FlowStoreTest, StopDuringGridAnchorDoesNotCountBuildFailure) {
+    Journal j(journal, "ETH-USD", "0.00000001", "2999", "3001");
+    j.snapshot(-1000); j.heartbeat(-500);
+    j.trades(1000, {trade(100, "first", 3000, "BUY", "ETH-USD")});
+    j.heartbeat(2 * Hour + Minute); j.close();
+    auto o = options(); o.symbols = {"ETH-USD"};
+    std::stop_source stop; size_t anchorRecords = 0;
+    o.afterAnchorRecordForTest = [&] { ++anchorRecords; stop.request_stop(); };
+    FlowStore store(o);
+    const auto result = store.runPass(stop.get_token());
+    EXPECT_EQ(anchorRecords, 1u);
+    EXPECT_TRUE(result.stopped); EXPECT_EQ(result.failed, 0u); EXPECT_EQ(result.built, 0u);
+    EXPECT_FALSE(fs::exists(store.filePath("ETH-USD", Epoch)));
+}
+
 TEST_F(FlowStoreTest, BuildsNewestHourFirstAndStopJoinsDuringReplay) {
     fixture();
     recordedGrid("BTC-USD", 100, 50, 100000);

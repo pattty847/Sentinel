@@ -386,7 +386,9 @@ FlowStoreGridValues dayScales(const FlowStore::Options &options, const std::stri
         values.hasHmc2 = true;
     } else {
         checkStop(stop);
-        const auto start = catalog.anchor(day, stop);
+        std::optional<roller::JournalPos> start;
+        try { start = catalog.anchor(day, stop, options.afterAnchorRecordForTest); }
+        catch (...) { checkStop(stop); throw; }
         checkStop(stop);
         roller::JournalReader reader(catalog, start);
         roller::JournalFeed feed(symbol);
