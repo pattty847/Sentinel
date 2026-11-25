@@ -123,10 +123,27 @@ TEST(ChunkClientWire, RejectsMalformedSnapshotWithoutPartialPublication) {
         case 8:l["latest_ms"]=T+H;break;
         case 9:j["channels"]["flow.rows"]["epoch"]="bad";break;
         case 10:j["channels"]["flow.rows"]["levels"].push_back(l);break;
-        case 11:j["channels"].erase("flow.summary");break;
+        case 11:j["channels"]=nlohmann::json::array();break;
         }
         EXPECT_THROW(w::parseAvailability(j),std::exception)<<n;
     }
+}
+TEST(ChunkClientWire, AvailabilityIgnoresUnknownChannelsAndAcceptsKnownSubsets) {
+    recording::FlowChunkStore::Snapshot s; s.epoch=1; s.levels[0]={{T,T+H}};
+    auto j=protocol::flowchunks::availability(Id,s);
+    const auto expected=w::parseAvailability(j);
+    j["channels"]["book.near"]={{"epoch","0000000000000002"},{"levels",nlohmann::json::array()}};
+    j["channels"]["book.deep"]=nullptr; // Unknown schemas must not affect recognized flow channels.
+    EXPECT_EQ(w::parseAvailability(j),expected);
+    j["channels"].erase("flow.summary");
+    auto& levels=j["channels"]["flow.rows"]["levels"];
+    levels.erase(levels.begin()+1,levels.end());
+    const auto subset=w::parseAvailability(j);
+    ASSERT_EQ(subset.channels.size(),1u);
+    ASSERT_EQ(subset.channels.at("flow.rows").levels.size(),1u);
+    EXPECT_EQ(subset.channels.at("flow.rows").levels.front(),expected.channels.at("flow.rows").levels.front());
+    j["channels"].erase("flow.rows");
+    EXPECT_TRUE(w::parseAvailability(j).channels.empty());
 }
 TEST(FlowChunkPlan, CoarseDivisorWithHoleFallsBackToSealedHoursOnly) {
     auto a=available(48); auto& ch=a.channels.at("flow.rows");
@@ -349,14 +366,19 @@ TEST_F(FlowChunkClientTest, ServiceRunsQueuedWantsOnDedicatedThread) {
 }
 
 TEST_F(FlowChunkClientTest, AvailabilityPublishesTypedSnapshotAndCountsMalformedInput) {
-    int count=0;
+    int count=0, notices=0;
+    QObject::connect(&client,&SentinelStreamClient::errorOccurred,&app,[&](const auto&) { ++notices; },Qt::QueuedConnection);
     QObject::connect(&client,&SentinelStreamClient::chunkAvailabilityReceived,&app,[&](const auto& a){
         ++count; EXPECT_EQ(a,available());
     },Qt::QueuedConnection);
     recording::FlowChunkStore::Snapshot snapshot; snapshot.epoch=1; snapshot.liveFromMs=T; snapshot.levels[0]={{T,T+H}};
-    auto j=protocol::flowchunks::availability(Id,snapshot); receiveJson(j); drain(); EXPECT_EQ(count,1);
-    j["channels"]["flow.rows"]["epoch"]="invalid"; receiveJson(j); drain();
-    EXPECT_EQ(count,1); EXPECT_EQ(client.chunkRejectedCount(),1u);
+    auto j=protocol::flowchunks::availability(Id,snapshot);
+    j["channels"]["book.near"]={{"epoch","0000000000000002"}};
+    receiveJson(j); drain(); EXPECT_EQ(count,1);
+    j["channels"]["flow.rows"]["epoch"]="invalid";
+    for (int n=0;n<8;++n) receiveJson(j);
+    drain();
+    EXPECT_EQ(count,1); EXPECT_EQ(client.chunkRejectedCount(),8u); EXPECT_EQ(notices,0);
 }
 TEST_F(FlowChunkClientTest, AdapterSecondConnectionAndHostReplacementIgnoreOldReplies) {
     SentinelStreamClient replacement("127.0.0.1","2");

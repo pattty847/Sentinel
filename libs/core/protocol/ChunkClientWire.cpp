@@ -53,13 +53,14 @@ Availability parseAvailability(const nlohmann::json& j) {
     require(j.at("type") == "chunk_availability" && integer(j.at("wire_version")) == WireVersion);
     Availability a; a.instrument = j.at("instrument").get<std::string>(); require(validInstrument(a.instrument));
     a.liveFromMs = integer(j.at("live_from_ms")); require(a.liveFromMs >= 0);
-    const auto& channels = j.at("channels"); require(channels.is_object() && channels.size() == 2);
+    const auto& channels = j.at("channels"); require(channels.is_object());
     for (const auto* name : {"flow.summary", "flow.rows"}) {
+        if (!channels.contains(name)) continue; // Other channel families are opaque to this client.
         const auto& c = channels.at(name); Channel channel;
         const auto hash = c.at("epoch").get<std::string>(); require(hash.size() == 16);
         const auto parsed = chunkwire::parseHashHex(hash); require(parsed.has_value()); channel.epoch = *parsed;
         require(c.at("meta").is_object());
-        const auto& levels = c.at("levels"); require(levels.is_array() && levels.size() == 3);
+        const auto& levels = c.at("levels"); require(levels.is_array());
         std::set<int64_t> seen;
         for (const auto& v : levels) {
             Level l; l.levelMs = integer(v.at("level_ms")); l.chunkSpanMs = integer(v.at("chunk_span_ms"));
@@ -82,7 +83,8 @@ Availability parseAvailability(const nlohmann::json& j) {
         }
         a.channels.emplace(name, std::move(channel));
     }
-    require(a.channels.at("flow.rows").epoch == a.channels.at("flow.summary").epoch);
+    if (a.channels.contains("flow.rows") && a.channels.contains("flow.summary"))
+        require(a.channels.at("flow.rows").epoch == a.channels.at("flow.summary").epoch);
     return a;
 }
 } // namespace protocol::chunks

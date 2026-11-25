@@ -918,7 +918,6 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
                 uint32_t suppressed = 0;
                 if (warning.admit(2000, sentinel::log_throttle::nowMs(), suppressed))
                     sLog_Warning("Chunk availability rejected: " << e.what());
-                emit errorOccurred(QStringLiteral("chunk availability rejected"));
             }
             return;
         }
