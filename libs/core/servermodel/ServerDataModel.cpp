@@ -1406,8 +1406,6 @@ void ServerDataModel::addFlowTrade(const Trade& trade, int64_t ms, std::optional
     auto& product = m_flowProducts[trade.product_id];
     const bool lateMinute = heldLate.value_or(product.receiveMax >=
         ms / 60'000 * 60'000 + 60'000 + m_serverConfig.flow.sealWindowMs);
-    if (lateMinute && !heldLate)
-        ++m_flowLateTrades[trade.product_id];
     if (product.firstLiveMs < 0) product.firstLiveMs = ms;
     const int64_t dayStart = ms / 86'400'000 * 86'400'000;
     const auto markLoss = [&] { markFlowLoss(product, ms); };
@@ -1425,6 +1423,9 @@ void ServerDataModel::addFlowTrade(const Trade& trade, int64_t ms, std::optional
         product.heldBytes += charge;
         return;
     }
+    // Classify only once the grid is available: a lost hold is missing-grid,
+    // while a released hold keeps its original admission lateness.
+    if (lateMinute) ++m_flowLateTrades[trade.product_id];
     auto& input = product.scratch;
     input.id = trade.trade_id;
     input.exchangeMs = ms; input.price = trade.price; input.size = trade.size;

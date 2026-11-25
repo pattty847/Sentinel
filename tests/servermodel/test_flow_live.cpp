@@ -577,6 +577,24 @@ TEST_F(FlowLive, HeldAdmissionUsesArrivalWatermarkAndCountsLateOnlyOnce) {
   EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(bare), 0u);
 }
 
+TEST_F(FlowLive, LateGridHoldsDroppedByOverflowOrExpiryCountOnlyMissingGrid) {
+  ServerDataModel bare(config); FlowLiveTestAccess::stopTimer(bare);
+  for (int n = 0; n < 8; ++n) {
+    bare.flowTradePosted("BTC-USD");
+    bare.onFlowTrade(trade(Day + 100, std::string(1024 * 1024, char('a' + n))),
+                     Day + 60000 + config.flow.sealWindowMs);
+  }
+  EXPECT_EQ(FlowLiveTestAccess::heldTrades(bare), 3u);
+  EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(bare), 5u);
+  EXPECT_EQ(FlowLiveTestAccess::lateDrops(bare), 0u);
+  FlowLiveTestAccess::expireHeld(bare);
+  EXPECT_EQ(FlowLiveTestAccess::missingGridDrops(bare), 8u);
+  EXPECT_EQ(FlowLiveTestAccess::totalDrops(bare), 8u);
+  EXPECT_EQ(FlowLiveTestAccess::lateDrops(bare), 0u);
+  grid(bare);
+  EXPECT_EQ(FlowLiveTestAccess::lateDrops(bare), 0u);
+}
+
 TEST_F(FlowLive, GridCanChangeBeforeTradesButNotAfterwards) {
   auto alternate = sentinel::roller::deriveGrid(metadata(), 100000, {{"near_tick", 2.0}});
   model->onFlowGrid("BTC-USD", Day, alternate, metadata());
