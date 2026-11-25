@@ -2,8 +2,9 @@
 #include "IGridDataSource.hpp"
 #include "CandleSeriesBuffer.hpp"
 #include "CandleBackfillState.hpp"
-#include "FlowBackfillState.hpp"
+#include "flow/FlowChunkClient.hpp"
 #include "FlowTimingProbe.hpp"
+#include "flow/FlowSecondHistory.hpp"
 #include <QElapsedTimer>
 #include "../models/MarketHealth.hpp"
 #include <QDateTime>
@@ -21,11 +22,14 @@ public:
 
     void subscribe(const QString& symbol) override;
     void unsubscribe(const QString& symbol) override;
-    void requestFlowHistory(const QString& symbol, int64_t timeframeMs, int64_t startMs, int64_t endMs, int64_t resetAnchorMs = -1) override;
+    ~RemoteGridDataSource() override;
+    void setFlowViewport(const QString& symbol, int64_t timeframeMs, int64_t startMs, int64_t endMs, int64_t resetAnchorMs = -1, bool rows = false) override;
     void requestTradeHistory(const QString& symbol, int64_t startMs, int64_t endMs, quint64 req) override;
     void subscribeFlowLive(const QString& symbol, int64_t timeframeMs) override;
     void unsubscribeFlowLive() override;
-    const FlowSeriesBuffer& flowBuffer() const { return m_flowBuffer; }
+    const FlowSeriesBuffer& flowBuffer(bool summary = false) const {
+        return summary && !m_flowSummary.symbol().isEmpty() ? m_flowSummary : m_flowBuffer;
+    }
     void requestTpoHistory(const QString& symbol,
                            int64_t timeframeMs,
                            int sessionType,
@@ -68,19 +72,31 @@ private slots:
 private:
     friend struct CandleDataSourceTest;
     friend struct FlowDataSourceTest;
-    void requestNextFlowPage();
+    void initializeFlow();
+    void requestNextFlowSecondPage();
+    void onFlowSeconds(SentinelStreamClient::FlowBatchPtr);
+    void failFlowSeconds(quint64, const QString&);
+    void publishFlowSeconds();
+    sentinel::flow::FlowSecondHistory m_flowSeconds;
+    QTimer m_flowSecondsTimer;
+    void startFlowLive();
+    void refreshFlowView();
     void onFlowBarsReceived(SentinelStreamClient::FlowBatchPtr batch);
-    void publishFlowCoverage(int64_t bucket, SentinelStreamClient::FlowStatus status);
-    void forgetTrimmedFlow();
-    FlowSeriesBuffer m_flowBuffer;
-    FlowBackfillState m_flowBackfill;
-    FlowTimingProbe m_flowProbe; // flow.timing lines only; inert when the probe is off
-    QTimer m_flowTimer;
+    FlowSeriesBuffer m_flowBuffer, m_flowSummary;
+    FlowTimingProbe m_flowProbe;
+    QTimer m_flowTimer, m_flowViewTimer;
     QElapsedTimer m_flowClock;
     QString m_flowSymbol;
-    int64_t m_flowTimeframeMs = 0;
-    quint64 m_flowSubscription = 0;
-    bool m_flowConfigReady = false;
+    int64_t m_flowTimeframeMs = 0, m_flowFrom = 0, m_flowTo = 0, m_flowAnchor = -1;
+    quint64 m_flowSubscription = 0, m_flowGeneration = 0;
+    bool m_flowConfigReady = false, m_flowAvailabilityReady = false, m_flowRows = false;
+    int m_flowPan = 0, m_flowRetryMs = 100;
+    bool m_flowComposing = false, m_flowDirty = false;
+    struct FlowWork;
+    std::shared_ptr<FlowWork> m_flowWork;
+    // Only retirement metadata survives selection changes; live bars are reset.
+    std::map<std::pair<QString, int64_t>, std::shared_ptr<FlowWork>> m_flowOwnership;
+    std::deque<std::pair<QString, int64_t>> m_flowOwnershipOrder;
     void processBookSnapshotDeadlines(qint64 nowMs);
     void onL2UpdateReceivedAt(const QString& productId, const std::vector<BookLevelUpdate>& updates,
                               double tickSize, quint64 deliveryGeneration, qint64 nowMs,
@@ -91,6 +107,8 @@ private:
     void advanceCandleDeliveryGeneration();
     MarketHealth m_marketHealth;
     SentinelStreamClient m_client;
+    // Destroy/join this service before the adapter's stream client can die.
+    std::unique_ptr<sentinel::flow::FlowChunkClient> m_flowChunks;
     std::unique_ptr<CandleSeriesBuffer> m_candleBuffer;
     CandleBackfillState m_candleBackfill;
     QTimer m_candleBackfillTimer;

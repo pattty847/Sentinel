@@ -111,10 +111,10 @@ class CandleViewportSource final : public IGridDataSource {
 public:
     struct Request { QString symbol; int64_t timeframeMs; qint64 startMs; qint64 endMs; };
     std::vector<Request> requests;
-    struct FlowRequest { int64_t start, end, anchor; };
+    struct FlowRequest { int64_t start, end, anchor; bool rows; };
     std::vector<FlowRequest> flowRequests;
-    void requestFlowHistory(const QString&, int64_t, int64_t start, int64_t end, int64_t anchor = -1) override {
-        flowRequests.push_back({start, end, anchor});
+    void setFlowViewport(const QString&, int64_t, int64_t start, int64_t end, int64_t anchor = -1, bool rows = false) override {
+        flowRequests.push_back({start, end, anchor, rows});
     }
     void subscribe(const QString&) override {}
     void unsubscribe(const QString&) override {}
@@ -1229,6 +1229,10 @@ TEST(MainWindowCandleViewport, CvdEnableResetAndSessionChangesRefreshTheFlowAnch
     ASSERT_FALSE(captured->flowRequests.empty());
     EXPECT_EQ(captured->flowRequests.back().anchor, -1);
     const auto originalWindow = captured->flowRequests.back();
+    renderer->layers()->setFootprintEnabled(true); QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
+    ASSERT_FALSE(captured->flowRequests.empty()); EXPECT_TRUE(captured->flowRequests.back().rows);
+    renderer->layers()->setFootprintEnabled(false); QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
+    EXPECT_FALSE(captured->flowRequests.back().rows);
     captured->flowRequests.clear();
     renderer->layers()->setCvdStripPx(96); QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
     ASSERT_FALSE(captured->flowRequests.empty()); EXPECT_EQ(captured->flowRequests.back().anchor, -1);

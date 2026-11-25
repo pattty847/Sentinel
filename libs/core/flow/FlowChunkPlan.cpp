@@ -24,8 +24,8 @@ std::vector<PlannedFlowChunk> planFlowChunks(const FlowChunkWant& v, const w::Av
     std::vector<PlannedFlowChunk> out;
     if (!validWant(v) || a.instrument != v.instrument || !a.channels.contains(v.channel)) return out;
     const auto width = v.toMs - v.fromMs;
-    const auto lo = std::max(recording::kHmc2MinMs, v.fromMs - width * (v.pan < 0 ? 4 : 2));
-    const auto hi = std::min(recording::kHmc2EndMs, v.toMs + width * (v.pan > 0 ? 4 : 2));
+    const auto lo = std::max(recording::kHmc2MinMs, v.fromMs - (budget ? width * (v.pan < 0 ? 4 : 2) : 0));
+    const auto hi = std::min(recording::kHmc2EndMs, v.toMs + (budget ? width * (v.pan > 0 ? 4 : 2) : 0));
     std::vector<w::Run> remaining{{lo, hi}};
     auto levels = a.channels.at(v.channel).levels;
     std::sort(levels.begin(), levels.end(), [](const auto& x, const auto& y) { return x.levelMs > y.levelMs; });

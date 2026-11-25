@@ -15,8 +15,8 @@ struct VolumeProfileSessionBounds {
 inline bool validFlowTimeframe(int64_t tf) {
     return tf == 1000 || (tf >= 60'000 && tf <= 86'400'000 && tf % 60'000 == 0 && 86'400'000 % tf == 0);
 }
+SentinelStreamClient::FlowBatch parseFlowSeconds(std::span<const uint8_t> frame);
 SentinelStreamClient::FlowBatch parseFlowLive(const nlohmann::json& msg);
-SentinelStreamClient::FlowBatch parseFlowHistory(std::span<const uint8_t> frame);
 
 Trade parseTrade(const nlohmann::json& msg);
 ServerConfig parseServerConfig(const nlohmann::json& msg);

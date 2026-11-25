@@ -43,6 +43,12 @@ void ClientTransport::attach(SentinelStreamClient& c) {
         f.requestId = it == pending_.end() ? 0 : it->second.local;
         emit failed(f); retire(id, f.key);
     }, Qt::QueuedConnection);
+    // Queue the seed so a service can finish constructing its fetcher first.
+    // The atomic read is safe on this thread; normal signals own later changes.
+    QMetaObject::invokeMethod(this, [this, generation] {
+        if (generation != generation_ || online_ || !client_ || !client_->isConnected()) return;
+        online_ = true; emit connected();
+    }, Qt::QueuedConnection);
 }
 void ClientTransport::retire(quint64 id, std::optional<Key> key) {
     if (!id) { for (const auto& [wire, p] : pending_) if (client_) client_->forgetChunks(wire); pending_.clear(); return; }

@@ -8,8 +8,8 @@ inline int64_t cvdResetBoundary(int64_t time, CvdReset reset, int sessionType) {
         static_cast<SessionManager::SessionType>(std::clamp(sessionType, 0, 6)));
     return CvdSeries::resetStart(time, reset, session.startMs);
 }
-// An optional earlier retention/request anchor. The source still applies its
-// ordinary viewport margin and existing 8192-bucket cap; off/visible leaves it alone.
+// An optional earlier summary-prefix anchor. The source folds anchor-to-view
+// into a scalar; only the composed viewport is retained. Off/visible has no prefix.
 inline int64_t cvdHistoryAnchor(int64_t visibleStart, int64_t timeframe, int stripPx,
                                CvdReset reset, int sessionType) {
     if (stripPx <= 0 || reset == CvdReset::Visible || visibleStart < 0 || timeframe <= 0) return -1;

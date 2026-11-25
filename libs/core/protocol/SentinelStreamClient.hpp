@@ -66,7 +66,6 @@ public:
 
     enum class FlowSource { Live, Store };
     enum class FlowStatus { Complete, Partial, Building, Unrecorded, Refused, Live }; // Live is client coverage only.
-    enum class FlowFailure { Retryable, Oversized, Fatal };
     struct FlowRecord {
         sentinel::flow::FlowBar bar;
         uint32_t revision = 0;
@@ -79,13 +78,16 @@ public:
         int64_t priceScale = 0, rowTickUnits = 0;
     };
     struct FlowBatch {
-        quint64 id = 0; // request id for history, subscription id for live
+        quint64 id = 0; // subscription id
         QString symbol;
         int64_t timeframeMs = 0;
-        bool history = false;
+        // Temporary FHE1 fallback is restricted to exactly one-second bars.
+        bool secondHistory = false;
         FlowStatus status = FlowStatus::Complete;
-        int64_t oldestMs = 0, sealedThroughMs = 0;
+        int64_t oldestMs = 0;
         QString error;
+        bool replayReady = false;
+        int64_t liveFromMs = 0;
         std::vector<FlowRange> ranges;
         std::vector<FlowRecord> bars;
         // Measurement only: wire frame size and decode time, set only while the flow.timing probe is on.
@@ -135,10 +137,10 @@ public:
                           const std::vector<std::optional<uint64_t>>& haveHash = {});
     void forgetChunks(quint64 request);
     void subscribeChunkAvailability(const std::vector<std::string>& instruments);
+    bool isConnected() const { return m_isConnected.load(); }
     uint64_t chunkRejectedCount() const { return m_chunkRejected.load(); }
-    void requestFlowHistory(quint64 req, const std::string& symbol, int64_t timeframeMs,
-                            int64_t endTimeMs, int limit);
     void requestTradeHistory(quint64 req, const std::string& symbol, int64_t startMs, int64_t endMs);
+    void requestFlowSeconds(quint64 req, const std::string& symbol, int64_t endMs, int limit);
     quint64 subscribeFlowLive(const std::string& symbol, int64_t timeframeMs);
     void unsubscribeFlowLive(quint64 sub);
     // requestId (required, 1..64 chars) is echoed on the reply chunk and on errors.
@@ -186,7 +188,8 @@ signals:
                           uint64_t bookVersion = 0);
     // Other signals as needed for aggregated slices
     void flowBarsReceived(SentinelStreamClient::FlowBatchPtr batch);
-    void flowHistoryFailed(quint64 req, const QString& message, SentinelStreamClient::FlowFailure failure);
+    void flowSecondsFailed(quint64 req, const QString& message);
+    void flowLiveFailed(quint64 sub, const QString& message);
     void tradeHistoryReceived(SentinelStreamClient::TradeHistoryPtr page);
     void tradeHistoryFailed(quint64 req, const QString& message);
     void flowLiveDropped(quint64 sub, const QString& symbol, int64_t timeframeMs, int64_t bucketStartMs);
@@ -246,7 +249,7 @@ private:
     void handleMessage(const std::string& msg);
     void handleBinaryMessage(std::shared_ptr<std::vector<uint8_t>> frame, bool flowLive = false,
                              std::optional<FlowDropInfo> flowDrop = {});
-    void decodeBinaryMessage(const std::vector<uint8_t>& frame, quint64 epoch, bool flowLive = false, quint64 flowRequest = 0);
+    void decodeBinaryMessage(const std::vector<uint8_t>& frame, quint64 epoch, bool flowLive = false);
     bool acceptChunkOrder(const heatmap::ChunkFrame& frame);
     void decodeChunkMessage(const std::vector<uint8_t>& frame, quint64 epoch);
     void resendChunkSubscription(); // strand only
@@ -305,8 +308,8 @@ private:
     std::unordered_map<std::string, quint64> m_bookDeliveryGenerations;
 
     std::atomic<quint64> m_nextChunkRequestId{0};
-    std::atomic<quint64> m_flowHistoryRequest{0};
     std::atomic<quint64> m_tradeHistoryRequest{0};
+    std::atomic<quint64> m_flowSecondsRequest{0};
     std::map<std::pair<quint64, int64_t>, std::chrono::steady_clock::time_point> m_flowDropNotified;
     // Replies from an older connection are dropped after reconnect.
     std::atomic<quint64> m_connectionEpoch{0};
@@ -338,4 +341,3 @@ Q_DECLARE_METATYPE(protocol::chunkwire::Availability)
 
 Q_DECLARE_METATYPE(SentinelStreamClient::FlowBatchPtr)
 Q_DECLARE_METATYPE(SentinelStreamClient::TradeHistoryPtr)
-Q_DECLARE_METATYPE(SentinelStreamClient::FlowFailure)

@@ -1,6 +1,6 @@
 #pragma once
 // Data-thread adapter. Wire ids are remapped so replacing a client whose counter
-// starts over cannot accept old queued replies. Attach before connecting client.
+// starts over cannot accept old queued replies. The stream client must outlive this adapter; already-connected clients are seeded.
 #include "ChunkReply.hpp"
 #include <QObject>
 #include <QPointer>

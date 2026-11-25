@@ -26,6 +26,7 @@ public:
     void setBudget(size_t bytes);
     struct Stats { size_t bytes, entries, budget, wantedBytes; };
     Stats stats() const;
+    uint64_t generation() const; // changes whenever readable bodies can change
 private:
     mutable std::mutex mutex_;
     struct Node { Entry value; std::list<Key>::iterator lru; };
@@ -33,6 +34,7 @@ private:
     std::list<Key> lru_;
     std::set<Key> wanted_;
     size_t bytes_ = 0, budget_;
+    uint64_t generation_ = 0;
     void evict();
 };
 }

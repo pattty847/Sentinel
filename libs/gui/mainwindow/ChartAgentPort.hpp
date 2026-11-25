@@ -17,6 +17,7 @@ public:
         : view_(&view), published_(&published), ack_(&ack), update_(std::move(update)), flow_(flow), layers_(layers), cvd_(cvd),
           tpo_(tpo) {}
     void bindFlowSource(IGridDataSource&) const;
+    std::pair<int64_t, int64_t> flowViewWindow() const;
     int64_t cvdHistoryAnchor(int64_t start, int64_t timeframe) const;
     QJsonObject footprintSettings() const;
     static QJsonObject footprintPatch(const QJsonObject&);

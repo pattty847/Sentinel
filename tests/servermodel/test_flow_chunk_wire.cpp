@@ -307,3 +307,59 @@ TEST_F(FlowChunkEndToEnd, ClientFetcherDecodesBothChannelsAtEveryStoredLevel) {
     EXPECT_EQ(client.chunkRejectedCount(),0u);
 }
 }
+
+#include "flow/FlowChunkView.hpp"
+namespace {
+// Migration oracle only: exercise the server's still-supported FHE1 encoder;
+// there is deliberately no FHE1 parser or request path in the production client.
+TEST_F(FlowChunkEndToEnd, ComposedViewsMatchFhe1PagesFromTheSameSyntheticArchive) {
+    namespace fc = sentinel::flow;
+    namespace codec = fc::chunks;
+    ASSERT_EQ(source->runPass().failed, 0u);
+    const auto inventory = store->snapshot(Id); ASSERT_TRUE(inventory);
+    const auto a = wire::parseAvailability(protocol::flowchunks::availability(Id, *inventory));
+    ServerDataModel::FlowHistorySnapshot snapshot; snapshot.store = source.get();
+    for (const auto tf : {Minute, 5*Minute, Hour, 4*Hour, Day}) {
+        const auto end = Epoch + (tf == Minute ? 6*Hour : Day);
+        const auto page = flow_history::build({1, "BTC-USD", tf, Epoch, end}, snapshot);
+        ASSERT_TRUE(page.starts_with("FHE1"));
+        size_t offset = 4;
+        const auto length = [&]() {
+            if (offset + 4 > page.size()) throw std::runtime_error("short oracle page");
+            uint32_t n = 0;
+            for (unsigned i=0; i<4; ++i) n |= uint32_t(uint8_t(page[offset++])) << (8*i);
+            if (n > page.size()-offset) throw std::runtime_error("short oracle payload");
+            return n;
+        };
+        const auto headerSize = length();
+        const auto header = Json::parse(page.substr(offset, headerSize)); offset += headerSize;
+        std::map<int64_t, fc::FlowBar> expected;
+        for (const auto& meta : header.at("bars")) {
+            const auto n = length();
+            auto bar = fc::decodeFlowBar({reinterpret_cast<const uint8_t*>(page.data()+offset), n});
+            offset += n; bar.notable.clear(); expected.emplace(bar.startMs, std::move(bar));
+        }
+        ASSERT_EQ(offset, page.size()); ASSERT_FALSE(expected.empty());
+        for (const auto* channel : {"flow.rows", "flow.summary"}) {
+            fc::FlowChunkCache cache; fc::FlowChunkView composer;
+            const fc::FlowChunkWant want{Id, channel, tf, Epoch, end, 0};
+            for (const auto& item : fc::planFlowChunks(want, a, fc::flowChunkEstimate, 0)) {
+                const auto payload = store->read(Id, item.key.levelMs, item.key.startMs); ASSERT_TRUE(payload);
+                auto k = item.key; k.priceStep = k.channel == "flow.rows" ? uint64_t(1) << payload->stepExponent : 0;
+                auto bytes = std::span(payload->bytes).first(k.channel == "flow.rows" ? payload->bytes.size() : payload->summaryLength);
+                auto body = std::make_shared<const codec::FlowChunk>(codec::decode(bytes, k,
+                    uint16_t(heatmap::chunkSpanMs(k.levelMs)/k.levelMs), payload->epoch));
+                cache.put(item.key, body, payload->epoch, 1);
+            }
+            const auto view = composer.compose(cache, want, a);
+            size_t count = 0;
+            for (const auto& [time, bucket] : view.buckets) if (bucket.value) {
+                ++count; ASSERT_TRUE(expected.contains(time)); auto before = expected.at(time);
+                if (std::string_view(channel) == "flow.summary") { before.rows.clear(); before.maxRowVol = 0; }
+                EXPECT_EQ(bucket.value->bar, before) << "tf=" << tf << " channel=" << channel << " time=" << time;
+            }
+            EXPECT_EQ(count, expected.size());
+        }
+    }
+}
+}

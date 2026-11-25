@@ -77,6 +77,15 @@ void ChartAgentPort::setControlRevision(quint64 revision, quint64 selectionEpoch
     update_();
 }
 
+std::pair<int64_t, int64_t> ChartAgentPort::flowViewWindow() const {
+    if (!view_) return {};
+    const auto camera = view_->camera().rasterCameraNow();
+    const auto view = view_->snapshot();
+    if (!camera.valid) return {view.start, view.end};
+    return {std::min<int64_t>(view.start, std::floor(camera.drawnStartMs)),
+            std::max<int64_t>(view.end, std::ceil(camera.drawnEndMs))};
+}
+
 int64_t ChartAgentPort::cvdHistoryAnchor(int64_t start, int64_t timeframe) const {
     return cvd_ ? cvd_->historyAnchor(start, timeframe) : -1;
 }
