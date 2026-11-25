@@ -57,10 +57,12 @@ std::vector<PlannedFlowChunk> planFlowChunks(const FlowChunkWant& v, const w::Av
         return std::tie(x.tier, x.order, x.key) < std::tie(y.tier, y.order, y.key);
     });
     size_t bytes = 0;
+    bool paddingStopped = false;
     std::erase_if(out, [&](const auto& item) {
         if (!item.tier) return false;
+        if (paddingStopped) return true;
         const auto n = std::max<size_t>(1, estimate(item.key));
-        if (n > budget - bytes) return true;
+        if (n > budget - bytes) { paddingStopped = true; return true; }
         bytes += n; return false;
     });
     return out;

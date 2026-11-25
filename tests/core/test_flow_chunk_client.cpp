@@ -171,6 +171,21 @@ TEST(FlowChunkPlan, PaddingOrderAndCapNeverRemoveVisible) {
     EXPECT_EQ(std::count_if(plan.begin(),plan.end(),[](auto& p){return p.tier==0;}),100);
     EXPECT_EQ(plan.size(),104u);
 }
+TEST(FlowChunkPlan, PaddingStopsBeforeCheaperFartherChunksAtAnotherLevel) {
+    auto a=available(96);
+    a.channels.at("flow.rows").levels[1].sealed={{T,T+3*D}};
+    const auto want=view(0,24,1,"flow.rows",4*H);
+    const auto estimate=[](const w::Key& k) -> size_t {
+        if (k.levelMs==M) return 64ull << 10; // Hour chunks in the farther, unsealed day.
+        return (k.startMs==T+D ? 16ull : 20ull) << 20; // Day chunks at the hour level.
+    };
+    const auto uncapped=f::planFlowChunks(want,a,estimate,64ull << 20);
+    ASSERT_TRUE(std::any_of(uncapped.begin(),uncapped.end(),[](const auto& p) { return p.key.levelMs==M; }));
+    const auto capped=f::planFlowChunks(want,a,estimate);
+    ASSERT_EQ(capped.size(),2u);
+    EXPECT_EQ(capped[0].key,key(0,"flow.rows",H));
+    EXPECT_EQ(capped[1].key,key(24,"flow.rows",H));
+}
 TEST_F(FlowFetch, WaitsForFirstAvailabilityDeduplicatesAndCapsFlight) {
     ASSERT_TRUE(fetch->want(1,view(0,20))); transport.connected(); drain(); EXPECT_TRUE(transport.requests.empty());
     transport.availability(available(20)); drain();
