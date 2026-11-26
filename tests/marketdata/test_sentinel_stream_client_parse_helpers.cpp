@@ -8,7 +8,7 @@ TEST(SentinelStreamClientParseHelpers, ParseServerConfigMapsFields) {
                    {"served_timeframes_ms", {0, 60000, -1, 300000}}}},
         {"trade_overlays", {{"retention_columns", 4096}}},
         {"orderbook", {{"tick_size", 0.01}, {"band_pct", 0.25}}},
-        {"candles", {{"update_bps_fast", 0.1}, {"update_tick_size", 0.5}}},
+        {"candles", {{"update_bps_fast", 0.1}, {"update_tick_size", 0.5}, {"update_coalesce_ms", 150}}},
         {"default_symbols", nlohmann::json::array({"BTC-USD", 123, "ETH-USD"})}
     };
 
@@ -21,11 +21,12 @@ TEST(SentinelStreamClientParseHelpers, ParseServerConfigMapsFields) {
     EXPECT_EQ(cfg.chart.servedTimeframesMs, (std::vector<int64_t>{60000, 300000}));
     EXPECT_TRUE(cfg.wasAdvertised("chart.servedTimeframesMs"));
     EXPECT_TRUE(cfg.wasAdvertised("orderbook.tickSize"));
-    EXPECT_FALSE(cfg.wasAdvertised("candles.bpsSlow"));
+    EXPECT_TRUE(cfg.wasAdvertised("candles.coalesceMs"));
     EXPECT_DOUBLE_EQ(cfg.orderbook.tickSize, 0.01);
     EXPECT_DOUBLE_EQ(cfg.orderbook.bandPct, 0.25);
     EXPECT_DOUBLE_EQ(cfg.candles.bpsFast, 0.1);
     EXPECT_DOUBLE_EQ(cfg.candles.tickSize, 0.5);
+    EXPECT_EQ(cfg.candles.coalesceMs, 150);
     ASSERT_EQ(cfg.defaultSymbols.size(), 2u);
     EXPECT_EQ(cfg.defaultSymbols[0], "BTC-USD");
     EXPECT_EQ(cfg.defaultSymbols[1], "ETH-USD");

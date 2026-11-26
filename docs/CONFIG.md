@@ -41,6 +41,14 @@ This setting does not affect the Prometheus HTTP listener, which remains on `127
 - GUI settings (API port, screenshot dir, font)
 - Client cache sizing and local UI preferences
 
+`candles.update_tick_size` sets the price tick for immediate 1m and coarser
+close updates; zero (the default) uses `orderbook.tick_size` (0.1 for BTC-USD).
+New buckets, first trades, and new highs/lows also send immediately. Other 1m+
+changes coalesce on a per-session timer, even when no further trade arrives.
+`candles.update_coalesce_ms` defaults to 200 and is clamped to 100..250 ms.
+The `update_*_fast` keys continue to govern 100 ms and 1 s candles. The former
+slow bps, tick multiplier, volume, and silence thresholds are removed.
+
 `orderbook.tick_size` remains the configured BTC-USD live-book tick (default 0.1 USD).
 For other products the server derives a live-book tick when metadata and an accepted raw book are
 both available, using the current raw BBO midpoint:

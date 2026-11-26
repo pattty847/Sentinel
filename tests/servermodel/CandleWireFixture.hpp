@@ -52,6 +52,17 @@ struct RecordingServerStopTest {
         s.postModelEvent([tf, bar](Session &session) { session.on_bar_updated("BTC-USD", tf, bar); });
     }
     static bool subscribed(Session &s) { return s.subscriptions_.contains("BTC-USD"); }
+    static std::shared_ptr<Session> offline(SentinelStreamServer &server, ServerDataModel &model,
+                                            std::function<void(std::string)> sink) {
+        auto session = std::make_shared<Session>(tcp::socket(net::make_strand(server.m_ioc)),
+                                                 server.m_sslCtx, model, &server);
+        session->subscriptions_.insert("BTC-USD");
+        session->candleWriteForTest_ = std::move(sink);
+        return session;
+    }
+    static void offlineBar(Session &s, int64_t tf, const OHLCVBar &bar) {
+        s.on_bar_updated("BTC-USD", tf, bar);
+    }
 };
 
 bool writeSelfSignedCert(const std::string &certFile, const std::string &keyFile) {

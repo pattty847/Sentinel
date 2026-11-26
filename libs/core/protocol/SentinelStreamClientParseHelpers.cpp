@@ -87,19 +87,16 @@ ServerConfig parseServerConfig(const nlohmann::json& msg) {
     if (msg.contains("candles") && msg["candles"].is_object()) {
         const auto& cd = msg["candles"];
         for (const auto& [wire, field] : {std::pair{"update_bps_fast", "candles.bpsFast"},
-                 {"update_bps_slow", "candles.bpsSlow"}, {"update_tick_mult_fast", "candles.tickMultFast"},
-                 {"update_tick_mult_slow", "candles.tickMultSlow"}, {"update_silence_ms_fast", "candles.silenceMsFast"},
-                 {"update_silence_ms_slow", "candles.silenceMsSlow"}, {"update_volume_fast", "candles.volumeFast"},
-                 {"update_volume_slow", "candles.volumeSlow"}, {"update_tick_size", "candles.tickSize"}}) mark(cd, wire, field);
+                 {"update_tick_mult_fast", "candles.tickMultFast"},
+                 {"update_silence_ms_fast", "candles.silenceMsFast"},
+                 {"update_volume_fast", "candles.volumeFast"}, {"update_tick_size", "candles.tickSize"},
+                 {"update_coalesce_ms", "candles.coalesceMs"}}) mark(cd, wire, field);
         cfg.candles.bpsFast = cd.value("update_bps_fast", cfg.candles.bpsFast);
-        cfg.candles.bpsSlow = cd.value("update_bps_slow", cfg.candles.bpsSlow);
         cfg.candles.tickMultFast = cd.value("update_tick_mult_fast", cfg.candles.tickMultFast);
-        cfg.candles.tickMultSlow = cd.value("update_tick_mult_slow", cfg.candles.tickMultSlow);
         cfg.candles.silenceMsFast = cd.value("update_silence_ms_fast", cfg.candles.silenceMsFast);
-        cfg.candles.silenceMsSlow = cd.value("update_silence_ms_slow", cfg.candles.silenceMsSlow);
         cfg.candles.volumeFast = cd.value("update_volume_fast", cfg.candles.volumeFast);
-        cfg.candles.volumeSlow = cd.value("update_volume_slow", cfg.candles.volumeSlow);
         cfg.candles.tickSize = cd.value("update_tick_size", cfg.candles.tickSize);
+        cfg.candles.coalesceMs = cd.value("update_coalesce_ms", cfg.candles.coalesceMs);
     }
     if (msg.contains("default_symbols") && msg["default_symbols"].is_array()) {
         cfg.defaultSymbols.clear();

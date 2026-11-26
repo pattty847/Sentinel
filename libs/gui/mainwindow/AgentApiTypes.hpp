@@ -87,14 +87,11 @@ struct StateSnapshot {
     std::optional<double> tickSize;
     std::optional<double> bandPct;
     std::optional<double> candleBpsFast;
-    std::optional<double> candleBpsSlow;
     std::optional<int> candleTickMultFast;
-    std::optional<int> candleTickMultSlow;
     std::optional<qint64> candleSilenceMsFast;
-    std::optional<qint64> candleSilenceMsSlow;
     std::optional<double> candleVolumeFast;
-    std::optional<double> candleVolumeSlow;
     std::optional<double> candleTickSize;
+    std::optional<qint64> candleCoalesceMs;
     std::optional<qint64> heatmapReceivedAtMs;
     std::optional<qint64> candlesReceivedAtMs;
     std::optional<qint64> bookReceivedAtMs;

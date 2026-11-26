@@ -594,14 +594,11 @@ void applyAdvertisedServerConfig(StateSnapshot& s, const ServerConfig& config) {
     if (has("orderbook.tickSize")) s.tickSize = config.orderbook.tickSize;
     if (has("orderbook.bandPct")) s.bandPct = config.orderbook.bandPct;
     if (has("candles.bpsFast")) s.candleBpsFast = config.candles.bpsFast;
-    if (has("candles.bpsSlow")) s.candleBpsSlow = config.candles.bpsSlow;
     if (has("candles.tickMultFast")) s.candleTickMultFast = config.candles.tickMultFast;
-    if (has("candles.tickMultSlow")) s.candleTickMultSlow = config.candles.tickMultSlow;
     if (has("candles.silenceMsFast")) s.candleSilenceMsFast = config.candles.silenceMsFast;
-    if (has("candles.silenceMsSlow")) s.candleSilenceMsSlow = config.candles.silenceMsSlow;
     if (has("candles.volumeFast")) s.candleVolumeFast = config.candles.volumeFast;
-    if (has("candles.volumeSlow")) s.candleVolumeSlow = config.candles.volumeSlow;
     if (has("candles.tickSize")) s.candleTickSize = config.candles.tickSize;
+    if (has("candles.coalesceMs")) s.candleCoalesceMs = config.candles.coalesceMs;
 }
 
 QJsonObject envelope(const Metadata& meta, const QJsonObject& data) {
@@ -632,11 +629,11 @@ QJsonObject stateJson(const StateSnapshot& s) {
                 {"servedTimeframesMs", list(s.servedTimeframesMs)}, {"activeTimeframeMs", integer(s.activeTimeframeMs)},
                 {"retentionColumns", integer(s.retentionColumns)}}},
             {"orderbook", QJsonObject{{"tickSize", number(s.tickSize)}, {"bandPct", number(s.bandPct)}}},
-            {"candles", QJsonObject{{"bpsFast", number(s.candleBpsFast)}, {"bpsSlow", number(s.candleBpsSlow)},
-                {"tickMultFast", integer(s.candleTickMultFast)}, {"tickMultSlow", integer(s.candleTickMultSlow)},
-                {"silenceMsFast", integer(s.candleSilenceMsFast)}, {"silenceMsSlow", integer(s.candleSilenceMsSlow)},
-                {"volumeFast", number(s.candleVolumeFast)}, {"volumeSlow", number(s.candleVolumeSlow)},
-                {"tickSize", number(s.candleTickSize)}}}}},
+            {"candles", QJsonObject{{"bpsFast", number(s.candleBpsFast)},
+                {"tickMultFast", integer(s.candleTickMultFast)},
+                {"silenceMsFast", integer(s.candleSilenceMsFast)},
+                {"volumeFast", number(s.candleVolumeFast)},
+                {"tickSize", number(s.candleTickSize)}, {"coalesceMs", integer(s.candleCoalesceMs)}}}}},
         {"lastReceivedAtMs", QJsonObject{{"heatmap", integer(s.heatmapReceivedAtMs)},
             {"candles", integer(s.candlesReceivedAtMs)}, {"book", integer(s.bookReceivedAtMs)},
             {"trades", integer(s.tradesReceivedAtMs)},

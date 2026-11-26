@@ -34,14 +34,11 @@ struct ServerOrderBookConfig {
 
 struct ServerCandleGateConfig {
     double bpsFast = 0.00005;
-    double bpsSlow = 0.0002;
     int tickMultFast = 1;
-    int tickMultSlow = 2;
     int64_t silenceMsFast = 200;
-    int64_t silenceMsSlow = 1000;
     double volumeFast = 0.0;
-    double volumeSlow = 0.0;
     double tickSize = 0.0;
+    int64_t coalesceMs = 200;
 };
 
 struct ServerMdcConfig {
