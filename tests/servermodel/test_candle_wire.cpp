@@ -320,6 +320,12 @@ class CandleWire : public testing::Test {
     int failures = 0;
     std::shared_ptr<Session> session;
     void SetUp() override {
+        // The subscribe snapshot must carry the BTC wire tick for close-move tests.
+        fixture.model->onLiveOrderBookInitialized("BTC-USD", {{99.9, 1}}, {{100.1, 1}}, 1000);
+        const auto book = fixture.model->ensureSymbol("BTC-USD").liveBook.snapshotLevels();
+        ASSERT_DOUBLE_EQ(book.tickSize, 0.1);
+        ASSERT_EQ(book.bids.size(), 1u);
+        ASSERT_EQ(book.asks.size(), 1u);
         fixture.start();
         client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(fixture.port()),
                                                         fixture.config.tls.certFile);
@@ -353,7 +359,7 @@ class CandleWire : public testing::Test {
         }));
     }
     void TearDown() override {
-        client->disconnectFromServer();
+        if (client) client->disconnectFromServer();
         client.reset();
     }
     void fetch(int64_t tf, int64_t end) {
