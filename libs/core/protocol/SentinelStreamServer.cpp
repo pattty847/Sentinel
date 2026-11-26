@@ -1,5 +1,7 @@
 // Session candle state and its single coalescing timer stay on the WebSocket executor;
 // model callbacks enter through postModelEvent, so timer turns need no cross-thread lock.
+// A candle's close tick is cached from its symbol's live-book wire tick and
+// refreshed on book messages; trade callbacks never query the book.
 #include "metrics/MetricsRegistry.hpp"
 #include "SentinelStreamServer.hpp"
 #include "../servermodel/TradeOverlayPublisher.hpp"
@@ -428,8 +430,10 @@ class Session : public std::enable_shared_from_this<Session> {
         bool pending = false;
         std::string symbol;
         int64_t timeframeMs = 0;
+        double tickSize = 0.0;
     };
     std::unordered_map<std::string, CandleStreamState> candleStates_;
+    std::unordered_map<std::string, double> bookTicks_;
     net::steady_timer candleTimer_{ws_.get_executor()};
     bool candleTimerArmed_ = false;
     uint64_t m_tradingBroadcasterId = 0;
@@ -1533,6 +1537,9 @@ public:
                  std::transform(symbol.begin(), symbol.end(), symbol.begin(),
                                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
                  const bool removed = !symbol.empty() && subscriptions_.erase(symbol) > 0;
+                 for (auto& [key, candle] : candleStates_)
+                     if (candle.symbol == symbol) candle.pending = false;
+                 bookTicks_.erase(symbol);
                  if (const auto it = rawViews_.find(symbol); it != rawViews_.end()) {
                      it->second->active.store(false);
                      rawViews_.erase(it);
@@ -1583,6 +1590,7 @@ public:
         if (subscriptions_.find(pid) == subscriptions_.end()) return;
         const bool ready = std::isfinite(tickSize) && tickSize > 0.0 && !bids.empty() && !asks.empty() &&
                            status == QStringLiteral("ready");
+        refreshCandleTick(pid, ready ? tickSize : 0.0);
         const auto wireStatus = ready ? std::string("ready")
                                       : status == QStringLiteral("ready") ? std::string("aggregation_unavailable")
                                                                            : status.toStdString();
@@ -1601,6 +1609,7 @@ public:
                         double minPrice, double tickSize, uint64_t bookVersion) {
         std::string pid = productId.toStdString();
         if (subscriptions_.find(pid) == subscriptions_.end()) return;
+        refreshCandleTick(pid, tickSize);
 
         nlohmann::json j;
         j["type"] = "l2update";
@@ -1635,6 +1644,22 @@ public:
         return item;
     }
 
+    double candleTickFor(const std::string& symbol) const {
+        const double overrideTick = owner_->serverConfig().candles.tickSize;
+        if (std::isfinite(overrideTick) && overrideTick > 0.0) return overrideTick;
+        const auto it = bookTicks_.find(symbol);
+        return it == bookTicks_.end() ? 0.0 : it->second;
+    }
+
+    void refreshCandleTick(const std::string& symbol, double wireTick) {
+        const double tick = std::isfinite(wireTick) && wireTick > 0.0 ? wireTick : 0.0;
+        auto [it, inserted] = bookTicks_.try_emplace(symbol, tick);
+        if (!inserted && it->second == tick) return;
+        it->second = tick;
+        for (auto& [key, candle] : candleStates_)
+            if (candle.symbol == symbol) candle.tickSize = candleTickFor(symbol);
+    }
+
     static bool should_emit_update(const OHLCVBar &bar, const CandleStreamState &state,
                                    const ServerCandleGateConfig &cfg, const ServerOrderBookConfig &obConfig,
                                    int64_t timeframeMs, int64_t nowMs) {
@@ -1644,10 +1669,10 @@ public:
 
         const OHLCVBar& last = state.lastBar;
         if (timeframeMs >= 60'000) {
-            const double tickSize = cfg.tickSize > 0.0 ? cfg.tickSize : obConfig.tickSize;
             return bar.timestamp_ms != last.timestamp_ms ||
                 (bar.count > 0 && last.count == 0) || bar.high > last.high || bar.low < last.low ||
-                std::abs(bar.close - last.close) + tickSize * 1e-9 >= tickSize;
+                (state.tickSize > 0.0 &&
+                 std::abs(bar.close - last.close) + state.tickSize * 1e-9 >= state.tickSize);
         }
         if (timeframeMs < 1000 && (bar.timestamp_ms != last.timestamp_ms || (last.volume <= 0 && bar.volume > 0))) {
             return true;
@@ -1729,6 +1754,7 @@ public:
         if (!entry.hasLast) {
             entry.symbol = sym;
             entry.timeframeMs = timeframeMs;
+            entry.tickSize = candleTickFor(sym);
         }
         if (!should_emit_update(bar, entry, owner_->serverConfig().candles, owner_->serverConfig().orderbook,
                                 timeframeMs, nowMs)) {
@@ -1757,6 +1783,7 @@ public:
         entry.pending = false;
         entry.symbol = sym;
         entry.timeframeMs = timeframeMs;
+        entry.tickSize = candleTickFor(sym);
         sLog_Probe("candles.closed", "symbol=" << sym << " tfMs=" << timeframeMs << " start=" << bar.timestamp_ms
                                                << " end=" << (bar.timestamp_ms + timeframeMs)
                                                << " now=" << entry.lastSentMs << " seq=" << entry.seq);

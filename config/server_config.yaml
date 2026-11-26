@@ -29,7 +29,7 @@ candles:
   update_tick_mult_fast: 1
   update_silence_ms_fast: 200
   update_volume_fast: 0
-  update_tick_size: 0 # zero uses orderbook.tick_size for 1m+ close changes
+  update_tick_size: 0 # zero uses each symbol's live-book wire tick for 1m+ close changes
   update_coalesce_ms: 200 # volume-only 1m+ updates; clamped to [100, 250]
 default_symbols: [BTC-USD]
 

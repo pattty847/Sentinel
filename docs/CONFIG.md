@@ -42,7 +42,8 @@ This setting does not affect the Prometheus HTTP listener, which remains on `127
 - Client cache sizing and local UI preferences
 
 `candles.update_tick_size` sets the price tick for immediate 1m and coarser
-close updates; zero (the default) uses `orderbook.tick_size` (0.1 for BTC-USD).
+close updates; zero (the default) uses that symbol's current live-book wire tick.
+Until the book provides a valid tick, close changes use the coalescing timer.
 New buckets, first trades, and new highs/lows also send immediately. Other 1m+
 changes coalesce on a per-session timer, even when no further trade arrives.
 `candles.update_coalesce_ms` defaults to 200 and is clamped to 100..250 ms.
