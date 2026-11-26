@@ -6,6 +6,7 @@ for QML price/time axes.
 */
 #include "CandlestickBatched.hpp"
 #include "CandlePixelGeometry.hpp"
+#include "PremultipliedColor.hpp"
 
 #include <QSGGeometryNode>
 #include <QSGVertexColorMaterial>
@@ -66,14 +67,13 @@ bool finiteCandle(const CandleData& candle) {
 }
 
 inline void addQuad(QSGGeometry::ColoredPoint2D*& v,
-                    float x0, float y0, float x1, float y1,
-                    uchar r, uchar g, uchar b, uchar a) {
-    v[0].set(x0, y0, r, g, b, a);
-    v[1].set(x0, y1, r, g, b, a);
-    v[2].set(x1, y0, r, g, b, a);
-    v[3].set(x1, y0, r, g, b, a);
-    v[4].set(x0, y1, r, g, b, a);
-    v[5].set(x1, y1, r, g, b, a);
+                    float x0, float y0, float x1, float y1, premultiplied::Rgba c) {
+    premultiplied::set(v[0], x0, y0, c);
+    premultiplied::set(v[1], x0, y1, c);
+    premultiplied::set(v[2], x1, y0, c);
+    premultiplied::set(v[3], x1, y0, c);
+    premultiplied::set(v[4], x0, y1, c);
+    premultiplied::set(v[5], x1, y1, c);
     v += 6;
 }
 
@@ -553,18 +553,15 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
     auto* wickVerts = isLine ? nullptr : root->wickGeometry->vertexDataAsColoredPoint2D();
     auto* bodyVerts = root->bodyGeometry->vertexDataAsColoredPoint2D();
 
-    const uchar wr = static_cast<uchar>(m_wickColor.red());
-    const uchar wg = static_cast<uchar>(m_wickColor.green());
-    const uchar wb = static_cast<uchar>(m_wickColor.blue());
-    const uchar wa = static_cast<uchar>(m_wickColor.alpha());
+    const auto wickColour = premultiplied::rgba(m_wickColor);
 
     for (int i = firstVisible; i <= lastVisible; ++i) {
         const auto& c = m_candles[i];
         if (!finiteCandle(c)) {
-            addQuad(volVerts, 0, 0, 0, 0, 0, 0, 0, 0);
-            if (!isLine) addQuad(wickVerts, 0, 0, 0, 0, 0, 0, 0, 0);
+            addQuad(volVerts, 0, 0, 0, 0, {0, 0, 0, 0});
+            if (!isLine) addQuad(wickVerts, 0, 0, 0, 0, {0, 0, 0, 0});
             for (int q = 0; q < (isHollow ? 4 : 1); ++q)
-                addQuad(bodyVerts, 0, 0, 0, 0, 0, 0, 0, 0);
+                addQuad(bodyVerts, 0, 0, 0, 0, {0, 0, 0, 0});
             continue;
         }
         const bool bullish = c.close >= c.open;
@@ -577,7 +574,7 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         if (!isLine) {
             const float wickW = std::max(1.0f, scaledBody * 0.15f);
             addQuad(wickVerts, ccx - wickW * 0.5f, priceToY(c.high),
-                               ccx + wickW * 0.5f, priceToY(c.low), wr, wg, wb, wa);
+                               ccx + wickW * 0.5f, priceToY(c.low), wickColour);
         }
 
         // ── Body — SEC signal color override ─────────────────────────────────
@@ -595,38 +592,35 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         }
         if (hovered) bodyColor = bodyColor.lighter(130);
 
-        const uchar br = static_cast<uchar>(bodyColor.red());
-        const uchar bg = static_cast<uchar>(bodyColor.green());
-        const uchar bb = static_cast<uchar>(bodyColor.blue());
-        const uchar ba = static_cast<uchar>(bodyColor.alpha());
+        const auto bodyColour = premultiplied::rgba(bodyColor);
 
         if (isLine) {
             // Line mode: 2px horizontal tick at close price
             const float closeY = priceToY(c.close);
-            addQuad(bodyVerts, cx, closeY - 1.0f, cx + scaledBody, closeY + 1.0f, br, bg, bb, ba);
+            addQuad(bodyVerts, cx, closeY - 1.0f, cx + scaledBody, closeY + 1.0f, bodyColour);
         } else if (isHollow && bullish) {
             // Hollow mode: bullish candles draw as border outline only
             const float bodyY0 = priceToY(std::max(c.open, c.close));
             const float bodyY1 = priceToY(std::min(c.open, c.close));
             const float bw = std::max(1.0f, scaledBody * 0.12f); // border thickness
             // Top
-            addQuad(bodyVerts, cx, bodyY0, cx + scaledBody, bodyY0 + bw, br, bg, bb, ba);
+            addQuad(bodyVerts, cx, bodyY0, cx + scaledBody, bodyY0 + bw, bodyColour);
             // Bottom
-            addQuad(bodyVerts, cx, bodyY1 - bw, cx + scaledBody, bodyY1, br, bg, bb, ba);
+            addQuad(bodyVerts, cx, bodyY1 - bw, cx + scaledBody, bodyY1, bodyColour);
             // Left
-            addQuad(bodyVerts, cx, bodyY0, cx + bw, bodyY1, br, bg, bb, ba);
+            addQuad(bodyVerts, cx, bodyY0, cx + bw, bodyY1, bodyColour);
             // Right
-            addQuad(bodyVerts, cx + scaledBody - bw, bodyY0, cx + scaledBody, bodyY1, br, bg, bb, ba);
+            addQuad(bodyVerts, cx + scaledBody - bw, bodyY0, cx + scaledBody, bodyY1, bodyColour);
         } else {
             // Normal filled body (also used for bearish candles in Hollow mode)
             const float bodyY0 = priceToY(std::max(c.open, c.close));
             const float bodyY1 = priceToY(std::min(c.open, c.close));
-            addQuad(bodyVerts, cx, bodyY0, cx + scaledBody, bodyY1, br, bg, bb, ba);
+            addQuad(bodyVerts, cx, bodyY0, cx + scaledBody, bodyY1, bodyColour);
             // Pad remaining 3 quads for hollow-mode allocation (degenerate, same point)
             if (isHollow) {
-                addQuad(bodyVerts, cx, bodyY0, cx, bodyY0, 0, 0, 0, 0);
-                addQuad(bodyVerts, cx, bodyY0, cx, bodyY0, 0, 0, 0, 0);
-                addQuad(bodyVerts, cx, bodyY0, cx, bodyY0, 0, 0, 0, 0);
+                addQuad(bodyVerts, cx, bodyY0, cx, bodyY0, {0, 0, 0, 0});
+                addQuad(bodyVerts, cx, bodyY0, cx, bodyY0, {0, 0, 0, 0});
+                addQuad(bodyVerts, cx, bodyY0, cx, bodyY0, {0, 0, 0, 0});
             }
         }
 
@@ -635,10 +629,7 @@ QSGNode* CandlestickBatched::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeDa
         const float barH    = std::max(1.0f, volFrac * volBarMaxH);
         const QColor vc     = bullish ? m_bullishColor : m_bearishColor;
         addQuad(volVerts, cx, h - 2.0f - barH, cx + scaledBody, h - 2.0f,
-                static_cast<uchar>(vc.red()),
-                static_cast<uchar>(vc.green()),
-                static_cast<uchar>(vc.blue()),
-                static_cast<uchar>(m_volumeBarAlpha));
+                premultiplied::rgba(vc, m_volumeBarAlpha));
     }
 
     root->volNode->markDirty(QSGNode::DirtyGeometry);

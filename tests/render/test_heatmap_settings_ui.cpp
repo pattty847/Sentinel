@@ -68,6 +68,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <gtest/gtest.h>
+#include <array>
 #include "render/TradeBubbleNode.hpp"
 #include "render/TradeBubbleOverlayItem.hpp"
 #include "chart/layers/ChartStack.hpp"
@@ -831,6 +832,63 @@ TEST(CandleStyleTest, SubmittedBodiesMatchRasterEdgesAtRestAndDuringGlide) {
             EXPECT_EQ(QPointF(v[2].x, v[1].y), restVertices[1]);
         }
     }
+    delete root;
+}
+
+TEST(CandleStyleTest, TranslucentBodiesSubmitPremultipliedColour) {
+    // QSGVertexColorMaterial blends One, OneMinusSrcAlpha: a translucent body must
+    // carry round(rgb * alpha / 255), or its full RGB adds to the heatmap under it.
+    CandleFrameProvider provider;
+    CandleGeometryItem item;
+    CandleSeriesBuffer buffer;
+    constexpr qint64 tf = 60'000, time = 600'000;
+    buffer.applyHistory("BTC-USD", 60000, {{time, time + tf, 104, 111, 98, 108, 1, true, 0, false},
+                                           {time + tf, time + 2 * tf, 108, 112, 100, 102, 1, true, 0, false}});
+    item.setSize({640, 320});
+    item.setMappingProvider(&provider);
+    item.setCandleBuffer(&buffer);
+    item.setSymbol("BTC-USD");
+    item.setTimeframeMs(60000);
+    item.setUpColor(QColor(46, 189, 133));
+    item.setDownColor(QColor(246, 70, 93));
+    item.setBodyOpacity(0.5);
+    ASSERT_EQ(candle_pixels::bodyAlpha(0.5), 128);
+    chart_raster::RasterInputs in;
+    in.timeStart = time - tf;
+    in.timeEnd = time + 3 * tf;
+    in.minPrice = 96;
+    in.maxPrice = 114;
+    in.tfMs = tf;
+    in.tick = 1;
+    in.itemWidthLogical = 640;
+    in.itemHeightLogical = 320;
+    in.dpr = 1;
+    const auto raster = chart_raster::computeRaster(in, {});
+    auto& f = provider.frame;
+    f.raster = raster;
+    f.mapping = chart_raster::toMapping(raster);
+    f.viewportValid = true;
+    f.surfaceDpr = 1;
+    f.viewportTimeStart = std::floor(raster.drawnStartMs);
+    f.viewportTimeEnd = std::ceil(raster.drawnEndMs);
+    const auto rgba = [](const QSGGeometry::ColoredPoint2D& v) {
+        return std::array<int, 4>{v.r, v.g, v.b, v.a};
+    };
+    const auto vertices = [](QSGNode* node) {
+        return static_cast<QSGGeometryNode*>(node)->geometry()->vertexDataAsColoredPoint2D();
+    };
+    const std::array<int, 4> up{23, 95, 67, 128}, down{123, 35, 47, 128};
+    QSGNode* root = item.updatePaintNode(nullptr, nullptr);
+    ASSERT_EQ(static_cast<QSGGeometryNode*>(root->lastChild())->geometry()->vertexCount(), 12);
+    EXPECT_EQ(rgba(vertices(root->lastChild())[0]), up);
+    EXPECT_EQ(rgba(vertices(root->lastChild())[6]), down);
+    // Wicks stay opaque, so their colour is the straight one.
+    EXPECT_EQ(rgba(vertices(root->firstChild())[0]), (std::array<int, 4>{46, 189, 133, 255}));
+    EXPECT_EQ(rgba(vertices(root->firstChild())[6]), (std::array<int, 4>{246, 70, 93, 255}));
+    item.setCandleStyle(2);
+    root = item.updatePaintNode(root, nullptr);
+    ASSERT_EQ(static_cast<QSGGeometryNode*>(root->lastChild())->geometry()->vertexCount(), 6);
+    EXPECT_EQ(rgba(vertices(root->lastChild())[0]), up);
     delete root;
 }
 
