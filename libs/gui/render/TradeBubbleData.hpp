@@ -42,10 +42,10 @@ struct Window {
 };
 // GUI-thread ingestion; updatePaintNode reads while Qt blocks the GUI thread.
 // Live rows append one at a time; a history page merges in one pass (merge).
-// Capacity stays below a 250k trade-history page (kTradeHistoryMaxTrades): every
-// frame's placement and reference scratch is sized by it (about 24 MiB per chart,
-// TradeBubbles.PreallocatedScratchStaysWithinPerChartBudget), and 250k would be
-// about 2.5x that. A larger page keeps its newest Capacity rows by event time.
+// Capacity matches a trade-history page (kTradeHistoryMaxTrades): every frame's
+// placement and reference scratch is sized by it (about 24 MiB per chart,
+// TradeBubbles.PreallocatedScratchStaysWithinPerChartBudget). Merging a page
+// with live rows keeps the newest Capacity rows by event time.
 class Tape {
 public:
     static constexpr size_t Capacity = 100000;

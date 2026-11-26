@@ -1,4 +1,5 @@
 #include "CandleWireFixture.hpp"
+#include "trading/MarketEventSource.hpp"
 #include <QScopeGuard>
 #include <gtest/gtest.h>
 
@@ -14,6 +15,296 @@ struct Event {
     int64_t tf, start, end, seq;
     double volume, open, high, low, close;
 };
+struct OfflineCandle {
+    int argc = 1;
+    char name[20] = "candle-offline";
+    char* argv[2] = {name, nullptr};
+    QCoreApplication app{argc, argv};
+    ServerConfig config;
+    ServerDataModel model{config};
+    Authenticator auth{"/private/tmp/sentinel-candle-no-credentials"};
+    SentinelStreamServer server{model, auth, config, 0};
+    std::vector<Event> events;
+    std::shared_ptr<Session> session = RecordingServerStopTest::offline(
+        server, model, [this](std::string payload) {
+            const auto frame = Json::parse(payload);
+            if (frame.value("type", "") != "candle_bar_update") return;
+            const auto& bar = frame.at("candle");
+            events.push_back({false, frame.at("timeframe_ms").get<int64_t>(),
+                frame.at("bucket_start_ms").get<int64_t>(), bar.at("time_end_ms").get<int64_t>(),
+                frame.at("seq").get<int64_t>(), bar.at("volume").get<double>(),
+                bar.at("open").get<double>(), bar.at("high").get<double>(),
+                bar.at("low").get<double>(), bar.at("close").get<double>()});
+        });
+    OfflineCandle() { RecordingServerStopTest::offlineBookTick(*session, "BTC-USD", 0.1); }
+    void send(int64_t tf, const OHLCVBar& bar) { RecordingServerStopTest::offlineBar(*session, tf, bar); }
+    void send(const char* symbol, int64_t tf, const OHLCVBar& bar) {
+        RecordingServerStopTest::offlineBar(*session, symbol, tf, bar);
+    }
+    size_t count(int64_t tf) const {
+        return std::count_if(events.begin(), events.end(), [tf](const Event& event) { return event.tf == tf; });
+    }
+    void runTimer() {
+        auto& io = RecordingServerStopTest::io(server);
+        io.restart();
+        io.run_for(300ms);
+    }
+};
+
+TEST(CandleGateOffline, ImmediateTickAndTimerReplayWithoutNetworkSockets) {
+    OfflineCandle fixture;
+    OHLCVBar bar{};
+    bar.timestamp_ms = 300000;
+    bar.open = bar.close = 100;
+    bar.high = 101;
+    bar.low = 99;
+    bar.volume = 1;
+    bar.count = 1;
+    fixture.send(100, bar);
+    fixture.send(1000, bar);
+    bar.volume = 2;
+    bar.count = 2;
+    fixture.send(100, bar);
+    fixture.send(1000, bar);
+    EXPECT_EQ(fixture.count(100), 1u);
+    EXPECT_EQ(fixture.count(1000), 1u);
+
+    bar.volume = 1;
+    bar.count = 1;
+    fixture.send(60000, bar);
+    bar.close = 100.1;
+    bar.volume = 2;
+    bar.count = 2;
+    fixture.send(60000, bar);
+    ASSERT_EQ(fixture.count(60000), 2u);
+    EXPECT_DOUBLE_EQ(fixture.events.back().close, 100.1);
+
+    bar.close = 100;
+    bar.volume = 1;
+    bar.count = 1;
+    fixture.send(300000, bar);
+    for (int i = 2; i <= 1001; ++i) {
+        bar.volume = i;
+        bar.count = i;
+        fixture.send(300000, bar);
+    }
+    EXPECT_EQ(fixture.count(300000), 1u);
+    fixture.runTimer();
+    ASSERT_EQ(fixture.count(300000), 2u);
+    EXPECT_DOUBLE_EQ(fixture.events.back().volume, 1001);
+
+    bar.close = 100;
+    bar.volume = 1;
+    bar.count = 1;
+    fixture.send(900000, bar);
+    bar.close = 100.05;
+    bar.volume = 2;
+    bar.count = 2;
+    fixture.send(900000, bar);
+    EXPECT_EQ(fixture.count(900000), 1u);
+    fixture.runTimer();
+    ASSERT_EQ(fixture.count(900000), 2u);
+    EXPECT_DOUBLE_EQ(fixture.events.back().close, 100.05);
+    EXPECT_EQ(fixture.count(100), 1u);
+    EXPECT_EQ(fixture.count(1000), 1u);
+
+    bar.close = 100;
+    bar.volume = 1;
+    bar.count = 1;
+    fixture.send(3600000, bar);
+    for (int i = 1; i <= 1000; ++i) {
+        bar.close = i % 2 ? 100.1 : 100;
+        bar.volume = i + 1;
+        bar.count = i + 1;
+        fixture.send(3600000, bar);
+    }
+    EXPECT_EQ(fixture.count(3600000), 1001u);
+    std::cout << "CANDLE_BUSY_REPLAY_BEFORE=1 AFTER=" << fixture.count(3600000) << '\n';
+}
+
+TEST(CandleGateOffline, NonBtcBookTickIsImmediateAndRefreshes) {
+    OfflineCandle fixture;
+    RecordingServerStopTest::offlineSubscribe(*fixture.session, "SOL-USD");
+    RecordingServerStopTest::offlineBookTick(*fixture.session, "SOL-USD", 0.01);
+    OHLCVBar bar{};
+    bar.timestamp_ms = 300000;
+    bar.open = bar.close = 100;
+    bar.high = 101;
+    bar.low = 99;
+    bar.volume = 1;
+    bar.count = 1;
+    fixture.send("SOL-USD", 14400000, bar);
+    bar.close = 100.01;
+    bar.volume = 2;
+    bar.count = 2;
+    fixture.send("SOL-USD", 14400000, bar);
+    ASSERT_EQ(fixture.count(14400000), 2u);
+    RecordingServerStopTest::offlineBookTick(*fixture.session, "SOL-USD", 0.05);
+    bar.close = 100.02;
+    bar.volume = 3;
+    bar.count = 3;
+    fixture.send("SOL-USD", 14400000, bar);
+    EXPECT_EQ(fixture.count(14400000), 2u);
+    fixture.runTimer();
+    ASSERT_EQ(fixture.count(14400000), 3u);
+    EXPECT_DOUBLE_EQ(fixture.events.back().close, 100.02);
+}
+
+TEST(CandleGateOffline, UnsubscribeDropsPendingBeforeResubscribe) {
+    OfflineCandle fixture;
+    OHLCVBar bar{};
+    bar.timestamp_ms = 300000;
+    bar.open = bar.close = 100;
+    bar.high = 101;
+    bar.low = 99;
+    bar.volume = 1;
+    bar.count = 1;
+    fixture.send(60000, bar);
+    bar.close = 100.05;
+    bar.volume = 2;
+    bar.count = 2;
+    fixture.send(60000, bar);
+    ASSERT_EQ(fixture.count(60000), 1u);
+    RecordingServerStopTest::offlineUnsubscribe(*fixture.session, "BTC-USD");
+    RecordingServerStopTest::offlineSubscribe(*fixture.session, "BTC-USD");
+    RecordingServerStopTest::offlineBookTick(*fixture.session, "BTC-USD", 0.1);
+    fixture.runTimer();
+    EXPECT_EQ(fixture.count(60000), 1u);
+}
+
+TEST(CandleGateOffline, ClosedBucketSupersedesPendingTimerUpdate) {
+    OfflineCandle fixture;
+    OHLCVBar bar{};
+    bar.timestamp_ms = 300000;
+    bar.open = bar.close = bar.high = bar.low = 100;
+    bar.volume = 1;
+    bar.count = 1;
+    fixture.send(60000, bar);
+    bar.volume = 2;
+    bar.count = 2;
+    fixture.send(60000, bar);
+    ASSERT_EQ(fixture.count(60000), 1u);
+    bar.is_closed = true;
+    RecordingServerStopTest::offlineClosed(*fixture.session, 60000, bar);
+    fixture.runTimer();
+    EXPECT_EQ(fixture.count(60000), 1u);
+}
+
+TEST(CandleGateOffline, SessionCloseCancelsPendingTimer) {
+    OfflineCandle fixture;
+    OHLCVBar bar{};
+    bar.timestamp_ms = 300000;
+    bar.open = bar.close = bar.high = bar.low = 100;
+    bar.volume = 1;
+    bar.count = 1;
+    fixture.send(60000, bar);
+    bar.volume = 2;
+    bar.count = 2;
+    fixture.send(60000, bar);
+    RecordingServerStopTest::offlineClose(*fixture.session);
+    fixture.runTimer();
+    EXPECT_EQ(fixture.count(60000), 1u);
+}
+
+// Opt-in recorded-hour measurement. Timer deadlines use exchange time as a
+// virtual clock so an hour of trades can be replayed without an hour of sleep.
+TEST(CandleRealHourReplay, ReportsUpdateCountsByTimeframe) {
+    const auto root = qEnvironmentVariable("SENTINEL_CANDLE_REPLAY_ROOT");
+    if (root.isEmpty()) GTEST_SKIP() << "set SENTINEL_CANDLE_REPLAY_ROOT to a read-only RAWL2 root";
+    constexpr int64_t fromMs = 1'795'618'800'000; // 2026-11-25 15:00 UTC
+    constexpr int64_t toMs = fromMs + 3'600'000;
+    constexpr double tick = 0.1;
+    struct RateState {
+        OHLCVBar sent{}, pendingBar{};
+        int64_t sentAt = 0;
+        size_t updates = 0, timerUpdates = 0;
+        bool hasSent = false, pending = false;
+        void publish(const OHLCVBar& bar, int64_t now, bool timer = false) {
+            sent = bar; sentAt = now; hasSent = true; pending = false; ++updates;
+            if (timer) ++timerUpdates;
+        }
+        void closed(const OHLCVBar& bar, int64_t now) {
+            sent = bar; sentAt = now; hasSent = true; pending = false;
+        }
+    };
+    const auto oldGate = [tick](const OHLCVBar& bar, const RateState& state, int64_t tf, int64_t now) {
+        if (!state.hasSent) return true;
+        const auto& last = state.sent;
+        if (tf < 1000 && (bar.timestamp_ms != last.timestamp_ms || (last.volume <= 0 && bar.volume > 0)))
+            return true;
+        if (tf >= 60000 && bar.count > 0 &&
+            (bar.timestamp_ms != last.timestamp_ms || last.count == 0)) return true;
+        const double closeDelta = std::abs(bar.close - last.close);
+        const double threshold = tf <= 1000 ? std::max(tick, bar.close * 0.00005)
+                                            : std::max(2 * tick, bar.close * 0.0002);
+        return bar.high > last.high || bar.low < last.low || closeDelta >= threshold ||
+            now - state.sentAt >= (tf <= 1000 ? 200 : 1000);
+    };
+    std::map<int64_t, RateState> before, after;
+    const auto timeframes = std::vector<int64_t>{100, 1000, 60000, 300000, 900000, 3600000, 14400000, 86400000};
+    TimeframeAggregator aggregator(timeframes);
+    int64_t nowMs = fromMs;
+    int64_t timerDeadline = 0;
+    bool timerArmed = false;
+    auto flushTimer = [&](int64_t now) {
+        if (!timerArmed || timerDeadline > now) return;
+        for (auto& [tf, state] : after)
+            if (state.pending) state.publish(state.pendingBar, timerDeadline, true);
+        timerArmed = false;
+    };
+    auto updated = [&](int64_t tf, const OHLCVBar& bar) {
+        auto& old = before[tf];
+        auto& next = after[tf];
+        flushTimer(nowMs);
+        if (oldGate(bar, old, tf, nowMs)) old.publish(bar, nowMs);
+        const bool immediate = tf <= 1000 ? oldGate(bar, next, tf, nowMs) :
+            !next.hasSent || bar.timestamp_ms != next.sent.timestamp_ms ||
+            (bar.count > 0 && next.sent.count == 0) || bar.high > next.sent.high ||
+            bar.low < next.sent.low ||
+            std::abs(bar.close - next.sent.close) + tick * 1e-9 >= tick;
+        if (immediate) next.publish(bar, nowMs);
+        else if (tf >= 60000) {
+            next.pendingBar = bar;
+            next.pending = true;
+            if (!timerArmed) {
+                timerDeadline = nowMs + 200;
+                timerArmed = true;
+            }
+        }
+    };
+    QObject::connect(&aggregator, &TimeframeAggregator::barUpdated, &aggregator,
+        [&](const QString&, int64_t tf, const OHLCVBar& bar) { updated(tf, bar); });
+    QObject::connect(&aggregator, &TimeframeAggregator::liveRollupsUpdated, &aggregator,
+        [&](const QString&, const std::vector<TimeframeBar>& bars) {
+            for (const auto& item : bars) updated(item.timeframeMs, item.bar);
+        });
+    QObject::connect(&aggregator, &TimeframeAggregator::barClosed, &aggregator,
+        [&](const QString&, int64_t tf, const OHLCVBar& bar) {
+            flushTimer(nowMs);
+            before[tf].closed(bar, nowMs);
+            after[tf].closed(bar, nowMs);
+        });
+    trading::JournalTradeEventSource source(root.toStdString(), "BTC-USD", fromMs, toMs);
+    size_t trades = 0;
+    while (const auto event = source.next()) {
+        if (!event->trade) continue;
+        const auto& row = *event->trade;
+        nowMs = std::max(nowMs, row.timestampMs);
+        Trade trade{std::chrono::system_clock::time_point(std::chrono::milliseconds(row.timestampMs)),
+                    row.symbol, row.tradeId, row.side, row.price, row.qty};
+        aggregator.onTrade(trade);
+        ++trades;
+    }
+    ASSERT_GT(trades, 1000u);
+    flushTimer(nowMs + 200);
+    for (const auto tf : timeframes) {
+        std::cout << "CANDLE_REAL_REPLAY tf_ms=" << tf << " trades=" << trades
+                  << " before=" << before[tf].updates << " after=" << after[tf].updates
+                  << " timer=" << after[tf].timerUpdates << '\n';
+        if (tf <= 1000) EXPECT_EQ(after[tf].updates, before[tf].updates);
+    }
+}
+
 class CandleWire : public testing::Test {
   protected:
     int argc = 1;
@@ -29,6 +320,12 @@ class CandleWire : public testing::Test {
     int failures = 0;
     std::shared_ptr<Session> session;
     void SetUp() override {
+        // The subscribe snapshot must carry the BTC wire tick for close-move tests.
+        fixture.model->onLiveOrderBookInitialized("BTC-USD", {{99.9, 1}}, {{100.1, 1}}, 1000);
+        const auto book = fixture.model->ensureSymbol("BTC-USD").liveBook.snapshotLevels();
+        ASSERT_DOUBLE_EQ(book.tickSize, 0.1);
+        ASSERT_EQ(book.bids.size(), 1u);
+        ASSERT_EQ(book.asks.size(), 1u);
         fixture.start();
         client = std::make_unique<SentinelStreamClient>("127.0.0.1", std::to_string(fixture.port()),
                                                         fixture.config.tls.certFile);
@@ -62,7 +359,7 @@ class CandleWire : public testing::Test {
         }));
     }
     void TearDown() override {
-        client->disconnectFromServer();
+        if (client) client->disconnectFromServer();
         client.reset();
     }
     void fetch(int64_t tf, int64_t end) {
@@ -154,15 +451,101 @@ TEST_F(CandleWire, CarriedBarIsReplacedByItsFirstTrade) {
         return std::any_of(events.begin(), events.end(),
                            [](const auto &e) { return e.tf == 300000 && !e.closed && e.volume == 1; });
     }, 500ms));
-    // Later updates of the bar stay gated.
+    // Later volume-only updates wait for the coalescing timer.
     OHLCVBar more = traded;
     more.volume = 2;
     more.count = 2;
     RecordingServerStopTest::bar(*session, 300000, more);
     ASSERT_TRUE(fixture.fence());
-    EXPECT_FALSE(spinUntil([&] {
+    EXPECT_TRUE(spinUntil([&] {
         return std::any_of(events.begin(), events.end(), [](const auto &e) { return e.tf == 300000 && e.volume == 2; });
-    }, 300ms));
+    }, 500ms));
+}
+
+TEST_F(CandleWire, OneTickCloseMoveIsSentBeforeTheCoalescingTimer) {
+    OHLCVBar bar{};
+    bar.timestamp_ms = 300000;
+    bar.open = bar.close = 100;
+    bar.high = 101;
+    bar.low = 99;
+    bar.volume = 1;
+    bar.count = 1;
+    RecordingServerStopTest::bar(*session, 300000, bar);
+    ASSERT_TRUE(spinUntil([&] { return events.size() == 1; }));
+    bar.close = 100.1;
+    bar.volume = 2;
+    bar.count = 2;
+    RecordingServerStopTest::bar(*session, 300000, bar);
+    ASSERT_TRUE(fixture.fence());
+    EXPECT_TRUE(spinUntil([&] { return events.size() == 2; }, 75ms));
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_DOUBLE_EQ(events.back().close, 100.1);
+}
+
+TEST_F(CandleWire, VolumeOnlyBurstCoalescesWithoutAnotherTrade) {
+    OHLCVBar bar{};
+    bar.timestamp_ms = 300000;
+    bar.open = bar.close = bar.high = bar.low = 100;
+    bar.volume = 1;
+    bar.count = 1;
+    RecordingServerStopTest::bar(*session, 300000, bar);
+    ASSERT_TRUE(spinUntil([&] { return events.size() == 1; }));
+    const auto started = std::chrono::steady_clock::now();
+    for (int i = 2; i <= 1001; ++i) {
+        bar.volume = i;
+        bar.count = i;
+        RecordingServerStopTest::bar(*session, 300000, bar);
+        if (i % 100 == 0) ASSERT_TRUE(fixture.fence());
+    }
+    ASSERT_TRUE(fixture.fence());
+    ASSERT_TRUE(spinUntil([&] { return !events.empty() && events.back().volume == 1001; }, 1000ms));
+    const auto count = events.size();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    EXPECT_LE(count, size_t(2 + elapsed / 200)); // initial update plus elapsed timer turns
+    EXPECT_DOUBLE_EQ(events.back().close, 100);
+}
+
+TEST_F(CandleWire, QuietSubtickCloseIsFlushedByTimer) {
+    OHLCVBar bar{};
+    bar.timestamp_ms = 300000;
+    bar.open = bar.close = 100;
+    bar.high = 101;
+    bar.low = 99;
+    bar.volume = 1;
+    bar.count = 1;
+    RecordingServerStopTest::bar(*session, 300000, bar);
+    ASSERT_TRUE(spinUntil([&] { return events.size() == 1; }));
+    bar.close = 100.05;
+    bar.volume = 2;
+    bar.count = 2;
+    RecordingServerStopTest::bar(*session, 300000, bar);
+    ASSERT_TRUE(fixture.fence());
+    EXPECT_EQ(events.size(), 1u);
+    ASSERT_TRUE(spinUntil([&] { return events.size() == 2; }, 500ms));
+    EXPECT_DOUBLE_EQ(events.back().close, 100.05);
+}
+
+TEST_F(CandleWire, BusyTickReplayReportsMessageRate) {
+    OHLCVBar bar{};
+    bar.timestamp_ms = 300000;
+    bar.open = bar.close = 100;
+    bar.high = 101;
+    bar.low = 99;
+    bar.volume = 1;
+    bar.count = 1;
+    RecordingServerStopTest::bar(*session, 300000, bar);
+    ASSERT_TRUE(spinUntil([&] { return events.size() == 1; }));
+    for (int i = 1; i <= 1000; ++i) {
+        bar.close = i % 2 ? 100.1 : 100;
+        bar.volume = i + 1;
+        bar.count = i + 1;
+        RecordingServerStopTest::bar(*session, 300000, bar);
+        if (i % 100 == 0) ASSERT_TRUE(fixture.fence());
+    }
+    ASSERT_TRUE(spinUntil([&] { return events.size() == 1001; }, 3000ms));
+    // The previous max(2 ticks, 2 bps) gate sent only the initial bar here.
+    std::cout << "CANDLE_BUSY_REPLAY_BEFORE=1 AFTER=" << events.size() << '\n';
 }
 
 TEST_F(CandleWire, PagesBothMemoryIntervalsAndRejectsUnsupportedOrFailedRest) {

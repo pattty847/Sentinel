@@ -52,6 +52,32 @@ struct RecordingServerStopTest {
         s.postModelEvent([tf, bar](Session &session) { session.on_bar_updated("BTC-USD", tf, bar); });
     }
     static bool subscribed(Session &s) { return s.subscriptions_.contains("BTC-USD"); }
+    static std::shared_ptr<Session> offline(SentinelStreamServer &server, ServerDataModel &model,
+                                            std::function<void(std::string)> sink) {
+        auto session = std::make_shared<Session>(tcp::socket(net::make_strand(server.m_ioc)),
+                                                 server.m_sslCtx, model, &server);
+        session->subscriptions_.insert("BTC-USD");
+        session->candleWriteForTest_ = std::move(sink);
+        return session;
+    }
+    static void offlineBar(Session &s, int64_t tf, const OHLCVBar &bar) {
+        s.on_bar_updated("BTC-USD", tf, bar);
+    }
+    static void offlineBar(Session &s, const char* symbol, int64_t tf, const OHLCVBar &bar) {
+        s.on_bar_updated(QString::fromLatin1(symbol), tf, bar);
+    }
+    static void offlineBookTick(Session &s, const char* symbol, double tick) {
+        s.on_book_snapshot(QString::fromLatin1(symbol), {{100 - tick, 1}}, {{100 + tick, 1}},
+                           tick, QStringLiteral("ready"), 1);
+    }
+    static void offlineSubscribe(Session &s, const char* symbol) { s.subscriptions_.insert(symbol); }
+    static void offlineUnsubscribe(Session &s, const char* symbol) {
+        s.handle_message(Json{{"type", "unsubscribe"}, {"symbol", symbol}}.dump());
+    }
+    static void offlineClosed(Session &s, int64_t tf, const OHLCVBar &bar) {
+        s.on_bar_closed("BTC-USD", tf, bar);
+    }
+    static void offlineClose(Session &s) { s.beginClose("candle timer test"); }
 };
 
 bool writeSelfSignedCert(const std::string &certFile, const std::string &keyFile) {

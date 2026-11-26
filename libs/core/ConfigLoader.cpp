@@ -193,14 +193,17 @@ void parseServerConfig(const std::string& filePath, ServerConfig& cfg) {
         if (serverRoot["candles"]) {
             auto candles = serverRoot["candles"];
             readScalar(candles, "update_bps_fast", cfg.candles.bpsFast);
-            readScalar(candles, "update_bps_slow", cfg.candles.bpsSlow);
             readScalar(candles, "update_tick_mult_fast", cfg.candles.tickMultFast);
-            readScalar(candles, "update_tick_mult_slow", cfg.candles.tickMultSlow);
             readScalar(candles, "update_silence_ms_fast", cfg.candles.silenceMsFast);
-            readScalar(candles, "update_silence_ms_slow", cfg.candles.silenceMsSlow);
             readScalar(candles, "update_volume_fast", cfg.candles.volumeFast);
-            readScalar(candles, "update_volume_slow", cfg.candles.volumeSlow);
             readScalar(candles, "update_tick_size", cfg.candles.tickSize);
+            if (readScalar(candles, "update_coalesce_ms", cfg.candles.coalesceMs)) {
+                const auto requestedMs = cfg.candles.coalesceMs;
+                cfg.candles.coalesceMs = std::clamp<int64_t>(requestedMs, 100, 250);
+                if (requestedMs != cfg.candles.coalesceMs)
+                    sLog_Warning("Config candles.update_coalesce_ms clamped: value=" << requestedMs
+                                 << " clamped=" << cfg.candles.coalesceMs);
+            }
         }
         if (serverRoot["trading"]) {
             auto trading = serverRoot["trading"];

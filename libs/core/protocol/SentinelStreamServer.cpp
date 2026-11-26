@@ -1,3 +1,7 @@
+// Session candle state and its single coalescing timer stay on the WebSocket executor;
+// model callbacks enter through postModelEvent, so timer turns need no cross-thread lock.
+// A candle's close tick is cached from its symbol's live-book wire tick and
+// refreshed on book messages; trade callbacks never query the book.
 #include "metrics/MetricsRegistry.hpp"
 #include "SentinelStreamServer.hpp"
 #include "../servermodel/TradeOverlayPublisher.hpp"
@@ -112,14 +116,11 @@ nlohmann::json buildServerConfigPayload(const ServerConfig& cfg, bool recordingA
     };
     payload["candles"] = {
         {"update_bps_fast", cfg.candles.bpsFast},
-        {"update_bps_slow", cfg.candles.bpsSlow},
         {"update_tick_mult_fast", cfg.candles.tickMultFast},
-        {"update_tick_mult_slow", cfg.candles.tickMultSlow},
         {"update_silence_ms_fast", cfg.candles.silenceMsFast},
-        {"update_silence_ms_slow", cfg.candles.silenceMsSlow},
         {"update_volume_fast", cfg.candles.volumeFast},
-        {"update_volume_slow", cfg.candles.volumeSlow},
-        {"update_tick_size", cfg.candles.tickSize}
+        {"update_tick_size", cfg.candles.tickSize},
+        {"update_coalesce_ms", cfg.candles.coalesceMs}
     };
     payload["default_symbols"] = cfg.defaultSymbols;
     payload["recording"] = protocol::recordingwire::capability(cfg, recordingAvailable);
@@ -425,15 +426,23 @@ class Session : public std::enable_shared_from_this<Session> {
         OHLCVBar lastBar;
         int64_t lastSentMs = 0;
         bool hasLast = false;
+        OHLCVBar pendingBar;
+        bool pending = false;
+        std::string symbol;
+        int64_t timeframeMs = 0;
+        double tickSize = 0.0;
     };
     std::unordered_map<std::string, CandleStreamState> candleStates_;
-    std::mutex candle_mutex_;
+    std::unordered_map<std::string, double> bookTicks_;
+    net::steady_timer candleTimer_{ws_.get_executor()};
+    bool candleTimerArmed_ = false;
     uint64_t m_tradingBroadcasterId = 0;
     bool m_tradingBroadcasterRegistered = false;
 
 #ifdef SENTINEL_CANDLE_TEST
     std::atomic<size_t> peakModelEvents_{0}, peakWriteBytes_{0};
     bool flowReplayHoldForTest_ = false;
+    std::function<void(std::string)> candleWriteForTest_;
     static void recordPeak(std::atomic<size_t> &peak, size_t value) {
         auto old = peak.load(std::memory_order_relaxed);
         while (old < value && !peak.compare_exchange_weak(old, value, std::memory_order_relaxed)) {
@@ -558,6 +567,7 @@ class Session : public std::enable_shared_from_this<Session> {
         disconnectModelSignals();
         overlayTimer_.cancel();
         availabilityTimer_.cancel();
+        candleTimer_.cancel();
         availability_.clear();
         overlayHistory_.clear();
         for (const auto& [symbol, view] : rawViews_) view->active.store(false);
@@ -1527,6 +1537,9 @@ public:
                  std::transform(symbol.begin(), symbol.end(), symbol.begin(),
                                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
                  const bool removed = !symbol.empty() && subscriptions_.erase(symbol) > 0;
+                 for (auto& [key, candle] : candleStates_)
+                     if (candle.symbol == symbol) candle.pending = false;
+                 bookTicks_.erase(symbol);
                  if (const auto it = rawViews_.find(symbol); it != rawViews_.end()) {
                      it->second->active.store(false);
                      rawViews_.erase(it);
@@ -1577,6 +1590,7 @@ public:
         if (subscriptions_.find(pid) == subscriptions_.end()) return;
         const bool ready = std::isfinite(tickSize) && tickSize > 0.0 && !bids.empty() && !asks.empty() &&
                            status == QStringLiteral("ready");
+        refreshCandleTick(pid, ready ? tickSize : 0.0);
         const auto wireStatus = ready ? std::string("ready")
                                       : status == QStringLiteral("ready") ? std::string("aggregation_unavailable")
                                                                            : status.toStdString();
@@ -1595,6 +1609,7 @@ public:
                         double minPrice, double tickSize, uint64_t bookVersion) {
         std::string pid = productId.toStdString();
         if (subscriptions_.find(pid) == subscriptions_.end()) return;
+        refreshCandleTick(pid, tickSize);
 
         nlohmann::json j;
         j["type"] = "l2update";
@@ -1629,6 +1644,22 @@ public:
         return item;
     }
 
+    double candleTickFor(const std::string& symbol) const {
+        const double overrideTick = owner_->serverConfig().candles.tickSize;
+        if (std::isfinite(overrideTick) && overrideTick > 0.0) return overrideTick;
+        const auto it = bookTicks_.find(symbol);
+        return it == bookTicks_.end() ? 0.0 : it->second;
+    }
+
+    void refreshCandleTick(const std::string& symbol, double wireTick) {
+        const double tick = std::isfinite(wireTick) && wireTick > 0.0 ? wireTick : 0.0;
+        auto [it, inserted] = bookTicks_.try_emplace(symbol, tick);
+        if (!inserted && it->second == tick) return;
+        it->second = tick;
+        for (auto& [key, candle] : candleStates_)
+            if (candle.symbol == symbol) candle.tickSize = candleTickFor(symbol);
+    }
+
     static bool should_emit_update(const OHLCVBar &bar, const CandleStreamState &state,
                                    const ServerCandleGateConfig &cfg, const ServerOrderBookConfig &obConfig,
                                    int64_t timeframeMs, int64_t nowMs) {
@@ -1637,13 +1668,13 @@ public:
         }
 
         const OHLCVBar& last = state.lastBar;
-        if (timeframeMs < 1000 && (bar.timestamp_ms != last.timestamp_ms || (last.volume <= 0 && bar.volume > 0))) {
-            return true;
+        if (timeframeMs >= 60'000) {
+            return bar.timestamp_ms != last.timestamp_ms ||
+                (bar.count > 0 && last.count == 0) || bar.high > last.high || bar.low < last.low ||
+                (state.tickSize > 0.0 &&
+                 std::abs(bar.close - last.close) + state.tickSize * 1e-9 >= state.tickSize);
         }
-        // A bar of a minute or longer is sent at its first trade: a new bucket,
-        // or a sent empty (carried) bar of the same bucket gaining a trade.
-        if (timeframeMs >= 60'000 && bar.count > 0 &&
-            (bar.timestamp_ms != last.timestamp_ms || last.count == 0)) {
+        if (timeframeMs < 1000 && (bar.timestamp_ms != last.timestamp_ms || (last.volume <= 0 && bar.volume > 0))) {
             return true;
         }
         const bool highChanged = bar.high > last.high;
@@ -1651,48 +1682,31 @@ public:
 
         const double closeDelta = std::abs(bar.close - last.close);
         const double tickSize = (cfg.tickSize > 0.0) ? cfg.tickSize : obConfig.tickSize;
-        const int tickMultiplier = (timeframeMs <= 1000) ? cfg.tickMultFast : cfg.tickMultSlow;
-        const double bpsThreshold = (timeframeMs <= 1000) ? cfg.bpsFast : cfg.bpsSlow;
-        const double priceThreshold = std::max(tickSize * tickMultiplier,
-                                               bar.close * bpsThreshold);
+        const double priceThreshold = std::max(tickSize * cfg.tickMultFast,
+                                               bar.close * cfg.bpsFast);
         const bool closeMoved = closeDelta >= priceThreshold;
 
         const double volumeDelta = bar.volume - last.volume;
-        const double volumeThreshold = (timeframeMs <= 1000) ? cfg.volumeFast : cfg.volumeSlow;
+        const double volumeThreshold = cfg.volumeFast;
         const bool volumeMoved = volumeThreshold > 0.0 && volumeDelta >= volumeThreshold;
 
-        const int64_t maxSilenceMs = (timeframeMs <= 1000) ? cfg.silenceMsFast : cfg.silenceMsSlow;
+        const int64_t maxSilenceMs = cfg.silenceMsFast;
         const bool silence = (nowMs - state.lastSentMs) >= maxSilenceMs;
 
         return highChanged || lowChanged || closeMoved || volumeMoved || silence;
     }
 
-    void on_bar_updated(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar) {
-        const std::string sym = symbol.toStdString();
-        if (subscriptions_.find(sym) == subscriptions_.end()) return;
-
-        const std::string key = sym + "|" + std::to_string(timeframeMs);
-        const int64_t nowMs = static_cast<int64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
-
-        CandleStreamState state;
-        {
-            std::lock_guard<std::mutex> lock(candle_mutex_);
-            auto& entry = candleStates_[key];
-            if (!should_emit_update(bar, entry, owner_->serverConfig().candles, owner_->serverConfig().orderbook,
-                                    timeframeMs, nowMs)) {
-                return;
-            }
-            entry.seq++;
-            entry.lastBar = bar;
-            entry.lastSentMs = nowMs;
-            entry.hasLast = true;
-            state = entry;
-        }
+    void publishBarUpdate(CandleStreamState& entry, const OHLCVBar& bar, int64_t nowMs) {
+        const auto& sym = entry.symbol;
+        const auto timeframeMs = entry.timeframeMs;
+        entry.seq++;
+        entry.lastBar = bar;
+        entry.lastSentMs = nowMs;
+        entry.hasLast = true;
+        entry.pending = false;
         sLog_Probe("candles.update", "symbol=" << sym << " tfMs=" << timeframeMs << " start=" << bar.timestamp_ms
                                                << " end=" << (bar.timestamp_ms + timeframeMs) << " now=" << nowMs
-                                               << " seq=" << state.seq
+                                               << " seq=" << entry.seq
                                                << " closed=" << (bar.is_closed ? "true" : "false"));
 
         auto item = candleItem(bar, timeframeMs, bar.is_closed);
@@ -1703,10 +1717,55 @@ public:
         payload["symbol"] = sym;
         payload["timeframe_ms"] = timeframeMs;
         payload["bucket_start_ms"] = bar.timestamp_ms;
-        payload["seq"] = state.seq;
+        payload["seq"] = entry.seq;
         payload["candle"] = std::move(item);
 
         do_write(payload.dump());
+    }
+
+    void armCandleTimer() {
+        if (candleTimerArmed_ || closing_.load()) return;
+        candleTimerArmed_ = true;
+        candleTimer_.expires_after(std::chrono::milliseconds(
+            std::clamp<int64_t>(owner_->serverConfig().candles.coalesceMs, 100, 250)));
+        candleTimer_.async_wait([weak = weak_from_this()](beast::error_code ec) {
+            if (auto self = weak.lock(); self && !ec && !self->closing_.load()) {
+                self->candleTimerArmed_ = false;
+                const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                for (auto& [key, entry] : self->candleStates_) {
+                    if (!entry.pending) continue;
+                    if (self->subscriptions_.contains(entry.symbol))
+                        self->publishBarUpdate(entry, entry.pendingBar, nowMs);
+                    else
+                        entry.pending = false;
+                }
+            }
+        });
+    }
+
+    void on_bar_updated(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar) {
+        const std::string sym = symbol.toStdString();
+        if (subscriptions_.find(sym) == subscriptions_.end()) return;
+        const std::string key = sym + "|" + std::to_string(timeframeMs);
+        const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        auto& entry = candleStates_[key];
+        if (!entry.hasLast) {
+            entry.symbol = sym;
+            entry.timeframeMs = timeframeMs;
+            entry.tickSize = candleTickFor(sym);
+        }
+        if (!should_emit_update(bar, entry, owner_->serverConfig().candles, owner_->serverConfig().orderbook,
+                                timeframeMs, nowMs)) {
+            if (timeframeMs >= 60'000) {
+                entry.pendingBar = bar;
+                entry.pending = true;
+                armCandleTimer();
+            }
+            return;
+        }
+        publishBarUpdate(entry, bar, nowMs);
     }
 
     void on_bar_closed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar) {
@@ -1714,21 +1773,20 @@ public:
         if (subscriptions_.find(sym) == subscriptions_.end()) return;
 
         const std::string key = sym + "|" + std::to_string(timeframeMs);
-        CandleStreamState state;
-        {
-            std::lock_guard<std::mutex> lock(candle_mutex_);
-            auto& entry = candleStates_[key];
-            entry.seq++;
-            entry.lastBar = bar;
-            entry.lastSentMs = static_cast<int64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count());
-            entry.hasLast = true;
-            state = entry;
-        }
+        auto& entry = candleStates_[key];
+        entry.seq++;
+        entry.lastBar = bar;
+        entry.lastSentMs = static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        entry.hasLast = true;
+        entry.pending = false;
+        entry.symbol = sym;
+        entry.timeframeMs = timeframeMs;
+        entry.tickSize = candleTickFor(sym);
         sLog_Probe("candles.closed", "symbol=" << sym << " tfMs=" << timeframeMs << " start=" << bar.timestamp_ms
                                                << " end=" << (bar.timestamp_ms + timeframeMs)
-                                               << " now=" << state.lastSentMs << " seq=" << state.seq);
+                                               << " now=" << entry.lastSentMs << " seq=" << entry.seq);
 
         auto item = candleItem(bar, timeframeMs, true);
 
@@ -1738,7 +1796,7 @@ public:
         payload["symbol"] = sym;
         payload["timeframe_ms"] = timeframeMs;
         payload["bucket_start_ms"] = bar.timestamp_ms;
-        payload["seq"] = state.seq;
+        payload["seq"] = entry.seq;
         payload["candle"] = std::move(item);
 
         do_write(payload.dump());
@@ -1821,7 +1879,7 @@ public:
                         auto snapshot = model->tradeHistorySnapshot(page.symbol, page.startMs, through,
                             SentinelProtocol::kTradeHistoryMaxTrades);
                         if (snapshot.exceededLimit)
-                            throw std::length_error("trade history exceeds 250000 trades");
+                            throw std::length_error("trade history exceeds 100000 trades");
                         const int64_t seam = snapshot.retainedFromMs > 0 ?
                             std::clamp(snapshot.retainedFromMs, page.startMs, through) : through;
                         bool partial = snapshot.invalidRows != 0 || through < page.endMs, building = false;
@@ -1844,7 +1902,7 @@ public:
                                 page.coveredToMs = std::clamp(journal.coveredToMs, page.coveredFromMs, through);
                                 page.rows = std::move(journal.rows);
                                 if (page.rows.size() > budget)
-                                    throw std::length_error("trade history exceeds 250000 trades");
+                                    throw std::length_error("trade history exceeds 100000 trades");
                             } else {
                                 building = true;
                                 page.coveredFromMs = page.coveredToMs = page.startMs;
@@ -1858,7 +1916,7 @@ public:
                                 std::make_move_iterator(snapshot.rows.end()));
                         }
                         if (page.rows.size() > SentinelProtocol::kTradeHistoryMaxTrades)
-                            throw std::length_error("trade history exceeds 250000 trades");
+                            throw std::length_error("trade history exceeds 100000 trades");
                         std::unordered_set<std::string> ids;
                         ids.reserve(std::min(page.rows.size(), size_t(SentinelProtocol::kTradeHistoryMaxTrades)));
                         std::stable_sort(page.rows.begin(), page.rows.end(), [](const auto& a, const auto& b) {
@@ -2209,6 +2267,12 @@ public:
     void do_write(std::string payload, bool binary = false,
                   std::shared_ptr<FlowSubscription> flow = {}, bool onExecutor = false,
                   bool flowReplay = false) {
+#ifdef SENTINEL_CANDLE_TEST
+        if (candleWriteForTest_) {
+            candleWriteForTest_(std::move(payload));
+            return;
+        }
+#endif
 #ifdef SENTINEL_FLOW_HISTORY_TEST
         if (flowHistoryWriteForTest_) {
             flowHistoryWriteForTest_(std::move(payload), binary);

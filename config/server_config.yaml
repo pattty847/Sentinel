@@ -26,14 +26,11 @@ recording:
   source: roller # required: primary has no feed; roller serves history and the live minute
 candles:
   update_bps_fast: 5e-05
-  update_bps_slow: 0.0002
   update_tick_mult_fast: 1
-  update_tick_mult_slow: 2
   update_silence_ms_fast: 200
-  update_silence_ms_slow: 1000
   update_volume_fast: 0
-  update_volume_slow: 0
-  update_tick_size: 0
+  update_tick_size: 0 # zero uses each symbol's live-book wire tick for 1m+ close changes
+  update_coalesce_ms: 200 # volume-only 1m+ updates; clamped to [100, 250]
 default_symbols: [BTC-USD]
 
 # The journal roller is the server's only live feed and recording source.

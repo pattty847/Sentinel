@@ -61,10 +61,10 @@ struct HeatmapChunkWireTest {
 };
 struct TradeOverlayModelTest {
     static int64_t retentionMs(const ServerDataModel& model) { return model.m_tradeRetentionMs; }
-    static void fill(ServerDataModel& model, int64_t ms) {
+    static void fill(ServerDataModel& model, int64_t ms, size_t count) {
         std::lock_guard lock(model.m_tradeMutex);
         auto& tape = model.m_recentTrades["BTC-USD"];
-        for (size_t i = 0; i <= protocol::SentinelProtocol::kTradeHistoryMaxTrades; ++i)
+        for (size_t i = 0; i < count; ++i)
             tape.push_back({ms + int64_t(i / 100), 100000, 0.1, AggressorSide::Buy,
                             std::to_string(i)});
     }
@@ -193,10 +193,17 @@ TEST_F(TradeHistory, InvalidWindowsAndUnknownSymbolAreRefused) {
 }
 
 TEST_F(TradeHistory, TradeCountAboveCapIsRefused) {
-    TradeOverlayModelTest::fill(*model, Epoch + 1000);
+    TradeOverlayModelTest::fill(*model, Epoch + 1000, protocol::SentinelProtocol::kTradeHistoryMaxTrades + 1);
     const auto page = request(1, Epoch, Epoch + 10'000);
     EXPECT_EQ(page.status, "refused");
-    EXPECT_NE(page.reason.find("250000"), std::string::npos);
+    EXPECT_NE(page.reason.find("100000"), std::string::npos);
+}
+
+TEST_F(TradeHistory, TradeCountAtCapIsAccepted) {
+    TradeOverlayModelTest::fill(*model, Epoch + 1000, protocol::SentinelProtocol::kTradeHistoryMaxTrades);
+    const auto page = request(1, Epoch, Epoch + 10'000);
+    EXPECT_NE(page.status, "refused");
+    EXPECT_EQ(page.rows.size(), protocol::SentinelProtocol::kTradeHistoryMaxTrades);
 }
 
 TEST_F(TradeHistory, MissingJournalReportsOnlyLiveSuffixCoverage) {
@@ -323,7 +330,7 @@ TEST_F(TradeHistory, DisconnectCancelsJournalWithoutReplyAndReleasesFlight) {
 TEST_F(TradeHistory, JournalAboveTradeCapIsRefusedEarly) {
     Journal writer(std::filesystem::path(dir.path().toStdString()) / "journal");
     writer.snapshot(0);
-    for (int batch = 0; batch < 251; ++batch) {
+    for (int batch = 0; batch < 101; ++batch) {
         std::vector<nlohmann::json> prints;
         prints.reserve(1000);
         for (int row = 0; row < 1000; ++row)
@@ -333,7 +340,7 @@ TEST_F(TradeHistory, JournalAboveTradeCapIsRefusedEarly) {
     writer.heartbeat(70'000); writer.close();
     const auto page = request(1, Epoch, Epoch + 60'000);
     EXPECT_EQ(page.status, "refused");
-    EXPECT_NE(page.reason.find("250000"), std::string::npos);
+    EXPECT_NE(page.reason.find("100000"), std::string::npos);
 }
 
 TEST_F(TradeHistory, LateLiveRowsAreSortedAndInvalidOnesAreSkipped) {
