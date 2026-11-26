@@ -122,6 +122,28 @@ TEST(RenderPerformance, CandleVertexBytesMatchBase) {
     expectGeometry("candlesMapped", root.get());
 }
 
+TEST(RenderPerformance, TranslucentCandleColoursArePremultiplied) {
+    // QSGVertexColorMaterial blends One, OneMinusSrcAlpha: a translucent vertex must
+    // carry round(rgb * alpha / 255), or its full RGB adds to what is underneath.
+    Candles item;
+    seed(item);
+    EXPECT_EQ(item.volumeBarAlpha(), 255);
+    item.setVolumeBarAlpha(85);
+    std::unique_ptr<QSGNode> root(item.paint(nullptr));
+    const auto first = [&](int child) {
+        auto* node = root->firstChild();
+        for (int i = 0; i < child; ++i) node = node->nextSibling();
+        return static_cast<QSGGeometryNode*>(node)->geometry()->vertexDataAsColoredPoint2D()[0];
+    };
+    const auto rgba = [](const QSGGeometry::ColoredPoint2D& v) {
+        return std::array<int, 4>{v.r, v.g, v.b, v.a};
+    };
+    // Candle 0 is bullish: (47, 221, 122) volume at 85, body at 220; wick (255, 255, 255, 200).
+    EXPECT_EQ(rgba(first(0)), (std::array<int, 4>{16, 74, 41, 85}));
+    EXPECT_EQ(rgba(first(1)), (std::array<int, 4>{200, 200, 200, 200}));
+    EXPECT_EQ(rgba(first(2)), (std::array<int, 4>{41, 191, 105, 220}));
+}
+
 TEST(RenderPerformance, VolumeProfileVertexBytesMatchBase) {
     VolumeProfileRenderer renderer;
     QSGNode root;

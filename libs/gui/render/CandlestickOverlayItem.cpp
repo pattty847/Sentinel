@@ -5,6 +5,7 @@ GPU-batched candlestick overlay (demo data only).
 #include "CandlestickOverlayItem.hpp"
 #include "chart/core/FootprintLod.hpp"
 #include "CandlePixelGeometry.hpp"
+#include "PremultipliedColor.hpp"
 #include "ChartPaneClip.hpp"
 #include "chart/layers/VolumeBarLayer.hpp"
 #include <QQuickWindow>
@@ -80,40 +81,38 @@ public:
 };
 
 inline void addQuad(QSGGeometry::ColoredPoint2D*& v,
-                    float x0, float y0, float x1, float y1,
-                    uchar r, uchar g, uchar b, uchar a) {
-    v[0].set(x0, y0, r, g, b, a);
-    v[1].set(x0, y1, r, g, b, a);
-    v[2].set(x1, y0, r, g, b, a);
-    v[3].set(x1, y0, r, g, b, a);
-    v[4].set(x0, y1, r, g, b, a);
-    v[5].set(x1, y1, r, g, b, a);
+                    float x0, float y0, float x1, float y1, premultiplied::Rgba c) {
+    premultiplied::set(v[0], x0, y0, c);
+    premultiplied::set(v[1], x0, y1, c);
+    premultiplied::set(v[2], x1, y0, c);
+    premultiplied::set(v[3], x1, y0, c);
+    premultiplied::set(v[4], x0, y1, c);
+    premultiplied::set(v[5], x1, y1, c);
     v += 6;
 }
 
 // Draws a diagonal line segment as a thin quad (2 triangles).
 inline void addLineSegment(QSGGeometry::ColoredPoint2D*& v,
                            float x1, float y1, float x2, float y2,
-                           float thickness,
-                           uchar r, uchar g, uchar b, uchar a) {
+                           float thickness, premultiplied::Rgba c) {
     const float dx = x2 - x1;
     const float dy = y2 - y1;
     const float len = std::sqrt(dx * dx + dy * dy);
     if (len < 0.5f) {
         // Degenerate segment — emit invisible (collapsed) verts
-        for (int i = 0; i < 6; ++i) v[i].set(x1, y1, r, g, b, 0);
+        for (int i = 0; i < 6; ++i) v[i].set(x1, y1, 0, 0, 0, 0);
         v += 6;
         return;
     }
     const float ht = thickness * 0.5f;
     const float px = -dy / len * ht;
     const float py =  dx / len * ht;
-    v[0].set(x1 + px, y1 + py, r, g, b, a);
-    v[1].set(x1 - px, y1 - py, r, g, b, a);
-    v[2].set(x2 + px, y2 + py, r, g, b, a);
-    v[3].set(x1 - px, y1 - py, r, g, b, a);
-    v[4].set(x2 - px, y2 - py, r, g, b, a);
-    v[5].set(x2 + px, y2 + py, r, g, b, a);
+    premultiplied::set(v[0], x1 + px, y1 + py, c);
+    premultiplied::set(v[1], x1 - px, y1 - py, c);
+    premultiplied::set(v[2], x2 + px, y2 + py, c);
+    premultiplied::set(v[3], x1 - px, y1 - py, c);
+    premultiplied::set(v[4], x2 - px, y2 - py, c);
+    premultiplied::set(v[5], x2 + px, y2 + py, c);
     v += 6;
 }
 
@@ -629,10 +628,13 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
     const int wickWidth = m_wickWidth;
     const bool isLine   = !footprintSpine && (m_candleStyle == 2);
 
-    const uchar bullR = uchar(m_upColor.red()), bullG = uchar(m_upColor.green()), bullB = uchar(m_upColor.blue());
-    const uchar bearR = uchar(m_downColor.red()), bearG = uchar(m_downColor.green()), bearB = uchar(m_downColor.blue());
+    // Bodies take the up/down RGB at the body opacity; wicks stay opaque.
     const uchar bodyA = candle_pixels::bodyAlpha(m_bodyOpacity);
-    const QColor customWick = m_customWickColor;
+    const auto bullBody = premultiplied::rgba(m_upColor, bodyA);
+    const auto bearBody = premultiplied::rgba(m_downColor, bodyA);
+    const auto bullWick = premultiplied::rgba(m_upColor, 255);
+    const auto bearWick = premultiplied::rgba(m_downColor, 255);
+    const auto customWick = premultiplied::rgba(m_customWickColor, 255);
     const bool autoWick = m_wickColor == "auto";
     const double dpr = frame.surfaceDpr > 0 && std::isfinite(frame.surfaceDpr) ? frame.surfaceDpr : 1.0;
 
@@ -647,12 +649,10 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
             const double xEnd = mapping.timeToScreenX(static_cast<double>(c.timeStartMs) + mapping.appendMs);
             const double cw   = xEnd - x;
             const float cx    = static_cast<float>(x + cw * 0.5);
+            const auto colour = bullish ? bullBody : bearBody;
             pts.push_back({cx,
                            static_cast<float>(mapping.priceToScreenY(c.close)),
-                           bullish ? bullR : bearR,
-                           bullish ? bullG : bearG,
-                           bullish ? bullB : bearB,
-                           bodyA});
+                           colour.r, colour.g, colour.b, colour.a});
         }
         // The line does not cross a span that was never fetched.
         const auto joined = [&](int i) {
@@ -668,7 +668,7 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
             if (!joined(i)) continue;
             addLineSegment(bodyVerts,
                            pts[i].cx, pts[i].cy, pts[i + 1].cx, pts[i + 1].cy,
-                           1.5f, pts[i].r, pts[i].g, pts[i].b, pts[i].a);
+                           1.5f, {pts[i].r, pts[i].g, pts[i].b, pts[i].a});
         }
 
         root->wickNode->markDirty(QSGNode::DirtyGeometry);
@@ -710,34 +710,29 @@ QSGNode* CandlestickOverlayItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNo
         const float yHighF = static_cast<float>(mapping.priceToScreenY(c.high));
         const float yLowF = static_cast<float>(mapping.priceToScreenY(c.low));
 
-        const uchar br = bullish ? bullR : bearR;
-        const uchar bg = bullish ? bullG : bearG;
-        const uchar bb = bullish ? bullB : bearB;
-        const uchar ba = bodyA;
-        const uchar wr = autoWick ? br : uchar(customWick.red());
-        const uchar wg = autoWick ? bg : uchar(customWick.green());
-        const uchar wb = autoWick ? bb : uchar(customWick.blue());
+        const auto bodyColour = bullish ? bullBody : bearBody;
+        const auto wickColour = !autoWick ? customWick : bullish ? bullWick : bearWick;
 
-        addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wr, wg, wb, 255);
+        addQuad(wickVerts, wickX0, yHighF, wickX1, yLowF, wickColour);
 
         auto* bodyStart = bodyVerts;
         if (spine) {
-            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, br, bg, bb, ba);
+            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, bodyColour);
         } else if (isHollow && bullish && c.open != c.close) {
             // Hollow bullish: border outline only (4 quads)
             const float bw = std::max(1.0f, std::min(bodyWidth * 0.12f, 3.0f));
-            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY0 + bw, br, bg, bb, ba); // top
-            addQuad(bodyVerts, bodyX0, bodyY1 - bw, bodyX1, bodyY1, br, bg, bb, ba); // bottom
-            addQuad(bodyVerts, bodyX0, bodyY0, bodyX0 + bw, bodyY1, br, bg, bb, ba); // left
-            addQuad(bodyVerts, bodyX1 - bw, bodyY0, bodyX1, bodyY1, br, bg, bb, ba); // right
+            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY0 + bw, bodyColour); // top
+            addQuad(bodyVerts, bodyX0, bodyY1 - bw, bodyX1, bodyY1, bodyColour); // bottom
+            addQuad(bodyVerts, bodyX0, bodyY0, bodyX0 + bw, bodyY1, bodyColour); // left
+            addQuad(bodyVerts, bodyX1 - bw, bodyY0, bodyX1, bodyY1, bodyColour); // right
         } else {
             // Normal filled body (also bearish candles in Hollow mode)
-            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, br, bg, bb, ba);
+            addQuad(bodyVerts, bodyX0, bodyY0, bodyX1, bodyY1, bodyColour);
             if (isHollow) {
                 // Pad 3 unused body quads with collapsed (invisible) entries
-                addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
-                addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
-                addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, 0, 0, 0, 0);
+                addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, {0, 0, 0, 0});
+                addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, {0, 0, 0, 0});
+                addQuad(bodyVerts, bodyX0, bodyY0, bodyX0, bodyY0, {0, 0, 0, 0});
             }
         }
         while (bodyVerts - bodyStart < bodyVertices) {

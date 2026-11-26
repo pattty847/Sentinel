@@ -51,7 +51,8 @@ private:
     Q_PROPERTY(QColor buySignalColor   READ buySignalColor   WRITE setBuySignalColor   NOTIFY buySignalColorChanged)
     Q_PROPERTY(QColor sellSignalColor  READ sellSignalColor  WRITE setSellSignalColor  NOTIFY sellSignalColorChanged)
     Q_PROPERTY(QColor mixedSignalColor READ mixedSignalColor WRITE setMixedSignalColor NOTIFY mixedSignalColorChanged)
-    // Alpha (0-255) for inline volume bars; lower = more supplemental feel (default 85)
+    // Alpha (0-255) for inline volume bars; lower = more supplemental feel. Default 255:
+    // bars drew straight RGB at 85 (as bright as opaque); premultiplied, 255 keeps that look.
     Q_PROPERTY(int volumeBarAlpha READ volumeBarAlpha WRITE setVolumeBarAlpha NOTIFY volumeBarAlphaChanged)
     // Candle rendering style: 0=Candle, 1=Hollow, 2=Line
     Q_PROPERTY(int candleStyle READ candleStyle WRITE setCandleStyle NOTIFY candleStyleChanged)
@@ -185,6 +186,6 @@ private:
     QColor m_buySignalColor  = QColor(  0, 230, 118, 235);  // bright green
     QColor m_sellSignalColor = QColor(255,  23,  68, 235);  // bright red
     QColor m_mixedSignalColor= QColor(255, 202,  40, 235);  // amber
-    int    m_volumeBarAlpha  = 85;
+    int    m_volumeBarAlpha  = 255;
     CandleStyle m_candleStyle = CandleStyle::Candle;
 };

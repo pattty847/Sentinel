@@ -1,4 +1,5 @@
 #include "ChartTextDebugNode.hpp"
+#include "PremultipliedColor.hpp"
 
 #include <QSGGeometry>
 #include <QtGlobal>
@@ -12,7 +13,7 @@ inline void setColoredVertex(QSGGeometry::ColoredPoint2D& vertex,
                              float x,
                              float y,
                              const QColor& color) {
-    vertex.set(x, y, color.red(), color.green(), color.blue(), color.alpha());
+    premultiplied::set(vertex, x, y, premultiplied::rgba(color));
 }
 } // namespace
 
