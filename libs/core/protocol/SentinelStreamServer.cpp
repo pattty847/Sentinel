@@ -1821,7 +1821,7 @@ public:
                         auto snapshot = model->tradeHistorySnapshot(page.symbol, page.startMs, through,
                             SentinelProtocol::kTradeHistoryMaxTrades);
                         if (snapshot.exceededLimit)
-                            throw std::length_error("trade history exceeds 250000 trades");
+                            throw std::length_error("trade history exceeds 100000 trades");
                         const int64_t seam = snapshot.retainedFromMs > 0 ?
                             std::clamp(snapshot.retainedFromMs, page.startMs, through) : through;
                         bool partial = snapshot.invalidRows != 0 || through < page.endMs, building = false;
@@ -1844,7 +1844,7 @@ public:
                                 page.coveredToMs = std::clamp(journal.coveredToMs, page.coveredFromMs, through);
                                 page.rows = std::move(journal.rows);
                                 if (page.rows.size() > budget)
-                                    throw std::length_error("trade history exceeds 250000 trades");
+                                    throw std::length_error("trade history exceeds 100000 trades");
                             } else {
                                 building = true;
                                 page.coveredFromMs = page.coveredToMs = page.startMs;
@@ -1858,7 +1858,7 @@ public:
                                 std::make_move_iterator(snapshot.rows.end()));
                         }
                         if (page.rows.size() > SentinelProtocol::kTradeHistoryMaxTrades)
-                            throw std::length_error("trade history exceeds 250000 trades");
+                            throw std::length_error("trade history exceeds 100000 trades");
                         std::unordered_set<std::string> ids;
                         ids.reserve(std::min(page.rows.size(), size_t(SentinelProtocol::kTradeHistoryMaxTrades)));
                         std::stable_sort(page.rows.begin(), page.rows.end(), [](const auto& a, const auto& b) {

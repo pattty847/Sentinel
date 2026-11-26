@@ -861,7 +861,7 @@ one-second flow replay gate, leaving the second history worker available for
 flow and candle history. Its binary reply shares the bounded chunk write queue.
 The global history queue remains capped at eight jobs. Requests must name a configured
 product and a half-open `[start_ms,end_ms)` window of at most 3,600,000 ms.
-More than 250,000 candidate executions or an invalid request returns `refused`
+More than 100,000 candidate executions or an invalid request returns `refused`
 with a `reason`. An occupied trade-history job or full worker queue returns
 `refused` with `reason: "busy"`; clients may retry it. Journal gaps, changed
 journal sources, invalid live rows, or unavailable early/late coverage return
@@ -882,10 +882,10 @@ count (1 for an individual trade). The frame is capped at 48 MiB. The client
 rejects truncated frames, count/length mismatches, invalid values, out-of-order
 times and trailing bytes before emitting a page. `server_config.flow` announces
 `trade_history: true`, `trade_history_encoding: "TRD1"`,
-`trade_history_max_window_ms: 3600000` and `trade_history_max_trades: 250000`.
+`trade_history_max_window_ms: 3600000` and `trade_history_max_trades: 100000`.
 TradeBubbleFeed merges a page into the existing 100,000-row event-time tape in one
 pass (O(page + tape)) and keeps the newest 100,000 rows of both: a full
-250,000-row page keeps only its newest 100,000 rows (fewer when newer live rows are
+100,000-row page keeps only its newest rows (fewer when newer live rows are
 retained) and drops the rest; live and history resends of a
 retained nonempty ID occupy one row. The GUI does not request these pages
 automatically yet.

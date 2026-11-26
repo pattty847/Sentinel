@@ -60,7 +60,7 @@ std::vector<std::pair<int64_t, std::string>> contents(const Tape& tape) {
 }
 }
 
-// A full 250k-row history page (kTradeHistoryMaxTrades) older than the 50k live rows on
+// A full 100k-row history page (kTradeHistoryMaxTrades) older than the 50k live rows on
 // the tape keeps only its newest 50k rows: the tape holds 100k. Appending row by row
 // shifted every live row for each page row (O(rows x tape)); the merge writes each
 // retained row once, which the row-write count bounds.
@@ -77,10 +77,10 @@ TEST(TradeBubbleHistory, FullHistoryPageKeepsOnlyItsNewestTapeCapacityRowsInLine
     const uint64_t writesBefore = TradeBubbleRendererTest::tape(feed).rowWrites();
     EXPECT_EQ(feed.appendHistory(history), Tape::Capacity - live);
     // Linear work: each retained row is written once. Row-by-row insertion before the live
-    // rows wrote ~50k rows per page row (2.5e9 writes, 24 s).
+    // rows wrote ~50k rows per page row (5e9 writes).
     const uint64_t writes = TradeBubbleRendererTest::tape(feed).rowWrites() - writesBefore;
     EXPECT_LE(writes, 2 * (pageRows + Tape::Capacity)) << "ingesting the page wrote " << writes << " rows";
-    std::cout << "MERGE_250K_MS "
+    std::cout << "MERGE_100K_MS "
               << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count()
               << '\n';
     const auto& tape = TradeBubbleRendererTest::tape(feed);
