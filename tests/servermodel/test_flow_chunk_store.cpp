@@ -1296,13 +1296,49 @@ TEST_F(ChunkStoreTest, ConcurrentAvailabilitySharesOneStatScanPerGeneration) {
     ASSERT_TRUE(service.availability(Id));
     EXPECT_EQ(scans, 2u); EXPECT_EQ(stats, 2 * firstStats);
 }
-TEST_F(ChunkStoreTest, SixteenDaySuffixUnrecordedIsRefusedAcrossRestart) {
-    fixture(8); FlowStore source(sourceOptions()); uint64_t epoch;
+TEST_F(ChunkStoreTest, SixteenDayInteriorUnrecordedIsRefusedAcrossRestart) {
+    // Two capture runs surround a whole absent UTC day. Resume after 02:00
+    // so no receive-tail file is created in the absent day.
+    auto run = [&](int from, int through, bool first) {
+        Journal journal(raw);
+        if (!first) journal.snapshot(from * Day + 3 * Hour);
+        for (int d = from; d <= through; ++d) for (int h = 0; h < 24; ++h) {
+            if (!first && d == from && h < 3) continue;
+            const auto t = d * Day + h * Hour;
+            if (h == 0) journal.snapshot(t);
+            journal.trades(t + 1000, {trade(t + 100, std::to_string(1 + d * 24 + h), 100000 + h)});
+            if (d != 3 || h != 23) journal.heartbeat(t + Hour + 15000);
+        }
+        journal.close();
+    };
+    run(0, 3, true);
+    run(5, 10, false); // Day 4 has no RAWL2 file; day 10 seals day 9.
+    FlowStore source(sourceOptions());
+    const auto archive = source.archive("BTC-USD");
+    ASSERT_EQ(archive.days.front(), Epoch - Day); // Inventory includes the prior-day receive tail.
+    ASSERT_FALSE(std::binary_search(archive.days.begin(), archive.days.end(), Epoch + 4 * Day));
+    ASSERT_EQ(source.sourceState("BTC-USD", Epoch + 4 * Day, Epoch + 5 * Day), FlowStore::SourceState::Absent);
     const auto chunkStart = heatmap::chunkStartOf(Day, Epoch);
-    { FlowChunkStore store(source, options()); ASSERT_EQ(store.runPass().failed, 0u);
-      ASSERT_FALSE(store.read(Id, Day, chunkStart)); epoch = store.epoch(Id); }
-    FlowChunkStore restarted(source, options()); restarted.initialize();
+    ASSERT_EQ(chunkStart + 16 * Day, Epoch + 10 * Day);
+    uint64_t epoch;
+    {
+        FlowChunkStore store(source, options()); ASSERT_EQ(store.runPass().failed, 0u);
+        for (int d = -1; d <= 9; ++d) {
+            if (d == 4) continue;
+            ASSERT_TRUE(store.stamp(Id, Hour, Epoch + d * Day)) << "unsealed recorded day " << d;
+        }
+        ASSERT_FALSE(store.stamp(Id, Day, chunkStart));
+        ASSERT_FALSE(store.read(Id, Day, chunkStart));
+        EXPECT_TRUE(store.sealed(Id, Day).ranges.empty());
+        epoch = store.epoch(Id);
+    }
+    FlowChunkStore restarted(source, options());
+    ASSERT_EQ(restarted.runPass().failed, 0u);
     EXPECT_EQ(restarted.epoch(Id), epoch);
+    for (int d = -1; d <= 9; ++d) {
+        if (d == 4) continue;
+        ASSERT_TRUE(restarted.stamp(Id, Hour, Epoch + d * Day)) << "unsealed recorded day after restart " << d;
+    }
     EXPECT_FALSE(restarted.stamp(Id, Day, chunkStart));
     EXPECT_FALSE(restarted.read(Id, Day, chunkStart));
     EXPECT_TRUE(restarted.sealed(Id, Day).ranges.empty());
