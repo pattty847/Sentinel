@@ -502,10 +502,14 @@ if(WIN32)
     target_link_libraries(sentinel_lab_lib PRIVATE d3d12) # D3D12GetDebugInterface (SENTINEL_RHI_DEBUG=2)
 endif()
 
-target_compile_definitions(sentinel_gui_lib
-    PRIVATE
-        SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
+# The GUI reads QML and research scripts from the source tree it was built from, so
+# these three units carry the checkout path. Keep it off the rest of the library:
+# a -D path differs per checkout and makes every unit with it miss ccache.
+set_source_files_properties(
+    mainwindow/QmlSceneController.cpp
+    widgets/StockChartDock.cpp
+    widgets/ResearchProcess.cpp
+    PROPERTIES COMPILE_DEFINITIONS SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 qt_add_resources(sentinel_gui_lib "resources"
     PREFIX
