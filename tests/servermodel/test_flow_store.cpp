@@ -20,6 +20,7 @@
 #include <bit>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 
 
 namespace fs = std::filesystem;
@@ -27,6 +28,30 @@ namespace flow = sentinel::flow;
 using namespace flow_fixture;
 using recording::FlowStore;
 namespace {
+std::mutex seedLogMutex;
+std::condition_variable seedLogCv;
+std::vector<std::string> *seedLogs = nullptr;
+struct SeedLogs {
+    std::vector<std::string> lines;
+    QtMessageHandler previous;
+    SeedLogs() : previous(qInstallMessageHandler([](QtMsgType, const QMessageLogContext&, const QString &message) {
+        const auto line = message.toStdString();
+        if (line.find("Flow startup seed") == std::string::npos) return;
+        std::lock_guard lock(seedLogMutex);
+        if (seedLogs) {
+            seedLogs->push_back(line);
+            seedLogCv.notify_all();
+        }
+    })) {
+        std::lock_guard lock(seedLogMutex);
+        seedLogs = &lines;
+    }
+    ~SeedLogs() {
+        qInstallMessageHandler(previous);
+        std::lock_guard lock(seedLogMutex);
+        seedLogs = nullptr;
+    }
+};
 TEST(FlowGrid, FallbackStopsAtNextDayLeadIn) {
     for (const int64_t offset : {24 * Hour + 2000, 24 * Hour + 2001, 3 * 24 * Hour}) {
         SCOPED_TRACE(offset);
@@ -382,6 +407,122 @@ TEST_F(FlowStoreTest, DelayedRollerWatermarkSeedsAnotherSymbolDuringBlockedPass)
     ASSERT_EQ(reply.bars.size(), 24u);
     for (const auto &range : reply.ranges) EXPECT_EQ(range.status, "complete");
     restarted.stop();
+}
+TEST_F(FlowStoreTest, FailedStartupSeedBacksOffAndLogsChangesAndRecovery) {
+    fixture();
+    fs::create_directory(root);
+    fs::create_directory_symlink(hmc2, root / "BTC-USD");
+    auto o = options();
+    auto now = std::chrono::steady_clock::time_point{};
+    o.seedNow = [&] { return now; };
+    int attempts = 0;
+    bool changedError = false;
+    o.beforeSeedForTest = [&] {
+        ++attempts;
+        if (changedError) throw std::runtime_error("injected seed error");
+    };
+    SeedLogs logs;
+    FlowStore store(o);
+    const auto pass = [&] { store.runPass(); };
+    pass();
+    EXPECT_EQ(attempts, 1);
+    ASSERT_EQ(logs.lines.size(), 1u);
+    for (int second = 1; second < 5; ++second) {
+        now += std::chrono::seconds(1);
+        pass();
+    }
+    EXPECT_EQ(attempts, 1);
+    now += std::chrono::seconds(1);
+    pass();
+    EXPECT_EQ(attempts, 2);
+    EXPECT_EQ(logs.lines.size(), 1u);
+    changedError = true;
+    now += std::chrono::seconds(10);
+    pass();
+    EXPECT_EQ(attempts, 3);
+    ASSERT_EQ(logs.lines.size(), 2u);
+    EXPECT_NE(logs.lines.back().find("injected seed error"), std::string::npos);
+    changedError = false;
+    now += std::chrono::seconds(20);
+    pass();
+    EXPECT_EQ(attempts, 4);
+    ASSERT_EQ(logs.lines.size(), 3u);
+    EXPECT_NE(logs.lines.back().find("unsafe flow directory"), std::string::npos);
+    now += std::chrono::hours(1);
+    pass();
+    EXPECT_EQ(attempts, 5);
+    ASSERT_EQ(logs.lines.size(), 4u);
+    EXPECT_NE(logs.lines.back().find("failed"), std::string::npos);
+    for (const auto delay : {80, 160, 300}) {
+        now += std::chrono::seconds(delay);
+        pass();
+    }
+    EXPECT_EQ(attempts, 8);
+    EXPECT_EQ(logs.lines.size(), 4u);
+    fs::remove(root / "BTC-USD");
+    pass(); // Backoff still holds after the fault is removed.
+    now += std::chrono::seconds(299);
+    pass();
+    EXPECT_EQ(attempts, 8);
+    now += std::chrono::seconds(1);
+    pass();
+    EXPECT_EQ(attempts, 9);
+    ASSERT_EQ(logs.lines.size(), 6u);
+    EXPECT_NE(logs.lines[4].find("recovered"), std::string::npos);
+    EXPECT_NE(logs.lines[5].find("seeded"), std::string::npos);
+    EXPECT_EQ(store.sealedThroughMs("BTC-USD"), through);
+}
+TEST_F(FlowStoreTest, StopInterruptsStartupSeedBackoff) {
+    fixture();
+    fs::create_directory(root);
+    fs::create_directory_symlink(hmc2, root / "BTC-USD");
+    auto o = options();
+    o.rescan = std::chrono::hours(1);
+    std::atomic<int> attempts{0};
+    o.beforeSeedForTest = [&] { ++attempts; };
+    SeedLogs logs;
+    FlowStore store(o);
+    store.start();
+    {
+        std::unique_lock lock(seedLogMutex);
+        ASSERT_TRUE(seedLogCv.wait_for(lock, std::chrono::seconds(10), [&] {
+            return std::any_of(logs.lines.begin(), logs.lines.end(), [](const auto &line) {
+                return line.find("Flow startup seed failed") != std::string::npos;
+            });
+        }));
+    }
+    store.runPass();
+    EXPECT_EQ(attempts, 1); // The seed is now waiting for its first retry deadline.
+    auto stopped = std::async(std::launch::async, [&] { store.stop(); });
+    EXPECT_EQ(stopped.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+}
+TEST_F(FlowStoreTest, LateSeedKeepsAlreadyDiscoveredGrid) {
+    Journal journalFile(journal, "ETH-USD");
+    journalFile.snapshot(0);
+    journalFile.trades(1000, {trade(800, "1", 3000, "BUY", "ETH-USD")});
+    journalFile.heartbeat(2 * Hour + Minute + 1);
+    journalFile.close();
+    auto o = options();
+    o.symbols = {"ETH-USD"};
+    auto now = std::chrono::steady_clock::time_point{};
+    o.seedNow = [&] { return now; };
+    int seedFailuresRemaining = 2;
+    o.beforeSeedForTest = [&] {
+        if (seedFailuresRemaining > 0) {
+            --seedFailuresRemaining;
+            throw std::runtime_error("seed unavailable");
+        }
+    };
+    int gridRecords = 0;
+    o.afterRecordForTest = [&](std::stop_token) { ++gridRecords; };
+    FlowStore store(o);
+    EXPECT_EQ(store.runPass().built, 2u);
+    ASSERT_GT(gridRecords, 0);
+    gridRecords = 0;
+    seedFailuresRemaining = 0;
+    now += std::chrono::seconds(5);
+    EXPECT_EQ(store.runPass().built, 0u);
+    EXPECT_EQ(gridRecords, 0);
 }
 TEST_F(FlowStoreTest, StartupRejectsCorruptAndStaleOlderDaysBeforeTheirSymbolPass) {
     for (const std::string damage : {"corrupt", "stale", "missing"}) {

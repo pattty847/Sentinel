@@ -3,6 +3,8 @@
 // Restore each symbol's FLD1 watermark when its roller writer first publishes
 // a watermark, including while another symbol's serial pass is running.
 // Seeding validates files and sources without grid discovery or trade replay.
+// Failed startup seeds retry after 5s, doubling to 5m; identical warnings
+// recur at most hourly. A changed error and recovery are logged immediately.
 // HMC2 remains authoritative. Missing grids use the roller's snapshot anchor;
 // BTC's fixed $1 near grid can be recovered exactly from product metadata alone.
 #include "FlowStore.hpp"
@@ -33,6 +35,9 @@ namespace flow = sentinel::flow;
 namespace roller = sentinel::roller;
 namespace fs = std::filesystem;
 constexpr int64_t Minute = 60'000, Hour = 60 * Minute, Day = 24 * Hour;
+constexpr auto SeedRetryBase = std::chrono::seconds(5);
+constexpr auto SeedRetryCap = std::chrono::seconds(300);
+constexpr auto SeedWarningInterval = std::chrono::hours(1);
 // Same receive-time tail as JournalTradeEventSource. Buckets use exchange time.
 constexpr int64_t TradeTail = Minute;
 constexpr qint64 MaxDayBytes = 64 * 1024 * 1024;
@@ -828,11 +833,15 @@ void FlowStore::seedReadySymbols(std::stop_token stop) {
         auto &state = seedStates_.at(symbol);
         std::unique_lock symbolLock(state.mutex, std::try_to_lock);
         if (!symbolLock || state.done) continue;
+        if (state.failures && options_.seedNow() < state.retryAt) continue;
         try {
             if (options_.hourThrough(symbol) < Hour) continue;
             const auto started = std::chrono::steady_clock::now();
+            if (options_.beforeSeedForTest) options_.beforeSeedForTest();
             if (!seedBuiltThrough(symbol, stop)) continue;
             state.done = true;
+            if (state.failures)
+                sLog_Data("Flow startup seed recovered symbol=" << symbol << " failures=" << state.failures);
             sLog_Data("Flow startup seeded symbol=" << symbol << " sealedThroughMs="
                       << sealedThroughMs(symbol) << " ms="
                       << std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -840,7 +849,16 @@ void FlowStore::seedReadySymbols(std::stop_token stop) {
         } catch (const Cancelled &) { return; }
         catch (const roller::NoJournalFiles &) {}
         catch (const std::exception &e) {
-            sLog_Warning("Flow startup seed failed symbol=" << symbol << " error=" << e.what());
+            const auto now = options_.seedNow();
+            const std::string error = e.what();
+            if (!state.failures || error != state.lastError || now - state.lastWarning >= SeedWarningInterval) {
+                sLog_Warning("Flow startup seed failed symbol=" << symbol << " error=" << error);
+                state.lastWarning = now;
+            }
+            state.lastError = error;
+            const auto shift = std::min(state.failures, 6u);
+            state.retryAt = now + std::min(SeedRetryBase * (1u << shift), SeedRetryCap);
+            ++state.failures;
         }
     }
 }
@@ -892,6 +910,11 @@ bool FlowStore::seedBuiltThrough(const std::string &symbol, std::stop_token stop
         if (!index.valid && index.file.present && journalSourceCanReachDay(symbol, day) == false)
             logMissingJournalDay(symbol, day);
         std::lock_guard lock(indexMutex_);
+        if (auto it = index_.find({symbol, day}); it != index_.end() &&
+            it->second.file == index.file && it->second.state == index.state) {
+            index.gridKnown = it->second.gridKnown;
+            index.gridPath = it->second.gridPath;
+        }
         index_[{symbol, day}] = std::move(index);
     }
     {
