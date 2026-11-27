@@ -53,6 +53,10 @@ class FlowStore {
         std::function<void()> afterWakeForTest;
         std::function<void(std::stop_token)> afterInventoryFileForTest;
         std::function<void()> afterBuilderStartForTest;
+        std::function<void()> beforeSeedForTest;
+        std::function<std::chrono::steady_clock::time_point()> seedNow = [] {
+            return std::chrono::steady_clock::now();
+        };
         std::function<int64_t()> nowMs = [] {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
@@ -181,7 +185,13 @@ class FlowStore {
     std::map<std::pair<std::string, int64_t>, uint64_t> buildFailures_; // builder thread only
     std::stop_source stopSource_;
     std::thread thread_, seedThread_;
-    struct SeedState { std::mutex mutex; bool done = false; };
+    struct SeedState {
+        std::mutex mutex;
+        bool done = false;
+        unsigned failures = 0;
+        std::chrono::steady_clock::time_point retryAt{}, lastWarning{};
+        std::string lastError;
+    };
     std::map<std::string, SeedState> seedStates_; // fixed after construction
     std::mutex seedWakeMutex_;
     std::condition_variable seedCv_;
