@@ -1,3 +1,5 @@
+// Forming snapshots are read-only: minute rollups include their open minute,
+// while stored coarse active bars continue to hold only closed minutes.
 #pragma once
 #include <QObject>
 #include <array>
@@ -57,6 +59,11 @@ public:
         uint64_t count = 0;
     };
     std::vector<LateDrops> lateDrops() const;
+    // Any thread, no caller-held lock: takes m_mutex shared and copies one bar.
+    // Returns no bar for an absent/unsupported series. For ordered subscription
+    // seeding, call on the model thread outside a signal callback, after prior
+    // publication drains; enqueue the result on the same executor as live events.
+    std::optional<OHLCVBar> formingBar(const std::string& symbol, int64_t timeframeMs) const;
 
     // One timeframe's state for a bulk restore. floorMs is set iff that
     // timeframe's journal floor is on, and then holds its value.

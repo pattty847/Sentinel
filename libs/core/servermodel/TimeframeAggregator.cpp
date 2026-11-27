@@ -1,3 +1,5 @@
+// formingBar reads under the shared state lock and never mutates or publishes.
+// It combines closed-minute rollups with the open minute using live-view order.
 #include "TimeframeAggregator.hpp"
 #include "SentinelLogging.hpp"
 #include <algorithm>
@@ -265,6 +267,34 @@ TimeframeAggregator::Series TimeframeAggregator::exportSeries(const std::string&
     if (const int i = tradeIndex(timeframeMs); i >= 0 && state->second.floorOn[i])
         out.floorMs = state->second.floorMs[i];
     return out;
+}
+
+std::optional<OHLCVBar> TimeframeAggregator::formingBar(const std::string& symbol,
+                                                       int64_t timeframeMs) const {
+    std::shared_lock lock(m_mutex);
+    if (!std::binary_search(m_timeframesMs.begin(), m_timeframesMs.end(), timeframeMs)) return std::nullopt;
+    const auto state = m_states.find(symbol);
+    if (state == m_states.end()) return std::nullopt;
+    const auto active = [&](int64_t tf) -> std::optional<OHLCVBar> {
+        const auto found = state->second.activeBars.find(tf);
+        if (found == state->second.activeBars.end() || found->second.is_closed ||
+            (found->second.count == 0 && found->second.timestamp_ms == 0)) return std::nullopt;
+        return found->second;
+    };
+    const auto closedPart = active(timeframeMs);
+    if (timeframeMs <= kMinuteMs) return closedPart;
+    const auto minute = active(kMinuteMs);
+    if (!minute) return closedPart;
+    OHLCVBar live = *minute;
+    live.timestamp_ms = bucketStart(minute->timestamp_ms, timeframeMs);
+    if (closedPart && closedPart->timestamp_ms == live.timestamp_ms) {
+        live.open = closedPart->open;
+        live.high = std::max(closedPart->high, minute->high);
+        live.low = std::min(closedPart->low, minute->low);
+        live.volume = closedPart->volume + minute->volume;
+        live.count = closedPart->count + minute->count;
+    }
+    return live;
 }
 
 bool TimeframeAggregator::restorable(const std::string& symbol, int64_t timeframeMs) const {

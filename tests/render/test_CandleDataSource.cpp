@@ -1,3 +1,6 @@
+// Exercise selection declarations and filtering before the queued GUI hop,
+// alongside history/live ownership through the real client parsers.
+// Client selection casing must match canonical symbols in incoming wire frames.
 #include <gtest/gtest.h>
 #include "datasources/RemoteGridDataSource.hpp"
 #include <QCoreApplication>
@@ -11,6 +14,7 @@
 #include "HostSettingsGuard.hpp"
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <thread>
 
 // Exercise the real serialized request queue and client reply parsers. Only the
@@ -29,6 +33,7 @@ struct CandleDataSourceTest : testing::Test {
     void stepCandleClock(qint64 ms) { source.m_candleClockOffsetMs += ms; }
     qint64 candleRetryDelay() const { return source.m_candleBackfill.retryDelayMs(source.candleLoaded(), source.candleNow()); }
     SentinelStreamClient& client() { return *source.streamClient(); }
+    quint64 deliveryGeneration() { return client().m_candleDeliveryGeneration.load(); }
     void deliver() { QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall); }
     size_t pendingBookCount() const { return source.m_pendingBookSnapshots.size(); }
     qint64 bookDeadline(const std::string& symbol) const {
@@ -68,7 +73,7 @@ struct CandleDataSourceTest : testing::Test {
         source.onL2UpdateReceivedAt("BTC-USD", {{true, 300.0, 1.0}}, 0.1,
                                      client().bookDeliveryGeneration("BTC-USD"), nowMs);
     }
-    Json takeRequest(int timeoutMs = 1000) {
+    Json takeRequest(int timeoutMs = 1000, bool includeSelection = false) {
         const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
         do {
             QCoreApplication::processEvents(QEventLoop::AllEvents);
@@ -77,7 +82,9 @@ struct CandleDataSourceTest : testing::Test {
             if (!client().m_writeQueue.empty()) {
                 auto message = std::move(client().m_writeQueue.front());
                 client().m_writeQueue.pop_front();
-                return Json::parse(message);
+                auto parsed = Json::parse(message);
+                if (!includeSelection && parsed.value("type", "") == "candle_live_select") continue;
+                return parsed;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         } while (std::chrono::steady_clock::now() < until);
@@ -114,12 +121,14 @@ struct CandleDataSourceTest : testing::Test {
              {"candles", Json::array()}});
         deliver();
     }
-    void live(const char* symbol, qint64 tf, qint64 startMinute, double close, qint64 seq, bool closed) {
+    void live(const char* symbol, qint64 tf, qint64 startMinute, double close, qint64 seq, bool closed,
+              std::optional<quint64> generation = std::nullopt) {
         client().handleCandleBarMessage(closed ? protocol::MessageType::CandleBarClosed
                                                : protocol::MessageType::CandleBarUpdate,
                                         {{"schema_version", protocol::SentinelProtocol::kCandleSchemaVersion},
                                          {"symbol", symbol},
                                          {"timeframe_ms", tf},
+                                         {"selection", generation.value_or(deliveryGeneration())},
                                          {"bucket_start_ms", startMinute * minute},
                                          {"seq", seq},
                                          {"candle", candle(startMinute, close, closed)}});
@@ -156,6 +165,68 @@ struct CandleDataSourceTest : testing::Test {
         source.setCandleHistoryViewport("BTC-USD", 60000, start * minute, end * minute);
     }
 };
+
+TEST_F(CandleDataSourceTest, DeclaresSelectionBeforeHistoryAndAgainOnReconnect) {
+    source.setCandleHistoryViewport("BTC-USD", 60000, 0, 0);
+    const auto selected = takeRequest(1000, true);
+    ASSERT_FALSE(selected.is_null());
+    EXPECT_EQ(selected.at("type"), "candle_live_select");
+    EXPECT_EQ(selected.at("symbol"), "BTC-USD");
+    EXPECT_EQ(selected.at("timeframe_ms"), 60000);
+    EXPECT_TRUE(takeRequest(20).is_null());
+    source.setCandleHistoryViewport("BTC-USD", 60000, 1000 * minute, 1010 * minute);
+    EXPECT_EQ(takeRequest().at("type"), "candle_history_request");
+    client().disconnected();
+    deliver();
+    client().connected();
+    deliver();
+    const auto restored = takeRequest(1000, true);
+    ASSERT_FALSE(restored.is_null());
+    EXPECT_EQ(restored.at("type"), "candle_live_select");
+    EXPECT_EQ(restored.at("symbol"), "BTC-USD");
+    EXPECT_EQ(restored.at("timeframe_ms"), 60000);
+    EXPECT_GT(restored.at("selection").get<quint64>(), selected.at("selection").get<quint64>());
+}
+
+TEST_F(CandleDataSourceTest, LowercaseClientSelectionAcceptsCanonicalWireFrames) {
+    client().selectLiveCandle("btc-usd", 60000);
+    const auto selected = takeRequest(1000, true);
+    ASSERT_FALSE(selected.is_null());
+    EXPECT_EQ(selected.at("symbol"), "BTC-USD");
+    int updates = 0, closes = 0;
+    QObject::connect(&client(), &SentinelStreamClient::candleBarUpdateReceived,
+        &app, [&](auto&&...) { ++updates; }, Qt::DirectConnection);
+    QObject::connect(&client(), &SentinelStreamClient::candleBarClosedReceived,
+        &app, [&](auto&&...) { ++closes; }, Qt::DirectConnection);
+    live("BTC-USD", 60000, 1000, 10, 1, false);
+    live("BTC-USD", 60000, 1000, 10, 2, true);
+    EXPECT_EQ(updates, 1);
+    EXPECT_EQ(closes, 1);
+}
+
+TEST_F(CandleDataSourceTest, InactiveTimeframesNeverEnterTheQueuedSignal) {
+    source.setCandleHistoryViewport("BTC-USD", 60000, 0, 0);
+    int published = 0;
+    QObject::connect(&client(), &SentinelStreamClient::candleBarUpdateReceived,
+        &app, [&](auto&&...) { ++published; }, Qt::DirectConnection);
+    QObject::connect(&client(), &SentinelStreamClient::candleBarClosedReceived,
+        &app, [&](auto&&...) { ++published; }, Qt::DirectConnection);
+    live("BTC-USD", 300000, 1000, 10, 1, false);
+    live("BTC-USD", 300000, 1000, 10, 2, true);
+    live("ETH-USD", 60000, 1000, 10, 1, false);
+    EXPECT_EQ(published, 0);
+    const auto oldSelection = deliveryGeneration();
+    source.setCandleHistoryViewport("BTC-USD", 300000, 0, 0);
+    source.setCandleHistoryViewport("BTC-USD", 60000, 0, 0);
+    live("BTC-USD", 60000, 1000, 99, 5, false, oldSelection);
+    live("BTC-USD", 60000, 1000, 99, 6, true, oldSelection);
+    EXPECT_EQ(published, 0); // old wire frames arriving after A -> B -> A
+    live("BTC-USD", 60000, 1000, 10, 7, false);
+    EXPECT_EQ(published, 1);
+    source.setCandleHistoryViewport("BTC-USD", 1000, 0, 0);
+    live("BTC-USD", 60000, 1000, 10, 8, false);
+    EXPECT_EQ(published, 1); // selecting sub-minute disables the minute stream
+}
 
 TEST_F(CandleDataSourceTest, ReconnectRefreshesCoveredCacheAndPreservesNewLiveOwnership) {
     warm();

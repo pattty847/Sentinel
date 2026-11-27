@@ -1,5 +1,7 @@
 #pragma once
 // Test-only in-process server; no config loading, recorder, capture socket or provider I/O.
+// Selection commands can be fenced on the session executor without pumping the
+// model thread, so snapshot/live overlap is deterministic.
 #define SENTINEL_CANDLE_TEST
 #include "protocol/SentinelStreamServer.cpp"
 #include "protocol/SentinelStreamClient.hpp"
@@ -39,6 +41,16 @@ struct RecordingServerStopTest {
         s.postModelEvent([](Session &) {});
     }
     static void send(Session &s, const Json &j) { s.do_write(j.dump()); }
+    static void offlineMessage(Session& s, const Json& message) { s.handle_message(message.dump()); }
+    static bool message(Session& s, const Json& message) {
+        auto done = std::make_shared<std::promise<void>>();
+        auto ready = done->get_future();
+        net::post(s.ws_.get_executor(), [self = s.shared_from_this(), message, done] {
+            self->handle_message(message.dump());
+            done->set_value();
+        });
+        return ready.wait_for(3s) == std::future_status::ready;
+    }
     static void candle(Session &s, int64_t start) {
         s.postModelEvent([start](Session &session) {
             OHLCVBar bar{};
@@ -50,6 +62,11 @@ struct RecordingServerStopTest {
     }
     static void bar(Session &s, int64_t tf, const OHLCVBar &bar) {
         s.postModelEvent([tf, bar](Session &session) { session.on_bar_updated("BTC-USD", tf, bar); });
+    }
+    static bool selected(Session& s, int64_t tf) { return s.candleTimeframeMs_ == tf; }
+    static void offlineSelect(Session& s, const char* symbol, int64_t tf, uint64_t generation) {
+        s.handle_message(Json{{"type", "candle_live_select"}, {"symbol", symbol},
+            {"timeframe_ms", tf}, {"selection", generation}}.dump());
     }
     static bool subscribed(Session &s) { return s.subscriptions_.contains("BTC-USD"); }
     static std::shared_ptr<Session> offline(SentinelStreamServer &server, ServerDataModel &model,
@@ -187,6 +204,13 @@ struct CandleFixture {
         auto ready = done->get_future();
         net::post(RecordingServerStopTest::io(*server),
                   [s, done] { done->set_value(RecordingServerStopTest::subscribed(*s)); });
+        return spinUntil([&] { return ready.wait_for(0ms) == std::future_status::ready; }) && ready.get();
+    }
+    bool selected(const std::shared_ptr<Session>& s, int64_t tf) {
+        auto done = std::make_shared<std::promise<bool>>();
+        auto ready = done->get_future();
+        net::post(RecordingServerStopTest::io(*server),
+            [s, done, tf] { done->set_value(RecordingServerStopTest::selected(*s, tf)); });
         return spinUntil([&] { return ready.wait_for(0ms) == std::future_status::ready; }) && ready.get();
     }
     ~CandleFixture() { server->stop(); }
