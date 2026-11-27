@@ -184,6 +184,10 @@ with timeframe 0 disables these live candles. Before a declaration, a session
 receives no 1m+ updates or closes. Symbol subscriptions remain required and do
 not implicitly choose a candle timeframe; history requests never change it.
 Sub-minute candles and other stream families retain their existing subscriptions.
+`symbol` must be a string and is uppercased exactly as for `subscribe`;
+`timeframe_ms` must be an integer. Missing or wrongly typed fields receive
+`{"type":"error","context":"candle_live_select","message":"invalid candle selection"}`
+(with the normalized symbol when available), without changing the active selection.
 
 The server replaces the selection on its session executor, discards pending old
 updates, and rejects non-selected updates/closes before encoding. It reads the
@@ -191,7 +195,7 @@ current forming bar on a queued model-thread turn (under the aggregator's shared
 state lock), including the open minute in coarser rollups. That snapshot returns
 on the same FIFO executor as model events: an identical already-delivered update
 is not sent twice, and live closes continue during snapshot/history work. The
-server sends `candle_live_selected` with the same symbol, timeframe and selection
+server sends `candle_live_selected` with the normalized symbol, timeframe and selection
 after seeding; if the symbol is not subscribed yet, it acknowledges the declaration
 and seeds when subscribed. With no forming bar yet, the next live event seeds it.
 Repeating the same declaration is idempotent. Unsubscribing its symbol clears the

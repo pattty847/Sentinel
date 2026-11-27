@@ -1,5 +1,6 @@
 // Raw TLS peers count candle frames before any client-side filter. Selection
 // tests also exercise quiet snapshots, replacement and reconnect boundaries.
+// Selection casing and malformed-field replies are checked on the raw wire.
 #include "CandleWireFixture.hpp"
 #include "trading/MarketEventSource.hpp"
 #include <QScopeGuard>
@@ -730,6 +731,7 @@ struct RawCandleClient : StalledCandleClient {
 // Every wait has a deadline, including when run against a server without selection.
 struct ActiveCandlePeer : StalledCandleClient {
     std::vector<Json> candles;
+    Json lastReply;
     using StalledCandleClient::StalledCandleClient;
     void write(const Json& message) { ws.write(net::buffer(message.dump())); }
     bool until(const std::string& type) {
@@ -749,7 +751,10 @@ struct ActiveCandlePeer : StalledCandleClient {
             const auto frame = Json::parse(beast::buffers_to_string(buffer.data()));
             const auto received = frame.value("type", "");
             if (received == "candle_bar_update" || received == "candle_bar_closed") candles.push_back(frame);
-            if (received == type) return true;
+            if (received == type) {
+                lastReply = frame;
+                return true;
+            }
         }
     }
     bool select(const std::string& symbol, int64_t tf, uint64_t generation) {
@@ -781,6 +786,56 @@ protected:
     CandleFixture fixture{true, 0, {300000}};
     void SetUp() override { fixture.start(); }
 };
+
+TEST_F(CandleSelectionWire, LowercaseSelectionMatchesTheSubscribedSymbol) {
+    ActiveCandlePeer peer(fixture.port());
+    ASSERT_TRUE(peer.until("ack"));
+    ASSERT_TRUE(peer.select("btc-usd", 300000, 1));
+    EXPECT_EQ(peer.lastReply.at("symbol"), "BTC-USD");
+    tradeAt(*fixture.model, 540000);
+    tradeAt(*fixture.model, 600000);
+    ASSERT_TRUE(peer.drain(fixture));
+    const auto frames = peer.minutes();
+    ASSERT_EQ(frames.size(), 3u); // forming, close, next forming
+    int closes = 0;
+    for (const auto& frame : frames) {
+        EXPECT_EQ(frame.at("symbol"), "BTC-USD");
+        EXPECT_EQ(frame.at("timeframe_ms"), 300000);
+        EXPECT_EQ(frame.at("selection"), 1);
+        closes += frame.at("type") == "candle_bar_closed";
+    }
+    EXPECT_EQ(closes, 1);
+}
+
+TEST_F(CandleSelectionWire, MalformedSelectionRepliesWithErrorAndKeepsSessionUsable) {
+    ActiveCandlePeer peer(fixture.port());
+    ASSERT_TRUE(peer.until("ack"));
+    const std::vector<Json> malformed{
+        {{"type", "candle_live_select"}, {"selection", 3}},
+        {{"type", "candle_live_select"}, {"selection", 3},
+         {"symbol", "BTC-USD"}, {"timeframe_ms", "300000"}},
+        {{"type", "candle_live_select"}, {"selection", 3},
+         {"symbol", 42}, {"timeframe_ms", 300000}},
+        {{"type", "candle_live_select"}, {"selection", 3}, {"symbol", "BTC-USD"}},
+        {{"type", "candle_live_select"}, {"selection", 3},
+         {"symbol", "BTC-USD"}, {"timeframe_ms", 300000.0}}
+    };
+    for (const auto& request : malformed) {
+        SCOPED_TRACE(request.dump());
+        peer.write(request);
+        ASSERT_TRUE(peer.until("error"));
+        EXPECT_EQ(peer.lastReply.at("context"), "candle_live_select");
+        EXPECT_EQ(peer.lastReply.at("message"), "invalid candle selection");
+    }
+    ASSERT_TRUE(peer.select("BTC-USD", 300000, 4));
+    tradeAt(*fixture.model, 540000);
+    ASSERT_TRUE(peer.drain(fixture));
+    const auto frames = peer.minutes();
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames.front().at("timeframe_ms"), 300000);
+    EXPECT_EQ(frames.front().at("selection"), 4);
+    EXPECT_EQ(frames.front().at("candle").at("volume"), 1);
+}
 
 TEST_F(CandleSelectionWire, UndeclaredSessionSendsNoMinuteFramesButKeepsSubminuteStreams) {
     ActiveCandlePeer peer(fixture.port());

@@ -5,6 +5,7 @@
 // Only the explicitly selected (symbol, timeframe) emits 1m+ candles. Selection
 // seeds on the model thread, FIFO with live callbacks; identical seeds are omitted.
 // History never changes selection. Sub-minute streams retain their original gates.
+// Selection symbols use subscription casing; malformed fields receive an error.
 #include "metrics/MetricsRegistry.hpp"
 #include "SentinelStreamServer.hpp"
 #include "../servermodel/TradeOverlayPublisher.hpp"
@@ -1709,7 +1710,14 @@ public:
     }
 
     void selectCandle(const nlohmann::json& message) {
-        const auto symbol = message.at("symbol").get<std::string>();
+        const bool hasSymbol = message.contains("symbol") && message["symbol"].is_string();
+        std::string symbol = hasSymbol ? message["symbol"].get<std::string>() : "";
+        std::transform(symbol.begin(), symbol.end(), symbol.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        if (!hasSymbol || !message.contains("timeframe_ms") || !message["timeframe_ms"].is_number_integer()) {
+            send_error("candle_live_select", symbol, "invalid candle selection");
+            return;
+        }
         const auto tf = message.at("timeframe_ms").get<int64_t>();
         const auto& configured = owner_->serverConfig().chart.timeframesMs;
         if (!message.contains("selection") || !message["selection"].is_number_unsigned() ||
