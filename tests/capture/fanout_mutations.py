@@ -8,6 +8,9 @@ import subprocess
 
 root = Path(__file__).resolve().parents[2]
 os.chdir(root)
+# Binaries run outside ctest get the paths ctest's ENVIRONMENT gives them (tests/support/TestPaths.hpp).
+os.environ.setdefault('SENTINEL_SOURCE_DIR', str(root))
+os.environ.setdefault('CAPTURE_APP_FIXTURE', str(root / 'build/mac-clang/tests/capture/capture_app_fixture'))
 fanout = Path('libs/core/capture/CaptureFanout.cpp')
 writer = Path('libs/core/capture/RawCapture.cpp')
 app = Path('libs/core/capture/CaptureApp.cpp')

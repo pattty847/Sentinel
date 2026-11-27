@@ -7,7 +7,8 @@
 // (golden/frames.json) is keyed by backend + device. On the owner's Mac M4 with Metal a
 // missing baseline or scene FAILS; other machines skip loudly (exit 77).
 //   --bless       write (merge) this machine's key into the manifest
-// A mismatch dumps PNGs to $SENTINEL_GOLDEN_OUT_DIR (ctest: <build>/golden-out; else <tmp>/golden-out).
+// A mismatch dumps PNGs to $SENTINEL_GOLDEN_OUT_DIR (ctest sets <build>/golden-out); a hand run
+// without it uses <build>/golden-out too, found from the executable (<build>/tests/render).
 #include "UnifiedGridRenderer.h"
 #include "../support/TestPaths.hpp"
 #include "SyntheticHmc2Fixture.hpp"
@@ -436,7 +437,8 @@ std::vector<Scene> scenes() {
 
 QString outDir() {
     const QString dir = qEnvironmentVariable("SENTINEL_GOLDEN_OUT_DIR");
-    return dir.isEmpty() ? QDir::tempPath() + "/golden-out" : dir;
+    if (!dir.isEmpty()) return dir;
+    return QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../../golden-out");
 }
 } // namespace
 

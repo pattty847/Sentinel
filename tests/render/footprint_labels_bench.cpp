@@ -4,8 +4,9 @@
 // Prints microseconds per changed frame and heap allocations per frame. No GPU, no GUI.
 // With an argument "heatmap [maxGlyphs]": time HeatmapLabelLayout::layout plus the shared
 // ChartTextRenderer submission for a 3840x2160 view of 96x108 cells (four-glyph labels).
+// The font comes from $SENTINEL_SOURCE_DIR, else from the first directory above the
+// executable that holds it (a build directory inside the checkout needs no setup).
 #include "chart/core/ChartFrame.hpp"
-#include "../support/TestPaths.hpp"
 #include "chart/layers/FootprintCellsLayer.hpp"
 #include "config/AgentHostMode.hpp"
 #include "render/ChartTextAtlas.hpp"
@@ -18,6 +19,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <new>
 #include <random>
@@ -36,6 +38,19 @@ void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
+constexpr const char* kFont = "resources/fonts/RobotoMono/RobotoMono-Regular.ttf";
+
+// Run-time source root: never a compile definition (it would miss ccache in every checkout).
+std::filesystem::path sourceDir(const char* argv0) {
+    if (const char* env = std::getenv("SENTINEL_SOURCE_DIR"); env && *env) return env;
+    std::error_code ec;
+    for (auto dir = std::filesystem::absolute(argv0, ec).parent_path(); !ec && !dir.empty(); dir = dir.parent_path()) {
+        if (std::filesystem::exists(dir / kFont, ec)) return dir;
+        if (dir == dir.parent_path()) break;
+    }
+    return {};
+}
+
 int heatmapBench(const ChartTextAtlas& atlas, size_t maxGlyphs) {
     using namespace heatmap;
     using namespace heatmap::gpu;
@@ -96,7 +111,12 @@ int main(int argc, char** argv) {
     if (!AgentHostMode::activate(cache.path(), {}, &error)) { std::cerr << error.toStdString() << "\n"; return 2; }
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    const auto source = sourceDir(argv[0]);
+    if (source.empty()) {
+        std::cerr << kFont << " not found above the executable; set SENTINEL_SOURCE_DIR to the checkout root\n";
+        return 2;
+    }
+    params.fontPath = QString::fromStdString((source / kFont).string());
     params.charset = "0123456789.<>kMBT";
     params.fontPx = 64;
     if (!atlas.build(params)) { std::cerr << "atlas build failed\n"; return 2; }

@@ -7,6 +7,8 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 os.chdir(ROOT)
 os.environ.setdefault("CCACHE_DIR", "/tmp/sentinel-ccache")
+# Binaries run outside ctest get the paths ctest's ENVIRONMENT gives them (tests/support/TestPaths.hpp).
+os.environ.setdefault("SENTINEL_SOURCE_DIR", str(ROOT))
 TARGET = "test_journal_anchors"
 STORE = "libs/core/roller/AnchorStore.cpp"
 RECORDER = "libs/core/servermodel/BookRecorder.cpp"

@@ -266,7 +266,7 @@ Validation commands (build `-j 2`):
   state and bounded reader tests.
 - `SENTINEL_ANCHOR_REAL_ROOT=/Volumes/T7/sentinel-data/raw-l2` enables the BTC and
   PEPE captured-hour recorder export/import cases in that suite.
-- `SENTINEL_ANCHOR_DAY_ROOT=/Volumes/T7/sentinel-data/raw-l2
+- `SENTINEL_ANCHOR_DAY_ROOT=/Volumes/T7/sentinel-data/raw-l2 SENTINEL_SOURCE_DIR=$PWD
   build/mac-clang/tests/roller/test_journal_anchors
   --gtest_filter=AnchorReplay.RealDayEveryAnchorMidnightAndSevenProductBenchmark`
   runs the explicit long captured-day acceptance: 96 separate resumptions for

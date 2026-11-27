@@ -10,6 +10,9 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build/mac-clang"
+# Binaries run outside ctest get the paths ctest's ENVIRONMENT gives them (tests/support/TestPaths.hpp).
+os.environ.setdefault("SENTINEL_SOURCE_DIR", str(ROOT))
+os.environ.setdefault("BACKTEST_CLI", str(BUILD / "apps/sentinel-backtest/sentinel-backtest"))
 DECODER = "libs/core/roller/KalshiDecoder.cpp"
 FEED = "libs/core/roller/JournalFeed.cpp"
 READER = "libs/core/roller/JournalReader.cpp"

@@ -9,6 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 os.chdir(ROOT)
 os.environ.setdefault('CCACHE_DIR', '/tmp/sentinel-db2b-ccache')
+# Binaries run outside ctest get the paths ctest's ENVIRONMENT gives them (tests/support/TestPaths.hpp).
+os.environ.setdefault('SENTINEL_SOURCE_DIR', str(ROOT))
+os.environ.setdefault('ROLLER_TEST_ROOT', str(ROOT / 'build/mac-clang/tests/roller'))
 SHADOW, ROLLER = 'test_shadow_roller', 'test_roller'
 
 def command(args):

@@ -11,6 +11,9 @@ import subprocess
 os.environ['CCACHE_DISABLE'] = '1'
 root = Path(__file__).resolve().parents[2]
 os.chdir(root)
+# Binaries run outside ctest get the paths ctest's ENVIRONMENT gives them (tests/support/TestPaths.hpp).
+os.environ.setdefault('SENTINEL_SOURCE_DIR', str(root))
+os.environ.setdefault('ROLLER_TEST_ROOT', str(root / 'build/mac-clang/tests/roller'))
 
 def command(args, expected=0):
     p = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
