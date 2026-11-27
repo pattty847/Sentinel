@@ -105,8 +105,10 @@ uint64_t outputBytes(const fs::path& root, const std::string& product) {
 // day's two derived levels; minute files and neighbouring days stay untouched.
 void invalidateRollups(const fs::path& root, const std::string& product, int64_t day) {
     const auto name = QDateTime::fromMSecsSinceEpoch(day, QTimeZone::UTC).toString("yyyy-MM-dd").toStdString() + ".shr";
-    unsigned removed = 0;
-    for (const auto* layer : {"near", "deep"}) for (const auto* level : {"3600000", "86400000"}) {
+    unsigned removed = 0, failed = 0;
+    std::string errors;
+    // Every (layer, level) is attempted; the failures are reported together.
+    for (const auto* layer : {"near", "deep"}) for (const auto* level : {"3600000", "86400000"}) try {
         const auto dir = root / product / layer / level;
         bool missing = false;
         for (const auto& at : {root, root / product, root / product / layer, dir}) {
@@ -132,8 +134,12 @@ void invalidateRollups(const fs::path& root, const std::string& product, int64_t
         int error = 0;
         if (!persistence::syncDirectory(dir, error))
             throw std::system_error(error, std::generic_category(), "rollup invalidation directory sync");
+    } catch (const std::exception& e) {
+        errors += (failed++ ? "; " : "") + std::string(layer) + "/" + level + ": " + e.what();
     }
     if (removed) sLog_Data("Roller invalidated rollups product=" << product << " dayMs=" << day << " files=" << removed);
+    if (failed)
+        throw std::runtime_error(std::to_string(failed) + " of 4 rollup levels failed: " + errors);
 }
 }
 int64_t parseTime(const std::string& text) {
@@ -161,6 +167,11 @@ json roll(const RollOptions& o) {
         o.fromMs % Minute || o.toMs % Minute) throw std::runtime_error("roll range must contain complete UTC minutes");
     capture::validateSymbol(o.product, Venue::Kalshi);
     std::optional<fs::path> rollupRoot;
+    struct InvalidationLog {
+        int64_t day = -1;
+        std::chrono::steady_clock::time_point last{};
+        uint64_t suppressed = 0;
+    } invalidationLog;
     const auto started = std::chrono::steady_clock::now();
     JournalReader inventory(o.journalRoot, o.product);
     const auto cpPath = o.outputRoot/o.product/"roller.json";
@@ -604,15 +615,28 @@ json roll(const RollOptions& o) {
             // counts offers, and removing the same files again is safe.
             if (stats.columnsWritten != checkpointColumns && day + Day <= QDateTime::currentMSecsSinceEpoch()) {
                 try {
-                    if (!rollupRoot)
+                    if (!rollupRoot) {
                         rollupRoot = recording::rollupRootFor(o.rollupRoot.string(), o.outputRoot);
-                    // A refused root means there is no usable derived store.
+                        // A refused root means there is no usable derived store.
+                        if (rollupRoot->empty())
+                            sLog_Warning("Roller skips rollup invalidation: refused rollup root product=" << o.product
+                                         << " configured=" << o.rollupRoot.string()
+                                         << " output=" << o.outputRoot.string());
+                    }
                     if (!rollupRoot->empty()) invalidateRollups(*rollupRoot, o.product, day);
                 } catch (const std::exception& e) {
                     if (!o.rollupInvalidationBestEffort) throw;
                     if (o.rollupInvalidationFailuresCounter) o.rollupInvalidationFailuresCounter->inc();
-                    sLog_Error("Roller rollup invalidation failed product=" << o.product
-                               << " dayMs=" << day << " reason=" << e.what());
+                    // Closed-day catch-up fences every minute: one line per day
+                    // and minute of wall time, with the count in between.
+                    const auto now = std::chrono::steady_clock::now();
+                    if (invalidationLog.day != day || now - invalidationLog.last >= std::chrono::minutes(1)) {
+                        sLog_Error("Roller rollup invalidation failed product=" << o.product << " dayMs=" << day
+                                   << " reason=" << e.what() << " suppressedSinceLastLine=" << invalidationLog.suppressed);
+                        invalidationLog = InvalidationLog{day, now, 0};
+                    } else {
+                        ++invalidationLog.suppressed;
+                    }
                 }
             }
             const bool metadataChanged = gridVenue == Venue::Kalshi && !completedCheckpoint && cp["days"].contains(key) &&

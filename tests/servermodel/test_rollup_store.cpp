@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <numeric>
 
 namespace {
@@ -147,6 +148,32 @@ std::vector<std::shared_ptr<const StoredChunk>> served(RollupStore& store, Hmc2R
     }
     return out;
 }
+// Captures Qt log lines for the lifetime of the object.
+class Logs {
+public:
+    Logs() {
+        std::lock_guard lock(mutex());
+        lines() = {};
+        previous_ = qInstallMessageHandler([](QtMsgType, const QMessageLogContext&, const QString& message) {
+            std::lock_guard lock(mutex());
+            lines().push_back(message);
+        });
+    }
+    ~Logs() { qInstallMessageHandler(previous_); }
+    size_t count(const QString& text) const {
+        std::lock_guard lock(mutex());
+        return size_t(std::count_if(lines().begin(), lines().end(), [&](const QString& m) { return m.contains(text); }));
+    }
+    QString first(const QString& text) const {
+        std::lock_guard lock(mutex());
+        for (const auto& m : lines()) if (m.contains(text)) return m;
+        return {};
+    }
+private:
+    static std::mutex& mutex() { static std::mutex m; return m; }
+    static std::vector<QString>& lines() { static std::vector<QString> l; return l; }
+    QtMessageHandler previous_ = nullptr;
+};
 uint32_t word(const BinCell& c) { return tiles::cellWord(c.valid ? tiles::kCellValid : tiles::kCellVeil, c.code, c.dominantAsk); }
 struct Diff { uint64_t compared = 0, cells = 0, states = 0; };
 // Every bucket's state, and every cell of every present bucket over both
@@ -666,6 +693,144 @@ TEST_F(RollupTest, HeaderChecksAreReusedWithinOnePassOnly) {
     EXPECT_EQ(store.runPass().built, 0u);
 }
 
+// Ages the directory's modification time past the listing settle time, to a
+// new value each call (a change the store must notice).
+void settle(const fs::path& dir) {
+    static int n = 0;
+    fs::last_write_time(dir, fs::file_time_type::clock::now() - std::chrono::hours(1) + std::chrono::seconds(++n));
+}
+
+// Chunk requests cost O(requested days): an unchanged minute directory is
+// listed once however many requests and days there are, and each request stats
+// only its own day's files.
+TEST_F(RollupTest, ChunkRequestsListTheMinuteDirectoryOnce) {
+    RollupStore store(options());
+    ASSERT_EQ(store.runPass().built, 8u);
+    const auto dir = hmc2() / "BTC-USD" / "near-60000";
+    for (int i = 10; i < 400; ++i) // a long history beyond the requested days (never read)
+        std::ofstream(Hmc2Store::filePath(hmc2(), record("near", day0).header, day0 + i * day));
+    settle(dir);
+    std::map<int64_t, uint64_t> filesOfDay; // minute files per requested day
+    for (int64_t d = day0; d < day0 + 4 * day; d += day) {
+        const auto prefix = Hmc2Store::filePath(hmc2(), record("near", d).header, d).filename().string().substr(0, 11);
+        for (const auto& entry : fs::directory_iterator(dir))
+            if (entry.path().filename().string().starts_with(prefix)) ++filesOfDay[d];
+    }
+    Hmc2Reader reader(hmc2());
+    const auto listings = store.counters().minuteListings.load();
+    const auto stats = store.counters().minuteFileStats.load();
+    uint64_t expectedStats = 0;
+    constexpr int requests = 40;
+    for (int i = 0; i < requests; ++i) {
+        const int64_t d = day0 + (i % 4) * day;
+        const auto reply = store.serve({"BTC-USD", "hmc2.near", hour, d}, reader);
+        ASSERT_TRUE(reply.wire) << reply.message;
+        EXPECT_FALSE(reply.fallback);
+        expectedStats += filesOfDay[d];
+    }
+    EXPECT_EQ(store.counters().minuteListings.load() - listings, 1u) << "one listing for every request";
+    EXPECT_EQ(store.counters().minuteFileStats.load() - stats, expectedStats) << "only the requested days' files";
+    EXPECT_EQ(expectedStats, uint64_t(requests)) << "one minute file per near day";
+}
+
+// A minute file added, replaced (in place, and by rename with the same size
+// and a new time) or removed between requests is seen by the next request,
+// including a change inside the directory's modification-time granularity.
+TEST_F(RollupTest, MinuteChangesBetweenRequestsAreSeenByTheNextRequest) {
+    RollupStore store(options());
+    ASSERT_EQ(store.runPass().built, 8u);
+    const auto dir = hmc2() / "BTC-USD" / "near-60000";
+    const auto listings = [&] { return store.counters().minuteListings.load(); };
+    auto serve = [&](int64_t d) {
+        Hmc2Reader reader(hmc2()); // a fresh reader: only the store's own reuse is under test
+        auto reply = store.serve({"BTC-USD", "hmc2.near", hour, d}, reader);
+        EXPECT_TRUE(reply.wire) << reply.message;
+        return reply;
+    };
+    // A recorder-gap day before the first recorded day, and its minute file
+    // staged elsewhere.
+    const int64_t gapDay = day0 - day;
+    const auto header = record("near", gapDay).header;
+    const fs::path staging = fs::path(temp.path().toStdString()) / "staging";
+    {
+        Hmc2Store staged(staging);
+        for (int64_t t = gapDay + 5 * hour; t < gapDay + 5 * hour + 10 * minute; t += minute)
+            staged.append(record("near", t));
+    }
+    const auto stagedFile = Hmc2Store::filePath(staging, header, gapDay);
+    const auto gapFile = Hmc2Store::filePath(hmc2(), header, gapDay);
+    ASSERT_TRUE(fs::exists(stagedFile));
+    auto add = [&] {
+        fs::copy_file(stagedFile, dir / "incoming.tmp");
+        fs::rename(dir / "incoming.tmp", gapFile);
+    };
+
+    settle(dir);
+    const auto gap = serve(gapDay);
+    EXPECT_FALSE(gap.fallback) << "no minute files: nothing to fall back from";
+    const auto good = serve(day0 + day);
+    EXPECT_FALSE(good.fallback);
+    auto before = listings();
+    EXPECT_FALSE(serve(day0 + day).fallback);
+    EXPECT_EQ(listings(), before) << "an unchanged directory is not listed again";
+
+    // Added.
+    add();
+    settle(dir);
+    EXPECT_TRUE(serve(gapDay).fallback);
+    EXPECT_EQ(listings(), before + 1);
+
+    // Replaced in place: same name and size, new time. No listing needed.
+    before = listings();
+    const auto inPlace = Hmc2Store::filePath(hmc2(), header, day0 + day);
+    fs::last_write_time(inPlace, fs::last_write_time(inPlace) + std::chrono::seconds(5));
+    EXPECT_TRUE(serve(day0 + day).fallback);
+    EXPECT_EQ(listings(), before);
+
+    // Replaced by rename over it: same size, new time.
+    const auto renamed = Hmc2Store::filePath(hmc2(), header, day0 + 2 * day);
+    EXPECT_FALSE(serve(day0 + 2 * day).fallback);
+    fs::copy_file(renamed, dir / "replacement.tmp");
+    fs::last_write_time(dir / "replacement.tmp", fs::last_write_time(renamed) + std::chrono::seconds(7));
+    ASSERT_EQ(fs::file_size(dir / "replacement.tmp"), fs::file_size(renamed));
+    fs::rename(dir / "replacement.tmp", renamed);
+    settle(dir);
+    EXPECT_TRUE(serve(day0 + 2 * day).fallback);
+
+    // Removed.
+    fs::remove(gapFile);
+    settle(dir);
+    const auto removed = serve(gapDay);
+    EXPECT_FALSE(removed.fallback);
+    EXPECT_EQ(*removed.wire, *gap.wire);
+
+    // Added within the directory's time granularity: listed while the
+    // directory time was recent, then a change that leaves the same time.
+    const auto recent = fs::file_time_type::clock::now();
+    fs::last_write_time(dir, recent);
+    EXPECT_FALSE(serve(gapDay).fallback);
+    add();
+    fs::last_write_time(dir, recent);
+    EXPECT_TRUE(serve(gapDay).fallback) << "a listing taken inside the granularity is never reused";
+}
+
+// The minute fallback is logged once per series day per interval, not per
+// request; the counter still counts every fallback serve.
+TEST_F(RollupTest, FallbackWarningIsLoggedOncePerSeriesDay) {
+    RollupStore store(options());
+    ASSERT_EQ(store.runPass().built, 8u);
+    fs::remove(store.filePath("BTC-USD", "near", hour, day0 + day));
+    fs::remove(store.filePath("BTC-USD", "near", hour, day0 + 2 * day));
+    Hmc2Reader reader(hmc2());
+    Logs logs;
+    for (int i = 0; i < 5; ++i)
+        EXPECT_TRUE(store.serve({"BTC-USD", "hmc2.near", hour, day0 + day}, reader).fallback);
+    EXPECT_EQ(logs.count("Rollup file missing, corrupt or stale"), 1u);
+    EXPECT_TRUE(store.serve({"BTC-USD", "hmc2.near", hour, day0 + 2 * day}, reader).fallback);
+    EXPECT_EQ(logs.count("Rollup file missing, corrupt or stale"), 2u) << "another day has its own line";
+    EXPECT_EQ(store.counters().fallbackServes.load(), 6u);
+}
+
 namespace {
 // Real roller writes and durable recorder fences, entirely in /tmp. The
 // second pass fills more minutes of the same closed UTC day's HMC2 files.
@@ -999,4 +1164,42 @@ TEST_F(RollerRollupTest, LateBuilderPublicationCannotResurrectStaleData) {
     EXPECT_NE(*reply.wire, *old.wire);
     EXPECT_EQ(store.runPass().built, 1u);
     EXPECT_EQ(*store.serve(key, reader).wire, *reply.wire);
+}
+
+// One unusable level does not stop the other three from being invalidated; the
+// failure is reported (logged) once, not once per level or per fence.
+TEST_F(RollerRollupTest, InvalidationTriesEveryLevelAndReportsOnce) {
+    RollupStore store(storeOptions());
+    ASSERT_EQ(store.runPass().built, 2u);
+    const auto nearHour = store.root() / "BTC-USD" / "near" / std::to_string(hour);
+    const auto outside = root() / "outside";
+    fs::rename(nearHour, outside);
+    fs::create_directory_symlink(outside, nearHour); // the first (layer, level) fails
+    sentinel::metrics::MetricsRegistry registry;
+    auto& failures = registry.counter("sentinel_roller_rollup_invalidation_failures_total", "", {{"product", "BTC-USD"}});
+    auto o = rollOptions();
+    o.productWriterLease = true;
+    o.nextRecord = [](sentinel::roller::JournalReader& source, sentinel::roller::JournalRecord& input) {
+        return source.next(input);
+    };
+    o.rollupInvalidationBestEffort = true;
+    o.rollupInvalidationFailuresCounter = &failures;
+    Logs logs;
+    EXPECT_NO_THROW(sentinel::roller::roll(o));
+    EXPECT_GT(failures.value(), 0u);
+    EXPECT_TRUE(fs::exists(outside / "2020-01-01.shr")) << "never through the link";
+    EXPECT_FALSE(fs::exists(store.filePath("BTC-USD", "near", day, start)));
+    EXPECT_FALSE(fs::exists(store.filePath("BTC-USD", "deep", hour, start)));
+    EXPECT_FALSE(fs::exists(store.filePath("BTC-USD", "deep", day, start)));
+    EXPECT_EQ(logs.count("Roller rollup invalidation failed"), 1u);
+    EXPECT_TRUE(logs.first("Roller rollup invalidation failed").contains("1 of 4 rollup levels failed"))
+        << logs.first("Roller rollup invalidation failed").toStdString();
+}
+
+TEST_F(RollerRollupTest, RefusedRollupRootIsLoggedOnce) {
+    auto o = rollOptions();
+    o.rollupRoot = o.outputRoot;
+    Logs logs;
+    EXPECT_NO_THROW(sentinel::roller::roll(o));
+    EXPECT_EQ(logs.count("Roller skips rollup invalidation: refused rollup root"), 1u);
 }

@@ -11,6 +11,10 @@
 // - serve() returns SHC1 chunk frames for 1h and 1d keys from these files. A
 //   missing or corrupt file is served by composing the day's minutes on the
 //   calling worker (correct, slower) and queued for rebuild.
+// - Minute fingerprints come from a per-series listing of the minute directory
+//   that is reused while the directory's modification time is unchanged and
+//   was settled when listed; every request still stats the requested days'
+//   files, so in-place rewrites are seen without a new listing.
 // Deleting the store directory is safe: it is rebuilt.
 #include "RecordingChunks.hpp"
 #include <atomic>
@@ -55,14 +59,12 @@ std::optional<RollupFileHeader> readRollupHeader(const std::filesystem::path& pa
 std::optional<std::vector<uint8_t>> readRollupFrame(const std::filesystem::path& path, const ChunkKey& expected);
 
 // A series' recorded minute files for one UTC day,
-// <hmc2Root>/<symbol>/<layer>-60000/<day>*.hmc2: `fingerprint` hashes their
+// <hmc2Root>/<symbol>/<layer>-60000/<day>.*hmc2: `fingerprint` hashes their
 // names, sizes and modification times; a rollup built from other files is
-// stale and is rebuilt (0 = no files). Keyed by day start.
+// stale and is rebuilt (0 = no files).
 struct MinuteDay {
     uint64_t fingerprint = 0;
 };
-std::map<int64_t, MinuteDay> minuteFingerprints(const std::filesystem::path& hmc2Root, const std::string& symbol,
-                                                const std::string& layer);
 
 // The store directory, resolved (absolute, symlinks followed): `configured`, or
 // "<hmc2Root>-rollups" when empty. Empty (refused) when either path cannot be
@@ -92,6 +94,8 @@ public:
     struct Counters {
         std::atomic<uint64_t> daysBuilt{0}, buildFailures{0}, buildMicros{0}, fallbackServes{0};
         std::atomic<int64_t> pendingDays{0}; // closed days without a current rollup, including failures
+        // Minute directory enumerations, and minute file stats, for fingerprints.
+        std::atomic<uint64_t> minuteListings{0}, minuteFileStats{0};
     };
     struct PassResult {
         uint64_t built = 0, failed = 0, pending = 0;
@@ -139,6 +143,21 @@ private:
         int64_t firstMinuteMs = 0; // oldest recorded minute bucket (0: none)
         int64_t runStart = 0, runEnd = 0; // contiguous built days ending at the newest built day
     };
+    // One minute directory's file names by day (sorted). Reused only while the
+    // directory's modification time equals `dirTime` and `settled`: the
+    // listing began more than the coarsest mtime granularity after dirTime, so
+    // any later entry change gives the directory a different time.
+    using DayNames = std::map<int64_t, std::vector<std::string>>;
+    struct Listing {
+        std::filesystem::file_time_type dirTime;
+        bool settled = false;
+        std::shared_ptr<const DayNames> names;
+        uint64_t lastUse = 0;
+    };
+    struct FallbackLog {
+        std::chrono::steady_clock::time_point last;
+        uint64_t repeats = 0; // fallbacks since the last line
+    };
     struct CacheEntry {
         ChunkKey key;
         uint64_t identity = 0;
@@ -151,6 +170,11 @@ private:
     std::set<std::tuple<std::string, std::string, int64_t>> suspect_; // days to rebuild (corrupt at serve)
     std::atomic<uint64_t> generation_{1};
     mutable std::mutex passMutex_;
+    std::mutex listingMutex_; // never held across I/O
+    std::map<std::pair<std::string, std::string>, Listing> listings_;
+    uint64_t listingUses_ = 0;
+    std::mutex fallbackLogMutex_;
+    std::map<std::tuple<std::string, std::string, int64_t>, FallbackLog> fallbackLogs_;
     std::mutex cacheMutex_;
     std::list<CacheEntry> cache_;
     size_t cacheBytes_ = 0;
@@ -167,8 +191,14 @@ private:
     void publish(const std::string& symbol, const std::string& layer, const Series& series);
     Series series(const std::string& symbol, const std::string& layer) const;
     void markSuspect(const std::string& symbol, const std::string& layer, int64_t dayMs);
-    // A file of this day should exist (it has minutes): count, log and queue a
-    // rebuild. False for a recorder-gap day.
+    // Fingerprints of the series' minute days in [from, to). Thread-safe.
+    std::map<int64_t, MinuteDay> minuteDays(const std::string& symbol, const std::string& layer, int64_t from,
+                                            int64_t to);
+    std::shared_ptr<const DayNames> minuteNames(const std::string& symbol, const std::string& layer);
+    // One warning line per (symbol, layer, day) per interval; true when due.
+    bool fallbackLogDue(const std::string& symbol, const std::string& layer, int64_t dayMs, uint64_t& repeats);
+    // A file of this day should exist (it has minutes): count, log (throttled)
+    // and queue a rebuild. A zero fingerprint for a recorder-gap day.
     MinuteDay expectFile(const ChunkKey& key, const std::string& layer, int64_t dayMs);
     uint64_t removeStaleTemps() const;
     bool ownedDirectory(const std::filesystem::path& dir) const;
