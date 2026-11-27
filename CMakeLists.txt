@@ -130,6 +130,7 @@ enable_testing()
 # Call at the end of a test directory's CMakeLists.txt: every test added in that
 # directory gets SENTINEL_SOURCE_DIR. Per-test values (an executable's
 # $<TARGET_FILE:...>, a scratch root) are appended next to their add_test.
+# A ';' in the source or build path is not supported: it would split the ENVIRONMENT list.
 function(sentinel_test_paths)
     get_property(tests DIRECTORY PROPERTY TESTS)
     foreach(test IN LISTS tests)
