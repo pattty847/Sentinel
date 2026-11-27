@@ -1,5 +1,6 @@
 // Minute candle selection is explicit and independent of history requests.
 // Reject obsolete wire selections before emitting a queued GUI signal.
+// Selection keys use the shared configured-symbol normalization rule.
 #include "SentinelStreamClient.hpp"
 #include "SentinelLogging.hpp"
 #include "ProtocolValidation.hpp"
@@ -744,12 +745,13 @@ void SentinelStreamClient::cancelTpoHistory(const std::string& symbol, const std
 
 void SentinelStreamClient::selectLiveCandle(const std::string& symbol, int64_t timeframeMs) {
     const int64_t tf = symbol.empty() || timeframeMs < 60000 ? 0 : timeframeMs;
+    const std::string selectedSymbol = tf ? normalizedDefaultSymbols({symbol}).front() : std::string{};
     {
         std::lock_guard lock(m_candleSelectionMutex);
-        m_candleSymbol = tf ? symbol : std::string{};
+        m_candleSymbol = selectedSymbol;
         m_candleTimeframeMs = tf;
     }
-    const nlohmann::json message = {{"type", "candle_live_select"}, {"symbol", tf ? symbol : ""},
+    const nlohmann::json message = {{"type", "candle_live_select"}, {"symbol", selectedSymbol},
         {"timeframe_ms", tf}, {"selection", m_candleDeliveryGeneration.load(std::memory_order_acquire)}};
     net::post(m_strand, [this, payload = message.dump()]() mutable {
         m_writeQueue.push_back(std::move(payload));

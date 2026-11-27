@@ -1,6 +1,7 @@
 // Raw TLS peers count candle frames before any client-side filter. Selection
 // tests also exercise quiet snapshots, replacement and reconnect boundaries.
 // Selection casing and malformed-field replies are checked on the raw wire.
+// Reply waits share one deadline and ignore errors from unrelated stream timers.
 #include "CandleWireFixture.hpp"
 #include "trading/MarketEventSource.hpp"
 #include <QScopeGuard>
@@ -734,13 +735,17 @@ struct ActiveCandlePeer : StalledCandleClient {
     Json lastReply;
     using StalledCandleClient::StalledCandleClient;
     void write(const Json& message) { ws.write(net::buffer(message.dump())); }
-    bool until(const std::string& type) {
+    bool until(const std::string& type,
+               std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + 3s) {
         for (;;) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (remaining <= 0ms) return false;
             beast::flat_buffer buffer;
             bool done = false;
             beast::error_code error;
             ws.async_read(buffer, [&](beast::error_code ec, size_t) { error = ec; done = true; });
-            const bool ready = spinUntil([&] { io.restart(); io.poll(); return done; });
+            const bool ready = spinUntil([&] { io.restart(); io.poll(); return done; }, remaining);
             if (!ready) {
                 beast::error_code ignored;
                 beast::get_lowest_layer(ws).socket().cancel(ignored);
@@ -756,6 +761,12 @@ struct ActiveCandlePeer : StalledCandleClient {
                 return true;
             }
         }
+    }
+    bool selectionError() {
+        const auto deadline = std::chrono::steady_clock::now() + 3s;
+        while (until("error", deadline))
+            if (lastReply.value("context", "") == "candle_live_select") return true;
+        return false;
     }
     bool select(const std::string& symbol, int64_t tf, uint64_t generation) {
         write({{"type", "candle_live_select"}, {"symbol", symbol},
@@ -810,6 +821,10 @@ TEST_F(CandleSelectionWire, LowercaseSelectionMatchesTheSubscribedSymbol) {
 TEST_F(CandleSelectionWire, MalformedSelectionRepliesWithErrorAndKeepsSessionUsable) {
     ActiveCandlePeer peer(fixture.port());
     ASSERT_TRUE(peer.until("ack"));
+    const auto sessions = RecordingServerStopTest::sessions(*fixture.server);
+    ASSERT_EQ(sessions.size(), 1u);
+    RecordingServerStopTest::send(*sessions.front(), {{"type", "error"},
+        {"context", "trade_overlay"}, {"message", "overlay grid unavailable or invalid"}});
     const std::vector<Json> malformed{
         {{"type", "candle_live_select"}, {"selection", 3}},
         {{"type", "candle_live_select"}, {"selection", 3},
@@ -823,7 +838,7 @@ TEST_F(CandleSelectionWire, MalformedSelectionRepliesWithErrorAndKeepsSessionUsa
     for (const auto& request : malformed) {
         SCOPED_TRACE(request.dump());
         peer.write(request);
-        ASSERT_TRUE(peer.until("error"));
+        ASSERT_TRUE(peer.selectionError());
         EXPECT_EQ(peer.lastReply.at("context"), "candle_live_select");
         EXPECT_EQ(peer.lastReply.at("message"), "invalid candle selection");
     }

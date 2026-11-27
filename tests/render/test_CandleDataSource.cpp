@@ -1,5 +1,6 @@
 // Exercise selection declarations and filtering before the queued GUI hop,
 // alongside history/live ownership through the real client parsers.
+// Client selection casing must match canonical symbols in incoming wire frames.
 #include <gtest/gtest.h>
 #include "datasources/RemoteGridDataSource.hpp"
 #include <QCoreApplication>
@@ -185,6 +186,22 @@ TEST_F(CandleDataSourceTest, DeclaresSelectionBeforeHistoryAndAgainOnReconnect) 
     EXPECT_EQ(restored.at("symbol"), "BTC-USD");
     EXPECT_EQ(restored.at("timeframe_ms"), 60000);
     EXPECT_GT(restored.at("selection").get<quint64>(), selected.at("selection").get<quint64>());
+}
+
+TEST_F(CandleDataSourceTest, LowercaseClientSelectionAcceptsCanonicalWireFrames) {
+    client().selectLiveCandle("btc-usd", 60000);
+    const auto selected = takeRequest(1000, true);
+    ASSERT_FALSE(selected.is_null());
+    EXPECT_EQ(selected.at("symbol"), "BTC-USD");
+    int updates = 0, closes = 0;
+    QObject::connect(&client(), &SentinelStreamClient::candleBarUpdateReceived,
+        &app, [&](auto&&...) { ++updates; }, Qt::DirectConnection);
+    QObject::connect(&client(), &SentinelStreamClient::candleBarClosedReceived,
+        &app, [&](auto&&...) { ++closes; }, Qt::DirectConnection);
+    live("BTC-USD", 60000, 1000, 10, 1, false);
+    live("BTC-USD", 60000, 1000, 10, 2, true);
+    EXPECT_EQ(updates, 1);
+    EXPECT_EQ(closes, 1);
 }
 
 TEST_F(CandleDataSourceTest, InactiveTimeframesNeverEnterTheQueuedSignal) {
