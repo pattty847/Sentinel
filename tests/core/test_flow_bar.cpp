@@ -219,6 +219,29 @@ TEST(FlowBar, CodecRejectsRowVolumesThatDisagreeWithSideTotals) {
     }
 }
 
+TEST(FlowBar, CodecAcceptsSideVolumesEqualToBaseAndRejectsExcess) {
+    FlowBarBuilder b(60'000, 1, 100, 1, 1);
+    accepted(b, {"buy", 0, 100, 1, Side::Buy});
+    accepted(b, {"sell", 1, 101, 2, Side::Sell});
+    accepted(b, {"unknown", 2, 102, 3, Side::Unknown});
+    auto bar = b.bars().front();
+    bar.baseVolume = bar.buyVol + bar.sellVol;
+    EXPECT_EQ(decodeFlowBar(encodeFlowBar(bar)), bar);
+    --bar.baseVolume;
+    EXPECT_THROW(encodeFlowBar(bar), std::invalid_argument);
+}
+
+TEST(FlowBar, CodecAcceptsKnownRowCountEqualToBarCountAndRejectsExcess) {
+    FlowBarBuilder b(60'000, 1, 100, 1, 1);
+    accepted(b, {"buy", 0, 100, 1, Side::Buy});
+    accepted(b, {"sell", 1, 101, 2, Side::Sell});
+    auto bar = b.bars().front();
+    ASSERT_EQ(bar.count, 2u);
+    EXPECT_EQ(decodeFlowBar(encodeFlowBar(bar)), bar);
+    --bar.count;
+    EXPECT_THROW(encodeFlowBar(bar), std::invalid_argument);
+}
+
 // The default decode keeps the writer's whole-day check; BarsOnly skips only that
 // re-encode and still checks every bar and the index.
 TEST(FlowBar, DayDecodeBarsOnlySkipsOnlyTheWholeDayReEncode) {
