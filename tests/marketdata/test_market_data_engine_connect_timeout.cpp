@@ -1,6 +1,7 @@
 // Real BeastWsTransport against local peers: bounded connect phases, bounded
 // close, late callbacks from timed-out attempts ignored. Loopback only.
 #include <gtest/gtest.h>
+#include "../support/TestPaths.hpp"
 #include "marketdata/MarketDataFeeds.hpp"
 #include "marketdata/ws/BeastWsTransport.hpp"
 #include <QTemporaryDir>
@@ -170,7 +171,7 @@ struct EngineConnectTimeout : testing::Test {
         ServerMdcConfig config;
         config.host = "localhost";
         config.port = port;
-        config.sslCaBundle = SENTINEL_TEST_CA;
+        config.sslCaBundle = testpaths::source("resources/certs/ca-bundle.crt");
         MarketDataFeeds::Options settings;
         settings.reconnect = policy;
         settings.jitter = [] { return 0ms; };

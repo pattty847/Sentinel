@@ -7,8 +7,9 @@
 // (golden/frames.json) is keyed by backend + device. On the owner's Mac M4 with Metal a
 // missing baseline or scene FAILS; other machines skip loudly (exit 77).
 //   --bless       write (merge) this machine's key into the manifest
-// A mismatch dumps PNGs to SENTINEL_GOLDEN_OUT_DIR (<build>/golden-out).
+// A mismatch dumps PNGs to $SENTINEL_GOLDEN_OUT_DIR (ctest: <build>/golden-out; else <tmp>/golden-out).
 #include "UnifiedGridRenderer.h"
+#include "../support/TestPaths.hpp"
 #include "SyntheticHmc2Fixture.hpp"
 #include "GoldenFlowSource.hpp"
 #include "mainwindow/ChartAgentPort.hpp"
@@ -434,11 +435,8 @@ std::vector<Scene> scenes() {
 }
 
 QString outDir() {
-#ifdef SENTINEL_GOLDEN_OUT_DIR
-    return QStringLiteral(SENTINEL_GOLDEN_OUT_DIR);
-#else
-    return QDir::tempPath() + "/golden-out";
-#endif
+    const QString dir = qEnvironmentVariable("SENTINEL_GOLDEN_OUT_DIR");
+    return dir.isEmpty() ? QDir::tempPath() + "/golden-out" : dir;
 }
 } // namespace
 
@@ -501,7 +499,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "ChartGolden: WARNING this Mac is '%s', not '%s': baselines are checked when present\n",
                          key.toStdString().c_str(), kRequiredKey);
 
-        QFile file(QStringLiteral(SENTINEL_SOURCE_DIR "/tests/render/golden/frames.json"));
+        QFile file(testpaths::qsource("tests/render/golden/frames.json"));
         QJsonObject keys;
         if (file.open(QIODevice::ReadOnly)) {
             keys = QJsonDocument::fromJson(file.readAll()).object().value("keys").toObject();

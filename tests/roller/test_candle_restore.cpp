@@ -1,4 +1,5 @@
 #include "roller/CandleRestore.hpp"
+#include "../support/TestPaths.hpp"
 #include "roller/JournalFeed.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
@@ -170,7 +171,7 @@ CandleRestoreInput input(const fs::path& root, const JournalPos& through) {
 }
 
 struct Temp {
-    QTemporaryDir dir{QStringLiteral(ROLLER_TEST_ROOT "/restore-XXXXXX")};
+    QTemporaryDir dir{testpaths::qenv("ROLLER_TEST_ROOT", "/restore-XXXXXX")};
     fs::path root() const { return dir.path().toStdString(); }
 };
 

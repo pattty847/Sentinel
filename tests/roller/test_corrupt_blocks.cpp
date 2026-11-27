@@ -1,4 +1,5 @@
 #include "roller/Roller.hpp"
+#include "../support/TestPaths.hpp"
 #include "roller/ShadowRoller.hpp"
 #include "roller/AnchorStore.hpp"
 #include "capture/CaptureFanout.hpp"
@@ -354,7 +355,7 @@ TEST(CorruptBlockPolicy, DecompressionErrorSkipsOnlyValidatedPayload) {
     EXPECT_THROW(capture::scan(qpath(p)), std::runtime_error);
 }
 TEST(CorruptBlockPolicy, AlertResolvesAfterTwoHoursWithoutNewCorruption) {
-    const auto root = YAML::LoadFile(std::string(SENTINEL_SOURCE_ROOT)+"/ops/monitoring/grafana/provisioning/alerting/rules.yaml");
+    const auto root = YAML::LoadFile(testpaths::source()+"/ops/monitoring/grafana/provisioning/alerting/rules.yaml");
     YAML::Node alert;
     for (size_t g = 0; g < root["groups"].size(); ++g) {
         const auto rules = root["groups"][g]["rules"];

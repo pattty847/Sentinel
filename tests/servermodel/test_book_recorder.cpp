@@ -1,4 +1,5 @@
 #include "servermodel/RecordingPage.hpp"
+#include "../support/TestPaths.hpp"
 #include "servermodel/BookRecorder.hpp"
 #include "servermodel/Hmc2Store.hpp"
 #include "servermodel/RecordingLive.hpp"
@@ -1178,7 +1179,7 @@ TEST_F(RecorderTest, BaseCompatibilityBytes) {
     const auto rows = read();
     ASSERT_EQ(rows.size(), 1);
     EXPECT_EQ(rows[0].header.configHash, 18191379077652817817ull);
-    const auto fixtures = std::filesystem::path(SENTINEL_SOURCE_DIR) / "tests/servermodel/fixtures";
+    const auto fixtures = std::filesystem::path(testpaths::source("tests/servermodel/fixtures"));
     EXPECT_EQ(recorderBytes(Hmc2Store::filePath(c.root, rows[0].header, kEpoch)),
               recorderBytes(fixtures / "recorder-61ae1b08.hmc2"));
     // Replay state deliberately rejects a different long-double representation.

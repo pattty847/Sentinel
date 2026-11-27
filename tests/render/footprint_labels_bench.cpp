@@ -5,6 +5,7 @@
 // With an argument "heatmap [maxGlyphs]": time HeatmapLabelLayout::layout plus the shared
 // ChartTextRenderer submission for a 3840x2160 view of 96x108 cells (four-glyph labels).
 #include "chart/core/ChartFrame.hpp"
+#include "../support/TestPaths.hpp"
 #include "chart/layers/FootprintCellsLayer.hpp"
 #include "config/AgentHostMode.hpp"
 #include "render/ChartTextAtlas.hpp"
@@ -95,7 +96,7 @@ int main(int argc, char** argv) {
     if (!AgentHostMode::activate(cache.path(), {}, &error)) { std::cerr << error.toStdString() << "\n"; return 2; }
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.charset = "0123456789.<>kMBT";
     params.fontPx = 64;
     if (!atlas.build(params)) { std::cerr << "atlas build failed\n"; return 2; }

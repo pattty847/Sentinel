@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "../support/TestPaths.hpp"
 
 #include "render/AxisLayout.hpp"
 #include "render/AxisTextService.hpp"
@@ -12,7 +13,7 @@ ChartTextAtlas buildAtlas() {
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
     params.fontPath =
-        QStringLiteral(SENTINEL_TEST_SOURCE_DIR) +
+        testpaths::qsource() +
         QStringLiteral("/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.charset = QStringLiteral(
         " 0123456789.+-,:/$ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");

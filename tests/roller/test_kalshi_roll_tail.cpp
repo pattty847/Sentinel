@@ -1,6 +1,7 @@
 // Receive-time tails can contain exchange-time book work for the previous day.
 // Journals/output are temporary; the three-file pin comes from 6f2226a5 sources.
 #include "roller/Roller.hpp"
+#include "../support/TestPaths.hpp"
 #include <gtest/gtest.h>
 #include <QCryptographicHash>
 #include <QTemporaryDir>
@@ -102,7 +103,7 @@ TEST(KalshiTail, LateDeltaMatchesBeforeMidnightAnd6f2226a5Bytes) {
     for (const auto& [name,bytes] : output)
         hashes[name] = QCryptographicHash::hash(QByteArray::fromStdString(bytes),QCryptographicHash::Sha256).toHex().toStdString();
     std::cout << "KALSHI_TAIL_HASHES " << hashes.dump() << '\n';
-    EXPECT_EQ(hashes,read(fs::path(KALSHI_FIXTURES) / "kalshi_tail_6f2226a5.json").at("sha256"));
+    EXPECT_EQ(hashes,read(fs::path(testpaths::source("tests/roller/fixtures")) / "kalshi_tail_6f2226a5.json").at("sha256"));
 }
 
 TEST(KalshiTail, ExchangeTimeAdmissionMatrixAndHistory) {

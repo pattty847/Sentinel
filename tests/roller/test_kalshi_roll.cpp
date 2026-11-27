@@ -1,6 +1,7 @@
 // Offline acceptance: independent Python book snapshots supply the TWAP oracle;
 // no reference decoder, production data, network, or live services are used.
 #include "roller/Roller.hpp"
+#include "../support/TestPaths.hpp"
 #include "roller/AnchorStore.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
@@ -162,8 +163,8 @@ TEST(KalshiRoll, OneSidedAndEmptyStartUseBoundsIncludingExtendedTickers) {
 }
 
 TEST(KalshiRoll, RealCaptureBothTickersIndependentWeightedRowsAndMidOhlc) {
-    const auto frames = read(fs::path(KALSHI_FIXTURES) / "ws_capture_sample.json");
-    const auto steps = read(fs::path(KALSHI_FIXTURES) / "ws_capture_expected_books.json").at("steps");
+    const auto frames = read(fs::path(testpaths::source("tests/roller/fixtures")) / "ws_capture_sample.json");
+    const auto steps = read(fs::path(testpaths::source("tests/roller/fixtures")) / "ws_capture_expected_books.json").at("steps");
     for (const auto& product : {A, B}) {
         QTemporaryDir temp; const fs::path root = temp.path().toStdString();
         const auto from = frames[0].at("sending_ts_ms").get<int64_t>() / Minute * Minute, end = from + Minute;

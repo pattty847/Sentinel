@@ -1,4 +1,5 @@
 #include "capture/CaptureFanout.hpp"
+#include "../support/TestPaths.hpp"
 #include "capture/CaptureSession.hpp"
 #include "metrics/MetricsRegistry.hpp"
 #include <gtest/gtest.h>
@@ -196,10 +197,10 @@ TEST_F(Fixture, ResnapshotRoutesAndRateLimitsAcrossClientsPerProduct) {
 TEST_F(Fixture, SocketSafetyOwnershipAndFailedStartupNeverDeletesFiles) {
     EXPECT_THROW(prepareFanoutPath("relative.sock"),std::exception);
     EXPECT_THROW(prepareFanoutPath("/Volumes/T7/must-not-create/f.sock"),std::exception);
-    EXPECT_THROW(prepareFanoutPath(QString(SENTINEL_SOURCE_ROOT)+"/must-not-create/f.sock"),std::exception);
+    EXPECT_THROW(prepareFanoutPath(testpaths::qsource()+"/must-not-create/f.sock"),std::exception);
     QDir().mkdir(dir.path()+"/public"); ::chmod((dir.path()+"/public").toStdString().c_str(),0755);
     EXPECT_THROW(prepareFanoutPath(dir.path()+"/public/f.sock"),std::exception);
-    ASSERT_TRUE(QFile::link(QString(SENTINEL_SOURCE_ROOT),dir.path()+"/repo"));
+    ASSERT_TRUE(QFile::link(testpaths::qsource(),dir.path()+"/repo"));
     EXPECT_THROW(prepareFanoutPath(dir.path()+"/repo/f.sock"),std::exception);
     start(); struct stat st{}; ASSERT_EQ(::stat(dir.path().toStdString().c_str(),&st),0); EXPECT_EQ(st.st_mode&0777,0700);
     sentinel::metrics::MetricsRegistry other;
@@ -488,7 +489,7 @@ TEST_F(Fixture, SessionFaultRetractsBeforeWaitingForClose) {
 } // namespace
 
 TEST(CaptureFanoutAlert, UnavailableForFiveMinutesAlertsWithoutPagingOnAbsence) {
-    const auto root=YAML::LoadFile(std::string(SENTINEL_SOURCE_ROOT)+"/ops/monitoring/grafana/provisioning/alerting/rules.yaml");
+    const auto root=YAML::LoadFile(testpaths::source()+"/ops/monitoring/grafana/provisioning/alerting/rules.yaml");
     YAML::Node alert;
     for(size_t g=0;g<root["groups"].size();++g) {
         const auto rules=root["groups"][g]["rules"];

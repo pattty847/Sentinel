@@ -3,6 +3,7 @@
 // a linked ancestor with a missing descendant, or an output directory that is
 // itself a link into the root. Links are symlinks, or junctions on Windows.
 #include "lab/LabSources.hpp"
+#include "../support/TestPaths.hpp"
 #include <QDir>
 #include <QFile>
 #include <QProcess>
@@ -102,7 +103,7 @@ int runLab(const QStringList &args, const fs::path &root, QByteArray *output) {
     env.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("offscreen"));
     lab.setProcessEnvironment(env);
     lab.setProcessChannelMode(QProcess::MergedChannels);
-    lab.start(QStringLiteral(SENTINEL_LAB_EXECUTABLE), args);
+    lab.start(testpaths::qenv("SENTINEL_LAB_EXECUTABLE"), args);
     if (!lab.waitForFinished(90'000)) {
         lab.kill();
         lab.waitForFinished(5'000);

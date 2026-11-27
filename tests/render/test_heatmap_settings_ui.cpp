@@ -5,6 +5,7 @@
 // owner's). GPU cases (a UnifiedGridRenderer over the synthetic HMC2 recording,
 // as test_ugr_gpu) skip with the reason when no QRhi can be created.
 #include "UnifiedGridRenderer.h"
+#include "../support/TestPaths.hpp"
 #include "config/TooltipHelp.hpp"
 #include "../servermodel/FakeChunkTransport.hpp"
 #include "render/heatmap/HeatmapDataService.hpp"
@@ -1276,7 +1277,7 @@ TEST(TpoLetters, BaselineMovesWithItsRow) {
 TEST(TpoTags, FollowTheVisibleSessionAtCurrentPrices) {
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 48;
     params.charset = QStringLiteral("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
     ASSERT_TRUE(atlas.build(params));
@@ -1350,7 +1351,7 @@ TEST(TpoTags, FollowTheVisibleSessionAtCurrentPrices) {
 TEST(TpoApproximate, CandlePeriodsDrawCellsAndLettersDimmed) {
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 48;
     params.charset = QStringLiteral("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
     ASSERT_TRUE(atlas.build(params));
@@ -2737,7 +2738,7 @@ TEST(TradeBubbleControls, LayerOrderUsesRealQmlBindingAndPersistedChartApiSettin
     ASSERT_NE(check,nullptr);
     EXPECT_TRUE(check->isChecked());
     EXPECT_TRUE(renderer.candles()->tradesAboveCandles());
-    QFile source(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml"));
+    QFile source(testpaths::qsource("libs/gui/qml/DepthChartView.qml"));
     ASSERT_TRUE(source.open(QIODevice::ReadOnly));
     const auto qml=source.readAll();
     const auto start=qml.indexOf("    TradeBubbleOverlayItem {");
@@ -3467,7 +3468,7 @@ TEST(CandleStyleTest, VolumeControlsRoundTripClampResetAndDriveRealQmlVisibility
     EXPECT_TRUE(show->isChecked()); EXPECT_EQ(band->value(), 22); EXPECT_EQ(opacity->value(), 45);
     EXPECT_EQ(band->minimum(), 10); EXPECT_EQ(band->maximum(), 40);
     EXPECT_EQ(opacity->minimum(), 10); EXPECT_EQ(opacity->maximum(), 100);
-    QFile source(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml"));
+    QFile source(testpaths::qsource("libs/gui/qml/DepthChartView.qml"));
     ASSERT_TRUE(source.open(QIODevice::ReadOnly));
     const auto qml = source.readAll();
     const auto start = qml.indexOf("    VolumeBarOverlayItem {");

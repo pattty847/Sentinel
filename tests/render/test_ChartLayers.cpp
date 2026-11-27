@@ -1,4 +1,5 @@
 #include "models/DisplayTime.hpp"
+#include "../support/TestPaths.hpp"
 #include <QTimeZone>
 #include "chart/layers/ChartLayers.hpp"
 #include "themes/ThemePalette.hpp"
@@ -1002,7 +1003,7 @@ TEST(ChartEmptyStateText, EmptyLabelsUseMsdfAndAvoidVisibleCandles) {
     chart::ChartLayers layers;
     auto& atlas = layers.text.atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64;
     params.charset = " 0123456789.+-,:/<>$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     ASSERT_TRUE(atlas.build(params));
@@ -1150,7 +1151,7 @@ TEST(FootprintCells, NumbersLayoutIsBoundedAndAllocatesNothingAfterWarmup) {
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64; params.charset = " 0123456789.+-,:/<>$%kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     ASSERT_TRUE(atlas.build(params));
     const double widest = chart::kFlowMagnitudeGlyphs * atlas.glyph(QChar('8')).advance * chart::kFootprintTextPx / atlas.fontPx();
@@ -1260,7 +1261,7 @@ FootprintRun footprintRun(const std::array<int64_t, 4>& volumes, double colLogic
     FootprintRun out;
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64; params.charset = "0123456789.<>kMBT";
     EXPECT_TRUE(atlas.build(params));
     chart::FootprintCellsLayer layer;
@@ -1351,7 +1352,7 @@ TEST(FootprintCells, AScopeSwitchForgetsTheDecision) {
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64; params.charset = "0123456789.<>kMBT";
     ASSERT_TRUE(atlas.build(params));
     chart::FootprintCellsLayer layer;
@@ -1386,7 +1387,7 @@ TEST(FootprintCells, CollectionOverflowAndGlyphBudgetDrawNone) {
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64; params.charset = "0123456789.<>kMBT";
     ASSERT_TRUE(atlas.build(params));
     const auto run = [&](int bars, int rows, int64_t volume) {
@@ -1715,7 +1716,7 @@ TEST(CvdLayer, LabelsAreBoundedAndFreshDataFramesAllocateNothing) {
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64; params.charset = " 0123456789.e+-CVDsinceTPOUdaylotrvw";
     ASSERT_TRUE(atlas.build(params));
     chart::CvdLayer layer;
@@ -1921,7 +1922,7 @@ TEST(FlowFooter, FreshDataPanAndLabelsAllocateNothingAfterWarmup) {
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64; params.charset = " 0123456789.+-<>kMBDELTACUMVOviewdays";
     ASSERT_TRUE(atlas.build(params));
     chart::CvdLayer cvd;
@@ -2044,7 +2045,7 @@ TEST(FlowFooter, RowsShareOneColumnGridBesideAFixedLabelGutter) {
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64; params.charset = " 0123456789.+-<>kMBDELTACUMVOviewdays";
     ASSERT_TRUE(atlas.build(params));
     chart::CvdLayer cvd;
@@ -2103,7 +2104,7 @@ TEST(FlowFooter, FooterOnlyGutterNamesTheResetAndFitsLongUnits) {
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error)) << error.toStdString();
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64;
     params.charset = " 0123456789.+-<>kMBABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     ASSERT_TRUE(atlas.build(params));
@@ -2155,7 +2156,7 @@ TEST(FlowFooter, PanAndMagnitudeChangesKeepTheSameAbsoluteColumnPhase) {
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error));
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64; params.charset = " 0123456789.+-<>kMBDELTACUMVO";
     ASSERT_TRUE(atlas.build(params));
     chart::CvdLayer cvd; chart::FlowFooterLayer footer(cvd);
@@ -2224,7 +2225,7 @@ TEST(FlowFooter, DeltaPillsShareOneStyleInTheDirectionPair) {
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error));
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64; params.charset = " 0123456789.+-<>kMBDELTACUMVO";
     ASSERT_TRUE(atlas.build(params));
     chart::CvdLayer cvd; chart::FlowFooterLayer footer(cvd);
@@ -2336,7 +2337,7 @@ private:
 TEST(CvdLayer, PriceLabelRectsStopAboveStripAndReturnToFullHeightWhenHidden) {
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 48; params.charset = " $0123456789.";
     ASSERT_TRUE(atlas.build(params));
     CvdPriceTicks ticks;
@@ -2380,7 +2381,7 @@ TEST(CvdLayer, LastLabelTracksCurveEndpointAndClampsClearOfExtrema) {
     ASSERT_TRUE(AgentHostMode::activate(cache.path(), {}, &error));
     ChartTextAtlas atlas;
     ChartTextAtlas::BuildParams params;
-    params.fontPath = QStringLiteral(SENTINEL_SOURCE_DIR "/resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
+    params.fontPath = testpaths::qsource("resources/fonts/RobotoMono/RobotoMono-Regular.ttf");
     params.fontPx = 64; params.charset = " 0123456789.-CVD";
     ASSERT_TRUE(atlas.build(params));
     chart::CvdLayer layer;

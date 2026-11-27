@@ -1,4 +1,5 @@
 #include "config/AgentHostMode.hpp"
+#include "../support/TestPaths.hpp"
 
 #include <QDir>
 #include <QDirIterator>
@@ -260,7 +261,7 @@ TEST(AgentHostModeSources, NoNativeFormatQSettingsInTheGui) {
     const QRegularExpression lineComment(R"(//.*$)");
     QStringList offenders;
     for (const QString& sub : {QStringLiteral("libs/gui"), QStringLiteral("apps/sentinel_gui")}) {
-        QDirIterator it(QString(SENTINEL_SOURCE_DIR) + "/" + sub, {"*.cpp", "*.hpp", "*.h"}, QDir::Files,
+        QDirIterator it(testpaths::qsource() + "/" + sub, {"*.cpp", "*.hpp", "*.h"}, QDir::Files,
                         QDirIterator::Subdirectories);
         while (it.hasNext()) {
             const QString path = it.next();
@@ -294,13 +295,13 @@ TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
     // they name no new symbol to the server or carry no request.
     const QSet<QString> exempt{"connectToServer", "unsubscribe", "cancelTpoHistory",
                                "unsubscribeFlowLive", "setCandleDeliveryGeneration", "bookDeliveryGeneration"};
-    QFile file(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/datasources/RemoteGridDataSource.cpp");
+    QFile file(testpaths::qsource() + "/libs/gui/datasources/RemoteGridDataSource.cpp");
     ASSERT_TRUE(file.open(QIODevice::ReadOnly));
     QString text = QString::fromUtf8(file.readAll());
-    QFile flow(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/datasources/RemoteGridDataSourceFlow.cpp");
+    QFile flow(testpaths::qsource() + "/libs/gui/datasources/RemoteGridDataSourceFlow.cpp");
     ASSERT_TRUE(flow.open(QIODevice::ReadOnly));
     text += QString::fromUtf8(flow.readAll());
-    QFile seconds(QString(SENTINEL_SOURCE_DIR) + "/libs/gui/datasources/RemoteGridDataSourceSeconds.cpp");
+    QFile seconds(testpaths::qsource() + "/libs/gui/datasources/RemoteGridDataSourceSeconds.cpp");
     ASSERT_TRUE(seconds.open(QIODevice::ReadOnly));
     text += QString::fromUtf8(seconds.readAll());
 
@@ -355,7 +356,7 @@ TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
     const QRegularExpression tradeSend(R"((\w+)\s*(\.|->)\s*(sendTradeCommand|sendAlgoCommand)\s*\()");
     QStringList offenders;
     for (const QString& sub : {QStringLiteral("libs/gui"), QStringLiteral("apps/sentinel_gui")}) {
-        QDirIterator it(QString(SENTINEL_SOURCE_DIR) + "/" + sub, {"*.cpp", "*.hpp", "*.h"}, QDir::Files,
+        QDirIterator it(testpaths::qsource() + "/" + sub, {"*.cpp", "*.hpp", "*.h"}, QDir::Files,
                         QDirIterator::Subdirectories);
         while (it.hasNext()) {
             const QString path = it.next();

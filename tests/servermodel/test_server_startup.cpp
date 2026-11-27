@@ -1,4 +1,5 @@
 #include <QCoreApplication>
+#include "../support/TestPaths.hpp"
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -43,7 +44,7 @@ struct ServerProcess {
             "roller_shadow:\n  enabled: true\n  dir: '" + scratch.filePath("recording").toUtf8() + "'\n"
             "  journal_dir: '" + scratch.filePath("journal").toUtf8() + "'\n"
             "  socket: '" + scratch.filePath("absent.sock").toUtf8() + "'\n  products: [BTC-USD]\n"
-            "ssl_ca_bundle: '" + QByteArray(SENTINEL_SOURCE_DIR) + "/resources/certs/ca-bundle.crt'\n"
+            "ssl_ca_bundle: '" + QByteArray::fromStdString(testpaths::source()) + "/resources/certs/ca-bundle.crt'\n"
             "tls:\n  cert_file: missing-cert.pem\n  key_file: missing-key.pem\n";
         if (config.write(yaml) != yaml.size()) return false;
         config.close();
@@ -53,7 +54,7 @@ struct ServerProcess {
         env.insert("SENTINEL_LOG_FILE", "1");
         process.setProcessEnvironment(env);
         process.setWorkingDirectory(scratch.path());
-        process.start(QString::fromUtf8(SENTINEL_SERVER_BINARY), {"--require-recording"});
+        process.start(testpaths::qenv("SENTINEL_SERVER_BINARY"), {"--require-recording"});
         return process.waitForStarted(3000);
     }
 
@@ -82,7 +83,7 @@ TEST(ServerStartup, InvalidBindAddressExitsBeforeRecordingOrFeeds) {
         EXPECT_EQ(server.process.exitStatus(), QProcess::NormalExit);
         EXPECT_EQ(server.process.exitCode(), 1);
         const auto log = server.log();
-        EXPECT_TRUE(log.contains("exe=" + QByteArray(SENTINEL_SERVER_BINARY) + " built="));
+        EXPECT_TRUE(log.contains("exe=" + QByteArray::fromStdString(testpaths::env("SENTINEL_SERVER_BINARY")) + " built="));
         EXPECT_TRUE(log.contains(" E app ")) << log.constData();
         EXPECT_TRUE(log.contains("Invalid server.bind_address: address=")) << log.constData();
         EXPECT_FALSE(log.contains("Initializing server components")) << log.constData();
@@ -103,7 +104,7 @@ TEST(ServerStartup, MissingTlsLeavesTheRequiredRecorderRunning) {
         QCoreApplication::processEvents();
     }
     const auto log = server.log();
-    EXPECT_TRUE(log.contains("exe=" + QByteArray(SENTINEL_SERVER_BINARY) + " built="));
+    EXPECT_TRUE(log.contains("exe=" + QByteArray::fromStdString(testpaths::env("SENTINEL_SERVER_BINARY")) + " built="));
     EXPECT_TRUE(log.contains(" E app ")) << log.constData();
     EXPECT_TRUE(log.contains("SentinelStreamServer start failed")) << log.constData();
     EXPECT_TRUE(log.contains("Recording served by the journal roller: dir=")) << log.constData();

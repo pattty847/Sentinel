@@ -1,4 +1,5 @@
 #include "roller/AnchorStore.hpp"
+#include "../support/TestPaths.hpp"
 #include "metrics/MetricsRegistry.hpp"
 #include <mutex>
 #include "roller/Roller.hpp"
@@ -672,7 +673,7 @@ uint64_t anchorMetric(metrics::MetricsRegistry& registry) {
 }
 TEST(AnchorReplay, UnwritableLiveFixtureCacheDoesNotAbort) {
     QTemporaryDir tmp; const fs::path root=tmp.path().toStdString(); fs::create_directories(root/"raw");
-    fs::copy_file(ANCHOR_LIVE_FIXTURE,root/"raw"/"btc.rawl2");
+    fs::copy_file(testpaths::source("tests/roller/fixtures/btc-prefix.rawl2"),root/"raw"/"btc.rawl2");
     const auto from=parseTime("2026-10-01T04:45:00Z"),to=from+10*Minute;
     RollOptions o{root/"raw",root/"baseline","BTC-USD",from,to}; o.writeAnchors=false;
     const auto baseline=roll(o); ASSERT_EQ(baseline["days"][0]["committedThroughMs"],to);

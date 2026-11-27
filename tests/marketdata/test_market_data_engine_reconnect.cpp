@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "../support/TestPaths.hpp"
 #include "marketdata/MarketDataFeeds.hpp"
 #include "fixtures/coinbase_messages.hpp"
 #include "fixtures/fake_ws_transport.hpp"
@@ -39,7 +40,7 @@ struct FeedsTest : testing::Test {
         };
     }
     void create(std::vector<std::string> products = {"BTC-USD", "ETH-USD"}) {
-        ServerMdcConfig config; config.sslCaBundle = SENTINEL_TEST_CA;
+        ServerMdcConfig config; config.sslCaBundle = testpaths::source("resources/certs/ca-bundle.crt");
         feeds = std::make_unique<MarketDataFeeds>(auth, config, options);
         feeds->onLiveOrderBookInitialized([this](const auto& p, const auto&, const auto&, auto) { valid[p] = true; ++snapshots[p]; });
         feeds->onLiveOrderBookLevelUpdates([this](const auto& p, const auto&, auto) { ++updates[p]; });
@@ -204,7 +205,7 @@ TEST_F(FeedsTest, PendingJitterIsCancelledByRemoveAndStatsExposeAgeAndReconnects
 }
 TEST_F(FeedsTest, IngestTapKeepsProductConnectionAndRawBytesBeforeDispatch) {
     options.jitter = [] { return 0ms; };
-    ServerMdcConfig config; config.sslCaBundle = SENTINEL_TEST_CA;
+    ServerMdcConfig config; config.sslCaBundle = testpaths::source("resources/certs/ca-bundle.crt");
     feeds = std::make_unique<MarketDataFeeds>(auth, config, options);
     std::vector<std::string> events;
     std::string raw;

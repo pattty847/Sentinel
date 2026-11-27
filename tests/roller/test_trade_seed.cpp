@@ -1,4 +1,5 @@
 #include "roller/Roller.hpp"
+#include "../support/TestPaths.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
 #include <fstream>
@@ -190,7 +191,7 @@ TEST(TradeSeed, FixtureCostAndParity) {
     // Read the checked-in capture fixtures only; do not access runtime journals.
     for (const auto* name : {"btc-prefix.rawl2", "btc-hour-boundary.rawl2"}) {
         QTemporaryDir tmp; const fs::path root=tmp.path().toStdString();
-        const auto source=fs::path(ROLLER_FIXTURE).parent_path()/name;
+        const auto source=fs::path(testpaths::source("tests/roller/fixtures"))/name;
         fs::copy_file(source,root/name);
         JournalReader inventory(root,"BTC-USD"); JournalRecord r,last;
         JournalFeed continuous("BTC-USD"),restored("BTC-USD");

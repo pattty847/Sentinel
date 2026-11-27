@@ -2,6 +2,7 @@
 // FlowStore symbol, over thousands of RAWL2 files. It must keep only the header
 // fields its readers use, not each file's parsed header.
 #include "heap_in_use.hpp"
+#include "../support/TestPaths.hpp"
 #include "roller/JournalReader.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
@@ -40,7 +41,7 @@ void writeRun(const fs::path& root, const json& metadata, int firstHour, int hou
 
 TEST(JournalCatalog, RetainedHeapPerFileStaysSmall) {
     if (!test::heapInUse()) GTEST_SKIP() << "no heap accounting on this platform";
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/catalog-XXXXXX"));
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/catalog-XXXXXX"));
     ASSERT_TRUE(temp.isValid());
     const fs::path root = temp.path().toStdString();
     const json metadata = {{"product_metadata", largeProductMetadata("BTC-USD")}};
@@ -68,7 +69,7 @@ TEST(JournalCatalog, RetainedHeapPerFileStaysSmall) {
 // Every header value a reader uses equals the file's own header; files with the
 // same metadata share one object instead of each keeping a parsed copy.
 TEST(JournalCatalog, KeepsEveryHeaderValueReadersUseAndSharesMetadata) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/catalog-XXXXXX"));
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/catalog-XXXXXX"));
     ASSERT_TRUE(temp.isValid());
     const fs::path root = temp.path().toStdString();
     auto metadataA = largeProductMetadata("BTC-USD");

@@ -50,7 +50,7 @@ add_test(NAME BacktestCoreTests COMMAND test_backtest_core)
 set_tests_properties(BacktestCoreTests PROPERTIES LABELS "trading")
 
 add_dependencies(test_backtest_core sentinel_backtest)
-target_compile_definitions(test_backtest_core PRIVATE BACKTEST_CLI="$<TARGET_FILE:sentinel_backtest>")
+set_property(TEST BacktestCoreTests APPEND PROPERTY ENVIRONMENT "BACKTEST_CLI=$<TARGET_FILE:sentinel_backtest>")
 
 # Trading snapshot wire, overlay order lines and the On-algo-stop policy (Qt-free)
 add_executable(test_trading_snapshot
@@ -67,3 +67,5 @@ target_link_libraries(test_trading_snapshot PRIVATE
 )
 add_test(NAME TradingSnapshotTests COMMAND test_trading_snapshot)
 set_tests_properties(TradingSnapshotTests PROPERTIES LABELS "trading")
+
+sentinel_test_paths()

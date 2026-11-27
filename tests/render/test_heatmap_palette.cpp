@@ -1,4 +1,5 @@
 #include "render/heatmap/HeatmapPalette.hpp"
+#include "../support/TestPaths.hpp"
 #include <QFile>
 #include <gtest/gtest.h>
 #include <algorithm>
@@ -110,7 +111,7 @@ TEST(HeatmapPalette, DisplayShaderMappingUsesTheCpuTexelCentres) {
     const std::string ask = "(256.5+adjusted*255.0)/512.0";
     for (const auto &[path, expression] :
          {std::pair{"libs/gui/render/heatmap/shaders/heatmap_display.frag", "ask?" + ask + ":" + bid}}) {
-        QFile source(QString::fromUtf8(SENTINEL_SOURCE_DIR) + '/' + QString::fromUtf8(path));
+        QFile source(testpaths::qsource() + '/' + QString::fromUtf8(path));
         ASSERT_TRUE(source.open(QIODevice::ReadOnly)) << path;
         const auto text = std::regex_replace(source.readAll().toStdString(), std::regex("\\s+"), "");
         EXPECT_NE(text.find("floatu=" + expression + ";"), std::string::npos) << path;

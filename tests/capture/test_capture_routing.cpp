@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "../support/TestPaths.hpp"
 #include "capture/CaptureRouting.hpp"
 #include <QFile>
 #include <cstdlib>
@@ -18,7 +19,7 @@ void operator delete[](void* p) noexcept { std::free(p); }
 
 using namespace sentinel::capture;
 TEST(CaptureRouting, FrozenGoldenIdentitiesAndRangeReceipts) {
-    QFile file(CAPTURE_ROUTING_GOLDEN);
+    QFile file(testpaths::qsource("tests/capture/routing_golden.json"));
     ASSERT_TRUE(file.open(QIODevice::ReadOnly));
     const auto golden = nlohmann::json::parse(file.readAll().toStdString());
     EXPECT_EQ(golden.at("routing"), RoutingId);
