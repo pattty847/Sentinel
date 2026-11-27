@@ -1,4 +1,5 @@
 #include "roller/Roller.hpp"
+#include "../support/TestPaths.hpp"
 #include "roller/ResnapshotPolicy.hpp"
 #include "marketdata/dispatch/BookParser.hpp"
 #include "legacy_v2_fixture.hpp"
@@ -105,7 +106,7 @@ TEST(Roller, GridsAndClamping) {
 }
 TEST(Roller, KalshiHeaderInventoryFrameDeliveryAndNoSnapshotAnchor) {
     for (const auto& symbol : {std::string("KXNBAGAME-26NOV18PHIORL-") + std::string(25, 'A'), std::string("KXTEST-1.5")}) {
-        QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); ASSERT_TRUE(temp.isValid());
+        QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/test-XXXXXX")); ASSERT_TRUE(temp.isValid());
         capture::WriterConfig cfg; cfg.root = temp.path(); cfg.symbol = symbol; cfg.fsyncBlocks = 0;
         const json meta = {{"venue", "kalshi"}, {"product_metadata", {{"product_id", symbol}}},
             {"instrument", {{"price_min", "0.0000"}, {"price_max", "1.0000"}, {"size_increment", "0.01"},
@@ -131,7 +132,7 @@ TEST(Roller, KalshiHeaderInventoryFrameDeliveryAndNoSnapshotAnchor) {
     }
 }
 TEST(Roller, ReaderVersionsPositionsAndOpenPolling) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString();
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/test-XXXXXX")); fs::path root=temp.path().toStdString();
     fixture(root/"v1",2,false);
     JournalReader reader(root/"v1","BTC-USD"); JournalRecord r;
     std::vector<JournalRecord> records;
@@ -151,7 +152,7 @@ TEST(Roller, ReaderVersionsPositionsAndOpenPolling) {
     EXPECT_FALSE(v2.next(r)); EXPECT_FALSE(v2.pending());
 }
 TEST(Roller, PendingFramingDeferredUntilSealedOrSuperseded) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root,3);
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root,3);
     const auto path=paths(root,".rawl2")[0]; const auto original=contents(path);
     const auto scan=capture::scan(QString::fromStdString(path.string()));
     ASSERT_GE(scan.index.size(),2);
@@ -202,7 +203,7 @@ TEST(Roller, FeedFiltersProductsClocksAndLifecycle) {
     EXPECT_EQ(ticks,8);EXPECT_EQ(snaps,1);EXPECT_EQ(invalid,2);EXPECT_EQ(trades,1);EXPECT_EQ(time,Epoch+7000);
 }
 TEST(Roller, FeedSortsWholeTradeFramesAndDedupesResentSnapshots) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/trades-XXXXXX"));
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/trades-XXXXXX"));
     ASSERT_TRUE(temp.isValid());
     const auto trade=[](const char* id,const char* time,const char* product="BTC-USD",const char* price="100") {
         return json{{"product_id",product},{"trade_id",id},{"time",time},
@@ -251,7 +252,7 @@ TEST(Roller, FeedSortsWholeTradeFramesAndDedupesResentSnapshots) {
     EXPECT_EQ(foreignIds,(std::vector<std::string>{"1"}));
 }
 TEST(Roller, FeedTradeIdWindowIsBoundedAndEvictsOldest) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/trade-window-XXXXXX"));
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/trade-window-XXXXXX"));
     ASSERT_TRUE(temp.isValid());
     const auto trade=[](size_t id) {
         return json{{"product_id","BTC-USD"},{"trade_id",std::to_string(id)},
@@ -310,7 +311,7 @@ TEST(Roller, FeedTradeIdWindowIsBoundedAndEvictsOldest) {
     EXPECT_TRUE(restored.tradeIds().empty());
 }
 TEST(Roller, RunIdentityCrashResumeAndIdempotence) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw",3665);
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw",3665);
     auto a=options(root/"raw",root/"a"); a.toMs=Epoch+3'660'000; const auto report=roll(a);
     EXPECT_EQ(report["days"][0]["committedThroughMs"],Epoch+3'660'000);
     auto b=a; b.outputRoot=root/"b"; roll(b); EXPECT_EQ(files(a.outputRoot),files(b.outputRoot));
@@ -325,7 +326,7 @@ TEST(Roller, RunIdentityCrashResumeAndIdempotence) {
     c.overrides={{"near_tick",2}}; EXPECT_THROW(roll(c),std::logic_error);
 }
 TEST(Roller, DryRunAndEofDoNotInventTime) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw",59,false);
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw",59,false);
     auto o=options(root/"raw",root/"out"); o.dryRun=true;
     const auto report=roll(o); EXPECT_FALSE(fs::exists(o.outputRoot)); EXPECT_EQ(report["records"],60);
     o.dryRun=false; roll(o); EXPECT_TRUE(files(o.outputRoot).empty());
@@ -343,7 +344,7 @@ TEST(Roller, DryRunAndEofDoNotInventTime) {
     EXPECT_EQ(roll(o)["days"][0]["grid"]["nearTick"],.01);
 }
 TEST(Roller, BlockingQueueAdmitsAtomicOversizedSnapshot) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); auto c=deriveGrid(metadata()["product_metadata"],100000).config(temp.path().toStdString());
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/test-XXXXXX")); auto c=deriveGrid(metadata()["product_metadata"],100000).config(temp.path().toStdString());
     c.maxQueuedLevels=1; c.latenessMs=0;
     recording::BookRecorder r(c);
     r.onSnapshotAt("BTC-USD",Epoch,Epoch,{{true,99999.99,2},{false,100000.01,3}});
@@ -352,7 +353,7 @@ TEST(Roller, BlockingQueueAdmitsAtomicOversizedSnapshot) {
     EXPECT_EQ(r.stats().columnsWritten,2);
 }
 TEST(Roller, CommitFloorAndCeiling) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); auto c=deriveGrid(metadata()["product_metadata"],100000).config(temp.path().toStdString());
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/test-XXXXXX")); auto c=deriveGrid(metadata()["product_metadata"],100000).config(temp.path().toStdString());
     c.commitFloorMs=Epoch+60'000;c.commitCeilingMs=Epoch+120'000;c.latenessMs=0;
     recording::BookRecorder r(c);r.onSnapshotAt("BTC-USD",Epoch,Epoch,{{true,99999.99,2},{false,100000.01,3}});
     r.onTick(Epoch+180'000);r.drain();
@@ -360,7 +361,7 @@ TEST(Roller, CommitFloorAndCeiling) {
     ASSERT_EQ(rows.size(),1);EXPECT_EQ(rows[0].bucketStartMs,Epoch+60'000);
 }
 TEST(Roller, DiffQualifiesMasksLateAndDetectsContent) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString();fixture(root/"raw");
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/test-XXXXXX")); fs::path root=temp.path().toStdString();fixture(root/"raw");
     auto a=options(root/"raw",root/"a");roll(a);
     fs::copy(a.outputRoot,root/"b",fs::copy_options::recursive);
     auto rows=recording::Hmc2Store::readRange(root/"b","BTC-USD","near",60'000,Epoch,Epoch+240'000);
@@ -389,7 +390,7 @@ TEST(Roller, DiffQualifiesMasksLateAndDetectsContent) {
 }
 
 TEST(Roller, SilenceAcrossMidnightCommitsMinuteAndHour) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/boundary-XXXXXX"));
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/boundary-XXXXXX"));
     ASSERT_TRUE(temp.isValid()); const fs::path root=temp.path().toStdString();
     constexpr int64_t day=86'400'000;
     capture::WriterConfig cfg; cfg.root=QString::fromStdString((root/"raw").string()); cfg.fsyncBlocks=0;
@@ -434,7 +435,7 @@ TEST(Roller, SequenceErrorAllowsFollowingSnapshotWithoutTransportUp) {
 }
 
 TEST(Roller, StopWakesBlockedProducerBeforeWorkerDrains) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/shutdown-XXXXXX")); ASSERT_TRUE(temp.isValid());
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/shutdown-XXXXXX")); ASSERT_TRUE(temp.isValid());
     auto cfg=deriveGrid(metadata()["product_metadata"],100000).config(temp.path().toStdString());
     cfg.maxQueuedLevels=1;
     std::promise<void> workerEntered,releaseWorker,producerWaiting;
@@ -465,7 +466,7 @@ TEST(Roller, StopWakesBlockedProducerBeforeWorkerDrains) {
 }
 
 TEST(Roller, RefusesUnownedHmc2AndConfiguredRecorderRoots) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/roots-XXXXXX"));ASSERT_TRUE(temp.isValid());
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/roots-XXXXXX"));ASSERT_TRUE(temp.isValid());
     const fs::path root=temp.path().toStdString(); fixture(root/"raw");
     fs::create_directories(root/"unowned"/"BTC-USD"/"near");
     const auto marker=root/"unowned"/"BTC-USD"/"near"/"existing.hmc2";save(marker,"do not touch");
@@ -495,7 +496,7 @@ TEST(Roller, RefusesUnownedHmc2AndConfiguredRecorderRoots) {
 // reopen under the serving path (a changed hash throws "checkpoint policy/range mismatch").
 TEST(Roller, PublisherKeepsSliceACheckpointPolicyHash) {
     constexpr uint64_t SliceABtcHash=18293455670244139256ull; // /Volumes/T7/sentinel-data/hmc2/BTC-USD/roller.json
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw");
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw");
     auto o=options(root/"raw",root/"out"); o.toMs=Epoch+120'000; o.productWriterLease=true;
     roll(o);
     const auto cp=root/"out"/"BTC-USD"/"roller.json";
@@ -514,7 +515,7 @@ TEST(Roller, PublisherKeepsSliceACheckpointPolicyHash) {
 // it is not checkpoint policy and changes neither the hash nor the output.
 TEST(Roller, FeedTapKeepsCheckpointPolicyHashAndOutput) {
     constexpr uint64_t SliceABtcHash=18293455670244139256ull; // /Volumes/T7/sentinel-data/hmc2/BTC-USD/roller.json
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw");
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/test-XXXXXX")); fs::path root=temp.path().toStdString(); fixture(root/"raw");
     auto plain=options(root/"raw",root/"plain"); plain.toMs=Epoch+240'000; plain.productWriterLease=true;
     roll(plain);
     auto tapped=options(root/"raw",root/"tapped"); tapped.toMs=Epoch+240'000; tapped.productWriterLease=true;
@@ -543,7 +544,7 @@ TEST(Roller, FeedFlipsMakerSideToAggressorOnce) {
 // The lead fork shares no store: it coexists with the history recorder's
 // product lease, never writes, and claims no committed cutoff.
 TEST(Roller, LeadForkNeverPersistsAndClaimsNoCommit) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/test-XXXXXX"));
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/test-XXXXXX"));
     auto c=deriveGrid(metadata()["product_metadata"],100000).config(temp.path().toStdString());
     c.writerProduct="BTC-USD"; c.latenessMs=0;
     std::vector<std::shared_ptr<const recording::Hmc2Record>> finals,lead;
@@ -573,7 +574,7 @@ TEST(Roller, LeadForkNeverPersistsAndClaimsNoCommit) {
 // After the flip the roller root is live: unscoped batch is refused there, and
 // --product-lease (shared root, exclusive product) may repair beside it.
 TEST(Roller, RollCliProductLeaseMayWriteRollerServedRoot) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/roots-XXXXXX"));ASSERT_TRUE(temp.isValid());
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/roots-XXXXXX"));ASSERT_TRUE(temp.isValid());
     const fs::path root=temp.path().toStdString(); fixture(root/"raw");
     const auto previous=fs::current_path();
     struct Restore {fs::path path;~Restore(){fs::current_path(path);}} restore{previous};
@@ -597,7 +598,7 @@ TEST(Roller, RollCliProductLeaseMayWriteRollerServedRoot) {
 // The served root comes from the merged server config
 // (config/server_config.yaml, then the private config/.server_config.yaml).
 TEST(Roller, RollCliRefusesRollerRootFromSplitOverride) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/roots-XXXXXX"));ASSERT_TRUE(temp.isValid());
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/roots-XXXXXX"));ASSERT_TRUE(temp.isValid());
     const fs::path root=temp.path().toStdString(); fixture(root/"raw");
     const auto previous=fs::current_path();
     struct Restore {fs::path path;~Restore(){fs::current_path(path);}} restore{previous};
@@ -625,9 +626,9 @@ TEST(Roller, RollCliRefusesRollerRootFromSplitOverride) {
 }
 
 TEST(Roller, RealJournalCrashResumeRestoresLargeDeltaBase) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/real-resume-XXXXXX"));ASSERT_TRUE(temp.isValid());
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/real-resume-XXXXXX"));ASSERT_TRUE(temp.isValid());
     const fs::path root=temp.path().toStdString();fs::create_directories(root/"raw");
-    fs::copy_file(ROLLER_FIXTURE,root/"raw"/"btc.rawl2");
+    fs::copy_file(testpaths::source("tests/roller/fixtures/btc-prefix.rawl2"),root/"raw"/"btc.rawl2");
     const auto from=parseTime("2026-10-01T04:53:00Z"),to=from+180'000;
     RollOptions o{root/"raw",root/"clean","BTC-USD",from,to};roll(o);
     JournalReader reader(root/"raw","BTC-USD");JournalRecord item;uint64_t crashAt=0;
@@ -645,8 +646,8 @@ TEST(Roller, RealJournalCrashResumeRestoresLargeDeltaBase) {
 }
 
 TEST(Roller, CapturedHourBoundaryWaitsForCommittedWatermark) {
-    QTemporaryDir temp(QStringLiteral(ROLLER_TEST_ROOT "/real-boundary-XXXXXX"));ASSERT_TRUE(temp.isValid());
-    const fs::path root=temp.path().toStdString(),fixtures=fs::path(ROLLER_FIXTURE).parent_path();
+    QTemporaryDir temp(testpaths::qenv("ROLLER_TEST_ROOT", "/real-boundary-XXXXXX"));ASSERT_TRUE(temp.isValid());
+    const fs::path root=temp.path().toStdString(),fixtures=fs::path(testpaths::source("tests/roller/fixtures"));
     fs::create_directories(root/"raw");
     // Original captured records around the reported 16:00 boundary, reblocked
     // for compression only. No timestamp shifts, omitted records or synthetic ticks.

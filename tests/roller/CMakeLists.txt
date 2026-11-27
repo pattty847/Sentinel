@@ -2,9 +2,7 @@ add_executable(test_roller test_roller.cpp test_trade_seed.cpp test_journal_cata
 target_link_libraries(test_roller PRIVATE sentinel_core capture_legacy_v2_fixture GTest::gtest_main Qt6::Core)
 add_test(NAME RollerTests COMMAND test_roller)
 set_tests_properties(RollerTests PROPERTIES LABELS "roller" TIMEOUT 120)
-
-target_compile_definitions(test_roller PRIVATE ROLLER_TEST_ROOT="${CMAKE_CURRENT_BINARY_DIR}"
-    ROLLER_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/btc-prefix.rawl2")
+set_property(TEST RollerTests APPEND PROPERTY ENVIRONMENT "ROLLER_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}")
 add_executable(test_shadow_roller test_shadow.cpp
     ../../apps/sentinel-server/SentinelServerApp.cpp
     ../../apps/sentinel-server/SentinelServerApp.hpp)
@@ -14,21 +12,19 @@ set_tests_properties(ShadowRollerTests PROPERTIES LABELS "roller" TIMEOUT 300)
 
 add_executable(test_roller_corrupt_blocks test_corrupt_blocks.cpp)
 target_link_libraries(test_roller_corrupt_blocks PRIVATE sentinel_core GTest::gtest_main Qt6::Core Qt6::Network)
-target_compile_definitions(test_roller_corrupt_blocks PRIVATE SENTINEL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 add_test(NAME RollerCorruptBlockTests COMMAND test_roller_corrupt_blocks)
 set_tests_properties(RollerCorruptBlockTests PROPERTIES LABELS "roller" TIMEOUT 300)
 
 add_executable(test_journal_anchors test_anchors.cpp)
-target_compile_definitions(test_journal_anchors PRIVATE ANCHOR_LIVE_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/btc-prefix.rawl2")
 target_link_libraries(test_journal_anchors PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
 add_test(NAME JournalAnchorTests COMMAND test_journal_anchors)
 set_tests_properties(JournalAnchorTests PROPERTIES LABELS "roller" TIMEOUT 180)
 
 add_executable(test_candle_restore test_candle_restore.cpp)
 target_link_libraries(test_candle_restore PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
-target_compile_definitions(test_candle_restore PRIVATE ROLLER_TEST_ROOT="${CMAKE_CURRENT_BINARY_DIR}")
 add_test(NAME CandleRestoreTests COMMAND test_candle_restore)
 set_tests_properties(CandleRestoreTests PROPERTIES LABELS "roller" TIMEOUT 120)
+set_property(TEST CandleRestoreTests APPEND PROPERTY ENVIRONMENT "ROLLER_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}")
 
 add_executable(candle_restore_bench candle_restore_bench.cpp)
 target_link_libraries(candle_restore_bench PRIVATE sentinel_core Qt6::Core)
@@ -49,18 +45,17 @@ target_link_libraries(one_sided_replay PRIVATE sentinel_core Qt6::Core)
 
 add_executable(test_coinbase_feed_state test_coinbase_feed_state.cpp)
 target_link_libraries(test_coinbase_feed_state PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
-target_compile_definitions(test_coinbase_feed_state PRIVATE COINBASE_STATE_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 add_test(NAME CoinbaseFeedStateTests COMMAND test_coinbase_feed_state)
 set_tests_properties(CoinbaseFeedStateTests PROPERTIES LABELS "roller" TIMEOUT 120)
 
 add_executable(test_kalshi_feed test_kalshi_feed.cpp)
 target_link_libraries(test_kalshi_feed PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
-target_compile_definitions(test_kalshi_feed PRIVATE KALSHI_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 add_test(NAME KalshiFeedTests COMMAND test_kalshi_feed)
 set_tests_properties(KalshiFeedTests PROPERTIES LABELS "roller" TIMEOUT 120)
 
 add_executable(test_kalshi_roll test_kalshi_roll.cpp test_kalshi_roll_recovery.cpp test_kalshi_roll_tail.cpp test_coinbase_roll_bytes.cpp)
 target_link_libraries(test_kalshi_roll PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
-target_compile_definitions(test_kalshi_roll PRIVATE KALSHI_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 add_test(NAME KalshiRollTests COMMAND test_kalshi_roll)
 set_tests_properties(KalshiRollTests PROPERTIES LABELS "roller" TIMEOUT 180)
+
+sentinel_test_paths()

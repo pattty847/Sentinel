@@ -498,6 +498,8 @@ mutants = [
      'LadderControls.ChartMenuToggleAndWidthPersistAndReachTheLayers'),
 ]
 env = dict(os.environ, CCACHE_READONLY='1', CCACHE_TEMPDIR='/tmp')
+# Binaries run outside ctest get the paths ctest's ENVIRONMENT gives them (tests/support/TestPaths.hpp).
+env.setdefault('SENTINEL_SOURCE_DIR', str(root))
 output = build / 'dom-validation'
 test_timeout = float(os.environ.get('DOM_MUTANT_TIMEOUT', '300'))
 

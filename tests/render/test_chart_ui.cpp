@@ -7,6 +7,7 @@
 // cannot create one: a skipped case is no result. Toolbar/menu cases need no GPU.
 // Every QSettings is a temporary INI file (never the owner's).
 #include <QScopeGuard>
+#include "../support/TestPaths.hpp"
 #include "UnifiedGridRenderer.h"
 #include "config/TooltipHelp.hpp"
 #include "marketdata/model/TradeData.h"
@@ -3114,7 +3115,7 @@ TEST_F(ChartLabels, DialogAndMenuSurviveTheRendererBeingDestroyed) {
 // QML), and every .qrc under resources/ is built by CMake. A file nobody loads is
 // dead weight that reads like a live icon set.
 TEST(IconResources, EverySvgIsUsedAndEveryQrcIsBuilt) {
-    const QString root = QStringLiteral(SENTINEL_SOURCE_DIR);
+    const QString root = testpaths::qsource();
     auto readAll = [&](const QStringList& dirs, const QStringList& patterns) {
         QString text;
         for (const QString& dir : dirs) {

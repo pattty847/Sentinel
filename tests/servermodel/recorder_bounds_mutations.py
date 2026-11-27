@@ -12,7 +12,9 @@ ROOT = Path(__file__).resolve().parents[2]
 BOOK = ROOT / 'libs/core/servermodel/BookRecorder.cpp'
 STORE = ROOT / 'libs/core/servermodel/Hmc2Store.cpp'
 BUILD = ROOT / 'build/mac-clang'
+# Binaries run outside ctest get the paths ctest's ENVIRONMENT gives them (tests/support/TestPaths.hpp).
 ENV = dict(os.environ, CCACHE_DIR=str(BUILD / 'ccache'))
+ENV.setdefault('SENTINEL_SOURCE_DIR', str(ROOT))
 
 
 def run(args, expected=0):

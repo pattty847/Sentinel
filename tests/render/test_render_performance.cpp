@@ -1,4 +1,5 @@
 #include "chart/core/ChartFrame.hpp"
+#include "../support/TestPaths.hpp"
 #include "chart/layers/TradeLayers.hpp"
 #include "render/CandlestickBatched.hpp"
 #include "render/ChartTextRenderer.hpp"
@@ -55,7 +56,7 @@ void seed(Candles& item) {
 void expectGeometry(const std::string& name, QSGNode* root) {
     // Raw little-endian vertex/index bytes captured from main 33081c31.
     // These fixtures are independent of the renderer's allocation and caching.
-    QFile file(QStringLiteral(SENTINEL_TEST_SOURCE_DIR "/tests/render/fixtures/render_geometry_33081c31.txt"));
+    QFile file(testpaths::qsource("tests/render/fixtures/render_geometry_33081c31.txt"));
     ASSERT_TRUE(file.open(QIODevice::ReadOnly));
     const auto lines = file.readAll().split('\n');
     int i = 0;

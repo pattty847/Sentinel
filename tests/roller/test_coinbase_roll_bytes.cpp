@@ -1,6 +1,7 @@
 // SHA-256 pins every HMC2, checkpoint and anchor byte produced by the unmodified
 // 6910fc11 roller on both checked-in Coinbase captures. See the manifest for ranges.
 #include "roller/Roller.hpp"
+#include "../support/TestPaths.hpp"
 #include <gtest/gtest.h>
 #include <QCryptographicHash>
 #include <QFile>
@@ -12,7 +13,7 @@ using nlohmann::json;
 using namespace sentinel::roller;
 
 TEST(CoinbaseRollBytes, Base6910fc11FilesAndPolicyIdentity) {
-    std::ifstream in(fs::path(KALSHI_FIXTURES) / "coinbase_roll_6910fc11.json");
+    std::ifstream in(fs::path(testpaths::source("tests/roller/fixtures")) / "coinbase_roll_6910fc11.json");
     const auto golden = json::parse(in);
     ASSERT_EQ(golden.at("base"), "6910fc11");
     for (const auto& run : golden.at("runs")) {
@@ -20,7 +21,7 @@ TEST(CoinbaseRollBytes, Base6910fc11FilesAndPolicyIdentity) {
         ASSERT_TRUE(temp.isValid());
         const fs::path root = temp.path().toStdString();
         fs::create_directories(root / "raw");
-        fs::copy_file(fs::path(KALSHI_FIXTURES) / run.at("fixture").get<std::string>(), root / "raw" / "input.rawl2");
+        fs::copy_file(fs::path(testpaths::source("tests/roller/fixtures")) / run.at("fixture").get<std::string>(), root / "raw" / "input.rawl2");
         RollOptions o{root / "raw", root / "out", "BTC-USD",
                       parseTime(run.at("from")), parseTime(run.at("to"))};
         roll(o);

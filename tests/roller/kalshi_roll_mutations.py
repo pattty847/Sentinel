@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Run alone through the owner's build queue. Refuses dirty trees; restores on every exit."""
+import os
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / 'build/mac-clang'
+# Binaries run outside ctest get the paths ctest's ENVIRONMENT gives them (tests/support/TestPaths.hpp).
+os.environ.setdefault('SENTINEL_SOURCE_DIR', str(ROOT))
 TEST = BUILD / 'tests/roller/test_kalshi_roll'
 
 

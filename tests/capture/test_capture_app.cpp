@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "../support/TestPaths.hpp"
 #include "capture/RawCapture.hpp"
 #include "capture/CaptureSession.hpp"
 #include "../marketdata/fixtures/coinbase_messages.hpp"
@@ -60,8 +61,8 @@ TEST(CaptureApplication, FloorsLargerThanThePoolRefuseToStart) {
     environment.insert("SENTINEL_LOG_DIR", dir.path() + "/logs");
     environment.insert("SENTINEL_LOG_STDERR", "1");
     child.setProcessEnvironment(environment);
-    child.start(CAPTURE_APP_FIXTURE, {"--fanout-socket", dir.path() + "/capture.sock", "--root", dir.path() + "/raw", "--symbols", "BTC-USD,ETH-USD",
-        "--queue-mib", "3", "--queue-floor-mib", "2", "--ca-bundle", SENTINEL_TEST_CA});
+    child.start(testpaths::qenv("CAPTURE_APP_FIXTURE"), {"--fanout-socket", dir.path() + "/capture.sock", "--root", dir.path() + "/raw", "--symbols", "BTC-USD,ETH-USD",
+        "--queue-mib", "3", "--queue-floor-mib", "2", "--ca-bundle", testpaths::qsource("resources/certs/ca-bundle.crt")});
     ASSERT_TRUE(child.waitForFinished(10000));
     EXPECT_EQ(child.exitCode(), 1);
     EXPECT_TRUE(child.readAllStandardError().contains("--queue-floor-mib x products exceeds --queue-mib"));
@@ -86,8 +87,8 @@ TEST(CaptureApplication, SigtermDrainsAndSealsAfterReconnectWithRealConnectionId
     child.setProcessEnvironment(environment);
     const auto metricsPort = freePort();
     ASSERT_NE(metricsPort, 0);
-    child.start(CAPTURE_APP_FIXTURE, {"--fanout-socket", dir.path() + "/capture.sock", "--root", dir.path() + "/raw", "--symbol", "BTC-USD",
-        "--ca-bundle", SENTINEL_TEST_CA, "--key-file", dir.path() + "/absent-key.json",
+    child.start(testpaths::qenv("CAPTURE_APP_FIXTURE"), {"--fanout-socket", dir.path() + "/capture.sock", "--root", dir.path() + "/raw", "--symbol", "BTC-USD",
+        "--ca-bundle", testpaths::qsource("resources/certs/ca-bundle.crt"), "--key-file", dir.path() + "/absent-key.json",
         "--block-ms", "60000", // SIGTERM must flush the unfinished block
         "--metrics-port", QString::number(metricsPort)});
     ASSERT_TRUE(child.waitForStarted(5000)) << child.errorString().toStdString();
@@ -185,9 +186,9 @@ TEST(CaptureApplication, SeveralCliFormsUseSevenConnectionsAndVerifyIndependentL
         environment.insert("SENTINEL_LOG_STDERR", "0");
         child.setProcessEnvironment(environment);
         auto args = form;
-        args << "--fanout-socket" << dir.path() + "/capture.sock" << "--root" << dir.path() + "/raw" << "--ca-bundle" << SENTINEL_TEST_CA
+        args << "--fanout-socket" << dir.path() + "/capture.sock" << "--root" << dir.path() + "/raw" << "--ca-bundle" << testpaths::qsource("resources/certs/ca-bundle.crt")
              << "--key-file" << dir.path() + "/absent.json" << "--block-ms" << "1" << "--fsync-blocks" << "0";
-        child.start(CAPTURE_APP_FIXTURE, args);
+        child.start(testpaths::qenv("CAPTURE_APP_FIXTURE"), args);
         ASSERT_TRUE(child.waitForStarted(5000));
         QByteArray output;
         QElapsedTimer deadline; deadline.start();
@@ -238,7 +239,7 @@ TEST(CaptureApplication, SeveralCliFormsUseSevenConnectionsAndVerifyIndependentL
         EXPECT_EQ(live.json["products"].size(), 7);
         QProcess liveVerifier;
         liveVerifier.setProcessEnvironment(environment);
-        liveVerifier.start(CAPTURE_APP_FIXTURE, {"--verify", dir.path() + "/raw"});
+        liveVerifier.start(testpaths::qenv("CAPTURE_APP_FIXTURE"), {"--verify", dir.path() + "/raw"});
         ASSERT_TRUE(liveVerifier.waitForFinished(10000));
         EXPECT_EQ(liveVerifier.exitCode(), 3) << liveVerifier.readAllStandardError().toStdString();
         ASSERT_EQ(::kill(static_cast<pid_t>(child.processId()), SIGTERM), 0);
@@ -256,7 +257,7 @@ TEST(CaptureApplication, SeveralCliFormsUseSevenConnectionsAndVerifyIndependentL
         }
         QProcess verifier;
         verifier.setProcessEnvironment(environment);
-        verifier.start(CAPTURE_APP_FIXTURE, {"--verify", dir.path() + "/raw"});
+        verifier.start(testpaths::qenv("CAPTURE_APP_FIXTURE"), {"--verify", dir.path() + "/raw"});
         ASSERT_TRUE(verifier.waitForFinished(5000));
         EXPECT_EQ(verifier.exitCode(), 0);
         EXPECT_EQ(nlohmann::json::parse(verifier.readAllStandardOutput().toStdString())["totals"]["snapshots"], 14);
@@ -276,8 +277,8 @@ TEST(CaptureApplication, UnevenReconnectsFailedAttemptAndAuditsVerifyAlongsideLe
     environment.insert("SENTINEL_FIXTURE_UNEVEN", "1");
     child.setProcessEnvironment(environment);
     const auto root = dir.path() + "/raw";
-    child.start(CAPTURE_APP_FIXTURE, {"--fanout-socket", dir.path() + "/capture.sock", "--root", root, "--symbols", "BTC-USD,ETH-USD",
-        "--ca-bundle", SENTINEL_TEST_CA, "--key-file", dir.path() + "/absent.json"});
+    child.start(testpaths::qenv("CAPTURE_APP_FIXTURE"), {"--fanout-socket", dir.path() + "/capture.sock", "--root", root, "--symbols", "BTC-USD,ETH-USD",
+        "--ca-bundle", testpaths::qsource("resources/certs/ca-bundle.crt"), "--key-file", dir.path() + "/absent.json"});
     ASSERT_TRUE(child.waitForStarted(5000));
     QByteArray output;
     QElapsedTimer deadline; deadline.start();
@@ -289,7 +290,7 @@ TEST(CaptureApplication, UnevenReconnectsFailedAttemptAndAuditsVerifyAlongsideLe
     ASSERT_TRUE(child.waitForFinished(5000)); ASSERT_EQ(child.exitCode(), 0);
     auto verifyCli = [&] {
         QProcess verifier; verifier.setProcessEnvironment(environment);
-        verifier.start(CAPTURE_APP_FIXTURE, {"--verify", root});
+        verifier.start(testpaths::qenv("CAPTURE_APP_FIXTURE"), {"--verify", root});
         EXPECT_TRUE(verifier.waitForFinished(5000));
         EXPECT_EQ(verifier.exitCode(), 0) << verifier.readAllStandardError().toStdString();
     };
@@ -345,8 +346,8 @@ TEST(CaptureApplication, FanoutResnapshotReachesOnlyRequestedEngine) {
     environment.insert("SENTINEL_LOG_DIR", dir.path() + "/logs");
     child.setProcessEnvironment(environment);
     const auto port = freePort();
-    child.start(CAPTURE_APP_FIXTURE, {"--fanout-socket", dir.path()+"/capture.sock", "--root", dir.path()+"/raw",
-        "--symbols", "BTC-USD,ETH-USD", "--ca-bundle", SENTINEL_TEST_CA, "--metrics-port", QString::number(port)});
+    child.start(testpaths::qenv("CAPTURE_APP_FIXTURE"), {"--fanout-socket", dir.path()+"/capture.sock", "--root", dir.path()+"/raw",
+        "--symbols", "BTC-USD,ETH-USD", "--ca-bundle", testpaths::qsource("resources/certs/ca-bundle.crt"), "--metrics-port", QString::number(port)});
     ASSERT_TRUE(child.waitForStarted(5000));
     QByteArray output; QElapsedTimer deadline; deadline.start();
     while (!output.contains("FIXTURE_READY\n") && deadline.elapsed() < 20000 && child.state()!=QProcess::NotRunning) {
@@ -381,8 +382,8 @@ TEST(CaptureApplication, FanoutUnavailableKeepsJournalingAndRecovers) {
     environment.insert("SENTINEL_LOG_DIR",dir.path()+"/logs"); environment.insert("SENTINEL_LOG_STDERR","1");
     child.setProcessEnvironment(environment);
     const auto port=freePort();
-    child.start(CAPTURE_APP_FIXTURE,{"--fanout-socket",dir.path()+"/socket/capture.sock","--root",dir.path()+"/raw",
-        "--symbols","BTC-USD,ETH-USD","--ca-bundle",SENTINEL_TEST_CA,"--metrics-port",QString::number(port)});
+    child.start(testpaths::qenv("CAPTURE_APP_FIXTURE"),{"--fanout-socket",dir.path()+"/socket/capture.sock","--root",dir.path()+"/raw",
+        "--symbols","BTC-USD,ETH-USD","--ca-bundle",testpaths::qsource("resources/certs/ca-bundle.crt"),"--metrics-port",QString::number(port)});
     ASSERT_TRUE(child.waitForStarted(5000));
     QByteArray output; QElapsedTimer deadline; deadline.start();
     while(!output.contains("FIXTURE_READY\n") && deadline.elapsed()<20000 && child.state()!=QProcess::NotRunning) {

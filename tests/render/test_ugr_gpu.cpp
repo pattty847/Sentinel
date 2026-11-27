@@ -4,6 +4,7 @@
 // selected QRhi backend (lab::OffscreenQuick) and skip with the reason when it
 // cannot create one: a skipped case is no result.
 #include "chart/core/PriceFitter.hpp"
+#include "../support/TestPaths.hpp"
 #include "UnifiedGridRenderer.h"
 #include "BookTopFixture.hpp"
 #include "GoldenFlowSource.hpp"
@@ -5321,7 +5322,7 @@ TEST(UgrInput, InputRouteReachesTheChartAndAxisAreasOncePerWheel) {
     view.rootContext()->setContextProperty("uiTheme", nullptr);
     view.rootContext()->setContextProperty("dataSource", nullptr);
     view.rootContext()->setContextProperty("chartModeController", nullptr);
-    view.setSource(QUrl::fromLocalFile(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml")));
+    view.setSource(QUrl::fromLocalFile(testpaths::qsource("libs/gui/qml/DepthChartView.qml")));
     ASSERT_EQ(view.status(), QQuickView::Ready) << view.errors().value(0).toString().toStdString();
     view.resize(1000, 600);
     view.rootObject()->setSize(QSizeF(1000, 600)); // the view is never exposed: size the root directly
@@ -5472,7 +5473,7 @@ TEST(UgrInput, MacMouseAndPreciseScrollReachBothAxisWheelHandlers) {
     view.rootContext()->setContextProperty("uiTheme", nullptr);
     view.rootContext()->setContextProperty("dataSource", nullptr);
     view.rootContext()->setContextProperty("chartModeController", nullptr);
-    view.setSource(QUrl::fromLocalFile(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml")));
+    view.setSource(QUrl::fromLocalFile(testpaths::qsource("libs/gui/qml/DepthChartView.qml")));
     ASSERT_EQ(view.status(), QQuickView::Ready) << view.errors().value(0).toString().toStdString();
     view.resize(1000, 600);
     view.rootObject()->setSize({1000, 600}); // never expose a native GUI window
@@ -5540,7 +5541,7 @@ TEST(UgrInput, EveryLayerMixHasFieldsVolumeCandlesProfilesBubblesThenText) {
     view.rootContext()->setContextProperty("uiTheme", nullptr);
     view.rootContext()->setContextProperty("dataSource", nullptr);
     view.rootContext()->setContextProperty("chartModeController", nullptr);
-    view.setSource(QUrl::fromLocalFile(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml")));
+    view.setSource(QUrl::fromLocalFile(testpaths::qsource("libs/gui/qml/DepthChartView.qml")));
     ASSERT_EQ(view.status(), QQuickView::Ready) << view.errors().value(0).toString().toStdString();
     auto* candles = view.rootObject()->findChild<CandlestickOverlayItem*>();
     auto* volume = view.rootObject()->findChild<VolumeBarOverlayItem*>();
@@ -5582,7 +5583,7 @@ TEST(UgrInput, EveryLayerMixHasFieldsVolumeCandlesProfilesBubblesThenText) {
     }
 }
 TEST(UgrInput, QmlStackingNeverDependsOnLayerEnableFlags) {
-    QFile qml(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml"));
+    QFile qml(testpaths::qsource("libs/gui/qml/DepthChartView.qml"));
     ASSERT_TRUE(qml.open(QIODevice::ReadOnly));
     const auto lines = QString::fromUtf8(qml.readAll()).split('\n');
     for (const auto& line : lines) {
@@ -5621,7 +5622,7 @@ TEST(UgrInput, CandlesFollowTheActiveSymbol) {
     view.rootContext()->setContextProperty("uiTheme", nullptr);
     view.rootContext()->setContextProperty("dataSource", nullptr);
     view.rootContext()->setContextProperty("chartModeController", nullptr);
-    view.setSource(QUrl::fromLocalFile(QStringLiteral(SENTINEL_SOURCE_DIR "/libs/gui/qml/DepthChartView.qml")));
+    view.setSource(QUrl::fromLocalFile(testpaths::qsource("libs/gui/qml/DepthChartView.qml")));
     ASSERT_EQ(view.status(), QQuickView::Ready) << view.errors().value(0).toString().toStdString();
     auto *candles = view.rootObject()->findChild<CandlestickOverlayItem *>();
     auto *paper = view.rootObject()->findChild<PaperTradeOverlayModel *>("paperTradeOverlayModel");

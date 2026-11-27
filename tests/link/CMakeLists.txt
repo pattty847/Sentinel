@@ -39,6 +39,11 @@ function(sentinel_collect_executables dir out)
 endfunction()
 
 sentinel_collect_executables("${CMAKE_SOURCE_DIR}" sentinel_all_executables)
+
+# Qt6::Test defines QT_TESTCASE_SOURCEDIR/BUILDDIR (absolute paths) on every unit of a
+# target that links it, which misses ccache in each new checkout. They only serve
+# QFINDTESTDATA, which no test uses; test paths come from ctest ENVIRONMENT instead.
+set_property(TARGET ${sentinel_all_executables} PROPERTY QT_SKIP_DEFAULT_TESTCASE_DIRS ON)
 set(sentinel_exe_files "")
 foreach(t IN LISTS sentinel_all_executables)
     string(APPEND sentinel_exe_files "$<TARGET_FILE:${t}>\n")

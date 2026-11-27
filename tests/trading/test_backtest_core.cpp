@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "../support/TestPaths.hpp"
 
 #include "trading/AlgoBacktestAdapter.hpp"
 #include "trading/AvendellaMM.hpp"
@@ -591,7 +592,7 @@ TEST(BacktestCore, B7CliHistoryDumpAndPositionalCsv) {
         writer.close();
     }
     QProcess process;
-    process.start(QString::fromUtf8(BACKTEST_CLI), {"--product", "BTC-USD", "--from", "2026-10-07T00:00:00Z",
+    process.start(testpaths::qenv("BACKTEST_CLI"), {"--product", "BTC-USD", "--from", "2026-10-07T00:00:00Z",
         "--to", "2026-10-07T01:00:00Z", "--journal", temp.path(), "--dump"});
     ASSERT_TRUE(process.waitForFinished(10000));
     EXPECT_EQ(process.exitCode(), 0) << process.readAllStandardError().toStdString();
@@ -600,15 +601,15 @@ TEST(BacktestCore, B7CliHistoryDumpAndPositionalCsv) {
     EXPECT_TRUE(dump.contains("\"cli\",1791331201000,"));
     const auto csv = temp.path() + "/trades.csv";
     { std::ofstream out(csv.toStdString()); out << "timestamp_ms,symbol,price,qty\n1000,BTC-USD,100,1\n"; }
-    process.start(QString::fromUtf8(BACKTEST_CLI), {csv, "BTC-USD"});
+    process.start(testpaths::qenv("BACKTEST_CLI"), {csv, "BTC-USD"});
     ASSERT_TRUE(process.waitForFinished(10000));
     EXPECT_EQ(process.exitCode(), 0);
     EXPECT_TRUE(process.readAllStandardOutput().contains("events=1"));
-    process.start(QString::fromUtf8(BACKTEST_CLI), {"--product", "BTC-USD", "--from", "2026-10-07",
+    process.start(testpaths::qenv("BACKTEST_CLI"), {"--product", "BTC-USD", "--from", "2026-10-07",
         "--to", "2026-10-08", "--journal", temp.path(), "--dump"});
     ASSERT_TRUE(process.waitForFinished(10000)); EXPECT_EQ(process.exitCode(), 0);
     EXPECT_TRUE(process.readAllStandardOutput().contains("\"cli\""));
-    process.start(QString::fromUtf8(BACKTEST_CLI), {"--product", "BTC-USD", "--from", "2026-10-07T00:00:00",
+    process.start(testpaths::qenv("BACKTEST_CLI"), {"--product", "BTC-USD", "--from", "2026-10-07T00:00:00",
         "--to", "2026-10-08", "--dump"});
     ASSERT_TRUE(process.waitForFinished(10000)); EXPECT_NE(process.exitCode(), 0);
 }
@@ -747,7 +748,7 @@ TEST(BacktestCore, R6JournalLeadingCoverageGapAppearsInDump) {
         EXPECT_EQ(source.gaps(), (std::vector<std::pair<int64_t, int64_t>>{{std::max(from, JournalEpoch), JournalEpoch + 100}}));
     }
     QProcess process;
-    process.start(QString::fromUtf8(BACKTEST_CLI), {"--product", "BTC-USD", "--from", "2026-10-07", "--to", "2026-10-08",
+    process.start(testpaths::qenv("BACKTEST_CLI"), {"--product", "BTC-USD", "--from", "2026-10-07", "--to", "2026-10-08",
         "--journal", temp.path(), "--dump"});
     ASSERT_TRUE(process.waitForFinished(10000)); EXPECT_EQ(process.exitCode(), 0);
     EXPECT_TRUE(process.readAllStandardOutput().contains("# gap,1791331200000,1791331200100"));
@@ -763,7 +764,7 @@ TEST(BacktestCore, R7EmptyRangeFailsWithRootsAndUsageListsParameters) {
                 "--journal", root};
             if (dump) args << "--dump";
             QProcess process;
-            process.start(QString::fromUtf8(BACKTEST_CLI), args);
+            process.start(testpaths::qenv("BACKTEST_CLI"), args);
             ASSERT_TRUE(process.waitForFinished(10000)); EXPECT_NE(process.exitCode(), 0);
             const auto error = process.readAllStandardError();
             EXPECT_TRUE(error.contains("no trades in range")) << error.toStdString();
@@ -771,7 +772,7 @@ TEST(BacktestCore, R7EmptyRangeFailsWithRootsAndUsageListsParameters) {
         }
     }
     QProcess process;
-    process.start(QString::fromUtf8(BACKTEST_CLI), QStringList{});
+    process.start(testpaths::qenv("BACKTEST_CLI"), QStringList{});
     ASSERT_TRUE(process.waitForFinished(10000));
     const auto usage = process.readAllStandardError();
     EXPECT_TRUE(usage.contains("--spread")); EXPECT_TRUE(usage.contains("--qty")); EXPECT_TRUE(usage.contains("--maxpos"));
@@ -835,7 +836,7 @@ TEST(BacktestCore, R6FirstRecordBeyondStopSlackReportsWholeLeadingGap) {
     EXPECT_FALSE(source.next());
     EXPECT_EQ(source.gaps(), (std::vector<std::pair<int64_t, int64_t>>{{JournalEpoch, JournalEpoch + 1000}}));
     QProcess process;
-    process.start(QString::fromUtf8(BACKTEST_CLI), {"--product", "BTC-USD", "--from", "2026-10-07T00:00:00Z",
+    process.start(testpaths::qenv("BACKTEST_CLI"), {"--product", "BTC-USD", "--from", "2026-10-07T00:00:00Z",
         "--to", "2026-10-07T00:00:01Z", "--journal", temp.path(), "--dump"});
     ASSERT_TRUE(process.waitForFinished(10000)); EXPECT_NE(process.exitCode(), 0);
     EXPECT_TRUE(process.readAllStandardOutput().contains("# gap,1791331200000,1791331201000"));
@@ -848,7 +849,7 @@ TEST(BacktestCore, R2EmptyPositionalInputsKeepZeroEventSuccess) {
     for (const auto& name : {"empty.csv"}) {
         SCOPED_TRACE(name);
         QProcess process;
-        process.start(QString::fromUtf8(BACKTEST_CLI), {temp.path() + '/' + name, "BTC-USD"});
+        process.start(testpaths::qenv("BACKTEST_CLI"), {temp.path() + '/' + name, "BTC-USD"});
         ASSERT_TRUE(process.waitForFinished(10000));
         EXPECT_EQ(process.exitCode(), 0);
         EXPECT_TRUE(process.readAllStandardOutput().contains("events=0 "));

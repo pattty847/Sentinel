@@ -1,5 +1,6 @@
 // Actual Session admission/close/write paths, captured products, no sockets/services.
 #include "protocol/SentinelStreamServer.cpp"
+#include "../support/TestPaths.hpp"
 #include "protocol/SentinelStreamClient.hpp"
 #include "marketdata/auth/Authenticator.hpp"
 #include "ConfigLoader.hpp"
@@ -38,7 +39,7 @@ struct ServerFeedAdmissionTest : testing::Test {
     void SetUp() override {
         config.recording.enabled = false;
         config.rollerShadow.products = {"BTC-USD", "SOL-USD", "ETH-USD"};
-        config.mdc.sslCaBundle = std::string(SENTINEL_SOURCE_DIR) + "/resources/certs/ca-bundle.crt";
+        config.mdc.sslCaBundle = testpaths::source() + "/resources/certs/ca-bundle.crt";
         model = std::make_unique<FeedClockModel>(config, recordingLocal);
         server = std::make_unique<SentinelStreamServer>(*model, auth, config, 0);
         model->registerMetrics(metrics);
@@ -236,14 +237,14 @@ TEST(ServerFeedConfig, CheckedInConfigDefaultsToLoopback) {
     ServerConfig config;
     // Distinguish loading the file's value from retaining the struct default.
     config.bindAddress = "0.0.0.0";
-    ASSERT_TRUE(ConfigLoader::loadServerConfig(std::string(SENTINEL_SOURCE_DIR) +
+    ASSERT_TRUE(ConfigLoader::loadServerConfig(testpaths::source() +
                                                "/config/server_config.yaml", &config));
     EXPECT_EQ(config.bindAddress, "127.0.0.1");
 }
 
 TEST(ServerFeedConfig, CheckedInConfigServesHundredMsCandlesFromThirtyMinutesOfRam) {
     ServerConfig config;
-    ASSERT_TRUE(ConfigLoader::loadServerConfig(std::string(SENTINEL_SOURCE_DIR) +
+    ASSERT_TRUE(ConfigLoader::loadServerConfig(testpaths::source() +
                                                "/config/server_config.yaml", &config));
     const auto& tfs = config.chart.timeframesMs;
     EXPECT_NE(std::find(tfs.begin(), tfs.end(), 100), tfs.end());
@@ -284,7 +285,7 @@ TEST(ServerFeedConfig, OnlyRestCaBundleIsReadFromMdc) {
 }
 
 TEST(ServerFeedAlerts, A1bSelectsEachCapturedProductForFiveMinutes) {
-    std::ifstream file(std::string(SENTINEL_SOURCE_DIR) + "/ops/monitoring/grafana/provisioning/alerting/rules.yaml");
+    std::ifstream file(testpaths::source() + "/ops/monitoring/grafana/provisioning/alerting/rules.yaml");
     const std::string text((std::istreambuf_iterator<char>(file)), {});
     const auto start = text.find("uid: sentinel-a1b");
     ASSERT_NE(start, std::string::npos);
@@ -359,7 +360,7 @@ TEST_F(ServerFeedAdmissionTest, LegacyScreenerRequestStartsNoWorkAndKeepsTheSess
 
 TEST(ServerFeedAdmissionSource, ServerHasOnlyTheJournalFeed) {
     const auto read = [](const char* path) {
-        std::ifstream file(std::string(SENTINEL_SOURCE_DIR) + path);
+        std::ifstream file(testpaths::source() + path);
         EXPECT_TRUE(file.good());
         return std::string((std::istreambuf_iterator<char>(file)), {});
     };

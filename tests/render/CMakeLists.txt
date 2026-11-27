@@ -99,9 +99,6 @@ target_link_libraries(test_AxisLayout PRIVATE
     Qt6::Core
     Qt6::Gui
 )
-target_compile_definitions(test_AxisLayout PRIVATE
-    SENTINEL_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-)
 add_test(NAME AxisLayoutTests COMMAND test_AxisLayout)
 set_tests_properties(AxisLayoutTests PROPERTIES LABELS "render")
 
@@ -188,7 +185,6 @@ set_tests_properties(HeatmapTileNodeTests PROPERTIES LABELS "render;heatmap")
 add_executable(test_heatmap_palette test_heatmap_palette.cpp)
 target_include_directories(test_heatmap_palette PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_heatmap_palette PRIVATE sentinel_heatmap_gpu GTest::gtest_main Qt6::Core)
-target_compile_definitions(test_heatmap_palette PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME HeatmapPaletteTests COMMAND test_heatmap_palette)
 set_tests_properties(HeatmapPaletteTests PROPERTIES LABELS "render;heatmap")
 # The live edge in the node (draw clip E/L vs the composed oracle, partial
@@ -212,21 +208,18 @@ find_package(Qt6 REQUIRED COMPONENTS QuickPrivate)
 add_executable(test_ugr_gpu test_ugr_gpu.cpp)
 target_include_directories(test_ugr_gpu PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_ugr_gpu PRIVATE sentinel_gui_lib sentinel_lab_lib GTest::gtest Qt6::GuiPrivate Qt6::QuickPrivate Qt6::Quick Qt6::Qml)
-target_compile_definitions(test_ugr_gpu PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_executable(test_chart_view_trace test_chart_view_trace.cpp)
 target_include_directories(test_chart_view_trace PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_chart_view_trace PRIVATE sentinel_gui_lib sentinel_lab_lib Qt6::Quick)
-target_compile_definitions(test_chart_view_trace PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME ChartViewTraceTests COMMAND test_chart_view_trace)
 set_tests_properties(ChartViewTraceTests PROPERTIES LABELS "render" TIMEOUT 300)
 # Metal frame-hash golden (golden/frames.json). Exit 77 (skip) only off the owner's Mac.
 add_executable(test_chart_golden test_chart_golden.cpp)
 target_include_directories(test_chart_golden PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_chart_golden PRIVATE sentinel_gui_lib sentinel_lab_lib Qt6::GuiPrivate Qt6::QuickPrivate Qt6::Quick)
-target_compile_definitions(test_chart_golden PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-                           SENTINEL_GOLDEN_OUT_DIR="${CMAKE_BINARY_DIR}/golden-out")
 add_test(NAME ChartGoldenTests COMMAND test_chart_golden)
 set_tests_properties(ChartGoldenTests PROPERTIES LABELS "render;heatmap" TIMEOUT 600 SKIP_RETURN_CODE 77)
+set_property(TEST ChartGoldenTests APPEND PROPERTY ENVIRONMENT "SENTINEL_GOLDEN_OUT_DIR=${CMAKE_BINARY_DIR}/golden-out")
 add_test(NAME CandleOverlayCpuTests COMMAND test_ugr_gpu "--gtest_filter=UgrCandleCpu.*")
 set_tests_properties(CandleOverlayCpuTests PROPERTIES LABELS "render;fast" TIMEOUT 30)
 add_test(NAME UgrTickCpuTests COMMAND test_ugr_gpu "--gtest_filter=UgrTickCpu.*")
@@ -245,7 +238,6 @@ endif()
 # settings, the synthetic HMC2 recording for the GPU chart cases).
 find_package(Qt6 REQUIRED COMPONENTS Test Widgets)
 add_executable(test_heatmap_settings_ui test_heatmap_settings_ui.cpp)
-target_compile_definitions(test_heatmap_settings_ui PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_include_directories(test_heatmap_settings_ui PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_heatmap_settings_ui PRIVATE sentinel_gui_lib sentinel_lab_lib GTest::gtest Qt6::Test Qt6::Widgets Qt6::Quick)
 add_test(NAME HeatmapSettingsUiTests COMMAND test_heatmap_settings_ui)
@@ -254,10 +246,10 @@ set_tests_properties(HeatmapSettingsUiTests PROPERTIES LABELS "render;heatmap;ui
 add_executable(test_lab_output_guard test_lab_output_guard.cpp)
 target_include_directories(test_lab_output_guard PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_lab_output_guard PRIVATE sentinel_lab_lib GTest::gtest_main Qt6::Core)
-target_compile_definitions(test_lab_output_guard PRIVATE SENTINEL_LAB_EXECUTABLE="$<TARGET_FILE:sentinel_lab>")
 add_dependencies(test_lab_output_guard sentinel_lab)
 add_test(NAME LabOutputGuardTests COMMAND test_lab_output_guard)
 set_tests_properties(LabOutputGuardTests PROPERTIES LABELS "render;lab")
+set_property(TEST LabOutputGuardTests APPEND PROPERTY ENVIRONMENT "SENTINEL_LAB_EXECUTABLE=$<TARGET_FILE:sentinel_lab>")
 set_tests_properties(HeatmapGpuBinnerTests PROPERTIES LABELS "render;heatmap")
 # FM-099: a readback result freed before its frame completes is a silent heap
 # write without Guard Malloc; under it a wrong teardown order crashes. Covers the
@@ -292,7 +284,6 @@ target_link_libraries(heatmap_cell_query_bench PRIVATE sentinel_heatmap_gpu)
 add_executable(footprint_labels_bench footprint_labels_bench.cpp)
 set_target_properties(footprint_labels_bench PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 target_include_directories(footprint_labels_bench PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
-target_compile_definitions(footprint_labels_bench PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(footprint_labels_bench PRIVATE sentinel_gui_lib)
 
 # compile only CPU sources, link QtCore (no GPU required).
@@ -337,7 +328,6 @@ set_tests_properties(HeatmapLabelLayoutTests PROPERTIES LABELS "render;heatmap")
 add_executable(test_chart_ui test_chart_ui.cpp)
 target_include_directories(test_chart_ui PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui ${CMAKE_SOURCE_DIR}/libs/core)
 target_link_libraries(test_chart_ui PRIVATE sentinel_gui_lib sentinel_lab_lib GTest::gtest Qt6::Test Qt6::Widgets Qt6::Quick)
-target_compile_definitions(test_chart_ui PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME ChartUiTests COMMAND test_chart_ui)
 set_tests_properties(ChartUiTests PROPERTIES LABELS "render;heatmap;ui" TIMEOUT 300)
 
@@ -434,7 +424,6 @@ set_tests_properties(FrameProducerTests PROPERTIES LABELS "render;fast")
 add_executable(test_ChartLayers test_ChartLayers.cpp)
 set_target_properties(test_ChartLayers PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 target_include_directories(test_ChartLayers PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
-target_compile_definitions(test_ChartLayers PRIVATE SENTINEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(test_ChartLayers PRIVATE GTest::gtest_main sentinel_gui_lib)
 add_test(NAME ChartLayersTests COMMAND test_ChartLayers)
 set_tests_properties(ChartLayersTests PROPERTIES LABELS "render")
@@ -478,7 +467,6 @@ set_tests_properties(ChartRenderSequenceTests PROPERTIES LABELS "render;fast")
 add_executable(test_RenderPerformance test_render_performance.cpp)
 target_include_directories(test_RenderPerformance PRIVATE ${CMAKE_SOURCE_DIR}/libs/gui)
 target_link_libraries(test_RenderPerformance PRIVATE sentinel_gui_lib GTest::gtest)
-target_compile_definitions(test_RenderPerformance PRIVATE SENTINEL_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME RenderPerformanceTests COMMAND test_RenderPerformance)
 set_tests_properties(RenderPerformanceTests PROPERTIES LABELS "render;fast")
 
@@ -524,3 +512,5 @@ target_include_directories(test_shell_chrome PRIVATE ${CMAKE_SOURCE_DIR}/libs/gu
 target_link_libraries(test_shell_chrome PRIVATE sentinel_gui_lib GTest::gtest Qt6::Widgets Qt6::Test)
 add_test(NAME ShellChromeTests COMMAND test_shell_chrome)
 set_tests_properties(ShellChromeTests PROPERTIES LABELS "ui" TIMEOUT 60)
+
+sentinel_test_paths()

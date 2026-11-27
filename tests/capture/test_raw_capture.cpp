@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "../support/TestPaths.hpp"
 #include "capture/RawCapture.hpp"
 #include "capture/CaptureVerifier.hpp"
 #include "capture/CaptureSession.hpp"
@@ -1745,7 +1746,7 @@ TEST_F(CaptureTest, TradeStrictCliChangesExitOnlyAndDefaultOpenStatusSurvives) {
         auto env = QProcessEnvironment::systemEnvironment(); env.insert("SENTINEL_LOG_DIR", config.root + "/logs");
         child.setProcessEnvironment(env);
         if (strict) args << "--strict-trades";
-        child.start(CAPTURE_APP_FIXTURE, args);
+        child.start(testpaths::qenv("CAPTURE_APP_FIXTURE"), args);
         ASSERT_TRUE(child.waitForFinished(5000)); EXPECT_EQ(child.exitCode(), strict ? 2 : 0);
         const auto report = nlohmann::json::parse(child.readAllStandardOutput().toStdString());
         EXPECT_EQ(report["ok"], true); EXPECT_EQ(report["ok_closed_runs"], true);

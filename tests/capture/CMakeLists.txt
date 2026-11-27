@@ -11,32 +11,30 @@ add_test(NAME RawCaptureTests COMMAND test_raw_capture --gtest_filter=-CaptureTe
 add_test(NAME CaptureVerifierScaleTests COMMAND test_raw_capture --gtest_filter=CaptureTest.InventoryOver100000FilesHasBoundedBuffersAtEveryScope)
 set_tests_properties(CaptureVerifierScaleTests PROPERTIES LABELS "capture" TIMEOUT 180)
 set_tests_properties(RawCaptureTests PROPERTIES LABELS "capture" TIMEOUT 60)
+set_property(TEST RawCaptureTests CaptureVerifierScaleTests APPEND PROPERTY ENVIRONMENT
+    "CAPTURE_APP_FIXTURE=$<TARGET_FILE:capture_app_fixture>")
 
 add_executable(capture_app_fixture capture_app_fixture.cpp)
 target_include_directories(capture_app_fixture PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(capture_app_fixture PRIVATE sentinel_core Qt6::Core)
 add_executable(test_capture_app test_capture_app.cpp)
 target_link_libraries(test_capture_app PRIVATE sentinel_core capture_legacy_v2_fixture GTest::gtest_main Qt6::Core Qt6::Network)
-target_compile_definitions(test_capture_app PRIVATE
-    CAPTURE_APP_FIXTURE="$<TARGET_FILE:capture_app_fixture>"
-    SENTINEL_TEST_CA="${CMAKE_SOURCE_DIR}/resources/certs/ca-bundle.crt")
 add_dependencies(test_capture_app capture_app_fixture)
 add_test(NAME CaptureApplicationTests COMMAND test_capture_app)
 set_tests_properties(CaptureApplicationTests PROPERTIES LABELS "capture" TIMEOUT 180)
+set_property(TEST CaptureApplicationTests APPEND PROPERTY ENVIRONMENT
+    "CAPTURE_APP_FIXTURE=$<TARGET_FILE:capture_app_fixture>")
 
 add_executable(test_capture_routing test_capture_routing.cpp)
 target_link_libraries(test_capture_routing PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
-target_compile_definitions(test_capture_routing PRIVATE CAPTURE_ROUTING_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/routing_golden.json")
 add_test(NAME CaptureRoutingTests COMMAND test_capture_routing)
 set_tests_properties(CaptureRoutingTests PROPERTIES LABELS "capture" TIMEOUT 30)
 
 add_dependencies(test_raw_capture capture_app_fixture)
-target_compile_definitions(test_raw_capture PRIVATE CAPTURE_APP_FIXTURE="$<TARGET_FILE:capture_app_fixture>")
 
 if(UNIX)
     add_executable(test_capture_fanout test_capture_fanout.cpp)
     target_link_libraries(test_capture_fanout PRIVATE sentinel_core GTest::gtest_main Qt6::Core Qt6::Network)
-    target_compile_definitions(test_capture_fanout PRIVATE SENTINEL_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
     add_test(NAME CaptureFanoutTests COMMAND test_capture_fanout)
     set_tests_properties(CaptureFanoutTests PROPERTIES LABELS "capture" TIMEOUT 60)
 endif()
@@ -44,3 +42,5 @@ if(UNIX)
     add_executable(capture_fanout_benchmark fanout_benchmark.cpp)
     target_link_libraries(capture_fanout_benchmark PRIVATE sentinel_core Qt6::Core Qt6::Network)
 endif()
+
+sentinel_test_paths()

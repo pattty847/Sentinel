@@ -6,6 +6,9 @@ import subprocess
 import sys
 
 os.chdir(Path(__file__).resolve().parents[2])
+# Binaries run outside ctest get the paths ctest's ENVIRONMENT gives them (tests/support/TestPaths.hpp).
+os.environ.setdefault('SENTINEL_SOURCE_DIR', os.getcwd())
+os.environ.setdefault('ROLLER_TEST_ROOT', os.path.join(os.getcwd(), 'build/mac-clang/tests/roller'))
 os.environ['CCACHE_DIR'] = '/tmp/sentinel-corrupt-skip-ccache'
 # Do not reuse an object from a future-dated restoration (FM-132).
 os.environ['CCACHE_DISABLE'] = '1'

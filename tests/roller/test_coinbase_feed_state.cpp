@@ -1,6 +1,7 @@
 // Pins every exported boundary in both checked-in Coinbase captures against
 // baa928cf, including the CBOR bytes used by anchors. Never regenerate on a port.
 #include "roller/JournalFeed.hpp"
+#include "../support/TestPaths.hpp"
 #include <gtest/gtest.h>
 #include <QCryptographicHash>
 #include <QTemporaryDir>
@@ -10,7 +11,7 @@ using namespace sentinel::roller;
 TEST(CoinbaseFeedState, CapturedFixturesMatchBaseBytes) {
     for (const auto* name : {"btc-prefix.rawl2", "btc-hour-boundary.rawl2"}) {
         QTemporaryDir temp; ASSERT_TRUE(temp.isValid());
-        std::filesystem::copy_file(std::filesystem::path(COINBASE_STATE_FIXTURES) / name,
+        std::filesystem::copy_file(std::filesystem::path(testpaths::source("tests/roller/fixtures")) / name,
                                   std::filesystem::path(temp.path().toStdString()) / name);
         JournalReader reader(temp.path().toStdString(), "BTC-USD");
         JournalFeed feed("BTC-USD");

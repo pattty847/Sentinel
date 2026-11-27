@@ -1,4 +1,5 @@
 #include "UnifiedGridRenderer.h"
+#include "../support/TestPaths.hpp"
 #include "datasources/CandleSeriesBuffer.hpp"
 #include "lab/LabData.hpp"
 #include "render/GridViewState.hpp"
@@ -244,7 +245,7 @@ int main(int argc, char** argv) {
         configureFixture(dir);
         Trace trace;
         trace.run();
-        QFile golden(QStringLiteral(SENTINEL_SOURCE_DIR "/tests/render/golden/view_trace.txt"));
+        QFile golden(testpaths::qsource("tests/render/golden/view_trace.txt"));
         if (bless) {
             if (!golden.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
                 golden.write(trace.text().data(), qsizetype(trace.text().size())) != qsizetype(trace.text().size()))

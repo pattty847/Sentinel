@@ -1,6 +1,7 @@
 // Synthetic durable RAWL2 fixtures exercise disk recovery, canonical seals and
 // epoch fencing. Never opens the recorder's roots or starts a server/service.
 #include "servermodel/FlowChunkStore.hpp"
+#include "../support/TestPaths.hpp"
 #include "servermodel/FlowChunkService.hpp"
 #include "roller/fixtures/FlowJournal.hpp"
 #include "roller/JournalReader.hpp"
@@ -909,7 +910,7 @@ TEST_F(ChunkStoreTest, OfflineDiffListsEveryMovedTrade) {
     j.heartbeat(Day + 300000); j.close();
     FlowStore source(sourceOptions()); ASSERT_EQ(source.runPass().failed, 0u);
     QProcess process;
-    process.start(FLOW_CHUNK_DIFF_EXE, {QString::fromStdString(raw.string()), QString::fromStdString(hmc.string()),
+    process.start(testpaths::qenv("FLOW_CHUNK_DIFF_EXE"), {QString::fromStdString(raw.string()), QString::fromStdString(hmc.string()),
         QString::fromStdString(source.root().string()), QString::fromStdString((base / "diff").string()),
         "BTC-USD", "2027-01-01"});
     ASSERT_TRUE(process.waitForFinished(60000));
@@ -919,7 +920,7 @@ TEST_F(ChunkStoreTest, OfflineDiffListsEveryMovedTrade) {
     EXPECT_NE(output.find("moved=excluded id=2"), std::string::npos) << output;
     EXPECT_NE(output.find("legacy_membership_proven=1"), std::string::npos) << output;
     QProcess repeated;
-    repeated.start(FLOW_CHUNK_DIFF_EXE, {QString::fromStdString(raw.string()), QString::fromStdString(hmc.string()),
+    repeated.start(testpaths::qenv("FLOW_CHUNK_DIFF_EXE"), {QString::fromStdString(raw.string()), QString::fromStdString(hmc.string()),
         QString::fromStdString(source.root().string()), QString::fromStdString((base / "diff").string()),
         "BTC-USD", "2027-01-01"});
     ASSERT_TRUE(repeated.waitForFinished(60000));

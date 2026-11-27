@@ -123,6 +123,20 @@ add_subdirectory(apps/sentinel-roll)
 add_subdirectory(apps/sentinel-lab)
 add_subdirectory(apps/sentinel-backtest)
 enable_testing()
+# Test paths (source tree, scratch roots, helper executables) reach tests at run
+# time through ctest ENVIRONMENT and tests/support/TestPaths.hpp, never as compile
+# definitions: ccache base_dir rewrites path arguments but not -D values, so an
+# absolute path in a definition misses the shared cache in every other checkout.
+# Call at the end of a test directory's CMakeLists.txt: every test added in that
+# directory gets SENTINEL_SOURCE_DIR. Per-test values (an executable's
+# $<TARGET_FILE:...>, a scratch root) are appended next to their add_test.
+# A ';' in the source or build path is not supported: it would split the ENVIRONMENT list.
+function(sentinel_test_paths)
+    get_property(tests DIRECTORY PROPERTY TESTS)
+    foreach(test IN LISTS tests)
+        set_property(TEST "${test}" APPEND PROPERTY ENVIRONMENT "SENTINEL_SOURCE_DIR=${CMAKE_SOURCE_DIR}")
+    endforeach()
+endfunction()
 add_library(sentinel_recording_oracle STATIC tests/support/servermodel/RecordingPage.cpp)
 target_include_directories(sentinel_recording_oracle PUBLIC tests/support)
 target_link_libraries(sentinel_recording_oracle PUBLIC sentinel_core)

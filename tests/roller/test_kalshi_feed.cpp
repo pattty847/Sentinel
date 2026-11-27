@@ -2,6 +2,7 @@
 // files are copied unchanged from the Python reference; all 43 oracle steps are
 // checked for both tickers. Synthetic failures never touch production data.
 #include "roller/JournalFeed.hpp"
+#include "../support/TestPaths.hpp"
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
 #include <bit>
@@ -16,7 +17,7 @@ constexpr int64_t Epoch = 1'792'860'100'000;
 const std::string A = "KXATPMATCH-26OCT24COBMUS-MUS";
 const std::string B = "KXSUPERLIGGAME-26OCT24SAMAMS-AMS";
 json fixture(const char* name) {
-    std::ifstream in(std::filesystem::path(KALSHI_FIXTURES) / name);
+    std::ifstream in(std::filesystem::path(testpaths::source("tests/roller/fixtures")) / name);
     return json::parse(in);
 }
 json metadata(const std::string& product) {
