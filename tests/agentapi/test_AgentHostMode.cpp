@@ -13,7 +13,8 @@
 
 // --agent-host: the GUI run by scripts/dev/gui-host.py for sandboxed agents. It must not capture
 // screen pixels, must keep screenshots and general QSettings in its session, and must not
-// load code (QML) from agent-writable paths. These are the policy pieces that need no window.
+// load code (QML) from agent-writable paths. Candle selections also name a guarded symbol.
+// These are the policy pieces that need no window.
 
 class AgentHostModeTest : public ::testing::Test {
 protected:
@@ -288,7 +289,7 @@ TEST(AgentHostModeSources, NoNativeFormatQSettingsInTheGui) {
 // or (c) a new outbound method appears that nobody has classified.
 TEST(AgentHostModeSources, EveryOutboundRequestInTheDataSourceIsGuarded) {
     // The legacy heatmap requests (heatmap history, recording view and history) went in S8a.
-    const QSet<QString> guarded{"subscribe", "requestCandleHistory",
+    const QSet<QString> guarded{"subscribe", "requestCandleHistory", "selectLiveCandle",
                                 "requestTpoHistory", "subscribeFlowLive", "requestFlowSeconds", "requestTradeHistory",
                                 "sendTradeCommand", "sendAlgoCommand"};
     // Connection management, releases, cancels and the local generation lookup:

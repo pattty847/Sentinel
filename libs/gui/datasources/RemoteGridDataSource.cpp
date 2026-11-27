@@ -1,3 +1,5 @@
+// Declare the selected live candle independently of viewport history readiness.
+// Reconnect redeclares it; queued generation/symbol/timeframe guards remain final.
 #include "RemoteGridDataSource.hpp"
 #include "SentinelLogging.hpp"
 #include <cmath>
@@ -135,6 +137,8 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
                 // Candle seq numbers restart with every server session.
                 advanceCandleDeliveryGeneration();
                 if (m_candleBuffer) m_candleBuffer->resetSequences();
+                if (!m_candleSymbol.isEmpty() && AgentHostMode::symbolAllowed(m_candleSymbol))
+                    m_client.selectLiveCandle(m_candleSymbol.toStdString(), m_candleTimeframeMs);
                 m_candleBackfill.requestRefresh();
                 m_marketHealth.setTransport(MarketHealth::Transport::Connected);
                 m_connectionActive = true;
@@ -311,6 +315,10 @@ void RemoteGridDataSource::setCandleHistoryViewport(const QString& symbol, int64
         m_candleBuffer->resetSeriesForSelection(symbol, timeframeMs);
     m_candleSymbol = symbol;
     m_candleTimeframeMs = timeframeMs;
+    if (selectionChanged) {
+        const bool permitted = symbol.isEmpty() || symbolPermitted(symbol.toStdString(), "candle selection");
+        m_client.selectLiveCandle(permitted ? symbol.toStdString() : std::string{}, timeframeMs);
+    }
     m_candleHistoryReady = timeframeMs > 0 && endMs > startMs && startMs > 0;
     if (!m_candleHistoryReady) m_candleBackfillTimer.stop();
     const bool viewportChanged = m_candleBackfill.setViewport(symbol, timeframeMs, startMs, endMs);

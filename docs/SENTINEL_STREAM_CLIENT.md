@@ -41,11 +41,17 @@ Writes (subscribe, history requests, trade commands) are posted to `m_strand` an
 | `requestHeatmapChunks(...)` | `heatmap_chunk_request` | Recorded heatmap chunks (binary replies) |
 | `subscribeHeatmapLive(...)` / `unsubscribeHeatmapLive(...)` | `heatmap_live_subscribe` / `heatmap_live_unsubscribe` | The live raw tail |
 | `requestTpoHistory(...)` | `tpo_history_request` | Historical TPO slices |
+| `selectLiveCandle(symbol, timeframeMs)` | `candle_live_select` | Replace the one live 1m+ candle selection; timeframe below 1m disables it |
 | `requestCandleHistory(...)` | `candle_history_request` | OHLCV candle history |
 | `sendTradeCommand(...)` | `trade_command` | Order placement / modification |
 | `sendAlgoCommand(...)` | `algo_command` | Algo start/stop/params |
 
 All outgoing messages are JSON; payloads are enqueued and written sequentially.
+The data source redeclares its candle selection on reconnect, independently of
+symbol resubscription and history requests. Minute candle frames echo the selection
+generation and are filtered before signal emission. `candle_live_selected` is the
+server's snapshot barrier acknowledgement and does not mutate GUI state. See
+[the candle contract](MARKETDATA.md#heatmap-timeframes) for snapshot and sequence ordering.
 
 ## Incoming Message Types and Render Objects
 

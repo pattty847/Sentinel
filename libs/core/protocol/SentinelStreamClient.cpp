@@ -1,3 +1,5 @@
+// Minute candle selection is explicit and independent of history requests.
+// Reject obsolete wire selections before emitting a queued GUI signal.
 #include "SentinelStreamClient.hpp"
 #include "SentinelLogging.hpp"
 #include "ProtocolValidation.hpp"
@@ -740,6 +742,21 @@ void SentinelStreamClient::cancelTpoHistory(const std::string& symbol, const std
     });
 }
 
+void SentinelStreamClient::selectLiveCandle(const std::string& symbol, int64_t timeframeMs) {
+    const int64_t tf = symbol.empty() || timeframeMs < 60000 ? 0 : timeframeMs;
+    {
+        std::lock_guard lock(m_candleSelectionMutex);
+        m_candleSymbol = tf ? symbol : std::string{};
+        m_candleTimeframeMs = tf;
+    }
+    const nlohmann::json message = {{"type", "candle_live_select"}, {"symbol", tf ? symbol : ""},
+        {"timeframe_ms", tf}, {"selection", m_candleDeliveryGeneration.load(std::memory_order_acquire)}};
+    net::post(m_strand, [this, payload = message.dump()]() mutable {
+        m_writeQueue.push_back(std::move(payload));
+        if (m_isConnected && m_writeQueue.size() == 1) doWrite();
+    });
+}
+
 void SentinelStreamClient::requestCandleHistory(const std::string &symbol, int64_t timeframeMs, int64_t endTimeMs,
                                                 int limit) {
     if (symbol.empty() || timeframeMs <= 0) {
@@ -899,6 +916,7 @@ void SentinelStreamClient::handleMessage(const std::string& msgStr) {
     try {
         const auto msg = nlohmann::json::parse(msgStr);
         const std::string typeStr = msg.value("type", "unknown");
+        if (typeStr == "candle_live_selected") return; // selection barrier; no GUI state to mutate
         if (typeStr == "chunk_availability") {
             try { emit chunkAvailabilityReceived(protocol::chunks::parseAvailability(msg)); }
             catch (const std::exception& e) {
@@ -1146,6 +1164,14 @@ void SentinelStreamClient::handleCandleBarMessage(protocol::MessageType type, co
     }
     const int64_t timeframeMs = msg.value("timeframe_ms", static_cast<int64_t>(0));
     const int64_t bucketStartMs = msg.value("bucket_start_ms", static_cast<int64_t>(0));
+    std::unique_lock selectionLock(m_candleSelectionMutex, std::defer_lock);
+    if (timeframeMs >= 60000) {
+        selectionLock.lock();
+        if (generation != m_candleDeliveryGeneration.load(std::memory_order_acquire) ||
+            symbol != m_candleSymbol || timeframeMs != m_candleTimeframeMs ||
+            !msg.contains("selection") || !msg["selection"].is_number_unsigned() ||
+            msg["selection"].get<quint64>() != generation) return;
+    }
     const int64_t seq = msg.value("seq", static_cast<int64_t>(0));
     const auto item = msg.value("candle", nlohmann::json::object());
     const CandleBar bar = protocol::clientparse::parseCandleBar(item);

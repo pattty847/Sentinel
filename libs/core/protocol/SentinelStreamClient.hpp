@@ -1,3 +1,5 @@
+// Live minute candles carry an explicit selection generation. Filter on the
+// network thread before signal publication; consumers still check queued tags.
 #pragma once
 #include <QObject>
 #include <boost/beast/core.hpp>
@@ -155,8 +157,12 @@ public:
     // Stops an abandoned or superseded page on the server; its reply, if any, is dropped.
     void cancelTpoHistory(const std::string& symbol, const std::string& requestId);
     void requestCandleHistory(const std::string &symbol, int64_t timeframeMs, int64_t endTimeMs, int limit);
+    // Replaces the one live 1m+ selection; tf < 1m disables it. Reissue after
+    // reconnect, independently of history paging and symbol subscriptions.
+    void selectLiveCandle(const std::string& symbol, int64_t timeframeMs);
     // Local delivery tag, captured on the network thread before queuing a bar.
     void setCandleDeliveryGeneration(quint64 generation) {
+        std::lock_guard lock(m_candleSelectionMutex);
         m_candleDeliveryGeneration.store(generation, std::memory_order_release);
     }
     void sendTradeCommand(const trading::TradeCommand& command);
@@ -304,6 +310,10 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_isConnected{false};
     std::atomic<quint64> m_candleDeliveryGeneration{0};
+    // Held through minute-candle publication; consumers must use queued connections.
+    std::mutex m_candleSelectionMutex;
+    std::string m_candleSymbol;
+    int64_t m_candleTimeframeMs = 0;
     mutable std::mutex m_bookDeliveryMutex;
     std::unordered_map<std::string, quint64> m_bookDeliveryGenerations;
 

@@ -1,3 +1,5 @@
+// Candle subscription snapshots are read-only model-thread barriers; aggregation
+// state is copied under the aggregator's shared mutex.
 #pragma once
 #include "RecordingLive.hpp"
 #include "FlowStore.hpp"
@@ -115,6 +117,11 @@ public:
     std::vector<OHLCVBar> getHistory(const std::string& symbol, int64_t timeframeMs, size_t limit = 1000) const;
     std::vector<OHLCVBar> getHistory(const std::string& symbol, int64_t timeframeMs, int64_t endMs,
                                      size_t limit) const;
+    // Model thread only, outside candle signal callbacks; no caller-held lock.
+    // Aggregator takes its shared mutex. Invoke through the model's event queue
+    // and post the result behind preceding live callbacks on the session executor
+    // to seed a selection without racing its next live event.
+    std::optional<OHLCVBar> formingCandle(const std::string& symbol, int64_t timeframeMs) const;
     // Newest is for TPO history only: retainedFromMs becomes the complete-tape
     // cutoff for candle fallback; budgetExceeded reports a truncated selection.
     bool collectOverlayTrades(const std::string& symbol, int64_t startMs, int64_t endMs,

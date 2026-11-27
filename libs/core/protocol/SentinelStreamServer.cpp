@@ -2,6 +2,9 @@
 // model callbacks enter through postModelEvent, so timer turns need no cross-thread lock.
 // A candle's close tick is cached from its symbol's live-book wire tick and
 // refreshed on book messages; trade callbacks never query the book.
+// Only the explicitly selected (symbol, timeframe) emits 1m+ candles. Selection
+// seeds on the model thread, FIFO with live callbacks; identical seeds are omitted.
+// History never changes selection. Sub-minute streams retain their original gates.
 #include "metrics/MetricsRegistry.hpp"
 #include "SentinelStreamServer.hpp"
 #include "../servermodel/TradeOverlayPublisher.hpp"
@@ -38,6 +41,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 #include <unordered_set>
@@ -433,6 +437,9 @@ class Session : public std::enable_shared_from_this<Session> {
         double tickSize = 0.0;
     };
     std::unordered_map<std::string, CandleStreamState> candleStates_;
+    std::string candleSymbol_;
+    int64_t candleTimeframeMs_ = 0;
+    uint64_t candleSelection_ = 0;
     std::unordered_map<std::string, double> bookTicks_;
     net::steady_timer candleTimer_{ws_.get_executor()};
     bool candleTimerArmed_ = false;
@@ -1328,7 +1335,10 @@ public:
                     // Availability is (re)sent on every subscribe, then on change.
                     availability_[symbol].sent.clear();
                     pushAvailability(symbol);
+                    if (inserted && candleSymbol_ == symbol) seedCandleSelection(false);
                 }
+            } else if (type == "candle_live_select") {
+                selectCandle(j);
             } else if (type == "flow_history_request") {
                 handleFlowHistory(j);
             } else if (type == "trade_history_request") {
@@ -1539,6 +1549,10 @@ public:
                  const bool removed = !symbol.empty() && subscriptions_.erase(symbol) > 0;
                  for (auto& [key, candle] : candleStates_)
                      if (candle.symbol == symbol) candle.pending = false;
+                 if (candleSymbol_ == symbol) {
+                     candleSymbol_.clear();
+                     candleTimeframeMs_ = 0;
+                 }
                  bookTicks_.erase(symbol);
                  if (const auto it = rawViews_.find(symbol); it != rawViews_.end()) {
                      it->second->active.store(false);
@@ -1644,6 +1658,82 @@ public:
         return item;
     }
 
+    bool acceptsCandle(const std::string& symbol, int64_t timeframeMs) const {
+        return subscriptions_.contains(symbol) &&
+            (timeframeMs < 60000 || (symbol == candleSymbol_ && timeframeMs == candleTimeframeMs_));
+    }
+
+    void acknowledgeCandleSelection() {
+        do_write(nlohmann::json{{"type", "candle_live_selected"}, {"symbol", candleSymbol_},
+            {"timeframe_ms", candleTimeframeMs_}, {"selection", candleSelection_}}.dump());
+    }
+
+    void seedCandleSelection(bool acknowledge) {
+        const auto symbol = candleSymbol_;
+        const auto tf = candleTimeframeMs_;
+        const auto selection = candleSelection_;
+        if (!tf || !subscriptions_.contains(symbol)) {
+            if (acknowledge) acknowledgeCandleSelection();
+            return;
+        }
+        // A model-thread turn runs after earlier candle publication has drained.
+        // Its post follows those live callbacks and precedes subsequent ones.
+        QMetaObject::invokeMethod(&model_, [weak = weak_from_this(), symbol, tf, selection, acknowledge] {
+            auto self = weak.lock();
+            if (!self || self->closing_.load()) return;
+            const auto bar = self->model_.formingCandle(symbol, tf);
+            self->postModelEvent([symbol, tf, selection, bar, acknowledge](Session& session) {
+                if (selection != session.candleSelection_ || !session.acceptsCandle(symbol, tf)) return;
+                auto& entry = session.candleStates_[symbol + "|" + std::to_string(tf)];
+                if (bar) {
+                    const auto& last = entry.lastBar;
+                    const bool identical = entry.hasLast &&
+                        std::tie(last.timestamp_ms, last.open, last.high, last.low, last.close, last.volume,
+                                 last.count, last.is_closed) ==
+                        std::tie(bar->timestamp_ms, bar->open, bar->high, bar->low, bar->close, bar->volume,
+                                 bar->count, bar->is_closed);
+                    if (identical) entry.pending = false;
+                    if (!identical && (!entry.hasLast || bar->timestamp_ms > last.timestamp_ms ||
+                        (bar->timestamp_ms == last.timestamp_ms && !last.is_closed))) {
+                        entry.symbol = symbol;
+                        entry.timeframeMs = tf;
+                        entry.tickSize = session.candleTickFor(symbol);
+                        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
+                        session.publishBarUpdate(entry, *bar, now);
+                    }
+                }
+                if (acknowledge) session.acknowledgeCandleSelection();
+            });
+        }, Qt::QueuedConnection);
+    }
+
+    void selectCandle(const nlohmann::json& message) {
+        const auto symbol = message.at("symbol").get<std::string>();
+        const auto tf = message.at("timeframe_ms").get<int64_t>();
+        const auto& configured = owner_->serverConfig().chart.timeframesMs;
+        if (!message.contains("selection") || !message["selection"].is_number_unsigned() ||
+            (tf == 0 ? !symbol.empty() : symbol.empty() || !candleHistoryFromRest(tf) ||
+                std::find(configured.begin(), configured.end(), tf) == configured.end())) {
+            send_error("candle_live_select", symbol, "invalid candle selection");
+            return;
+        }
+        const auto selection = message["selection"].get<uint64_t>();
+        if (symbol == candleSymbol_ && tf == candleTimeframeMs_ && selection == candleSelection_) {
+            acknowledgeCandleSelection();
+            return;
+        }
+        candleSymbol_ = symbol;
+        candleTimeframeMs_ = tf;
+        candleSelection_ = selection;
+        for (auto& [key, entry] : candleStates_) {
+            if (entry.timeframeMs < 60000) continue;
+            entry.pending = false;
+            entry.hasLast = false; // force a fresh seed on re-entry; seq stays session-monotonic
+        }
+        seedCandleSelection(true);
+    }
+
     double candleTickFor(const std::string& symbol) const {
         const double overrideTick = owner_->serverConfig().candles.tickSize;
         if (std::isfinite(overrideTick) && overrideTick > 0.0) return overrideTick;
@@ -1718,6 +1808,7 @@ public:
         payload["timeframe_ms"] = timeframeMs;
         payload["bucket_start_ms"] = bar.timestamp_ms;
         payload["seq"] = entry.seq;
+        if (timeframeMs >= 60000) payload["selection"] = candleSelection_;
         payload["candle"] = std::move(item);
 
         do_write(payload.dump());
@@ -1735,7 +1826,7 @@ public:
                     std::chrono::system_clock::now().time_since_epoch()).count();
                 for (auto& [key, entry] : self->candleStates_) {
                     if (!entry.pending) continue;
-                    if (self->subscriptions_.contains(entry.symbol))
+                    if (self->acceptsCandle(entry.symbol, entry.timeframeMs))
                         self->publishBarUpdate(entry, entry.pendingBar, nowMs);
                     else
                         entry.pending = false;
@@ -1746,7 +1837,7 @@ public:
 
     void on_bar_updated(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar) {
         const std::string sym = symbol.toStdString();
-        if (subscriptions_.find(sym) == subscriptions_.end()) return;
+        if (!acceptsCandle(sym, timeframeMs)) return;
         const std::string key = sym + "|" + std::to_string(timeframeMs);
         const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -1770,7 +1861,7 @@ public:
 
     void on_bar_closed(const QString& symbol, int64_t timeframeMs, const OHLCVBar& bar) {
         const std::string sym = symbol.toStdString();
-        if (subscriptions_.find(sym) == subscriptions_.end()) return;
+        if (!acceptsCandle(sym, timeframeMs)) return;
 
         const std::string key = sym + "|" + std::to_string(timeframeMs);
         auto& entry = candleStates_[key];
@@ -1797,6 +1888,7 @@ public:
         payload["timeframe_ms"] = timeframeMs;
         payload["bucket_start_ms"] = bar.timestamp_ms;
         payload["seq"] = entry.seq;
+        if (timeframeMs >= 60000) payload["selection"] = candleSelection_;
         payload["candle"] = std::move(item);
 
         do_write(payload.dump());

@@ -1,6 +1,8 @@
 // Live flow holds trades across the provisional-tap/durable-grid ordering gap.
 // Grid holds are bounded on the model thread; the ordinary trade path does no
 // grid I/O, clock read, or hold allocation. Admission lateness is saved at arrival.
+// Forming candle snapshots run between model events and acquire only the
+// aggregator's shared state lock; they never alter candle publication.
 #include "TradeOverlayPublisher.hpp"
 #include "ServerDataModel.hpp"
 #include "FlowStoreLag.hpp"
@@ -511,6 +513,11 @@ std::vector<OHLCVBar> ServerDataModel::getHistory(const std::string& symbol, int
                                                   int64_t endMs, size_t limit) const {
     if (m_aggregator) return m_aggregator->getHistory(symbol, timeframeMs, endMs, limit);
     return {};
+}
+
+std::optional<OHLCVBar> ServerDataModel::formingCandle(const std::string& symbol, int64_t timeframeMs) const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    return m_aggregator ? m_aggregator->formingBar(symbol, timeframeMs) : std::nullopt;
 }
 
 trade_overlay::LiveSnapshot ServerDataModel::collectLiveOverlay(const trade_overlay::Request& request) const {
