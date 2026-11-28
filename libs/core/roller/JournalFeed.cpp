@@ -74,9 +74,9 @@ std::optional<uint64_t> numericTradeId(const std::string& id) {
     return value;
 }
 }
-// Coinbase resends trades and orders frames newest-first. Every raw-trade reader
-// must dedupe with a bounded trade_id window and sort each frame ascending
-// before delivery to ServerDataModel, FlowStore or the DOM.
+// Coinbase market_trades resends trades and lists each frame's trades newest-first.
+// Every raw-trade reader must dedupe by a bounded trade_id window and sort each
+// frame's trades ascending before delivery to ServerDataModel, FlowStore or the DOM dock.
 bool JournalFeed::rememberTradeId(const std::string& id) {
     return tradeWindow_.remember(id);
 }

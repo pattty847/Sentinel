@@ -52,9 +52,10 @@ double lowestPrice(const recording::Hmc2Record &r) {
                            : double(low) * double(r.header.rowTickUnits) /
                                  r.header.priceScale;
 }
-// History applies durable fanout prefixes and publishes Finals only. The worker-owned
-// lead is a non-persisting fork; drop it before retracting provisional output on
-// discard or day end. The next fork republishes from durable history.
+// Roller worker thread only. History applies durable fan-out prefixes and publishes Finals only;
+// the lead is a non-persisting fork that also applies provisional records as they arrive. On any
+// discard (retract, disconnect, EOF, socket failure) or day end, drop the lead, then retract its
+// provisional output (committed minutes stay); the next fork republishes from durable history.
 class LiveLead {
   const ShadowConfig &cfg;
   const std::string product;
@@ -1770,6 +1771,7 @@ struct ShadowRoller::Impl {
               const auto completed = nowMs() / 1000.;
               // Atomically save comparison.json with the watermark and both near/deep totals
               // before publishing metrics; never expose transient zero mismatch totals.
+              // A failed comparison never counts twice.
               writeCheckpoint(progressPath,
                               {{"version", 1},
                                {"product", p->name},

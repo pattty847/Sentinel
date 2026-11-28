@@ -2645,6 +2645,7 @@ bool SentinelStreamServer::submitHistoryTask(std::function<void()> task) {
     return true;
 }
 
+// Keep wildcard-listener warnings and IPv6 zone-label validation in the stream path.
 net::ip::address SentinelStreamServer::validateBindAddress(const ServerConfig& config) {
     const auto address = net::ip::make_address(config.bindAddress);
     if (!address.is_unspecified()) {

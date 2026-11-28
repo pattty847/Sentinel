@@ -278,7 +278,7 @@ json roll(const RollOptions& o) {
         };
 
         // Create roller.json before the first input can write, so first-write retries
-        // remain owned. An unscoped Hmc2Store must exclude later scoped writers on its root.
+        // remain owned.
         const auto claimProvenance = [&] {
             if (o.productWriterLease && !fs::exists(cpPath)) {
                 // Claim provenance before the first asynchronous write, so

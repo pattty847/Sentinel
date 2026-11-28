@@ -1,6 +1,6 @@
-// Keep each native grid intact and weight mixed grids by observed time. Display
-// ticks must be native-grid multiples; the deep recording default is $5, never
-// invented finer rows or split native detail.
+// Keep each native grid intact and weight mixed grids by observed time. Display ticks
+// must be multiples of the native grid (deep records at $5 by default); never split
+// native rows or invent finer detail.
 #include "TimeComposer.hpp"
 #include "NativeRows.hpp"
 #include "../servermodel/RecordingCodec.hpp"

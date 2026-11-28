@@ -1,5 +1,5 @@
-// Heatmap buckets and candle bars may have different timeframes. Map every layer
-// by timestamp through the same per-frame mapping; never assume one bucket per bar.
+// Heatmap and candles share the chart's one view timeframe. Still map every layer
+// by timestamp through this per-frame mapping; never assume one heatmap bucket per candle bar.
 /*
 Sentinel — TimeAxisMapping
 Role: Single source of truth for world-time/price → screen mapping.

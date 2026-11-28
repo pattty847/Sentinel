@@ -103,8 +103,6 @@ void Session::logFirstFailure() noexcept {
 // must never wait behind a large cleanup. The bytes go back now, not at close,
 // so a failed product never holds shared capacity (or makes a healthy product
 // fail for "pool limit").
-// Detach under the mutex, then log failures and destroy the backlog outside it;
-// one blocked product must not hold the shared accounting pool hostage.
 void Session::dropQueue() {
     std::deque<Record> lost;
     { std::lock_guard lock(m_mutex); lost.swap(m_queue); }

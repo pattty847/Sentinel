@@ -792,8 +792,6 @@ void HeatmapSourceController::setLiveMinInterval(int ms) {
     sLog_Data("Heatmap live min interval chart=" << chart_ << " ms=" << ms);
 }
 
-// Sealed 1m, 1h and 1d chunks are immutable for this GUI lifetime; offline minute
-// rewrites must invalidate the day's server rollups before clients reload them.
 std::shared_ptr<const SpanSet> HeatmapSourceController::latestSnapshot() const {
     std::scoped_lock lock(latestMutex_);
     return latest_;
