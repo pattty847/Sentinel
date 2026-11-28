@@ -472,12 +472,42 @@ TEST_F(FlowStoreTest, FailedStartupSeedBacksOffAndLogsChangesAndRecovery) {
     EXPECT_NE(logs.lines[5].find("seeded"), std::string::npos);
     EXPECT_EQ(store.sealedThroughMs("BTC-USD"), through);
 }
+TEST_F(FlowStoreTest, NoJournalFilesSkipsSeedAttemptsForFiveSeconds) {
+    auto o = options();
+    auto now = std::chrono::steady_clock::time_point{};
+    o.seedNow = [&] { return now; };
+    int attempts = 0;
+    o.beforeSeedForTest = [&] { ++attempts; };
+    FlowStore store(o);
+    store.runPass();
+    EXPECT_EQ(attempts, 1);
+    for (int second = 1; second < 5; ++second) {
+        now += std::chrono::seconds(1);
+        store.runPass();
+        EXPECT_EQ(attempts, 1) << second;
+    }
+    now += std::chrono::seconds(1);
+    store.runPass();
+    EXPECT_EQ(attempts, 2);
+    fixture();
+    store.runPass();
+    EXPECT_EQ(attempts, 2);
+    now += std::chrono::seconds(5);
+    store.runPass();
+    EXPECT_EQ(attempts, 3);
+    EXPECT_EQ(store.sealedThroughMs("BTC-USD"), through);
+    now += std::chrono::seconds(5);
+    store.runPass();
+    EXPECT_EQ(attempts, 3);
+}
 TEST_F(FlowStoreTest, StopInterruptsStartupSeedBackoff) {
     fixture();
     fs::create_directory(root);
     fs::create_directory_symlink(hmc2, root / "BTC-USD");
     auto o = options();
     o.rescan = std::chrono::hours(1);
+    const auto seedNow = std::chrono::steady_clock::now() + std::chrono::hours(1);
+    o.seedNow = [seedNow] { return seedNow; };
     std::atomic<int> attempts{0};
     o.beforeSeedForTest = [&] { ++attempts; };
     SeedLogs logs;
