@@ -464,6 +464,8 @@ TEST(CorruptBlockPolicy, ShadowRegistersJournalCorruptionForEveryProduct) {
     ShadowConfig config; config.enabled = true;
     config.journalRoot = (root/"raw").string();
     config.outputRoot = (root/"shadow").string();
+    config.rollupRoot = (root/"rollup").string();
+    config.socketPath = (root/"capture.sock").string();
     metrics::MetricsRegistry registry;
     EXPECT_FALSE(registry.hasSeries("sentinel_roller_journal_corrupt_blocks_total", {{"product", "BTC-USD"}}));
     ShadowRoller shadow(config, {"BTC-USD", "ETH-USD"}, registry);
