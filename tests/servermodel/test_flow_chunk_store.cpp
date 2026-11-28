@@ -575,17 +575,19 @@ TEST_F(ChunkStoreTest, FormingDayDoesNotReplaySealedHoursUntilNextSeal) {
     EXPECT_TRUE(store.read(Id, Minute, Epoch + Hour));
 }
 TEST_F(ChunkStoreTest, SteadyPassOverClosedDaysFeedsNoTrades) {
-    fixture(3); FlowStore source(sourceOptions()); auto o = options(); size_t replayed = 0;
+    fixture(3); FlowStore source(sourceOptions()); auto o = options(); size_t replayed = 0, loads = 0;
     o.afterRecordForTest = [&](std::stop_token) { ++replayed; };
+    o.beforeDayLoadForTest = [&](int64_t day) { if (day >= Epoch && day < Epoch + 3 * Day) ++loads; };
     FlowChunkStore store(source, o); ASSERT_EQ(store.runPass().failed, 0u);
-    replayed = 0;
+    replayed = loads = 0;
     const auto begin = std::chrono::steady_clock::now();
     ASSERT_EQ(store.runPass().failed, 0u);
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
     EXPECT_EQ(replayed, 0u);
+    EXPECT_EQ(loads, 0u);
     const auto rendered = metrics.render();
     EXPECT_NE(rendered.find("sentinel_flow_chunk_pending_days{instrument=\"coinbase:BTC-USD\"} 0"), std::string::npos);
-    std::cout << "steady_pass_days=3 feed_records=" << replayed << " wall_ms=" << ms << '\n';
+    std::cout << "steady_pass_days=3 feed_records=" << replayed << " day_loads=" << loads << " wall_ms=" << ms << '\n';
 }
 TEST_F(ChunkStoreTest, FirstBackfillReportsEveryDiscoveredDayUntilChecked) {
     fixture(3); FlowStore source(sourceOptions());
