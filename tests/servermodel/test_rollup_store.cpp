@@ -843,7 +843,8 @@ TEST_F(RollupTest, FallbackWarningIsLoggedOncePerSeriesDay) {
 TEST_F(RollupTest, FallbackWarningThrottleRetainsTrackedKeysAtCapacity) {
     RollupStore store(options());
     uint64_t repeats = 0;
-    for (int64_t i = 0; i < 4096; ++i)
+    ASSERT_TRUE(RollupStoreTestAccess::logDue(store, "zz-oldest", day0, repeats));
+    for (int64_t i = 0; i < 4095; ++i)
         ASSERT_TRUE(RollupStoreTestAccess::logDue(store, "symbol-" + std::to_string(i), day0, repeats));
     ASSERT_EQ(RollupStoreTestAccess::logCount(store), 4096u);
 
@@ -854,8 +855,10 @@ TEST_F(RollupTest, FallbackWarningThrottleRetainsTrackedKeysAtCapacity) {
     EXPECT_EQ(RollupStoreTestAccess::logCount(store), 4096u);
     EXPECT_FALSE(RollupStoreTestAccess::logDue(store, "symbol-1", day0, repeats))
         << "admitting one new key must not reset unrelated throttles";
-    EXPECT_TRUE(RollupStoreTestAccess::logDue(store, "symbol-0", day0, repeats))
-        << "the oldest key makes room for the new key";
+    EXPECT_FALSE(RollupStoreTestAccess::logDue(store, "symbol-0", day0, repeats))
+        << "the map's first key is newer than zz-oldest and must remain throttled";
+    EXPECT_TRUE(RollupStoreTestAccess::logDue(store, "zz-oldest", day0, repeats))
+        << "the first inserted key makes room for the new key despite sorting last";
     EXPECT_EQ(RollupStoreTestAccess::logCount(store), 4096u);
 }
 
