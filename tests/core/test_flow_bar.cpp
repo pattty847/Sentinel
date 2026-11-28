@@ -16,6 +16,21 @@ FlowBarBuilder builder(int64_t tf = 60'000) { return {tf, 1, 100, Base, Quote}; 
 void accepted(FlowBarBuilder& b, const Trade& t) {
     ASSERT_EQ(b.add(t), FlowBarBuilder::AddResult::Accepted);
 }
+FlowBar codecBar() {
+    FlowBar bar;
+    bar.timeframeMs = 60'000;
+    bar.nativeTick = 1;
+    bar.priceScale = bar.baseScale = bar.quoteScale = 1;
+    return bar;
+}
+void rejectedBy(const FlowBar& bar, const char* reason) {
+    try {
+        (void)encodeFlowBar(bar);
+        FAIL() << "Expected FlowBar rejection: " << reason;
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(), reason);
+    }
+}
 }
 
 TEST(FlowBar, ScriptedTotalsRowsSweepAndDedup) {
@@ -199,6 +214,86 @@ TEST(FlowBar, CodecRejectsNonfiniteAndInvalidNotable) {
     bar.open = 100;
     std::reverse(bar.notable.begin(), bar.notable.end());
     EXPECT_THROW(encodeFlowBar(bar), std::invalid_argument);
+}
+
+TEST(FlowBar, CodecRejectsInvalidScalarsAndCapacities) {
+    const auto good = codecBar();
+    EXPECT_NO_THROW(encodeFlowBar(good));
+    for (int64_t value : {int64_t(0), int64_t(-1)}) {
+        auto bar = good;
+        bar.timeframeMs = value;
+        SCOPED_TRACE("timeframeMs");
+        rejectedBy(bar, "invalid flow bar");
+    }
+    for (double value : {0.0, -1.0, std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()}) {
+        auto bar = good;
+        bar.nativeTick = value;
+        SCOPED_TRACE("nativeTick");
+        rejectedBy(bar, "invalid flow bar");
+    }
+    for (auto field : {&FlowBar::priceScale, &FlowBar::baseScale, &FlowBar::quoteScale}) {
+        auto bar = good;
+        bar.*field = 0;
+        rejectedBy(bar, "invalid flow bar");
+    }
+    auto bar = good;
+    bar.rows.resize(size_t(UINT16_MAX) + 1);
+    rejectedBy(bar, "invalid flow bar");
+    bar = good;
+    bar.notable.resize(NotableCapacity + 1);
+    rejectedBy(bar, "invalid flow bar");
+}
+
+TEST(FlowBar, CodecRejectsEveryNonfinitePrice) {
+    const auto good = codecBar();
+    for (auto field : {&FlowBar::open, &FlowBar::high, &FlowBar::low, &FlowBar::close}) {
+        for (double value : {std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::quiet_NaN()}) {
+            auto bar = good;
+            bar.*field = value;
+            rejectedBy(bar, "nonfinite flow price");
+        }
+    }
+}
+
+TEST(FlowBar, CodecRejectsEveryNegativeBarVolume) {
+    const auto good = codecBar();
+    for (auto field : {&FlowBar::baseVolume, &FlowBar::quoteVolume, &FlowBar::buyVol,
+                       &FlowBar::sellVol, &FlowBar::maxRowVol}) {
+        auto bar = good;
+        bar.*field = -1;
+        rejectedBy(bar, "negative flow volume");
+    }
+}
+
+TEST(FlowBar, CodecRejectsInvalidRowOffsets) {
+    const auto good = codecBar();
+    for (uint16_t offset : {uint16_t(65535), uint16_t(0), uint16_t(1)}) {
+        auto bar = good;
+        bar.rows = {{1}, {offset}};
+        rejectedBy(bar, "invalid flow row offset");
+    }
+}
+
+TEST(FlowBar, CodecRejectsNegativeRowVolume) {
+    const auto good = codecBar();
+    for (auto field : {&Row::bidVol, &Row::askVol}) {
+        auto bar = good;
+        bar.rows = {{0}};
+        bar.rows.front().*field = -1;
+        rejectedBy(bar, "negative flow row volume");
+    }
+}
+
+TEST(FlowBar, CodecRejectsRowVolumeAboveSideTotal) {
+    const auto good = codecBar();
+    for (auto field : {&Row::bidVol, &Row::askVol}) {
+        auto bar = good;
+        bar.rows = {{0}};
+        bar.rows.front().*field = 1;
+        rejectedBy(bar, "flow row volume exceeds side total");
+    }
 }
 
 TEST(FlowBar, CodecRejectsRowVolumesThatDisagreeWithSideTotals) {
