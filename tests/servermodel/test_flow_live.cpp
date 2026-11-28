@@ -1,5 +1,6 @@
 #include "CandleWireFixture.hpp"
 #include "FlowLiveTestAccess.hpp"
+#include "flow/FlowChunkCodec.hpp"
 #include "flow/FlowCodec.hpp"
 #include "flow/FlowCompose.hpp"
 #include "flow/FlowScales.hpp"
@@ -1310,6 +1311,46 @@ TEST_F(FlowLive, SealedHourNotificationCountsEachDifferentLiveFinalMinute) {
             std::string::npos);
   FlowLiveTestAccess::tick(*model);
   EXPECT_EQ(FlowLiveTestAccess::sealMismatches(*model), 2u);
+}
+
+TEST_F(FlowLive, ChunkRowStepDoesNotCountAsLiveSealMismatch) {
+  namespace chunks = sentinel::flow::chunks;
+  for (const bool publishBeforeFinal : {false, true}) {
+    model = std::make_unique<ServerDataModel>(config);
+    FlowLiveTestAccess::stopTimer(*model);
+    grid(*model);
+    model->onTrade(trade(Day + 100, "warmup"));
+    model->onTrade(trade(Day + 60'100, "first"));
+    auto adjacent = trade(Day + 60'200, "adjacent");
+    adjacent.price = 100001;
+    model->onTrade(adjacent);
+    model->onTrade(trade(Day + 120'100, "wide-low"));
+    auto wideHigh = trade(Day + 120'200, "wide-high");
+    wideHigh.price = 200000;
+    model->onTrade(wideHigh);
+    tick(Day + (publishBeforeFinal ? 3 : 8) * 60'000);
+
+    auto& builder = FlowLiveTestAccess::series(*model, "BTC-USD", Day, 60'000).builder;
+    const auto first = builder.snapshotBar(Day + 60'000);
+    const auto wide = builder.snapshotBar(Day + 120'000);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(wide);
+    ASSERT_EQ(first->nativeTick, 1);
+    ASSERT_EQ(wide->nativeTick, 2);
+    const std::array bars{*first, *wide};
+    const chunks::FlowGrid nativeGrid{100, first->priceScale, first->baseScale, first->quoteScale};
+    const std::array grids{nativeGrid, nativeGrid};
+    const auto chunk = chunks::fromBars(bars, 60'000, Day, 60, nullptr, grids);
+    ASSERT_EQ(chunk.priceStep, 2u);
+    const auto payload = chunks::encode(chunk);
+    auto sealed = chunks::toBars(chunks::decode(payload, 60'000, Day, 60, false, chunk.priceStep));
+    ASSERT_EQ(sealed.size(), 2u);
+    EXPECT_NE(*first, sealed.front()); // The chunk re-bins both minutes.
+    model->onFlowChunkIndexChange("coinbase:BTC-USD", Day, 1);
+    model->onFlowChunkDayPublished("coinbase:BTC-USD", Day, 1, std::move(sealed), {Day});
+    if (publishBeforeFinal) tick(Day + 8 * 60'000);
+    EXPECT_EQ(FlowLiveTestAccess::sealMismatches(*model), 0u);
+  }
 }
 
 TEST_F(FlowLive, ReorderedRunsCountTheDifferentLiveFinalAgainstSealedArchive) {
