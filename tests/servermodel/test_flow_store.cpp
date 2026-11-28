@@ -496,6 +496,9 @@ TEST_F(FlowStoreTest, NoJournalFilesSkipsSeedAttemptsForFiveSeconds) {
     store.runPass();
     EXPECT_EQ(attempts, 3);
     EXPECT_EQ(store.sealedThroughMs("BTC-USD"), through);
+    now += std::chrono::seconds(5);
+    store.runPass();
+    EXPECT_EQ(attempts, 3);
 }
 TEST_F(FlowStoreTest, StopInterruptsStartupSeedBackoff) {
     fixture();
