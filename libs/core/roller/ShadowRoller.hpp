@@ -18,6 +18,8 @@ public:
   void stop();
   // False when roller_shadow.enabled is false (nothing constructed).
   bool active() const { return m != nullptr; }
+  // Seeing live minute N does not prove N-1 is durable. Before stopping or diffing,
+  // wait for minuteThroughMs >= the exclusive end being compared.
   // Thread-safe (chunk workers): the product's committed history watermarks,
   // never regressing across day rotation; zero when the product is not rolled.
   recording::BookRecorder::Watermarks

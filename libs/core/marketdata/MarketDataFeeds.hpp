@@ -9,6 +9,8 @@
 
 // Capacity one token buckets: one connection attempt and one three-frame
 // subscription batch per second, independently. Shared by owners in a process.
+// FIFO admission spaces attempts and three-frame subscription batches by at least
+// one second each per process; closing a feed cancels both pending tickets.
 class FeedConnectLimiter {
 public:
     struct Ticket {};

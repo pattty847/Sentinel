@@ -119,7 +119,8 @@ struct ServerConfig {
     ServerRecordingConfig recording;
     sentinel::roller::ShadowConfig rollerShadow;
     uint16_t streamPort = 8080;
-    // Numeric local address; wildcard listeners require an explicit choice.
+    // Default to loopback. Remote clients use an explicitly configured tailnet
+    // address; never make an unauthenticated wildcard listener the default.
     std::string bindAddress = "127.0.0.1";
     std::vector<std::string> defaultSymbols{"BTC-USD"};
 };

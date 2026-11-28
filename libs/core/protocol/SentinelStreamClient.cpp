@@ -17,6 +17,8 @@ namespace {
 
 constexpr qint64 kSchemaLogThrottleMs = 2000;
 
+// Check kMaxGridHeight and kMaxPayloadBytes before allocating/decoding payloads;
+// malformed dimensions must not turn into unbounded memory requests.
 enum class DropReason : int {
     ServerSchema = 0,
     CandleSchema,
@@ -63,6 +65,8 @@ void logDroppedMessage(DropReason reason, const QString& msg) {
     }
 }
 
+// Every streamed payload family needs schema_version on the server and family
+// validation here before decoding; a missing version is not a compatible default.
 bool validateFamilySchema(const nlohmann::json& msg,
                           const char* family,
                           int supportedVersion,

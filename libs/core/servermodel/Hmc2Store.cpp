@@ -20,6 +20,8 @@
 #include <cassert>
 #include <cerrno>
 
+// An unscoped writer lease excludes scoped product writers on the same root,
+// regardless of which owner opens first.
 namespace recording {
 namespace {
 namespace fs = std::filesystem;

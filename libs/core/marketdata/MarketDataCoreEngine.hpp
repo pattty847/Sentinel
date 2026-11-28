@@ -56,6 +56,8 @@ public:
     using IngestObserver = std::function<void(const IngestObservation&)>;
     void onIngest(IngestObserver cb) { m_ingestObserver = std::move(cb); }
 
+    // Allow 20 seconds of heartbeat silence by default; stale-heartbeat reconnects
+    // must back off so a slow upstream cannot cause a reconnect loop.
     struct ReconnectPolicy {
         std::chrono::milliseconds initialDelay{1000};
         std::chrono::milliseconds maximumDelay{30000};

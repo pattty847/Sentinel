@@ -48,6 +48,9 @@ struct SparseColumn {
     uint32_t flags = 0;
     std::vector<NativeColumn> native;
 };
+// Only scannedRanges proves complete buckets; start/end is a bounding extent.
+// Keep holes and incomplete edges NotLoaded, distinct from scanned recorder gaps;
+// retain original chunks until composition has a complete bucket.
 struct SparseColumns {
     std::string symbol, layer;
     int64_t tfMs = kMinuteMs;

@@ -174,6 +174,7 @@ void buildContinuousBars(const std::vector<CandleOverlayBar>& source,
     }
 }
 
+// Geometry invalidation includes both snap axes and DPR even when mapped bounds match.
 bool mappingChanged(const TimeAxisMapping& a, const TimeAxisMapping& b) {
     // INV-005: timeOffset is shader-only ring wrap for heatmap sampling.
     // Candle geometry uses mapping helpers (world->screen), so timeOffset must not drive dirty.

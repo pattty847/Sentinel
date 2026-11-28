@@ -37,6 +37,8 @@ static void addSentinelChartsImportPath(QQmlEngine* engine) {
     }
 }
 
+// Set symbol and chartModeController on the QML root as well as the context:
+// root properties shadow context properties with the same names.
 void QmlSceneController::loadQmlSource() {
     QSettings config("config.ini", QSettings::IniFormat);
     QString qmlPath;

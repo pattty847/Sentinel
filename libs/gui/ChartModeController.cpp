@@ -11,6 +11,8 @@ int ChartModeController::primaryField() const {
     return static_cast<int>(m_primaryField);
 }
 
+// This controller is the mode authority; QML and renderer paths must not
+// independently write a second primary-field state.
 void ChartModeController::setPrimaryField(PrimaryField field) {
     if (m_primaryField == field) {
         return;

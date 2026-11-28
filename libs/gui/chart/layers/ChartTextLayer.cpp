@@ -1,3 +1,6 @@
+// Axis text uses captured itemBounds; heatmap labels use surfaceDpr and registry
+// containers are the roots. Repeated profiler marks accumulate per frame; afterRendering
+// reads retained atomics and queues label-signature checks on the GUI thread.
 #include "chart/layers/ChartTextLayer.hpp"
 #include "chart/layers/HeatmapLayer.hpp"
 #include "chart/layers/LadderLayer.hpp"

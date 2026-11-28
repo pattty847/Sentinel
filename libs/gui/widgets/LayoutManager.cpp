@@ -51,6 +51,8 @@ bool LayoutManager::restoreLayout(QMainWindow* window, const QString& layoutName
     }
     
     // Qt preserves a missing dock as a placeholder in saved QMainWindow state.
+    // Remove retired AICommentaryFeedDock and LabDock placeholders after restore,
+    // before any new layout save can retain them.
     // Supply retired docks during restore, then remove them so surviving tabs
     // keep their positions and the next save contains only live docks.
     const auto options = window->dockOptions();

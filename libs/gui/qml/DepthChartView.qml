@@ -3,6 +3,8 @@ import QtQuick.Controls
 import Sentinel 1.0
 import Sentinel.Charts 1.0
 
+// Overlay bindings must name the viewport properties they depend on explicitly;
+// otherwise use the captured frame mapping in a scene-graph layer.
 Rectangle {
     id: root
     color: uiTheme ? uiTheme.bg : "black"
@@ -91,6 +93,8 @@ Rectangle {
         z: 0
     }
 
+    // Keep the chart canvas visible for input even when heatmap is not primary.
+    // Heatmap and footprint are layers; every frame still needs the shared mapping.
     UnifiedGridRenderer {
         id: unifiedGridRenderer
         objectName: "unifiedGridRenderer"

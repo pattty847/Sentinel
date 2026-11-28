@@ -66,6 +66,8 @@ std::optional<std::pair<qint64, qint64>> PriceFitter::gpuFitTimeWindow() const {
   return std::make_pair<qint64, qint64>(qint64(start), start + span);
 }
 
+// Auto price scale fits the candles in the drawn time window and follows time zoom.
+// Keep this behavior enabled by the chart default and controlled by the corner toggle.
 std::optional<std::pair<double, double>> PriceFitter::gpuFitPriceWindow(qint64 start, qint64 end,
                                                                      bool candlesOnly,
                                                                      std::optional<double> anchorFracX) {

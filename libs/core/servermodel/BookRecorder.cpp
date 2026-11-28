@@ -72,6 +72,8 @@ struct Layer {
         hourMinutes.reserve(60);
     }
 };
+// Keep pooled ordered price maps for constant-time best bid/ask lookup, and
+// per-layer pooled row/side hashes with lazy integrals; do not scan the book per update.
 struct Symbol {
     std::pmr::unsynchronized_pool_resource pool;
     std::pmr::map<int64_t, double> bids{&pool}, asks{&pool};
@@ -1216,6 +1218,8 @@ BookRecorder::Stats BookRecorder::stats() const {
     return {i.columnsWritten.load(), i.lateEvents.load(),    i.backwardSteps.load(),
             i.invalidations.load(), i.diskErrors.load()};
 }
+// Scrape-time samplers may lock only this short watermark map, never a mutex
+// held across disk I/O; ShadowRoller watermark readers must keep the same separation.
 BookRecorder::Watermarks BookRecorder::watermarks(const std::string &symbol, const std::string &layer) const {
     std::lock_guard lock(impl_->watermarksMutex);
     const auto it = impl_->watermarksBySeries.find({symbol, layer});

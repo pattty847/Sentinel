@@ -1,3 +1,5 @@
+// Render-thread text consumes snapshots captured on the GUI thread. Never read
+// live QObject or QAbstractItemModel state from updatePaintNode or rendering.
 #include "AxisTextService.hpp"
 #include "AxisLabelFit.hpp"
 

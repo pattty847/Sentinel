@@ -22,6 +22,9 @@ void ZoomGlide::endZoomGlide(bool time, bool price) {
   if (ended) emit updateRequested();
 }
 
+// Read the start clock after intendedEndNow; read glide clocks only while active.
+// Preserve direct raster/viewport/polish/update order; stop timers and disconnect
+// policy forwarding before the shell detaches the chart port.
 void ZoomGlide::startAxisGlides(const chart_raster::RasterCamera& drawn,
                                  const chart_raster::RasterCamera& restBefore, double anchorTime,
                                  double anchorPrice, bool forceTime, bool forcePrice) {
@@ -59,6 +62,8 @@ void ZoomGlide::startAxisGlides(const chart_raster::RasterCamera& drawn,
   emit updateRequested();
 }
 
+// Wheel clicks set stored rungs while each axis glides independently. Translations
+// shift both ends; other target changes rebase with a cap of two glide durations.
 void ZoomGlide::advanceAxisGlide(AxisGlide& g, bool time, const chart_raster::RasterCamera& rest,
                                   const chart_raster::RasterCamera& intended, qint64 now) {
   if (!g.active) return;

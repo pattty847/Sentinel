@@ -86,6 +86,9 @@ QJsonObject DockVisibilityController::apply(const QJsonObject& changes, const QS
     return snapshot();
 }
 
+// Hosted dock changes persist immediately in the docks-only profile and restore
+// after layout; other hosted settings stay per-session. Normal API changes need
+// persist:true, including session saves unless the owner manually toggled a dock.
 void DockVisibilityController::save() const {
     if (AgentHostMode::active()) {
         QSettings settings(AgentHostMode::dockProfileFile(), QSettings::IniFormat);

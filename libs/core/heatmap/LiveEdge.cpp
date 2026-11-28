@@ -1,3 +1,5 @@
+// The forming bucket proves only its known prefix, never the enclosing extent.
+// GPU upload identity follows LiveSnapshot::version, including provisional revisions.
 #include "LiveEdge.hpp"
 #include "TimeComposer.hpp"
 #include <algorithm>

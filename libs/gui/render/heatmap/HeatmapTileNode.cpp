@@ -875,6 +875,9 @@ bool HeatmapTileNode::addLoadingDraw(QRhiResourceUpdateBatch *updates, int64_t l
 // ------------------------------------------------------------------ live edge
 bool HeatmapTileNode::overCap() const { return residentBytes() > frame_.gpuCapBytes; }
 
+// Metal may memcpy static/immutable storage buffers when recording commands.
+// Refill only after usedFrame + FramesInFlight <= frame and no current, pending,
+// held or fading bin references the set.
 bool HeatmapTileNode::liveSetInUse(const LiveSet *set) const {
     auto has = [&](const std::array<LiveSet *, kMaxSpanSources> &sets, uint8_t count) {
         return std::find(sets.begin(), sets.begin() + count, set) != sets.begin() + count;
@@ -1231,6 +1234,8 @@ void HeatmapTileNode::noteLiveDrawn(const Bin &bin) {
 }
 
 // ------------------------------------------------------------------ frame
+// Keep compute in QSGRenderNode::prepare and drawing in render, in the normal
+// scene graph, so heatmap and candle mapping agree within the same frame.
 void HeatmapTileNode::prepare() {
     const auto started = std::chrono::steady_clock::now();
     stats_->wantsFrame.store(false); // set again at the end when work remains

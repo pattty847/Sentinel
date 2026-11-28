@@ -1130,6 +1130,8 @@ void OrderBookDock::recenter()
     refreshDisplay();
 }
 
+// Only explicit ladder gestures may stop follow. Covered or minimized docks
+// suspend publication while continuing to ingest trades.
 void OrderBookDock::refreshBook()
 {
     if (!m_source || m_symbol.isEmpty()) return;
@@ -1145,7 +1147,8 @@ void OrderBookDock::refreshBook()
     updateVisibleRows();
     updateGrouping(book);
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    // Scale decay, visible-range changes and trades leaving the window need a publish too.
+    // Request scale decay, range changes and trade expiry only via needsRepublish,
+    // not extra signals; dirty book/trade data already trigger their own publication.
     if (m_model->needsRepublish(now)) m_dirty = true;
     if (m_dirty) {
         QElapsedTimer cost;

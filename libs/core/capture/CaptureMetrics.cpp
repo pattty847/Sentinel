@@ -6,6 +6,9 @@
 #include <optional>
 
 namespace sentinel::capture {
+// Scrape only atomic mirrors, never session locks or I/O-thread state.
+// Sessions share an accounting-only pool (512 MiB total, 2 MiB floor by default);
+// failure logging and backlog destruction must remain outside their mutexes.
 void registerCaptureMetrics(metrics::MetricsRegistry& r, std::shared_ptr<const QueuePool> pool,
                             std::vector<CaptureMetricsSource> sources, std::function<int64_t()> steadyNowNs) {
     using Value = std::optional<double>;

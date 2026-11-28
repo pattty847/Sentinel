@@ -1,3 +1,6 @@
+// Shell reactions bind Heatmap, ViewState, then Ready so seed/follow precede refit;
+// preserve direct forwarding and teardown order. Trade seeding compares UTF-8,
+// independently of the shell last-trade comparison using Latin-1.
 #include "chart/core/LivePlacement.hpp"
 #include "chart/core/LiveEdge.hpp"
 #include "chart/core/ChartViewController.hpp"
@@ -87,6 +90,8 @@ void LivePlacement::followGpuLiveTo(int64_t openEnd) {
 
 // The first price places the view; the loading hatch stays until the newest span lands.
 // The price band uses initial_price_pct of kSeedBandRows rows at kSeedBandTick.
+// Seed immediately from book top, then trade or decoded median; do not wait for history.
+// An untouched seed follows layout size while preserving its initial column width.
 void LivePlacement::seedGpuViewport(double bestBid, double bestAsk) {
   if (!shouldSeed(bestBid, bestAsk)) return;
   const bool timeValid = controller_.viewPtr()->isTimeWindowValid();

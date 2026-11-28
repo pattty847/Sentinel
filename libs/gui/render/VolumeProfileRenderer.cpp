@@ -1,6 +1,8 @@
 /*
  * Sentinel – VolumeProfileRenderer (implementation)
  */
+// Volume profile is price-domain geometry. Left/right/overlay anchoring may
+// move it horizontally but must not change its price mapping.
 #include "VolumeProfileRenderer.hpp"
 #include "SentinelLogging.hpp"
 

@@ -4,6 +4,9 @@
  * Market profile overlay: coloured letter cells + MSDF letters per session.
  * See the header for the layout modes and the rebuild contract.
  */
+// Draw each session with vertex-colour cells and MSDF letters, supporting split
+// and collapsed profiles with per-period palettes. Compute POC/value area on the
+// displayed rows; panning should only change the transform.
 #include "TpoOverlayRenderer.hpp"
 
 #include "ChartTextAtlas.hpp"
@@ -762,6 +765,8 @@ void TpoOverlayRenderer::render(QQuickWindow* window,
         // Exact sizes are stable at rest and rebuild only as the drawn scale changes.
         key.cellW = cellW;
         key.cellH = cellH;
+        // Candle and TPO geometry caches must include both snap axes and DPR, even
+        // when the mapped world bounds are unchanged.
         key.dpr = scale;
         key.snapX = snapX;
         key.snapY = snapY;

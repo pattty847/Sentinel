@@ -60,6 +60,8 @@ double ZoomController::clampSpan(double span, double current, double maximum, do
   return span;
 }
 
+// Keep route/axis carry and settling in this policy, and priceInteracted before follow-off.
+// Click clamps are directional; stop the timer and disconnect direct shell updates before detach.
 void ZoomController::postZoom(bool price) {
   if (price) emit getViewState()->priceInteracted();
   if (getViewState()->isAutoScrollEnabled()) controller_.livePlacement().enableAutoScroll(false);

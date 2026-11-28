@@ -877,6 +877,9 @@ double DomModel::pulseThreshold(bool bid) const
     return PulseThresholdShare * m_scales[scaleIndex(bid, false)].target;
 }
 
+// Feed the classifier ascending visible rows plus eight on each side at the dock
+// 67 ms cadence. Re-baseline on symbol change/withdrawal and expire flashes
+// through needsRepublish so quiet books still fade without extra signals.
 void DomModel::pulseStep(qint64 nowMs, std::span<const sentinel::book::Trade> trades)
 {
     using namespace sentinel::book;

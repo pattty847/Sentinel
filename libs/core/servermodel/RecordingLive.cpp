@@ -13,6 +13,8 @@ void LiveCache::releaseSymbol(const std::string &symbol) {
         return true;
     });
 }
+// Advance committed prefixes only to the recorder watermark; retain every newer
+// frozen-pending/open record and keep it provisional until its exclusive end is proven.
 bool LiveCache::publish(RecordPtr r) {
     if (!r || r->header.tfMs != 60'000 || !r->observedMs) return false;
     std::lock_guard lock(mutex_);

@@ -1,3 +1,6 @@
+// Bound request parsing before dispatch. Snapshot GUI-owned state on the GUI
+// thread and report absent server capabilities as null using wire presence,
+// never default-initialized configuration values.
 #include "GuiApiServer.h"
 #include "SentinelLogging.hpp"
 #include "../config/AgentHostMode.hpp"

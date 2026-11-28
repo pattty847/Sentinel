@@ -1,3 +1,6 @@
+// Keep symbol/subscribe first, settings last and overflow immediately to its left.
+// Overflow mirrors the toolbar editors; arrows/WASD navigate menus without
+// taking keystrokes from an active editor.
 #include "TopToolbar.hpp"
 #include "../config/TooltipHelp.hpp"
 #include "SentinelLogging.hpp"
@@ -580,6 +583,8 @@ void TopToolbar::refreshGearCommands() {
         if (!m_chartMenu->actions().contains(command)) m_chartMenu->addAction(command);
 }
 
+// Parent popups to the toolbar and keep the overflow button enabled while
+// hidden so keyboard access survives narrow/wide layout changes.
 void TopToolbar::refreshOverflowMenu() {
     if (!m_overflowMenu) return;
     if (m_overflowMenu->isVisible()) {

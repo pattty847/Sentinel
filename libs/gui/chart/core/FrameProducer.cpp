@@ -26,6 +26,8 @@ void FrameProducer::publishFrameContext(const FrameContext& frame, PublishedFram
     destination.publish(published);
 }
 
+// Publish one raster camera before item synchronization; consumers must not add pan again.
+// Commit proposed ticks on the GUI thread only while their policy generation matches.
 void FrameProducer::computeGpuFrameMapping(const FrameInputs& inputs, ITickAuthority& ticks, PublishedFrame& published) {
     auto& frame = frame_.context;
     const double tick = ticks.tickPrice();
@@ -52,6 +54,9 @@ void FrameProducer::computeGpuFrameMapping(const FrameInputs& inputs, ITickAutho
     }
 }
 
+// Read captured inputs; keep step-read, conditional step-write and publish locks separate.
+// Shell notices remain raster then viewport; FrameAck stamps at sync, submits at
+// preparation and completes after rendering.
 const ChartFrame& FrameProducer::produce(const FrameInputs& inputs, ITickAuthority& ticks, PublishedFrame& published) {
     frame_ = {};
     auto& frame = frame_.context;

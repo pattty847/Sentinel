@@ -1,4 +1,6 @@
 // MarketDataCoreEngine: WebSocket market data; I/O on worker thread. Coinbase-like API.
+// Coinbase sequence numbers span every channel on one connection, starting at zero.
+// A sequence gap, disconnect or malformed L2 invalidates the book until a snapshot.
 #include "MarketDataCoreEngine.hpp"
 #include "SentinelLogging.hpp"
 #include "dispatch/MessageDispatcher.hpp"

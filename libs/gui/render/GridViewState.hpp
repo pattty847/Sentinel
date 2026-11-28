@@ -25,6 +25,8 @@ public:
     bool isTimeWindowValid() const { return m_timeWindowValid; }
     bool isDragging() const { return m_isDragging; }
     
+    // Change viewport bounds through setViewport so viewportVersion advances;
+    // direct field writes leave render rebuilds unaware of the new view.
     // Explicit placements advance even when the bounds are bit-identical. Only
     // automatic refits/follow updates preserve the placement (not viewportVersion).
     void setViewport(qint64 timeStart, qint64 timeEnd, double priceMin, double priceMax,

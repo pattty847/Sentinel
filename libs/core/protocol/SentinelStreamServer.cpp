@@ -1,3 +1,5 @@
+// Keep chunk, candle and overlay history work on production workers.
+// RecordingPage and LiveBuilder are test-only oracles, never serving paths.
 // Session candle state and its single coalescing timer stay on the WebSocket executor;
 // model callbacks enter through postModelEvent, so timer turns need no cross-thread lock.
 // A candle's close tick is cached from its symbol's live-book wire tick and
@@ -566,6 +568,8 @@ class Session : public std::enable_shared_from_this<Session> {
                   });
     }
 
+    // Teardown is idempotent and executor-confined. Keep callback ownership weak,
+    // close/drain on failure and bound queued bytes so disconnected sessions cannot linger.
     void beginClose(const char* reason) {
         flowReplayStop_.request_stop();
         if (closing_.exchange(true)) {
@@ -2604,6 +2608,8 @@ SentinelStreamServer::~SentinelStreamServer() {
     stop();
 }
 
+// Persisted heatmap reads and response encoding stay off the single I/O thread.
+// Keep two history workers with at most eight queued/running jobs process-wide.
 bool SentinelStreamServer::submitHistoryTask(std::function<void()> task) {
     if (!task || !m_running.load(std::memory_order_acquire)) {
         return false;

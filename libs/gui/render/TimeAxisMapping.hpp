@@ -1,9 +1,11 @@
+// Heatmap buckets and candle bars may have different timeframes. Map every layer
+// by timestamp through the same per-frame mapping; never assume one bucket per bar.
 /*
 Sentinel — TimeAxisMapping
 Role: Single source of truth for world-time/price → screen mapping.
       All chart layers (heatmap, candles, labels, future TPO/footprint)
-      consume the same mapping. Core invariant: 1 slice = 1 candle.
-Threading: Populated on render thread in updatePaintNode(); consumed by
+      consume the same timestamp mapping, regardless of their bucket widths.
+Threading: Published before item synchronization on the render thread; consumed by
            all renderers in the same frame.
 */
 #pragma once
@@ -12,6 +14,8 @@ Threading: Populated on render thread in updatePaintNode(); consumed by
 #include <cmath>
 #include <cstdint>
 
+// Keep world time/price, grid columns/rows and screen pixels explicit at every
+// layer boundary; convert through this mapping rather than mixing coordinates.
 struct TimeAxisMapping {
     // View bounds: the drawn window (the raster camera's; a drag is baked in as
     // whole device pixels)
@@ -49,7 +53,8 @@ struct TimeAxisMapping {
     int rowPxDev = 0;
     int colPxDev = 0;
 
-    // Heatmap shader ONLY — never use for candle/label mapping
+    // timeOffset is shader-only for ring-texture overlays. Candles, labels and
+    // other screen mappings must not apply it; any new use needs an explicit reason.
     float timeOffset = 0.0f;
 
     bool valid = false;

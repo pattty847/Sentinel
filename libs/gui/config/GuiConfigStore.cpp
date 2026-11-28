@@ -4,6 +4,8 @@
 #include <QtGlobal>
 #include <QString>
 
+// Server-advertised timeframes and native grids are authoritative; client
+// display preferences must not silently override the server data contract.
 GuiConfigStore& GuiConfigStore::instance() {
     static GuiConfigStore store;
     return store;
@@ -48,9 +50,9 @@ void GuiConfigStore::setClientConfig(const ClientConfig& config) {
     emit clientConfigUpdated(m_clientConfig);
 }
 
+// Received server configuration is memory-only. The GUI must never write it
+// back to config/server_config.yaml or change server persistence settings.
 void GuiConfigStore::setServerConfig(const ServerConfig& config) {
-    // Held in memory only: config/server_config.yaml belongs to the server,
-    // and the client must never rewrite it.
     m_serverConfig = config;
     m_hasServerConfig = true;
     sLog_Data("Server config received: retentionColumns=" << config.tradeOverlays.retentionColumns
