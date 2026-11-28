@@ -48,6 +48,8 @@ LabData &LabData::instance() {
 
 void LabData::setLocalSymbolsForTest(std::vector<std::string> symbols) { localSymbols = std::move(symbols); }
 
+// Configure synthetic data before creating consumers; stop and join readers
+// before changing recording roots. An empty root selects recordingRoot().
 void LabData::configure(const std::string &root, int64_t pinnedEndMs, heatmap::HeatmapBudgets budgets) {
     std::unique_ptr<LabData> old;
     {

@@ -29,6 +29,8 @@ struct FanoutConfig {
 QString prepareFanoutPath(const QString&);
 class CaptureFanout {
 public:
+    // The roller needs one connection per product within this eight-client limit.
+    // Extra server instances can consume the slots it needs to reconnect.
     static constexpr size_t MaxClients = 8;
     CaptureFanout(FanoutConfig, const std::vector<std::string>& products,
                   metrics::MetricsRegistry&, std::function<void(const std::string&)> resnapshot);

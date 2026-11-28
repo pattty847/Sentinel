@@ -341,6 +341,8 @@ add_library(sentinel_lab_lib
 )
 set_target_properties(sentinel_lab_lib PROPERTIES AUTOMOC ON)
 
+# List every Sentinel.Charts QML_ELEMENT type in this module's SOURCES;
+# compiling it into sentinel_gui_lib alone does not register the type.
 # Create the QML module
 qt6_add_qml_module(sentinel_gui_lib
     URI Sentinel.Charts

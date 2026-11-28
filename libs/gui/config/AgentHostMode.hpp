@@ -41,6 +41,8 @@ QString startupSymbol(const QString& preferred);
 // never screen pixels or retired targets.
 bool screenshotTargetAllowed(const QString& target);
 
+// Resets QSettings to NativeFormat, which uses the owner's settings. Test scopes
+// must restore IniFormat before creating more settings objects.
 void resetForTests();
 
 }  // namespace AgentHostMode

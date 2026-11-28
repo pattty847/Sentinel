@@ -1,3 +1,5 @@
+# List every GPU test in _sentinel_gpu_tests and every server test in
+# _sentinel_server_tests so CTest assigns the required RESOURCE_LOCK.
 # CTest properties shared by test directories, including directories owned by
 # other slices. Cross-directory test properties require CMake 3.28.
 if(CMAKE_VERSION VERSION_LESS 3.28)
