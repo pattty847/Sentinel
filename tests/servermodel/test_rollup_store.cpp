@@ -21,6 +21,15 @@
 #include <mutex>
 #include <numeric>
 
+namespace recording {
+struct RollupStoreTestAccess {
+    static bool logDue(RollupStore& store, const std::string& symbol, int64_t day, uint64_t& repeats) {
+        return store.fallbackLogDue(symbol, "near", day, repeats);
+    }
+    static size_t logCount(const RollupStore& store) { return store.fallbackLogs_.size(); }
+};
+} // namespace recording
+
 namespace {
 using namespace recording;
 using namespace heatmap;
@@ -829,6 +838,25 @@ TEST_F(RollupTest, FallbackWarningIsLoggedOncePerSeriesDay) {
     EXPECT_TRUE(store.serve({"BTC-USD", "hmc2.near", hour, day0 + 2 * day}, reader).fallback);
     EXPECT_EQ(logs.count("Rollup file missing, corrupt or stale"), 2u) << "another day has its own line";
     EXPECT_EQ(store.counters().fallbackServes.load(), 6u);
+}
+
+TEST_F(RollupTest, FallbackWarningThrottleRetainsTrackedKeysAtCapacity) {
+    RollupStore store(options());
+    uint64_t repeats = 0;
+    for (int64_t i = 0; i < 4096; ++i)
+        ASSERT_TRUE(RollupStoreTestAccess::logDue(store, "symbol-" + std::to_string(i), day0, repeats));
+    ASSERT_EQ(RollupStoreTestAccess::logCount(store), 4096u);
+
+    EXPECT_FALSE(RollupStoreTestAccess::logDue(store, "symbol-0", day0, repeats))
+        << "a tracked key must remain throttled when the map is full";
+    EXPECT_EQ(RollupStoreTestAccess::logCount(store), 4096u);
+    EXPECT_TRUE(RollupStoreTestAccess::logDue(store, "new-symbol", day0, repeats));
+    EXPECT_EQ(RollupStoreTestAccess::logCount(store), 4096u);
+    EXPECT_FALSE(RollupStoreTestAccess::logDue(store, "symbol-1", day0, repeats))
+        << "admitting one new key must not reset unrelated throttles";
+    EXPECT_TRUE(RollupStoreTestAccess::logDue(store, "symbol-0", day0, repeats))
+        << "the oldest key makes room for the new key";
+    EXPECT_EQ(RollupStoreTestAccess::logCount(store), 4096u);
 }
 
 namespace {

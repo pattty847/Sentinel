@@ -73,6 +73,7 @@ struct MinuteDay {
 std::filesystem::path rollupRootFor(const std::string& configured, const std::filesystem::path& hmc2Root);
 
 class RollupStore {
+    friend struct RollupStoreTestAccess;
 public:
     // The recorder's committed minute cutoff for a series (exclusive, epoch ms).
     using MinuteThroughFn = std::function<int64_t(const std::string& symbol, const std::string& layer)>;
