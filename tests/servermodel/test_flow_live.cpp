@@ -1353,6 +1353,75 @@ TEST_F(FlowLive, ChunkRowStepDoesNotCountAsLiveSealMismatch) {
   }
 }
 
+TEST_F(FlowLive, RowOnlySealedDifferenceCountsAtSameAndCoarserStep) {
+  namespace chunks = sentinel::flow::chunks;
+  for (const bool coarsened : {false, true}) {
+    for (const bool publishBeforeFinal : {false, true}) {
+      SCOPED_TRACE(std::string("coarsened=") + (coarsened ? "true" : "false") +
+                   " publishBeforeFinal=" + (publishBeforeFinal ? "true" : "false"));
+      model = std::make_unique<ServerDataModel>(config);
+      FlowLiveTestAccess::stopTimer(*model);
+      grid(*model);
+      model->onTrade(trade(Day + 100, "warmup"));
+      for (const auto [offset, price] : std::array<std::pair<int64_t, double>, 4>{
+               {{100, 100000}, {200, 100001}, {300, 100002}, {400, 100004}}}) {
+        auto value = trade(Day + 60'000 + offset, std::to_string(offset));
+        value.price = price;
+        model->onTrade(value);
+      }
+      if (coarsened) {
+        model->onTrade(trade(Day + 120'100, "wide-low"));
+        auto high = trade(Day + 120'200, "wide-high");
+        high.price = 200000;
+        model->onTrade(high);
+      }
+      tick(Day + (publishBeforeFinal ? 3 : 8) * 60'000);
+
+      auto& builder = FlowLiveTestAccess::series(*model, "BTC-USD", Day, 60'000).builder;
+      const auto first = builder.snapshotBar(Day + 60'000);
+      ASSERT_TRUE(first);
+      std::vector<sentinel::flow::FlowBar> bars{*first};
+      if (coarsened) {
+        const auto wide = builder.snapshotBar(Day + 120'000);
+        ASSERT_TRUE(wide);
+        bars.push_back(*wide);
+      }
+      const chunks::FlowGrid nativeGrid{100, first->priceScale, first->baseScale, first->quoteScale};
+      const std::vector<chunks::FlowGrid> grids(bars.size(), nativeGrid);
+      const auto chunk = chunks::fromBars(bars, 60'000, Day, 60, nullptr, grids);
+      ASSERT_EQ(chunk.priceStep, coarsened ? 2u : 1u);
+      const auto payload = chunks::encode(chunk);
+      auto sealed = chunks::toBars(chunks::decode(payload, 60'000, Day, 60, false, chunk.priceStep));
+      ASSERT_EQ(sealed.size(), bars.size());
+      auto& shifted = sealed.front();
+      ASSERT_GE(shifted.rows.size(), 3u);
+      auto& source = shifted.rows[shifted.rows.size() - 2];
+      auto& target = shifted.rows.back();
+      ASSERT_EQ((target.offset - source.offset) * chunk.priceStep, 2u);
+      target.bidVol += source.bidVol; target.askVol += source.askVol;
+      target.bidCount += source.bidCount; target.askCount += source.askCount;
+      shifted.rows.erase(shifted.rows.end() - 2);
+      shifted.maxRowVol = 0;
+      for (const auto& row : shifted.rows)
+        shifted.maxRowVol = std::max(shifted.maxRowVol, row.bidVol + row.askVol);
+      EXPECT_EQ(shifted.count, first->count);
+      EXPECT_EQ(shifted.open, first->open);
+      EXPECT_EQ(shifted.high, first->high);
+      EXPECT_EQ(shifted.low, first->low);
+      EXPECT_EQ(shifted.close, first->close);
+      EXPECT_EQ(shifted.baseVolume, first->baseVolume);
+      EXPECT_EQ(shifted.quoteVolume, first->quoteVolume);
+      EXPECT_EQ(shifted.buyVol, first->buyVol);
+      EXPECT_EQ(shifted.sellVol, first->sellVol);
+      EXPECT_EQ(shifted.delta, first->delta);
+      model->onFlowChunkIndexChange("coinbase:BTC-USD", Day, 1);
+      model->onFlowChunkDayPublished("coinbase:BTC-USD", Day, 1, std::move(sealed), {Day});
+      if (publishBeforeFinal) tick(Day + 8 * 60'000);
+      EXPECT_EQ(FlowLiveTestAccess::sealMismatches(*model), 1u);
+    }
+  }
+}
+
 TEST_F(FlowLive, ReorderedRunsCountTheDifferentLiveFinalAgainstSealedArchive) {
   namespace ff = flow_fixture;
   QTemporaryDir temp;
