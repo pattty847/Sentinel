@@ -194,6 +194,8 @@ QString ChartLookSettings::tpoTheme() const {
 
 int ChartLookSettings::tpoSessions() const { return layers_.tpo.renderer.style().maxSessions; }
 
+// After the extra tone sync, apply view settings, refresh axes, then apply TPO
+// config before reacting to the viewport; observers depend on this order.
 void ChartLookSettings::applyClientConfig(const ClientConfig& config, ChartViewController& view,
                                           AxisTextService* axes) {
     setHeatmapGamma(config.heatmap.gamma);

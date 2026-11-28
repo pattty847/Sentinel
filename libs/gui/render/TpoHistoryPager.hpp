@@ -1,3 +1,6 @@
+// VP follows the selected TPO session up to 24 hours, otherwise H24. Keep one
+// history page in flight, match request IDs and cancel abandoned server jobs;
+// reject unselected sessions/brackets before mutating the stream store.
 /*
  * Sentinel – TpoHistoryPager
  *

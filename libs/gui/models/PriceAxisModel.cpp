@@ -88,6 +88,7 @@ void PriceAxisModel::recalculateTicks() {
     updateTicksAndNotify();
 }
 
+// Choose label density from pixel spacing with hysteresis, not one label per data tick.
 void PriceAxisModel::calculateTicks() {
     clearTicks();
     

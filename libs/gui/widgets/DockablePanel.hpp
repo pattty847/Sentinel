@@ -7,6 +7,8 @@
  * Base class for all dockable panels in Sentinel.
  * Provides consistent behavior, menu integration, and symbol change propagation.
  */
+// Each subclass constructor calls buildUi exactly once before connecting any
+// external data signals, so callbacks cannot reach unconstructed widgets.
 class DockablePanel : public QDockWidget {
     Q_OBJECT
 

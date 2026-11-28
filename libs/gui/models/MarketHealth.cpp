@@ -1,3 +1,5 @@
+// Chart coverage and hold facts stay unknown until the GUI provider supplies
+// evidence. Hidden consumers must stop polling rather than inventing freshness.
 #include "MarketHealth.hpp"
 #include "heatmap/ChunkFetcher.hpp"
 #include <QDateTime>

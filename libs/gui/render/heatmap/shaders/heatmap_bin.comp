@@ -47,6 +47,8 @@ layout(std140, binding = 7) uniform Params {
     uvec4 paging;     // log2 entries per page (a group never straddles a page)
 };
 
+// Missing scanned buckets draw as veil; recorded all-zero columns remain valid
+// unshaded cells. Do not collapse missing data into a zero-size observation.
 const uint kNotLoaded = 0xffffffffu;
 const uint kGap = 0xfffffffeu;
 const uint kNoData = 0u, kLoading = 1u, kVeil = 2u, kValid = 3u;
@@ -115,6 +117,8 @@ vec2 decodeValue(uint w0, uint w1) {
 }
 // Sum entries [a, end) of page P whose relative row <= relHi (a found by the
 // row-index-narrowed search in [a, b) for firstKey).
+// Pad source groups so none straddles a page, and select the page once per group.
+// Keep page selection out of the per-entry hot loop.
 #define WALK_GROUP(P) { \
     while (a < b) { \
         uint m = (a + b) >> 1; \

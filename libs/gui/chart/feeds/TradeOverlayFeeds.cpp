@@ -1,3 +1,5 @@
+// Network and data processing stay on workers; cross-thread delivery to GUI
+// objects must use queued connections; never run ingestion on the GUI thread.
 #include "chart/feeds/TradeOverlayFeeds.hpp"
 #include "chart/feeds/TradeOverlaySequence.hpp"
 #include "chart/layers/ChartLayers.hpp"

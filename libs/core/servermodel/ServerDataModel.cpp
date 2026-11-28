@@ -3,6 +3,9 @@
 // grid I/O, clock read, or hold allocation. Admission lateness is saved at arrival.
 // Forming candle snapshots run between model events and acquire only the
 // aggregator's shared state lock; they never alter candle publication.
+// Live VP/TPO scan the retained sorted session tape under m_tradeMutex using
+// lower_bound into O(rows) snapshots. The 250k trade cap is history-only; live
+// failures must produce edge-triggered trade_overlay errors.
 #include "TradeOverlayPublisher.hpp"
 #include "ServerDataModel.hpp"
 #include "FlowStoreLag.hpp"
@@ -843,6 +846,8 @@ void ServerDataModel::onLiveOrderBookInitialized(const QString& productId, const
     publishAggregatedBook(productId, data, feed, envelopeMs);
 }
 
+// Invalidation or release clears raw-book validity. Metadata must never
+// hydrate the aggregate from invalid raw state; only a fresh snapshot restores it.
 void ServerDataModel::publishAggregatedBook(const QString& productId, SymbolHotData& data,
                                             const FeedState& feed, qint64 envelopeMs) {
     const std::string symbol = productId.toStdString();

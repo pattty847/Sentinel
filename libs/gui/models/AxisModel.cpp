@@ -36,6 +36,8 @@ void AxisModel::setTarget(QQuickItem* target) {
     }
 }
 
+// The view is optional on construction and after target detach. Keep null checks
+// here and the derived price/time axis fallbacks; this is not an owner-created chart view.
 void AxisModel::setGridViewState(GridViewState* viewState) {
     if (m_viewState == viewState) return;
     
@@ -192,6 +194,8 @@ void AxisModel::addTick(double value, double position, const QString& label, boo
     m_ticks[static_cast<size_t>(m_tickWriteIndex++)] = TickInfo(value, position, label, isMajorTick, widthLabel);
 }
 
+// Keep fixed-capacity rows during pan/zoom; publish only changed roles.
+// Model resets, delegate rebuilds and repeated shared math turn cheap frames into UI stalls.
 void AxisModel::updateTicksAndNotify() {
     if (!m_viewState || !isViewportValid()) return;
     if (m_labelCapacity <= 0) return;

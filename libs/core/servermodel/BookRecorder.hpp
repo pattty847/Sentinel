@@ -67,6 +67,8 @@ struct Level {
     double price;
     double size;
 };
+// The roller core takes explicit envelope/receive times and lossless blocking admission.
+// Do not add a resnapshot callback, release-flush, or queue-overflow invalidation.
 class BookRecorder {
   public:
     struct Watermarks {

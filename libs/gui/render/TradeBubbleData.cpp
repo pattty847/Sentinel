@@ -203,6 +203,8 @@ std::span<const Bubble> Layout::build(Samples trades, const TimeAxisMapping& map
                 slot = (slot+1) & (FineSlots-1);
             }
         }
+        // Reuse occupied 6 px cells for overflow; choose the smallest fitting integer
+        // multiple, capped at 4096 side/cell pairs, without rescanning the trade tape.
         binSize_ = 6;
         if (fineCellCount_ <= MaxBubbles) {
             for (size_t i=0; i<fineCellCount_; ++i) appendBubble(points_[i]);

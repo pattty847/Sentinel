@@ -114,6 +114,8 @@ def is_macho(path):
                              b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca")
 
 
+# SENTINEL_PROBES is not inherited. Hosted traces need explicit per-session
+# probe selection support that preserves this environment allowlist.
 def child_env(environ=None):
     environ = os.environ if environ is None else environ
     env = {k: environ[k] for k in ENV_ALLOW if k in environ}

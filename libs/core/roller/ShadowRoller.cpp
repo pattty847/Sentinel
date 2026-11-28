@@ -52,13 +52,10 @@ double lowestPrice(const recording::Hmc2Record &r) {
                            : double(low) * double(r.header.rowTickUnits) /
                                  r.header.priceScale;
 }
-// Option C live path (owner 2026-10-06), roller worker thread only. The lead is
-// a non-persisting fork of the day's history recorder (Publication::Lead) that
-// also applies provisional fan-out records as they arrive. History still
-// applies only durable prefixes (INV-114) and publishes committed minutes. Any
-// provisional discard (retract, disconnect, EOF, socket failure) and day end
-// drops the lead and withdraws everything it published from the live cache
-// (committed minutes stay); the next fork republishes from durable history.
+// Roller worker thread only. History applies durable fan-out prefixes and publishes Finals only;
+// the lead is a non-persisting fork that also applies provisional records as they arrive. On any
+// discard (retract, disconnect, EOF, socket failure) or day end, drop the lead, then retract its
+// provisional output (committed minutes stay); the next fork republishes from durable history.
 class LiveLead {
   const ShadowConfig &cfg;
   const std::string product;
@@ -1195,12 +1192,16 @@ struct ShadowRoller::Impl {
   std::mutex mutex;
   std::condition_variable wake;
   std::thread checker;
+  // Shadow-only runs must not duplicate the primary recorder column metric.
+  // Invalidation and append-error counters outlive recorder retries.
   Impl(ShadowConfig c, std::vector<std::string> names,
        metrics::MetricsRegistry &registry)
       : cfg(std::move(c)) {
     for (auto &name : names) {
       auto p = std::make_unique<Product>();
       p->name = std::move(name);
+      // Register journal corruption metrics for every product at startup; decoder
+      // tests registering their own metrics do not protect this production wiring.
       registerJournalMetrics(registry, p->name);
       registerAnchorMetrics(registry, p->name);
       const metrics::Labels labels = {{"product", p->name}};
@@ -1768,9 +1769,9 @@ struct ShadowRoller::Impl {
                 sLog_Data("Shadow roller comparison " << report.dump());
               }
               const auto completed = nowMs() / 1000.;
-              // Commit both layers and the exclusive hour watermark together,
-              // before publishing metrics. Failed comparisons never count
-              // twice.
+              // Atomically save comparison.json with the watermark and both near/deep totals
+              // before publishing metrics; never expose transient zero mismatch totals.
+              // A failed comparison never counts twice.
               writeCheckpoint(progressPath,
                               {{"version", 1},
                                {"product", p->name},
@@ -1807,6 +1808,7 @@ ShadowRoller::ShadowRoller(ShadowConfig c, std::vector<std::string> p,
     m = std::make_unique<Impl>(std::move(c), std::move(p), r);
 }
 ShadowRoller::~ShadowRoller() = default;
+// Scrape readers may take short map locks only, never a lock held across disk I/O.
 recording::BookRecorder::Watermarks
 ShadowRoller::watermarks(const std::string &product,
                          const std::string &layer) const {

@@ -92,6 +92,8 @@ bool TimeframeSwitch::request(int next) const {
     return true;
 }
 
+// Capture the old drawn span before new limits clamp it; forward processor queue, update, notice.
+// A symbol switch reseeds before layer setSymbol, clear and refit; candle carry needs a source.
 TimeframeSwitchInputs TimeframeSwitch::capture(int next) {
     TimeframeSwitchInputs in;
     in.drawnBefore = controller_.camera().rasterCameraNow(false);

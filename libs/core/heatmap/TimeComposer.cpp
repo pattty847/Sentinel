@@ -1,3 +1,6 @@
+// Keep each native grid intact and weight mixed grids by observed time. Display ticks
+// must be multiples of the native grid (deep records at $5 by default); never split
+// native rows or invent finer detail.
 #include "TimeComposer.hpp"
 #include "NativeRows.hpp"
 #include "../servermodel/RecordingCodec.hpp"
@@ -11,6 +14,8 @@ Identity identity(const NativeColumn& n) {
     return {n.grid.rowTickUnits, n.grid.priceScale, n.grid.configHash,
             n.sizeScale.floor, n.sizeScale.codesPerOctave};
 }
+// Live aggregates and history must each accumulate on the original native grid
+// before combining contributions; matching row indices do not mean matching prices.
 NativeColumn combine(std::span<const NativeColumn* const> sources, detail::DecodeTables& tables,
                      const std::optional<ComposeOptions::PriceClip>& price) {
     int64_t lo = INT64_MIN, end = INT64_MAX;

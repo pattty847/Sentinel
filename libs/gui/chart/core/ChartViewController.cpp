@@ -3,6 +3,8 @@
 
 namespace chart {
 
+// Own camera and glide state here; rendering consumes captured CameraInputs and one BinView.
+// Preserve window-dependent effective DPR and pan each axis against its active glide endpoint.
 FrameInputs ChartViewController::frameInputs(const QRectF& bounds, double dpr, const QElapsedTimer& clock,
                                            const TimeAuthority& time, FrameContext::OverlayActivationSet overlays) const {
     FrameInputs inputs;

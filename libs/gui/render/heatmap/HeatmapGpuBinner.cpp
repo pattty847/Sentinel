@@ -1,3 +1,6 @@
+// Failed or cancelled pending uploads must preserve the active source. Limit buffers
+// to 128 MiB and entry pages to 64 MiB without splitting groups; rebin on source,
+// grid, scale or kernel changes, and enable fast kernels only after the precision test.
 #include "HeatmapGpuBinner.hpp"
 #include "HeatmapGpuSelfTest.hpp"
 #include "SentinelLogging.hpp"

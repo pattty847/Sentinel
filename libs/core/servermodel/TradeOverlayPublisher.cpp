@@ -1,3 +1,6 @@
+// Trade overlays own their immutable time/price grid and bounded snapshot jobs.
+// Never drive them from heatmap slices, scan the tape in ingest callbacks, or
+// infer shared coordinates merely because texture dimensions match.
 #include "TradeOverlayPublisher.hpp"
 #include "../protocol/SentinelStreamProtocol.hpp"
 #include <QtEndian>

@@ -1,3 +1,6 @@
+// Publish immutable tick-free SpanSets and share builds by chunk generation. Rank
+// admissions before net upload credit; retain wanted chunks and drawn sources, shed
+// lower-priority CPU work first and preserve the nearest visible span for every source.
 #include "HeatmapSourceController.hpp"
 #include "HeatmapCellQuery.hpp"
 #include "SentinelLogging.hpp"
@@ -21,6 +24,8 @@
 #include <set>
 #include <tuple>
 
+// Display ticks stay multiples of commonTick, the native-tick LCM. A stale
+// source may remain as a fallback but must never be stretched to a new extent.
 namespace heatmap {
 namespace {
 std::atomic<uint64_t> nextChart{1};

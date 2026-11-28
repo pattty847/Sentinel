@@ -59,6 +59,7 @@ bool SentinelServerApp::initialize() {
         }
         sLog_App("Initializing server components: streamPort=" << m_serverConfig.streamPort);
 
+        // Metrics stay on 127.0.0.1 regardless of server.bind_address (default port 8090).
         // GET /ping and GET /metrics on 127.0.0.1 (ops/monitoring/README.md).
         sentinel::metrics::registerProcessMetrics(m_metrics);
         // Main-thread load while serving the journal.

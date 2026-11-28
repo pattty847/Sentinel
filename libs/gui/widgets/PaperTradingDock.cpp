@@ -1168,6 +1168,8 @@ void PaperTradingDock::onPositionUpdated(const trading::PositionUpdate& update) 
     }
 }
 
+// Late order activity after stop/disconnect cannot restore RUNNING. Accept it
+// again only after a new start command or a server snapshot confirming the algo runs.
 void PaperTradingDock::onAlgoOrderEvent(const trading::AlgoOrderEvent& event) {
     if (m_symbol.isEmpty() || QString::fromStdString(event.symbol) != m_symbol) {
         return;

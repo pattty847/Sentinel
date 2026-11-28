@@ -37,6 +37,8 @@ void trade_bubbles::RenderLink::sync() {
         node->clear();
     }
 }
+// Bubbles draw above candles by default so executions remain visible inside
+// opaque bodies; persist tradesAboveCandles=false for the below-candle choice.
 TradeBubbleOverlayItem::TradeBubbleOverlayItem(QQuickItem* parent) : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
     setZ(chart::depth(chart::ChartDepth::BubblesAbove));
@@ -62,6 +64,9 @@ void TradeBubbleOverlayItem::setRenderer(QObject* renderer) {
     update();
     emit rendererChanged();
 }
+// Use ChartDepth and synchronize published C++ frame data after all item syncs
+// while the GUI is blocked. Each window needs its own root link; provider
+// revisions must invalidate cached geometry even when addresses are reused.
 void TradeBubbleOverlayItem::connectWindow() {
     disconnect(m_syncConnection);
     // A moved item can leave a root awaiting deletion in another render thread.

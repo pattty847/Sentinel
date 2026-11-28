@@ -1,3 +1,5 @@
+// Prefilter future anchor filenames before decoding. Validate all sidecar state
+// before attaching consumers; restoring it emits neither snapshots nor resync flags.
 // Offline backfill and ShadowRoller share the durable recorder fence. Derived
 // .shr invalidation belongs there, before the checkpoint can skip those writes
 // on restart; it must never delete minutes or follow links below its root.
@@ -275,6 +277,8 @@ json roll(const RollOptions& o) {
             if (o.onGrid) o.onGrid(day, grid, gridMetadata);
         };
 
+        // Create roller.json before the first input can write, so first-write retries
+        // remain owned.
         const auto claimProvenance = [&] {
             if (o.productWriterLease && !fs::exists(cpPath)) {
                 // Claim provenance before the first asynchronous write, so

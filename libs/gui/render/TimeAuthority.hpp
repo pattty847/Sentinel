@@ -5,6 +5,8 @@
 #include <atomic>
 #include <cstdint>
 
+// Render cadence belongs here. Overlays read the frame/mapping snapshot,
+// never a stream payload timeframe as an independent rendering clock.
 class TimeAuthority {
 public:
     struct Snapshot {

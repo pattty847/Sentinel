@@ -32,6 +32,8 @@ void UnifiedGridRenderer::connectCameraChanged(QObject* context, std::function<v
   connect(view(), &chart::ChartViewQml::heatmapTickSizeChanged, context, onChange);
 }
 
+// Advance on framePending (including MidLock); repolish via the reused
+// zero-interval timer, never inside updatePolish.
 void UnifiedGridRenderer::updatePolish() {
   QQuickItem::updatePolish();
   if (m_view->framePending()) m_view->advanceFrame(zoomNowMs());

@@ -73,13 +73,8 @@ private:
     std::vector<RecordPtr> records_;
     std::vector<RecordPtr> filledRecords_;
 };
-// The recorder publishes the open minute every recording.live_publish_ms
-// (RecorderConfig::livePublishMs, default 500). The live worker checks for a
-// new revision at half that interval: frames still follow publications (one
-// per revision, so the frame rate is the publish rate), but a worker cadence
-// equal to the publish interval plus its 100 ms turn quantization falls behind
-// the recorder and skips publications, so the data age would sawtooth through a
-// whole interval instead of staying within one worker turn.
+// Publish open minutes at recording.live_publish_ms (500 ms default, 250-5000 ms).
+// Poll live work at half the publication interval so worker quantization cannot skip revisions.
 inline constexpr int64_t kLivePublishDefaultMs = 500;
 inline constexpr int64_t kLiveCadenceMaxMs = 5000;
 constexpr int64_t liveCadenceMs(int64_t publishMs) {

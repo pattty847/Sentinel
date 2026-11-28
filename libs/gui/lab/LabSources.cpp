@@ -18,6 +18,8 @@ using Clock = std::chrono::steady_clock;
 double msSince(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
+// Real recordings must be composed at the selected timeframe before GPU upload.
+// Report composition failure as unavailable; never relabel minute entries as coarse columns.
 LabSource finish(heatmap::SparseColumns composed, heatmap::gpu::GpuSourceOptions options, LabSource out) {
     uint64_t entries = 0;
     for (const auto &c : composed.columns) for (const auto &n : c.native) entries += n.entries.size();

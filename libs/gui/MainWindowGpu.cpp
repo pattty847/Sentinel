@@ -276,6 +276,8 @@ MainWindowGPU::MainWindowGPU(QWidget* parent, int symbolSwitchTimeoutMs)
     }
 }
 
+// Detach the chart from HeatmapDataService while both still exist; clear service
+// callbacks before their controllers die. QWidget destroys child docks later.
 MainWindowGPU::~MainWindowGPU() {
     if (auto *remote = dynamic_cast<RemoteGridDataSource *>(m_dataSource.get())) {
         remote->marketHealth()->setChartProvider({});
@@ -632,6 +634,8 @@ void MainWindowGPU::setupGuiApiServer() {
                                                     this);
     m_guiApiServer->setHeatmapSnapshot([this] { return agentApiHeatmapSnapshot(); });
     m_guiApiServer->setDocksSnapshot([this] { return m_dockVisibility->snapshot(); });
+    // Window capture uses QWidget::grab with visible QQuickView images composited.
+    // Never use the screen-region target main.
     // Grab only Sentinel widgets. QQuickView content needs its own image because
     // QWidget::grab does not paint native window containers.
     m_guiApiServer->setWidgetGrab([this](const QString& target, QString* error) -> QImage {
@@ -667,6 +671,8 @@ void MainWindowGPU::setupGuiApiServer() {
             }
             return m_statusBar->grab().toImage();
         }
+        // A screenshot of a hidden dock returns a visibility error. Showing or focusing
+        // it belongs only to the docks API, never to this capture path.
         for (const auto& [id, dock] : LayoutOrchestrator::apiDocks(getDockWidgets())) {
             if (id != target) continue;
             if (!dock || !dock->isVisible() ||

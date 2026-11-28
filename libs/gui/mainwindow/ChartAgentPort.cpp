@@ -1,3 +1,6 @@
+// Report stored and drawn bounds separately and use FrameAck for completion.
+// QML notices belong on view/candles/tpo/debug/layers; mapping observers use
+// viewNotifications while liveRenderTick and frame reads remain on the shell.
 #include "ChartAgentPort.hpp"
 #include "chart/shell/ChartTpoQml.hpp"
 #include "chart/core/ChartViewController.hpp"

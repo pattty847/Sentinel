@@ -4,6 +4,8 @@
 // A cached minute-directory listing holds names only: sizes and times are
 // stat'ed on every use, and the names are reused only while the directory's
 // modification time is unchanged and was settled when listed (minuteNames).
+// Running GUIs treat sealed 1m/1h/1d chunks as immutable. Tools rewriting closed-day
+// HMC2 minutes must invalidate that day's .shr rollups so serving rebuilds them.
 #include "RollupStore.hpp"
 #include "SessionManager.hpp"
 #include "../heatmap/TimeComposer.hpp"
@@ -32,6 +34,8 @@
 #include <unistd.h>
 #endif
 
+// Compose 1h/1d rollups from minutes using heatmap::compose. Chunk plans must
+// depend on advertised levels, never on special cases for a source identifier.
 namespace recording {
 namespace {
 using heatmap::kDayMs;

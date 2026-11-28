@@ -1,3 +1,5 @@
+// Transport changes must keep TLS/WSS configuration, endpoints, GUI wiring,
+// client transport and the server Session handshake in agreement.
 #include "SentinelStreamClient.hpp"
 #include "SentinelStreamClientTransport.hpp"
 #include "../SentinelLogging.hpp"

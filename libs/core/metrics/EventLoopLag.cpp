@@ -33,6 +33,8 @@ void EventLoopLagSampler::stop() {
     m_outstanding.store(false, std::memory_order_release);
 }
 
+// Measure main-thread lag with timestamped queued calls from this 100 ms helper.
+// QTimer spacing or inferred deadlines do not measure the queue wait.
 void EventLoopLagSampler::run() {
     const auto interval = std::chrono::milliseconds(kIntervalMs);
     auto nextWake = Clock::now() + interval;

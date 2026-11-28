@@ -74,9 +74,14 @@ std::optional<uint64_t> numericTradeId(const std::string& id) {
     return value;
 }
 }
+// Coinbase market_trades resends trades and lists each frame's trades newest-first.
+// Every raw-trade reader must dedupe by a bounded trade_id window and sort each
+// frame's trades ascending before delivery to ServerDataModel, FlowStore or the DOM dock.
 bool JournalFeed::rememberTradeId(const std::string& id) {
     return tradeWindow_.remember(id);
 }
+// Even trade-only replay must feed every Coinbase frame, including L2, through
+// JournalFeed: v1 sequence numbers are contiguous across all channels.
 void JournalFeed::collectTrades(const nlohmann::json& j, int64_t local) {
     frameTrades_.clear();
     const auto collect = [&](const nlohmann::json& trades) {
