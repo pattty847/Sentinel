@@ -752,11 +752,18 @@ bool RollupStore::fallbackLogDue(const std::string& symbol, const std::string& l
                                  uint64_t& repeats) {
     const auto now = std::chrono::steady_clock::now();
     std::lock_guard lock(fallbackLogMutex_);
-    if (fallbackLogs_.size() >= kMaxFallbackLogs) {
-        std::erase_if(fallbackLogs_, [&](const auto& entry) { return now - entry.second.last >= kFallbackLogInterval; });
-        if (fallbackLogs_.size() >= kMaxFallbackLogs) fallbackLogs_.clear(); // bounded: at worst a repeated line
+    const auto key = std::tuple<std::string, std::string, int64_t>(symbol, layer, dayMs);
+    auto it = fallbackLogs_.find(key);
+    const bool inserted = it == fallbackLogs_.end();
+    if (inserted) {
+        if (fallbackLogs_.size() >= kMaxFallbackLogs) {
+            std::erase_if(fallbackLogs_, [&](const auto& entry) { return now - entry.second.last >= kFallbackLogInterval; });
+            if (fallbackLogs_.size() >= kMaxFallbackLogs)
+                fallbackLogs_.erase(std::min_element(fallbackLogs_.begin(), fallbackLogs_.end(),
+                                                     [](const auto& a, const auto& b) { return a.second.last < b.second.last; }));
+        }
+        it = fallbackLogs_.try_emplace(key).first;
     }
-    const auto [it, inserted] = fallbackLogs_.try_emplace(std::tuple<std::string, std::string, int64_t>(symbol, layer, dayMs));
     auto& log = it->second;
     if (!inserted && now - log.last < kFallbackLogInterval) {
         ++log.repeats;
