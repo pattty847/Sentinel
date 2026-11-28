@@ -206,6 +206,27 @@ TEST(WatchRail, FooterSpeaksOnlyForAProblemOnOneWarningLine) {
     EXPECT_TRUE(status->isHidden());
 }
 
+TEST(WatchRail, ActivePairWithoutQuoteKeepsFooterHiddenWhenCatalogIsKnown) {
+    WatchlistDock dock;
+    dock.show();
+    auto* status = dock.findChild<QLabel*>("watchStatus");
+    auto* tree = dock.findChild<QTreeView*>("watchRows");
+    ASSERT_NE(status, nullptr);
+    ASSERT_NE(tree, nullptr);
+
+    dock.setCryptoAvailability({"BTC-USD"}, true, "server catalog");
+    dock.setChartSwitchState("BTC-USD", {});
+    QCoreApplication::processEvents();
+
+    auto* model = qobject_cast<QStandardItemModel*>(tree->model());
+    ASSERT_NE(model, nullptr);
+    const int activeRow = rowFor(model, "BTC-USD");
+    ASSERT_GE(activeRow, 0);
+    EXPECT_TRUE(model->item(activeRow, 0)->data(WatchlistDock::ActiveRole).toBool());
+    EXPECT_TRUE(status->isHidden());
+    EXPECT_TRUE(status->text().isEmpty());
+}
+
 TEST(WatchRail, EntryWarningsClearOnTheNextSuccessfulActionButRefusalsStay) {
     QTemporaryDir settingsDir;
     ASSERT_TRUE(settingsDir.isValid());
