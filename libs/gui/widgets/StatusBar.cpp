@@ -47,6 +47,13 @@ StatusBar::StatusBar(QWidget* parent) : QWidget(parent) {
     connect(&m_ageTimer, &QTimer::timeout, this, &StatusBar::refresh);
 }
 void StatusBar::setMessage(const QString& message) {
+    m_message = message;
+    refreshMessage();
+}
+void StatusBar::refreshMessage() {
+    const auto s = m_health ? m_health->snapshot() : MarketHealth::Snapshot{};
+    const auto message = s.transport == MarketHealth::Transport::Disconnected && !s.reason.isEmpty()
+        ? s.reason : m_message;
     m_messageLabel->setText(message);
     m_messageLabel->setToolTip(message);
 }
@@ -68,6 +75,7 @@ void StatusBar::refresh() {
         m_stateLabel->setText("Unavailable");
         m_stateLabel->setStyleSheet("color: #b0b0b0;");
         m_ageLabel->setText(bookAgeText(std::nullopt));
+        refreshMessage();
         return;
     }
     m_health->refreshChartState();
@@ -81,6 +89,7 @@ void StatusBar::refresh() {
         s.state == MarketHealth::State::Live ? theme::positive().name()
         : disconnected ? "#e57373" : degraded ? "#ffcc80" : "#b0b0b0"));
     m_ageLabel->setText(bookAgeText(s.bookAgeMs));
+    refreshMessage();
 }
 void StatusBar::showEvent(QShowEvent* event) { QWidget::showEvent(event); refresh(); if (m_health) m_ageTimer.start(); }
 void StatusBar::hideEvent(QHideEvent* event) { m_ageTimer.stop(); QWidget::hideEvent(event); }

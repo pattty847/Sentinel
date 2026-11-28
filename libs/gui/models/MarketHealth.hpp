@@ -36,7 +36,8 @@ public:
     explicit MarketHealth(QObject* parent = nullptr) : QObject(parent) {}
     const QString& activeSymbol() const { return m_activeSymbol; }
     void setActiveSymbol(const QString& symbol);
-    void setTransport(Transport transport);
+    // Disconnected with a reason is terminal/unavailable, not a pending retry.
+    void setTransport(Transport transport, const QString& reason = {});
     void subscriptionRequested(const QString& symbol);
     void subscriptionAcknowledged(const QString& symbol);
     void subscriptionRefused(const QString& symbol, const QString& reason);
@@ -66,6 +67,7 @@ private:
     QHash<QString, Facts> m_symbols;
     QString m_activeSymbol;
     Transport m_transport = Transport::Initializing;
+    QString m_transportReason;
     ChartFacts m_chart;
     std::function<ChartFacts()> m_chartProvider;
     bool m_refreshing = false;

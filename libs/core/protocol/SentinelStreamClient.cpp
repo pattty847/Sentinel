@@ -221,6 +221,7 @@ void SentinelStreamClient::connectToServer() {
         m_connectionError = QString::fromStdString(m_tlsConfigError);
         emit errorOccurred(m_connectionError);
         emit disconnected();
+        emit terminalFailure(m_connectionError);
         return;
     }
     m_ws = std::make_unique<WebSocket>(m_strand, m_sslCtx);

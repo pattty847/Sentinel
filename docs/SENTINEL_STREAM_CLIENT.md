@@ -16,8 +16,8 @@ The client is a key aspect of the server–client split: it owns the network I/O
 
 ## Connection Lifecycle
 
-1. **Construction** — Host, port, optional CA file. If no CA file, TLS peer verification is disabled (dev mode).
-2. **connectToServer()** — Starts `io_context`, resolves host:port, connects TCP, performs SSL handshake, then WebSocket handshake.
+1. **Construction** — Host, port and CA file. TLS peer verification is always enabled; the CA is loaded once at construction.
+2. **connectToServer()** — An empty or unloadable CA emits `errorOccurred`, `disconnected`, then `terminalFailure(reason)` without opening a socket or scheduling retries. RemoteGridDataSource carries this terminal reason into MarketHealth as unavailable, and the status bar displays it ahead of temporary messages. Correct the CA configuration and restart the client to recover. Otherwise, starts `io_context`, resolves host:port, connects TCP, performs SSL handshake, then WebSocket handshake.
 3. **onHandshake** — Sets `m_isConnected`, emits `connected()`, starts `doRead()`, and flushes any queued writes.
 4. **disconnectFromServer()** — Stops `io_context`, joins the I/O thread.
 
