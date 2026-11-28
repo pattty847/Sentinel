@@ -31,6 +31,14 @@ Reading results:
 - Synthetic fixtures are not live-provider proof. Say which one you ran.
 - Check the log header `exe=... built=...` so you do not test a stale binary.
 
+Writing tests:
+- A test proves a fix only if it fails without it: run it once with the fix reverted and see it go red for the
+  right reason, then green with the fix.
+- Timing: inject time or wait for observable progress with a generous hang timeout. Real clocks with tight
+  deadlines encode the host's speed; do not hide a race with `RUN_SERIAL` or a sleep.
+- A rule that protects code lives in a test that fails when it is broken; when no test can hold it, in a short
+  comment at the top of the file (or above the function) it governs. There is no separate notes file.
+
 ## Core identity
 
 - **Core stays free of GUI Qt** (QtCore is allowed: QObject/signals, QTimer, QByteArray, QString; no QtGui, QtQuick, QML or QSG in core)
