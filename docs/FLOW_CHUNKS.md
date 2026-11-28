@@ -378,16 +378,21 @@ unthrottled (today the roller sends it after the trades, at most once per journa
 point is at or below M, and marks a bar final when M reaches the seal point. With one run and a monotone clock this
 gives the sealed bar; after a clock step back, a capture restart or a retracted suffix it may not. When the store
 seals an hour, the server compares each live-final 1m bar it still holds with the sealed bar (both are in the same
-process) and counts every difference in `sentinel_flow_live_seal_mismatch_total{instrument}`. The client replaces
-live bars with the sealed chunk in any case (section 8).
+process): it compares the summary exactly and the rows re-binned by absolute row to the coarser of the two steps;
+low row, offsets and maximum row volume are not compared directly; ticks not related by a power of two count as a mismatch.
+A chunk can coarsen an otherwise equal minute because another minute in its hour is wide (section 4); that alone
+must not increment `sentinel_flow_live_seal_mismatch_total{instrument}`. Summary or normalized-row differences
+still count. The client replaces live bars with the sealed chunk in any case (section 8).
 
 Fixtures (step 3 acceptance):
 - Determinism: the same RAWL2 built in one pass, hour by hour and in reverse order gives identical bytes, including
   an archive with a backward clock step inside a run and a reordered, non-overlapping run (a restart after a clock
   step back whose run sorts earlier).
-- Live: on archives without regressions the live finals equal the sealed bars (trade in the record that first
-  reaches the seal point; seal point in the next hourly file; reconnect snapshots resending trades after the seal
-  point). On the reordered-run archive live may differ; the mismatch counter counts each differing bar.
+- Live: on archives without regressions the live finals equal the sealed bars after both are normalized to their
+  common row step (trade in the record that first reaches the seal point; seal point in the next hourly file;
+  reconnect snapshots resending trades after the seal point). The unit test
+  `ChunkRowStepDoesNotCountAsLiveSealMismatch` covers an hour whose wide minute coarsens a narrower minute in the
+  sealed chunk. On the reordered-run archive live may differ; the mismatch counter counts each differing bar.
 - Replay: after several sealed hours inside the retention window, a 1m, 5m and 1h subscription replays only the
   buckets of unsealed hours (the barrier counts them); a 1d subscription replays its forming bucket.
 - Coarse live composition: that forming 1d bucket, after the sealed hours have been pruned from live, equals the
@@ -537,7 +542,9 @@ Retry, busy backoff, deadlines and reconnect follow the heatmap fetcher (MARKETD
 ## 11. What stays as is
 
 `flow_bar` revision semantics and FLB1 live bodies (open item 6); the 1 s live series and its journal replay;
-`FlowBarBuilder` and `composeFlowBars`; the recorder grid as the row grid; quote scale 10^8.
+`FlowBarBuilder` and `composeFlowBars` except for the row-step behavior in section 4 (wide bars are retained and
+compositions use the smallest fitting power-of-two step not below any constituent's); the recorder grid as the
+underlying row grid; quote scale 10^8.
 
 ## 12. Measurements
 

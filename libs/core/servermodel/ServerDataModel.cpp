@@ -6,6 +6,8 @@
 // Live VP/TPO scan the retained sorted session tape under m_tradeMutex using
 // lower_bound into O(rows) snapshots. The 250k trade cap is history-only; live
 // failures must produce edge-triggered trade_overlay errors.
+// Live/sealed flow comparisons re-bin rows to a common step; an hour chunk can
+// coarsen an otherwise equal minute because another minute is wide.
 #include "TradeOverlayPublisher.hpp"
 #include "ServerDataModel.hpp"
 #include "FlowStoreLag.hpp"
@@ -14,20 +16,51 @@
 #include "flow/FlowCodec.hpp"
 #include <QThread>
 #include "flow/FlowCompose.hpp"
+#include "flow/FlowRowStep.hpp"
 #include "protocol/SentinelStreamProtocol.hpp"
 #include "metrics/MetricsRegistry.hpp"
 #include "roller/Grid.hpp"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <cstdlib>
+#include <tuple>
 
 namespace {
 bool flowLossIn(const std::set<int64_t>& losses, int64_t start, int64_t end) {
     const auto it = losses.lower_bound(start);
     return it != losses.end() && *it < end;
+}
+
+bool sameSealedFlowContent(const sentinel::flow::FlowBar& live,
+                           const sentinel::flow::FlowBar& sealed) {
+    if (std::tie(live.startMs, live.timeframeMs, live.priceScale, live.baseScale, live.quoteScale,
+                 live.open, live.high, live.low, live.close, live.baseVolume, live.quoteVolume,
+                 live.count, live.buyVol, live.sellVol, live.delta) !=
+        std::tie(sealed.startMs, sealed.timeframeMs, sealed.priceScale, sealed.baseScale,
+                 sealed.quoteScale, sealed.open, sealed.high, sealed.low, sealed.close,
+                 sealed.baseVolume, sealed.quoteVolume, sealed.count, sealed.buyVol,
+                 sealed.sellVol, sealed.delta)) return false;
+    const auto liveTick = sentinel::flow::chunks::tickUnits(live.nativeTick, live.priceScale);
+    const auto sealedTick = sentinel::flow::chunks::tickUnits(sealed.nativeTick, sealed.priceScale);
+    const auto commonTick = std::max(liveTick, sealedTick);
+    if (commonTick % liveTick || commonTick % sealedTick ||
+        !sentinel::flow::chunks::validStep(uint64_t(commonTick / liveTick)) ||
+        !sentinel::flow::chunks::validStep(uint64_t(commonTick / sealedTick))) return false;
+    const auto rowsAtStep = [commonTick](const sentinel::flow::FlowBar& bar, int64_t tick) {
+        std::map<int64_t, std::array<int64_t, 4>> rows;
+        for (const auto& row : bar.rows) {
+            auto& totals = rows[recording::floorDiv(bar.lowRow + row.offset, commonTick / tick)];
+            totals[0] += row.bidVol; totals[1] += row.askVol;
+            totals[2] += row.bidCount; totals[3] += row.askCount;
+        }
+        return rows;
+    };
+    return rowsAtStep(live, liveTick) == rowsAtStep(sealed, sealedTick);
 }
 
 int64_t localNowMs() {
@@ -1061,9 +1094,8 @@ void ServerDataModel::onFlowChunkDayPublished(const std::string& instrument, int
             slot.compared || !state.hours.contains(slot.start / 3'600'000 * 3'600'000)) continue;
         auto live = minutes.builder.snapshotBar(slot.start);
         if (!live) continue;
-        live->notable.clear(); // FLC1 stores rows and summary, not notable prints.
         const auto sealed = state.bars.find(slot.start);
-        if (sealed == state.bars.end() || *live != sealed->second)
+        if (sealed == state.bars.end() || !sameSealedFlowContent(*live, sealed->second))
             ++m_flowSealMismatches[symbol];
         slot.compared = true;
     }
@@ -1516,9 +1548,8 @@ void ServerDataModel::publishFlowSeries(const std::string& symbol, FlowProduct& 
                 flowHourSealed(symbol, slot.start / 3'600'000 * 3'600'000)) {
                 auto live = series.builder.snapshotBar(slot.start);
                 if (live) {
-                    live->notable.clear();
                     const auto disk = flowSealedMinute(symbol, slot.start);
-                    if (!disk || *live != *disk) ++m_flowSealMismatches[symbol];
+                    if (!disk || !sameSealedFlowContent(*live, *disk)) ++m_flowSealMismatches[symbol];
                     slot.compared = true;
                 }
             }
