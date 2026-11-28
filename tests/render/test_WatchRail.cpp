@@ -207,7 +207,12 @@ TEST(WatchRail, FooterSpeaksOnlyForAProblemOnOneWarningLine) {
 }
 
 TEST(WatchRail, ActivePairWithoutQuoteKeepsFooterHiddenWhenCatalogIsKnown) {
+    QTemporaryDir settingsDir;
+    ASSERT_TRUE(settingsDir.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
     WatchlistDock dock;
+    dock.findChild<QComboBox*>("watchPreset")->setCurrentIndex(0);
     dock.show();
     auto* status = dock.findChild<QLabel*>("watchStatus");
     auto* tree = dock.findChild<QTreeView*>("watchRows");
