@@ -3,8 +3,9 @@
 // Restore each symbol's FLD1 watermark when its roller writer first publishes
 // a watermark, including while another symbol's serial pass is running.
 // Seeding validates files and sources without grid discovery or trade replay.
-// Failed startup seeds retry after 5s, doubling to 5m; identical warnings
-// recur at most hourly. A changed error and recovery are logged immediately.
+// Failed startup seeds retry after 5s, doubling to 5m; absent journals use
+// a fixed 5s skip. Identical warnings recur at most hourly; changed errors
+// and recovery are logged immediately.
 // HMC2 remains authoritative. Missing grids use the roller's snapshot anchor;
 // BTC's fixed $1 near grid can be recovered exactly from product metadata alone.
 #include "FlowStore.hpp"
@@ -833,7 +834,7 @@ void FlowStore::seedReadySymbols(std::stop_token stop) {
         auto &state = seedStates_.at(symbol);
         std::unique_lock symbolLock(state.mutex, std::try_to_lock);
         if (!symbolLock || state.done) continue;
-        if (state.failures && options_.seedNow() < state.retryAt) continue;
+        if (options_.seedNow() < state.retryAt) continue;
         try {
             if (options_.hourThrough(symbol) < Hour) continue;
             const auto started = std::chrono::steady_clock::now();
@@ -847,7 +848,9 @@ void FlowStore::seedReadySymbols(std::stop_token stop) {
                       << std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - started).count());
         } catch (const Cancelled &) { return; }
-        catch (const roller::NoJournalFiles &) {}
+        catch (const roller::NoJournalFiles &) {
+            state.retryAt = options_.seedNow() + SeedRetryBase;
+        }
         catch (const std::exception &e) {
             const auto now = options_.seedNow();
             const std::string error = e.what();
