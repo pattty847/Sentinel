@@ -457,6 +457,27 @@ TEST(CorruptBlockPolicy, MetricRegistrationSurvivesRepeatedAndReusedRegistries) 
     }
 }
 
+TEST(CorruptBlockPolicy, ShadowRegistersJournalCorruptionForEveryProduct) {
+    QTemporaryDir temp; ASSERT_TRUE(temp.isValid());
+    const fs::path root = temp.path().toStdString();
+    fs::create_directories(root/"raw"); // absent product journals refuse workers without opening a socket
+    ShadowConfig config; config.enabled = true;
+    config.journalRoot = (root/"raw").string();
+    config.outputRoot = (root/"shadow").string();
+    metrics::MetricsRegistry registry;
+    EXPECT_FALSE(registry.hasSeries("sentinel_roller_journal_corrupt_blocks_total", {{"product", "BTC-USD"}}));
+    ShadowRoller shadow(config, {"BTC-USD", "ETH-USD"}, registry);
+    ASSERT_TRUE(shadow.active());
+    const auto exposition = registry.render();
+    for (const auto* product : {"BTC-USD", "ETH-USD"}) {
+        const metrics::Labels labels = {{"product", product}};
+        EXPECT_TRUE(registry.hasSeries("sentinel_roller_journal_corrupt_blocks_total", labels)) << product;
+        EXPECT_NE(exposition.find("sentinel_roller_journal_corrupt_blocks_total{product=\"" +
+                                  std::string(product) + "\"} "), std::string::npos) << product;
+    }
+    EXPECT_FALSE(registry.hasSeries("sentinel_roller_journal_corrupt_blocks_total", {{"product", "SOL-USD"}}));
+}
+
 namespace {
 constexpr int64_t FramingStart = Epoch+Day-240'000;
 fs::path framingFixture(const fs::path& root, bool splitAfter75) {
