@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
 #include <QScopeGuard>
+#include <QSignalSpy>
 #include <QStringList>
 #include <openssl/pem.h>
 #include <condition_variable>
@@ -308,6 +309,8 @@ TEST_F(SentinelStreamClientWriteTest, FailedInitialConnectRetriesAndShutdownCanc
     const auto port = unavailable.local_endpoint().port();
     unavailable.close();
     SentinelStreamClient c("127.0.0.1", std::to_string(port), ca);
+    QSignalSpy terminalFailures(&c, &SentinelStreamClient::terminalFailure);
+    ASSERT_TRUE(terminalFailures.isValid());
     std::atomic<unsigned> downs{0}, ups{0};
     std::mutex timesMutex;
     std::condition_variable downChanged;
@@ -342,6 +345,7 @@ TEST_F(SentinelStreamClientWriteTest, FailedInitialConnectRetriesAndShutdownCanc
     const auto shutdownAt = std::chrono::steady_clock::now();
     c.disconnectFromServer();
     EXPECT_LT(std::chrono::steady_clock::now() - shutdownAt, 300ms);
+    EXPECT_EQ(terminalFailures.count(), 0); // Read after joining the emitting worker.
     const auto stoppedAt = downs.load();
     // Observe beyond the pending second backoff, waking early on a retry.
     {
@@ -404,6 +408,8 @@ TEST_F(SentinelStreamClientWriteTest, MissingOrUnloadableCaRefusesToConnect) {
     for (const std::string& caFile : {std::string{}, missing, garbage}) {
         SCOPED_TRACE("caFile=" + caFile);
         SentinelStreamClient c("127.0.0.1", std::to_string(acceptor.local_endpoint().port()), caFile);
+        QSignalSpy terminalFailures(&c, &SentinelStreamClient::terminalFailure);
+        ASSERT_TRUE(terminalFailures.isValid());
         unsigned ups = 0, downs = 0;
         QStringList errors;
         QObject::connect(&c, &SentinelStreamClient::connected, &c, [&] { ++ups; }, Qt::DirectConnection);
@@ -413,6 +419,8 @@ TEST_F(SentinelStreamClientWriteTest, MissingOrUnloadableCaRefusesToConnect) {
         c.connectToServer();
         EXPECT_FALSE(started(c)) << "the client started a connection without a verified CA";
         ASSERT_EQ(errors.size(), 1);
+        ASSERT_EQ(terminalFailures.count(), 1);
+        EXPECT_EQ(terminalFailures.at(0).at(0).toString(), errors[0]);
         EXPECT_TRUE(errors[0].contains("client.server.ca_file")) << errors[0].toStdString();
         EXPECT_TRUE(errors[0].contains("refusing to connect")) << errors[0].toStdString();
         if (!caFile.empty()) EXPECT_TRUE(errors[0].contains(QString::fromStdString(caFile)));
@@ -421,6 +429,8 @@ TEST_F(SentinelStreamClientWriteTest, MissingOrUnloadableCaRefusesToConnect) {
         c.connectToServer(); // a retry reports again; it still never connects
         EXPECT_FALSE(started(c));
         EXPECT_EQ(errors.size(), 2);
+        ASSERT_EQ(terminalFailures.count(), 2);
+        EXPECT_EQ(terminalFailures.at(1).at(0).toString(), errors[0]);
         c.disconnectFromServer();
     }
     std::this_thread::sleep_for(100ms); // let a stray connect reach the acceptor if one were made

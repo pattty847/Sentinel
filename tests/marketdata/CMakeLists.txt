@@ -90,7 +90,7 @@ add_custom_target(marketdata_tests
 message(STATUS "Marketdata tests configured (3 test suites)")
 
 add_executable(test_sentinel_stream_client_write test_sentinel_stream_client_write.cpp)
-target_link_libraries(test_sentinel_stream_client_write PRIVATE sentinel_core GTest::gtest_main Qt6::Core)
+target_link_libraries(test_sentinel_stream_client_write PRIVATE sentinel_core GTest::gtest_main Qt6::Core Qt6::Test)
 add_test(NAME SentinelStreamClientWriteTests COMMAND test_sentinel_stream_client_write)
 set_tests_properties(SentinelStreamClientWriteTests PROPERTIES LABELS "marketdata" TIMEOUT 30)
 add_dependencies(marketdata_tests test_sentinel_stream_client_write)
