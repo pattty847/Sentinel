@@ -20,7 +20,9 @@ protected:
     void hideEvent(QHideEvent*) override;
 private:
     void refresh();
+    void refreshMessage();
     QPointer<MarketHealth> m_health;
+    QString m_message;
     QLabel *m_symbolLabel, *m_stateLabel, *m_ageLabel, *m_messageLabel, *m_versionLabel;
     QTimer m_ageTimer;
 };

@@ -189,6 +189,10 @@ RemoteGridDataSource::RemoteGridDataSource(const QString& host, const QString& p
             }, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::errorOccurred,
             this, &IGridDataSource::errorOccurred, Qt::QueuedConnection);
+    connect(&m_client, &SentinelStreamClient::terminalFailure,
+            this, [this](const QString& reason) {
+                m_marketHealth.setTransport(MarketHealth::Transport::Disconnected, reason);
+            }, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::orderUpdated,
             this, &IGridDataSource::orderUpdated, Qt::QueuedConnection);
     connect(&m_client, &SentinelStreamClient::algoOrderEventReceived,

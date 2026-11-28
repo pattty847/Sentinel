@@ -646,6 +646,17 @@ TEST(MainWindowHealthIntegration, StatusClusterIsAtTheLeftOfTheWindow) {
     auto* age = status->findChild<QLabel*>("marketBookAge");
     auto* message = status->findChild<QLabel*>("marketMessage");
     ASSERT_TRUE(state && age && message);
+    // Startup has no loadable CA in this test tree. Assert the real MainWindow
+    // wiring before simulating a connection for the temporary-message checks.
+    EXPECT_EQ(state->text(), "Unavailable");
+    EXPECT_TRUE(message->isVisible());
+    EXPECT_TRUE(message->text().startsWith("TLS:"));
+    EXPECT_TRUE(message->text().contains("client.server.ca_file"));
+    EXPECT_TRUE(message->text().contains("refusing to connect"));
+    auto* source = dynamic_cast<RemoteGridDataSource*>(ServiceLocator::dataSource());
+    ASSERT_TRUE(source);
+    EXPECT_EQ(message->text(), source->marketHealth()->snapshot().reason);
+    source->streamClient()->connected(); deliver(source);
     for (const auto& text : {QString("Switching to ETH-USD..."), QString("Reconnecting..."),
                              QString("Order book stale: BTC-USD")}) {
         host->showMessage(text);

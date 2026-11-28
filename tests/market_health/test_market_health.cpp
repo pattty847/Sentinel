@@ -12,6 +12,7 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QDir>
+#include <QFile>
 #include <QTemporaryDir>
 #include <QSettings>
 #include <QToolButton>
@@ -32,6 +33,82 @@ void ready(MarketHealth& h, const QString& symbol = "BTC-USD") {
     h.bookReceived(symbol, 1000);
     h.setActiveSymbol(symbol);
 }
+class TlsFailureStatus : public ::testing::TestWithParam<int> {};
+TEST_P(TlsFailureStatus, ConfigurationFailureReachesVisibleStatusAndSurvivesRetry) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    QString caFile;
+    if (GetParam() != 0) caFile = dir.filePath("ca.pem");
+    if (GetParam() == 2) {
+        QFile file(caFile);
+        ASSERT_TRUE(file.open(QIODevice::WriteOnly));
+        ASSERT_GT(file.write("not a certificate\n"), 0);
+    }
+    // Real client startup refuses these configurations before opening any socket.
+    RemoteGridDataSource source("127.0.0.1", "1", caFile);
+    auto* health = source.marketHealth();
+    StatusBar bar;
+    bar.setMarketHealth(health);
+    bar.resize(1800, 40);
+    bar.show();
+    auto* state = bar.findChild<QLabel*>("marketState");
+    auto* message = bar.findChild<QLabel*>("marketMessage");
+    ASSERT_NE(state, nullptr);
+    ASSERT_NE(message, nullptr);
+    QSignalSpy errors(&source, &IGridDataSource::errorOccurred);
+    source.connectToServer();
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    ASSERT_EQ(errors.count(), 1);
+    const QString reason = errors.at(0).at(0).toString();
+    EXPECT_TRUE(reason.contains("client.server.ca_file"));
+    EXPECT_TRUE(reason.contains("refusing to connect"));
+    if (!caFile.isEmpty()) EXPECT_TRUE(reason.contains(caFile));
+    const auto check = [&] {
+        EXPECT_EQ(health->snapshot().state, State::Unavailable);
+        EXPECT_EQ(health->snapshot().transport, Transport::Disconnected);
+        EXPECT_EQ(health->snapshot().reason, reason);
+        EXPECT_EQ(state->text(), "Unavailable");
+        EXPECT_TRUE(message->isVisible());
+        EXPECT_EQ(message->text(), reason); // visible label, not just a tooltip/log
+        EXPECT_EQ(message->textFormat(), Qt::PlainText);
+    };
+    check(); // Failure must be visible even before an active symbol exists.
+    health->setActiveSymbol("BTC-USD");
+    source.subscribe("BTC-USD");
+    bar.setMessage("Subscription requested");
+    check();
+    source.connectToServer();
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    ASSERT_EQ(errors.count(), 2);
+    check();
+    bar.hide();
+    bar.show();
+    check();
+    bar.setMarketHealth(nullptr);
+    EXPECT_EQ(message->text(), "Subscription requested");
+    bar.setMarketHealth(health);
+    check();
+
+    // Exercise the recovery/outage signal wiring without a socket. An ordinary
+    // transport epoch clears the terminal reason; generic errors do not stop retries.
+    source.streamClient()->connected();
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    EXPECT_EQ(health->snapshot().state, State::WaitingForSubscription);
+    EXPECT_TRUE(health->snapshot().reason.isEmpty());
+    EXPECT_EQ(message->text(), "Subscription requested");
+    source.streamClient()->disconnected();
+    source.streamClient()->errorOccurred("SSL: handshake failed");
+    QCoreApplication::sendPostedEvents(&source, QEvent::MetaCall);
+    EXPECT_EQ(health->snapshot().state, State::Reconnecting);
+    EXPECT_TRUE(health->snapshot().reason.isEmpty());
+    EXPECT_EQ(state->text(), "Reconnecting");
+    EXPECT_EQ(message->text(), "Subscription requested");
+}
+INSTANTIATE_TEST_SUITE_P(CaConfigurations, TlsFailureStatus, ::testing::Values(0, 1, 2),
+    [](const auto& info) {
+        return info.param == 0 ? "MissingSetting" : info.param == 1 ? "MissingFile" : "InvalidPem";
+    });
+
 TEST(MarketHealth, StartupAckThenBookAndQuietMarket) {
     MarketHealth h;
     EXPECT_EQ(h.snapshot().state, State::Initializing);

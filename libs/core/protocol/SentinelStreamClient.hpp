@@ -114,8 +114,8 @@ public:
     static constexpr size_t kMaxDecodeBacklogFrames = 256;
 
     // caFile is the PEM CA that verifies the server certificate chain. Empty or
-    // unloadable: connectToServer() emits errorOccurred and disconnected and
-    // never opens a socket (no unverified fallback).
+    // unloadable: connectToServer() emits errorOccurred, disconnected, then
+    // terminalFailure, and never opens a socket (no unverified fallback).
     explicit SentinelStreamClient(const std::string& host, const std::string& port,
                                   const std::string& caFile = "", QObject* parent = nullptr);
     ~SentinelStreamClient();
@@ -176,6 +176,8 @@ signals:
     // must be idempotent and restore their session through the connected path.
     void connected();
     void disconnected();
+    // Emitted after disconnected when no automatic retry will occur.
+    void terminalFailure(const QString& reason);
     // Transport failures report once per outage; protocol errors remain independently reported.
     void errorOccurred(const QString& error);
     void subscriptionRefused(const QString& symbol, int maxConnections, const QString& message);

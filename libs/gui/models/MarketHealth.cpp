@@ -37,9 +37,10 @@ void MarketHealth::setActiveSymbol(const QString& symbol) {
     m_chart = {};
     emit changed();
 }
-void MarketHealth::setTransport(Transport transport) {
-    if (transport == m_transport) return;
+void MarketHealth::setTransport(Transport transport, const QString& reason) {
+    if (transport == m_transport && reason == m_transportReason) return;
     m_transport = transport;
+    m_transportReason = reason;
     // Every transport epoch needs its own ack and accepted book. Retain receive
     // times only as explicitly aged last observations, never as readiness proof.
     for (auto& f : m_symbols) {
@@ -161,8 +162,10 @@ MarketHealth::Snapshot MarketHealth::snapshot(const QString& symbol, qint64 nowM
         out.holding = m_chart.holding;
         out.coverage = m_chart.coverage;
     }
-    if (m_transport == Transport::Disconnected) out.state = State::Disconnected;
-    else if (m_transport == Transport::Reconnecting) out.state = State::Reconnecting;
+    if (m_transport == Transport::Disconnected) {
+        out.state = m_transportReason.isEmpty() ? State::Disconnected : State::Unavailable;
+        out.reason = m_transportReason;
+    } else if (m_transport == Transport::Reconnecting) out.state = State::Reconnecting;
     else if (m_transport == Transport::Initializing || symbol.isEmpty()) out.state = State::Initializing;
     else if (!f.refusal.isEmpty()) { out.state = State::Unavailable; out.reason = f.refusal; }
     else if (!f.acknowledged) out.state = State::WaitingForSubscription;
